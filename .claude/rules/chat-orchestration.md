@@ -9,7 +9,7 @@ paths:
 # Chat orchestration rules
 
 ## Agent + tool wiring
-1. **Agent hallucination guard** — `_task_contains_query()` in `base_agent.py` forces tool execution at step==0.
+1. **Evidence-aware tool use** — do not infer query or write intent from keywords or schema reads. The agent selects tools using the request and observed evidence. Keep source-specific evidence checks, schema validation and exact write approval at their execution boundaries.
 2. **MCP tool visibility is role-permission based** — missing tools = OAuth role lacks permissions, NOT SuiteApp version. Record Tools need `REST Web Services (Full)` + Create/Edit. Saved Search needs `Perform Search (Full)`. Administrator role CANNOT be used.
 3. **External MCP response format differs** — `ns_runCustomSuiteQL` returns `{"data": [{col: val}], ...}`, NOT `{"columns": [], "rows": []}`. Test interception with both formats.
 4. **Knowledge profiles use fnmatch globs** — `ext__*__ns_createRecord` matches any connector UUID. Never hardcode connector UUIDs in `trigger_tools`.

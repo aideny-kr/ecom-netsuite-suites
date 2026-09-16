@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, DecimalException
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 
@@ -19,6 +19,7 @@ from app.models.tenant import Tenant
 from app.schemas.transaction_ops import _decimal
 from app.services import audit_service
 from app.services.ingestion.base import save_cursor_async
+from app.services.transaction_ops.source_eligibility import FAILED_PAYMENT, payment_failed
 from app.services.transaction_ops.source_reader import SourceReadError, read_framework_orders_page
 
 CURSOR_TYPE = "solidus_orders_v1"
@@ -39,6 +40,7 @@ _HEADER_FIELDS = (
     "updated_at",
     "completed_at",
     "state",
+    "payment_state",
 )
 
 
@@ -78,13 +80,18 @@ def project_canonical_order(order, tenant_id, connection_id, observed_at):
             or not re.fullmatch(r"[A-Z]{3}", currency)
         ):
             raise ValueError("Invalid source identity")
-        total = _money(order.get("total"))
+        failed = payment_failed(order)
+        total = None if failed else _money(order.get("total"))
         state = order.get("state")
-        if total is None or not isinstance(state, str) or not 1 <= len(state) <= 50:
+        if not failed and (total is None or not isinstance(state, str) or not 1 <= len(state) <= 50):
             raise ValueError("Missing source amount or state")
-        included, additional = _money(order.get("included_tax_total")), _money(order.get("additional_tax_total"))
+        included, additional = (
+            (None, None)
+            if failed
+            else (_money(order.get("included_tax_total")), _money(order.get("additional_tax_total")))
+        )
         tax = included + additional if included is not None and additional is not None else None
-        if "tax_total" in order and _money(order["tax_total"]) != tax:
+        if not failed and "tax_total" in order and _money(order["tax_total"]) != tax:
             tax = None
         header = {key: order[key] for key in _HEADER_FIELDS if key in order}
         entity = order.get("business_entity")
@@ -103,7 +110,7 @@ def project_canonical_order(order, tenant_id, connection_id, observed_at):
             "order_number": reference,
             "currency": currency,
             "total_amount": total,
-            "subtotal": _money(order.get("item_total")),
+            "subtotal": None if failed else _money(order.get("item_total")),
             "tax_amount": tax,
             "discount_amount": None,
             "status": state,
@@ -117,6 +124,24 @@ def project_canonical_order(order, tenant_id, connection_id, observed_at):
 
 
 async def _upsert_order(db, row):
+    if payment_failed(row["raw_data"]["order"]):
+        # Never import a new failed order. Retain an existing row's historical
+        # amounts while marking its fresh source eligibility; no history deletes.
+        await db.execute(
+            update(Order)
+            .where(
+                Order.tenant_id == row["tenant_id"],
+                Order.source_connection_id == row["source_connection_id"],
+                Order.dedupe_key == row["dedupe_key"],
+                or_(
+                    Order.source_updated_at.is_(None),
+                    Order.source_updated_at < row["source_updated_at"],
+                    and_(Order.source_updated_at == row["source_updated_at"], Order.updated_at <= row["updated_at"]),
+                ),
+            )
+            .values(raw_data=row["raw_data"], source_updated_at=row["source_updated_at"], updated_at=row["updated_at"])
+        )
+        return
     statement = insert(Order).values(**row)
     await db.execute(
         statement.on_conflict_do_update(
@@ -162,11 +187,15 @@ async def save_observed_order(db, tenant_id, connection_id, order, observed_at):
         db=db,
         tenant_id=tenant_id,
         category="ingestion",
-        action="solidus.order.observed",
+        action="solidus.order.excluded" if payment_failed(order) else "solidus.order.observed",
         actor_type="system",
         resource_type="connection",
         resource_id=str(connection_id),
-        payload={"order_reference": row["order_number"], "source_updated_at": row["source_updated_at"].isoformat()},
+        payload={
+            "order_reference": row["order_number"],
+            "source_updated_at": row["source_updated_at"].isoformat(),
+            **({"reason": FAILED_PAYMENT} if payment_failed(order) else {}),
+        },
     )
     # Release the connection lock before any subsequent remote investigation reads.
     await db.commit()
@@ -283,6 +312,8 @@ async def _sync_page(db, tenant_id, connection_id, now):
         raise SolidusImportError("source_window_mismatch")
     for row in rows:
         await _upsert_order(db, row)
+    excluded = [row["order_number"] for row in rows if payment_failed(row["raw_data"]["order"])]
+    synced = len(rows) - len(excluded)
     next_page = page + 1 if evidence["next_page"] is not None else None
     seen = state.get("seen", 0)
     state.update(next_page=next_page, total=seen + evidence["total_count"], seen=seen + len(rows))
@@ -299,14 +330,19 @@ async def _sync_page(db, tenant_id, connection_id, now):
         actor_type="system",
         resource_type="connection",
         resource_id=str(connection_id),
-        payload={"page": page, "records_synced": len(rows), "complete": next_page is None},
+        payload={
+            "page": page,
+            "records_synced": synced,
+            "complete": next_page is None,
+            "excluded_payment_failed": excluded,
+        },
     )
     await db.commit()
     return {
         "termination_reason": "done" if next_page is None else "budget",
         "reason": None,
         "complete": next_page is None,
-        "records_synced": len(rows),
+        "records_synced": synced,
         "api_calls": calls,
         "coverage_since": state["since"],
         "next_page": next_page,

@@ -13,7 +13,7 @@ def test_last_week_is_the_same_closed_local_calendar_cohort():
     window = periods.review_window("last_week", NOW, "America/Los_Angeles")
     assert window["window_start"] == datetime(2026, 8, 31, 7, tzinfo=timezone.utc)
     assert window["window_end"] == datetime(2026, 9, 7, 7, tzinfo=timezone.utc)
-    assert window["window_basis"] == "completed_at"
+    assert window["window_basis"] == "updated_at"
 
 
 def test_last_month_preserves_dst_instead_of_subtracting_30_days():
@@ -95,7 +95,9 @@ def test_policy_rejects_unbounded_cost_and_invalid_timezones():
 def test_calendar_period_can_cross_31_days_plus_dst_hour():
     from app.schemas.transaction_runs import RunCreate
 
-    window = periods.review_window("last_month", datetime(2026, 11, 2, 18, tzinfo=timezone.utc), "Europe/Amsterdam")
+    window = periods.review_window(
+        "last_month", datetime(2026, 11, 2, 18, tzinfo=timezone.utc), "Europe/Amsterdam", basis="completed_at"
+    )
     assert window["window_end"] - window["window_start"] == timedelta(days=31, hours=1)
     request = RunCreate(evaluation_key="october-close", **window)
     assert request.window_basis == "completed_at"

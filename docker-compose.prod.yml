@@ -47,7 +47,7 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  worker:
+  worker: &worker-runtime
     image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest
     env_file: .env.production
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 -Q default,sync,recon,export
@@ -57,6 +57,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Keep recovery ticks independent of long scans and financial execution.
+  worker-collectors:
+    <<: *worker-runtime
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --prefetch-multiplier=1 -Q recon-control
 
   beat:
     image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest

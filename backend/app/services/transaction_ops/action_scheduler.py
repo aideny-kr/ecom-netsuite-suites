@@ -16,12 +16,24 @@ from app.services.transaction_ops.scheduler import _BROKER_IO_TIMEOUT, _DISPATCH
 from app.workers.celery_app import celery_app
 
 _LIMIT = 200
-_TASKS = {"execute": "tasks.transaction_ops_execute", "recover": "tasks.transaction_ops_recover"}
+_TASKS = {
+    "execute": "tasks.transaction_ops_execute",
+    "recover": "tasks.transaction_ops_recover",
+    "credit_recover": "tasks.transaction_ops_recover_credit",
+    "complete": "tasks.transaction_ops_complete_accounting",
+    "group": "tasks.transaction_ops_dispatch_group",
+}
 
 
 def publish_action(tenant_id, kind, identifier, *, app=celery_app):
     task = _TASKS[kind]
-    key = "proposal_id" if kind == "execute" else "operation_id"
+    key = {
+        "execute": "proposal_id",
+        "recover": "operation_id",
+        "credit_recover": "message_id",
+        "complete": "message_id",
+        "group": "message_id",
+    }[kind]
     with app.connection_for_write(
         connect_timeout=_BROKER_IO_TIMEOUT,
         transport_options={
@@ -130,6 +142,9 @@ async def collect_due_actions(db, now):
     stats = {
         "executions": 0,
         "recoveries": 0,
+        "credit_recoveries": 0,
+        "completions": 0,
+        "groups": 0,
         "dispatched": 0,
         "dispatch_failed": 0,
         "tenant_failed": 0,
@@ -145,8 +160,20 @@ async def collect_due_actions(db, now):
             for tenant_id in tenants:
                 try:
                     executions, recoveries = await _candidates(db, tenant_id, now)
+                    from app.services.transaction_ops.accounting_recovery import candidates as credit_candidates
+
+                    credits = await credit_candidates(db, tenant_id, now, limit=_LIMIT + 1)
+                    from app.services.transaction_ops.accounting_completion import candidates as completion_candidates
+
+                    completions = await completion_candidates(db, tenant_id, now, limit=_LIMIT + 1)
+                    from app.services.transaction_ops.accounting_dispatch import candidates as group_candidates
+
+                    groups = await group_candidates(db, tenant_id, now, limit=_LIMIT + 1)
                     await db.commit()
                     for kind, candidates, counter in (
+                        ("complete", completions, "completions"),
+                        ("group", groups, "groups"),
+                        ("credit_recover", credits, "credit_recoveries"),
                         ("recover", recoveries, "recoveries"),
                         ("execute", executions, "executions"),
                     ):

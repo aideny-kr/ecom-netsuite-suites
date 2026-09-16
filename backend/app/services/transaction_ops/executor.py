@@ -33,6 +33,7 @@ from app.services.transaction_ops.netsuite_transport import (
 from app.services.transaction_ops.normalization import TransactionMapping, _time
 from app.services.transaction_ops.planner import plan_proposal, source_fingerprint
 from app.services.transaction_ops.runner import build_report
+from app.services.transaction_ops.source_eligibility import FAILED_PAYMENT, payment_failed
 from app.services.transaction_ops.source_reader import read_framework_order
 
 
@@ -152,6 +153,8 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
                 else {}
             ),
         )
+        if len(source.get("orders") or []) == 1 and payment_failed(source["orders"][0]):
+            raise ExecutionStoppedError(FAILED_PAYMENT)
         targets = await read(
             10,
             read_netsuite_order,
@@ -235,13 +238,14 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
         if proof is not None:
             return await complete("verified", "independently_verified", verification=proof)
         return await complete("unknown", "verification_unproven")
-    except Exception:
+    except Exception as exc:
         # A transport exception may follow an actual send; only the committed
         # ledger decides whether failure is known. Never expose raw exceptions.
         row = await _operation(db, tenant_id, proposal, operation_id=claimed.operation_id)
         if row.status != "executing":
             return _result(row)
         sent = (row.result_json or {}).get("dispatch_reserved") is True
-        return await complete(
-            "unknown" if sent else "failed", "verification_unavailable" if sent else "evidence_revalidation_failed"
-        )
+        code = "verification_unavailable" if sent else "evidence_revalidation_failed"
+        if isinstance(exc, ExecutionStoppedError) and str(exc) == FAILED_PAYMENT:
+            code = FAILED_PAYMENT
+        return await complete("unknown" if sent else "failed", code)

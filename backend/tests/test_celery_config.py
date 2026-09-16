@@ -58,6 +58,55 @@ themselves still carry an explicit `priority=` kwarg matching these routes.
 
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+from uuid import uuid4
+
+import pytest
+
+
+@pytest.mark.parametrize("name", ["tasks.transaction_ops_collect_due", "tasks.transaction_ops_collect_actions"])
+def test_reconciliation_collectors_keep_priority_across_actual_publication_paths(name):
+    """Consume real Redis envelopes: bound Task defaults can override routes."""
+    from app.workers.celery_app import RECON_COLLECTOR_PRIORITY, RECON_COLLECTOR_QUEUE, celery_app
+    from app.workers.tasks import transaction_ops  # noqa: F401 - register the bound tasks
+
+    assert urlparse(celery_app.conf.broker_url).hostname in {"localhost", "127.0.0.1", "redis"}
+    assert not celery_app.conf.task_always_eager
+    assert RECON_COLLECTOR_PRIORITY == 3
+    assert celery_app.amqp.router.route({}, name)["queue"].name == RECON_COLLECTOR_QUEUE
+    assert celery_app.tasks[name].queue == RECON_COLLECTOR_QUEUE
+    entry = next(e for e in celery_app.conf.beat_schedule.values() if e["task"] == name)
+    assert entry["options"]["expires"] == 120
+    queue_name = f"recon-priority-test-{uuid4()}"
+    with celery_app.connection_for_write() as connection:
+        queue = connection.SimpleQueue(queue_name, no_ack=True)
+        try:
+            options = {"queue": queue_name, "connection": connection, "ignore_result": True}
+            # All work stays in a unique unconsumed test queue. Nothing executes.
+            celery_app.send_task("tasks.transaction_ops_run", **options)
+            celery_app.send_task(name, **options)
+            celery_app.tasks[name].apply_async(**options)
+            celery_app.tasks[name].apply_async(**options, **entry["options"])
+            celery_app.send_task("tasks.scheduled_jobs_run_now", **options)
+
+            messages = [queue.get(block=False) for _ in range(5)]
+            assert [m.properties["priority"] for m in messages] == [0, 3, 3, 3, 6]
+            assert [m.headers["task"] for m in messages] == [
+                "tasks.scheduled_jobs_run_now",
+                name,
+                name,
+                name,
+                "tasks.transaction_ops_run",
+            ]
+        finally:
+            queue.queue.delete()
+            queue.close()
+
 
 def test_kombu_redis_transport_serves_the_lowest_priority_step_first():
     """Ground truth, read straight from the installed kombu package (not
@@ -154,3 +203,138 @@ def test_explicit_send_task_priority_kwarg_overrides_the_route_and_still_matches
     # proving the kwarg is not merely decorative once task_routes exists.
     drifted = lpmerge(dict(route), {"priority": 9})
     assert drifted["priority"] == 9
+
+
+def test_collectors_execute_while_bulk_worker_is_saturated(tmp_path):
+    """Real prefork workers: short ticks must run without a free bulk slot.
+
+    Only probe implementations execute, on unique local Redis queues. Worker
+    subscription/concurrency flags come from the actual production compose.
+    Application publishers retain their actual routes and task metadata.
+    """
+    import redis
+    import yaml
+
+    from app.workers.celery_app import RECON_COLLECTOR_QUEUE, celery_app
+    from app.workers.tasks import transaction_ops  # noqa: F401
+
+    broker = celery_app.conf.broker_url
+    assert urlparse(broker).hostname in {"localhost", "127.0.0.1", "redis"}
+    root = Path(__file__).resolve().parents[2]
+    production = yaml.safe_load((root / "docker-compose.prod.yml").read_text())["services"]
+    development = yaml.safe_load((root / "docker-compose.yml").read_text())["services"]
+    prefix = f"collector-worker-test-{uuid4()}"
+    clients = redis.Redis.from_url(broker, decode_responses=True)
+    queue_names = {name: f"{prefix}-{name}" for name in celery_app.amqp.queues}
+    workers = []
+    handles = []
+    # Stub just the provider-independent bodies. The probes cannot access DBs
+    # or financial providers, even when given real application task names.
+    (tmp_path / "collector_probe.py").write_text(
+        "import os\n"
+        "from celery import Celery, signals\n"
+        "import redis\n"
+        "app = Celery('collector_probe', broker=os.environ['PROBE_BROKER'])\n"
+        "app.conf.update(task_ignore_result=True, task_serializer='json', accept_content=['json'])\n"
+        "r = redis.Redis.from_url(os.environ['PROBE_BROKER'], decode_responses=True)\n"
+        "p = os.environ['PROBE_PREFIX']\n"
+        "@signals.worker_ready.connect\n"
+        "def ready(**kw): r.rpush(p + ':ready', 'ready')\n"
+        "@app.task(name='tasks.transaction_ops_run')\n"
+        "def bulk(marker):\n"
+        "    r.rpush(p + ':started', marker)\n"
+        "    r.blpop(p + ':release', timeout=30)\n"
+        "    r.rpush(p + ':finished', marker)\n"
+        "def collect(self): r.rpush(p + ':collected', self.request.headers['probe_marker'])\n"
+        "app.task(name='tasks.transaction_ops_collect_due', bind=True)(collect)\n"
+        "app.task(name='tasks.transaction_ops_collect_actions', bind=True)(collect)\n"
+    )
+    try:
+        for service in ("worker", "worker-collectors"):
+            flags = shlex.split(production[service]["command"])
+            original_queues = flags[flags.index("-Q") + 1].split(",")
+            if service == "worker":
+                assert RECON_COLLECTOR_QUEUE not in original_queues
+            else:
+                assert original_queues == [RECON_COLLECTOR_QUEUE]
+                assert RECON_COLLECTOR_QUEUE in shlex.split(development[service]["command"])
+            flags[flags.index("-A") + 1] = "collector_probe:app"
+            flags[flags.index("-Q") + 1] = ",".join(queue_names[q] for q in original_queues)
+            handle = (tmp_path / f"{service}.log").open("w")
+            handles.append(handle)
+            workers.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        *flags,
+                        "--without-gossip",
+                        "--without-mingle",
+                        "--without-heartbeat",
+                        f"--hostname={prefix}-{service}@%h",
+                    ],
+                    cwd=tmp_path,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    env={**os.environ, "PROBE_BROKER": broker, "PROBE_PREFIX": prefix},
+                )
+            )
+        for _ in workers:
+            assert clients.blpop(prefix + ":ready", timeout=20), "probe worker failed to start"
+        with celery_app.connection_for_write() as connection:
+            options = {"connection": connection, "ignore_result": True}
+            # Both production bulk slots are occupied before any collector is
+            # published; four further bulks may already be prefetched.
+            for index in range(6):
+                celery_app.send_task(
+                    "tasks.transaction_ops_run", args=[str(index)], queue=queue_names["recon"], **options
+                )
+            for _ in range(2):
+                assert clients.blpop(prefix + ":started", timeout=10)
+            expected = []
+            for name in ("tasks.transaction_ops_collect_due", "tasks.transaction_ops_collect_actions"):
+                route = celery_app.amqp.router.route({}, name)
+                assert route["queue"].name == RECON_COLLECTOR_QUEUE
+                assert celery_app.tasks[name].queue == RECON_COLLECTOR_QUEUE
+                target = queue_names[route["queue"].name]
+                beat = next(e["options"] for e in celery_app.conf.beat_schedule.values() if e["task"] == name)
+                for path in ("named", "bound", "beat"):
+                    marker = name + ":" + path
+                    expected.append(marker)
+                    call = celery_app.send_task if path == "named" else celery_app.tasks[name].apply_async
+                    call_args = [name] if path == "named" else []
+                    call(
+                        *call_args,
+                        headers={"probe_marker": marker},
+                        queue=target,
+                        **options,
+                        **(beat if path == "beat" else {"expires": 120}),
+                    )
+            actual = [clients.blpop(prefix + ":collected", timeout=10) for _ in expected]
+            assert all(actual), "collector starved while bulk worker was busy"
+            assert sorted(value[1] for value in actual) == sorted(expected)
+            assert clients.llen(prefix + ":finished") == 0, "bulk gate timed out before collector proof"
+            clients.rpush(prefix + ":release", *["release"] * 6)
+            for _ in range(6):
+                assert clients.blpop(prefix + ":finished", timeout=10)
+    finally:
+        clients.rpush(prefix + ":release", *["release"] * 6)
+        for worker in workers:
+            worker.terminate()
+        for worker in workers:
+            try:
+                worker.wait(timeout=35)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                worker.wait(timeout=5)
+        for handle in handles:
+            handle.close()
+        with celery_app.connection_for_write() as connection:
+            for name in queue_names.values():
+                queue = connection.SimpleQueue(name, no_ack=True)
+                queue.queue.delete()
+                queue.close()
+        keys = list(clients.scan_iter(match=prefix + ":*"))
+        if keys:
+            clients.delete(*keys)
+        clients.close()

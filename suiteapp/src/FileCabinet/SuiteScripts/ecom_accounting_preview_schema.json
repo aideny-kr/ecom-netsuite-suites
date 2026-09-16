@@ -1,0 +1,82 @@
+{
+  "tools": [
+    {
+      "name": "previewAccountingAmendment",
+      "description": "Preview an exact accounting amendment on an unsaved native record. Does not post, save, grant approval or simulate save-time scripts/GL effects. Returns whether native calculated totals match the expected values.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "Expected NetSuite account ID."
+          },
+          "recordType": {
+            "type": "string",
+            "description": "creditmemo, salesorder or invoice."
+          },
+          "recordId": {
+            "type": "string",
+            "description": "Native record ID."
+          },
+          "subsidiaryId": {
+            "type": "string",
+            "description": "Expected subsidiary ID."
+          },
+          "currencyId": {
+            "type": "string",
+            "description": "Expected currency ID."
+          },
+          "amendmentJson": {
+            "type": "string",
+            "description": "JSON object with native body fields and keyed item-line changes; this tool never saves."
+          },
+          "expectedJson": {
+            "type": "string",
+            "description": "JSON object containing expected subtotal, taxtotal and total as decimal strings."
+          },
+          "fieldMapJson": {
+            "type": "string",
+            "description": "Explicit JSON source field map: order_reference, source_line_id, original_sku and vat_amount. Evidence only, never a write allowlist."
+          }
+        },
+        "required": [
+          "accountId",
+          "recordType",
+          "recordId",
+          "subsidiaryId",
+          "currencyId",
+          "amendmentJson",
+          "expectedJson",
+          "fieldMapJson"
+        ],
+        "nullable": []
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "result": {
+            "type": "string",
+            "description": "JSON preview receipt with scope, before/after values, matching status and limitations."
+          },
+          "remainingUsage": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "success",
+          "result",
+          "remainingUsage"
+        ],
+        "nullable": []
+      },
+      "annotations": {
+        "title": "Preview accounting amendment",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    }
+  ]
+}

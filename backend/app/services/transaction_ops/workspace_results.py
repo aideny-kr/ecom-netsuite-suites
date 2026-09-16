@@ -36,6 +36,7 @@ async def selected_evidence(db, tenant_id, run_ids):
                 "run_id": str(run_id),
                 "config_id": str(run.config_id),
                 "period": span.model_dump(mode="json"),
+                "window_basis": run.params_json.get("window_basis", "completed_at"),
                 "config": run.config_snapshot,
             }
         )
@@ -116,8 +117,11 @@ async def review_page(db, tenant_id, run_ids, *, limit=50, offset=0, status=None
             .one()
         )
         total = await db.scalar(select(func.count()).select_from(filtered_query(latest, status, search).subquery()))
+    from app.services.transaction_ops.accounting_projection import project_rows
+
+    projected = await project_rows(db, tenant_id, rows)
     return {
-        "items": [result_item(row) for row in rows],
+        "items": [result_item(row) for row in projected],
         "summary": summary,
         "total": total,
         "has_next": offset + len(rows) < total,
@@ -133,7 +137,9 @@ async def record_page(db, tenant_id, view, *, limit=50, offset=0, config_id=None
     }[view]
     query = select(model).where(model.tenant_id == tenant_id)
     if view == "cases":
-        query = query.where(model.status == "open")
+        from app.services.transaction_ops.source_eligibility import eligible_reports
+
+        query = query.where(model.status == "open", eligible_reports(model.latest_report_json))
         ordering = (model.last_observed_at.desc(), model.id)
     else:
         ordering = (model.created_at.desc(), model.id)

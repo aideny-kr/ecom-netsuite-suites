@@ -51,6 +51,8 @@ def _schema_property_to_anthropic(name: str, spec: dict) -> dict:
         prop["description"] = spec["description"]
     if "default" in spec:
         prop["default"] = spec["default"]
+    if "enum" in spec:
+        prop["enum"] = spec["enum"]
     return prop
 
 
@@ -218,7 +220,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
             continue
         connector_tag = _connector_tag(connector)
         sorted_discovered = sorted(connector.discovered_tools, key=lambda t: t.get("name", ""))
-        from app.services.chat.metabase_tool_policy import is_read_only_metabase_tool
+        from app.services.chat.metabase_tool_policy import constrain_metabase_query_schema, is_read_only_metabase_tool
 
         direct_metabase_query = is_read_only_metabase_tool(connector, "query") and any(
             tool.get("name") == "query" for tool in sorted_discovered
@@ -261,6 +263,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
             # Ensure it has required top-level fields
             if "type" not in input_schema:
                 input_schema["type"] = "object"
+            input_schema = constrain_metabase_query_schema(connector, raw_name, input_schema)
 
             tools.append(
                 {
@@ -407,6 +410,7 @@ async def execute_tool_call(
     session_id=None,
     actor_type="user",
     human_approved=False,
+    approval_context=None,
 ):
     """Do not spend another RPC/model repair cycle repeating a rejected query in one turn."""
     kwargs = dict(
@@ -418,6 +422,7 @@ async def execute_tool_call(
         session_id=session_id,
         actor_type=actor_type,
         human_approved=human_approved,
+        approval_context=approval_context,
     )
     info = getattr(db, "info", None)
     sql = (
@@ -489,6 +494,7 @@ async def _execute_tool_call_once(
     session_id: str | None = None,
     actor_type: str = "user",
     human_approved: bool = False,
+    approval_context: dict | None = None,
 ) -> str:
     """Execute a tool call and return the result as a JSON string.
 
@@ -550,6 +556,14 @@ async def _execute_tool_call_once(
             )
     # ── End HITL guard ──
 
+    if tool_name == "transaction_ops_accounting_amendment_apply":
+        from app.services.transaction_ops.native_accounting_dispatch import execute as execute_native
+
+        result = await execute_native(
+            db, tenant_id, actor_id, session_id, tool_input, approval_context, correlation_id=correlation_id
+        )
+        return json.dumps(result, default=str, allow_nan=False)
+
     if tool_name == "escalate_reasoning":
         # Control signal handled by the agent loop (it bumps thinking depth).
         # Returning a terse ack keeps the tool-result contract intact.
@@ -592,6 +606,7 @@ async def _execute_tool_call_once(
             tool_name=tool_name,
             params=tool_input,
             human_approved=human_approved,
+            approval_context=approval_context,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
@@ -778,6 +793,17 @@ async def _execute_external_tool(
         from app.services.mcp_client_service import call_external_mcp_tool
 
         result = await call_external_mcp_tool(connector, raw_tool_name, tool_input, db=db)
+        if isinstance(result, dict):
+            # Binding metadata belongs to this dispatcher, never the remote server.
+            result.pop("metabase_source", None)
+            from app.services.chat.metabase_tool_policy import is_read_only_metabase_tool
+
+            if raw_tool_name in {"query", "execute_query", "execute_question"} and is_read_only_metabase_tool(
+                connector, raw_tool_name
+            ):
+                from app.services.chat.metabase_results import bind_result
+
+                result = bind_result(result, tool_input, connector)
         if (
             raw_tool_name == "ns_runCustomSuiteQL"
             and isinstance(result, dict)

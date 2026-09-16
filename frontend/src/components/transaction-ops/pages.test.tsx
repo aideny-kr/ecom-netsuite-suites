@@ -114,6 +114,25 @@ it("links a finished part to the continuing investigation", () => {
   expect(screen.getByText(/8 not verified/)).toBeInTheDocument();
 });
 describe("transaction operations pages", () => {
+  it.each([
+    ["pending", undefined, "Reconciliation pending"],
+    ["finished", "succeeded", "Order, tax and refunds matched"],
+    ["finished", "difference", "Differences remain"],
+    ["finished", "unverified", "Reconciliation not verified"],
+    ["finished", undefined, "Reconciliation not verified"],
+  ])("reports post-credit reconciliation separately: %s / %s", (status, verdict, heading) => {
+    mocks.run = {
+      id: "run", config_snapshot: config,
+      params_json: { approval_message_id: "approval" },
+      status, termination_reason: status === "finished" ? "done" : null,
+      progress_json: verdict ? { settlement: { status: verdict } } : {},
+      api_calls_used: 0, max_api_calls: 64, orders_used: 0, max_orders: 1,
+    };
+    render(<TransactionRunPage id="run" />);
+    expect(screen.getByRole("heading", { name: heading! })).toBeVisible();
+    expect(screen.getByText(/Bank and processor clearance remain separate/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument();
+  });
   it("links administrators to Transactions without exposing setup", () => {
     mocks.manage = true;
     render(<TransactionOperationsPage />);

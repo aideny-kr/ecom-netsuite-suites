@@ -367,6 +367,8 @@ export interface ChatMessage {
   citations: Citation[] | null;
   input_tokens?: number;
   output_tokens?: number;
+  cache_creation_tokens?: number;
+  cache_read_tokens?: number;
   model_used?: string;
   provider_used?: string;
   is_byok?: boolean;
@@ -852,6 +854,104 @@ export interface EditableSlot {
   allowed?: { value: string; label: string }[] | null;
 }
 
+export interface AccountingResolutionPlan {
+  version: number;
+  order_reference: string;
+  currency?: string | null;
+  active_step: string;
+  status: string;
+  rules_fingerprint?: string;
+  steps: Array<{
+    id: string;
+    title: string;
+    status: string;
+    depends_on: string[];
+    affects_gl?: boolean;
+    current_total?: string | number | null;
+    target_total?: string | number | null;
+    note?: string;
+  }>;
+}
+
+interface AccountingReviewBase {
+  resolution_plan?: AccountingResolutionPlan;
+  order_reference: string;
+  record_id: string;
+  case_id: string;
+  before: Record<string, unknown>;
+  proposed_fields: Record<string, unknown>;
+  scope: { netsuite_account_id: string; subsidiary_id: string };
+  period: Record<string, unknown>;
+  ar_account: string;
+  ar_account_name?: string;
+  accounting_book: string;
+  approval_basis: string;
+}
+
+export interface InvoiceTaxReview extends AccountingReviewBase {
+  kind?: "invoice_tax";
+  expected_after: { total: string; taxTotal: string };
+  tax_item: Record<string, unknown>;
+  tax_account: string;
+  tax_account_name?: string;
+}
+
+export interface SalesCreditReview extends AccountingReviewBase {
+  kind: "sales_adjustment_credit";
+  source: Record<string, unknown>;
+  profile: {
+    currency: string;
+    item_id: string;
+    adjustment_account_id: string;
+    source_adjustment_label: string;
+  };
+  expected_after: {
+    credit_total: string;
+    credit_tax: string;
+    net_invoice_total: string;
+    invoice_total: string;
+    invoice_tax: string;
+    invoice_remaining: string;
+    remaining_variance: string;
+  };
+  sales_adjustment_account: string;
+  sales_adjustment_account_name?: string;
+}
+
+export interface InvoiceDiscountReview extends Omit<SalesCreditReview, "kind" | "expected_after"> {
+  kind: "invoice_sales_adjustment";
+  expected_after: { total: string; taxTotal: string; amountPaid: string; amountRemaining: string; discountTotal: string };
+}
+
+export interface SalesOrderAlignmentReview extends Omit<SalesCreditReview, "kind" | "expected_after" | "period"> {
+  kind: "sales_order_source_alignment";
+  invoice_id: string;
+  support: { invoice: Record<string, unknown> };
+  expected_after: { total: string; subtotal: string; taxTotal: string; discountTotal: string };
+}
+
+interface NativeAccountingReviewBase extends AccountingReviewBase {
+  source: Record<string, unknown>;
+  invoice_id: string;
+  sales_adjustment_account: string;
+  tax_account: string;
+  expected_after: { total: string; subtotal: string; taxTotal: string };
+}
+
+export type NativeAccountingReview =
+  | (NativeAccountingReviewBase & { kind: "credit_tax_reallocation" })
+  | (NativeAccountingReviewBase & { kind: "sales_order_line_alignment" });
+
+export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview | NativeAccountingReview;
+
+export interface AccountingGroup {
+  group_id: string;
+  treatment_batches?: Array<{ treatment_id: string; label: string; case_ids: string[]; treatment: { currency?: string; accounting_book: string; ar_account: string; offset_account?: string } }>;
+  investigation_batches?: Array<{ code: string; next_step: string; case_ids: string[]; executable: false }>;
+  members: Array<{ case_id: string; order_reference: string; confirmation_id?: string; reason?: string; card?: WriteConfirmationData; resolution_receipt?: WriteConfirmationData["accounting_receipt"] }>;
+  concurrency: number;
+}
+
 export interface WriteConfirmationData {
   type: "write_confirmation";
   mutation_type: "create" | "update" | "delete" | "upsert" | "execute";
@@ -869,6 +969,39 @@ export interface WriteConfirmationData {
   // header-only record types (e.g. customer).
   proposed_lines?: Record<string, unknown>[];
   current_record: Record<string, unknown> | null;
+  accounting_review?: AccountingReview | null;
+  accounting_verification?: {
+    status: string;
+    reason?: string;
+    invoice?: Record<string, unknown>;
+    sales_order?: Record<string, unknown>;
+    credit_memo_id?: string;
+    resolution?: Record<string, unknown>;
+    after?: { body: Record<string, unknown>; lines: Record<string, unknown>[] };
+  } | null;
+  accounting_group?: AccountingGroup | null;
+  accounting_group_dispatch?: {
+    version: number;
+    status: "queued" | "running" | "finished" | "needs_review";
+    next_at?: string;
+    members: Record<string, { status: string; reason?: string }>;
+  };
+  accounting_group_child?: boolean;
+  accounting_receipt?: {
+    plan?: AccountingResolutionPlan;
+    balance?: { amounts?: Record<string, { source?: string | number | null; target?: string | number | null; delta?: string | number | null }> };
+    status: "reconciled" | "partially_resolved" | "needs_review";
+    summary: string;
+    approved_by: { id: string; name: string };
+    approved_at: string;
+    record_links: Array<{ label: string; url: string; record_type: string; record_id: string }>;
+    reconciliation_url: string;
+    audit_url: string;
+    completion_audit_id: string;
+    next_step: { status: string; reasons?: string[]; confirmation_id?: string };
+  };
+  accounting_plan_progress?: { orders: number; results_ready: number; reconciled: number; remaining: number; status: string };
+  accounting_recheck?: { status: "queued" | "not_queued"; run_id?: string; reason?: string };
   tool_name: string;
   tool_input: Record<string, unknown>;
   confirmation_token: string;

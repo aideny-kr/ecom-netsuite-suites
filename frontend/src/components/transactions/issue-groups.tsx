@@ -133,7 +133,6 @@ export function IssueGroups({
                   const matching = (configs.data || []).filter((config) =>
                     matches(config, group.scope),
                   );
-                  const active = matching.filter((config) => config.enabled);
                   const changes = [
                     ["order_total", "Order"],
                     ["tax", "Tax"],
@@ -147,7 +146,7 @@ export function IssueGroups({
                         ]
                       : [];
                   });
-                  const prompt = `Investigate issue group ${group.group_id} (${group.pattern}). Use transaction_ops.groups with this group_id${reviewRunIds ? ` and these exact scope parameters on every call: ${JSON.stringify(scope)}.` : "."} Follow every has_next page to include all current members within this scope. ${active.length === 1 ? `The exact active investigation config for this scope is ${active[0].id}.` : "Verify the exact configuration scope before starting any run."} Verify a shared cause across the cases; split any different causes. Use existing investigations or queue bounded fresh investigations for the exact order references in this scope. Prepare supported exact fixes together for human approval in Fix approvals. Do not approve or execute changes, issue duplicate refunds, or treat a group ID as authorization. Preserve per-case audit and independently verify each outcome.`;
+                  const prompt = `Prepare fixes for all orders in issue group ${group.group_id} (${group.pattern}). Call transaction_ops.accounting_group with group_id "${group.group_id}"${reviewRunIds ? ` and these exact scope parameters: ${JSON.stringify(scope)}` : ""}. Prepare supported exact invoice corrections together for human approval; show every unsupported case separately. Execute only after I approve the exact group card, with bounded concurrency and per-order verification and audit. Do not treat this request or the group ID as financial approval.`;
                   return (
                     <tr key={group.group_id} className="border-b last:border-0">
                       <td className="p-3 font-medium">
@@ -172,7 +171,7 @@ export function IssueGroups({
                           className="whitespace-nowrap text-primary underline"
                           href={`/chat?${new URLSearchParams({ compose: prompt, new_session: "true" })}`}
                         >
-                          Investigate group →
+                          Prepare group fixes →
                         </Link>
                       </td>
                     </tr>

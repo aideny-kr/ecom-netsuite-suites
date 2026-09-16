@@ -235,6 +235,8 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
             "\n  Pre-built business reports → ns_runSavedSearch"
             "\n  Ad-hoc data queries → ns_runCustomSuiteQL (MCP) → netsuite_suiteql (local fallback)"
             "\n  Accounting cases → transaction_ops_accounting_evidence first; reuse its scoped native reads."
+            "\n  Fix an issue group → transaction_ops_accounting_group with the exact group scope; "
+            "one bounded preparation, one human batch review, independently verified concurrent corrections."
             "\n  Schema verification → one applicable metadata tool; do not fetch duplicate schemas."
             "\n  Documentation/how-to → rag_search → web_search"
             "\n"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from sqlalchemy import DateTime, String, and_, cast, exists, extract, func, literal, or_, select
 from sqlalchemy.orm import aliased
@@ -19,6 +20,7 @@ _DISPATCH_TIMEOUT = 5
 _BROKER_IO_TIMEOUT = 1
 _TICK_TIMEOUT = 40
 _MAX_WINDOW = timedelta(days=31)
+_PUBLICATION_COOLDOWN = 300
 
 
 def _dependencies():
@@ -114,7 +116,7 @@ async def _recovery_ids(db, tenant_id, now):
 
 
 async def _candidate_ids(db, tenant_id, now):
-    _, _, config, run = _dependencies()
+    state, _, config, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     latest = (
         select(run.config_id, func.max(run.created_at).label("latest_at"))
@@ -124,7 +126,10 @@ async def _candidate_ids(db, tenant_id, now):
     )
     active = exists(
         select(run.id).where(
-            run.tenant_id == tenant_id, run.config_id == config.id, run.status.in_(("pending", "running"))
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.origin.in_(("schedule", "recovery")),
+            run.status.in_(("pending", "running")),
         )
     )
     interval_seconds = config.interval_minutes * 60
@@ -136,6 +141,7 @@ async def _candidate_ids(db, tenant_id, now):
             config.tenant_id == tenant_id,
             config.enabled.is_(True),
             config.schedule_enabled.is_(True),
+            state.current_config_clause(),
             ~active,
             or_(
                 latest.c.latest_at.is_(None),
@@ -157,7 +163,12 @@ async def _schedule_history(db, tenant_id, config_id):
     active = (
         await db.execute(
             select(run.id)
-            .where(run.tenant_id == tenant_id, run.config_id == config_id, run.status.in_(("pending", "running")))
+            .where(
+                run.tenant_id == tenant_id,
+                run.config_id == config_id,
+                run.origin.in_(("schedule", "recovery")),
+                run.status.in_(("pending", "running")),
+            )
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -169,6 +180,25 @@ async def _schedule_history(db, tenant_id, config_id):
         .execution_options(populate_existing=True)
     )
     return active is not None, latest.scalar_one_or_none()
+
+
+def _schedule_key(config, now):
+    policy = (getattr(config, "mapping_json", None) or {}).get("reconciliation_policy")
+    if policy:
+        from app.services.transaction_ops.periods import ReconciliationPolicy, scheduled_window
+
+        _, cutoff = scheduled_window(ReconciliationPolicy.model_validate(policy), now)
+        return f"daily:{cutoff.isoformat()}"
+    return _bucket(now, config.interval_minutes)
+
+
+def _cycle_key(config, run):
+    progress = getattr(run, "progress_json", None) or {}
+    if progress.get("schedule_cycle_key"):
+        return progress["schedule_cycle_key"]
+    # Legacy continuations inherit the root start, not their own creation day.
+    started = progress.get("continuation_started_at")
+    return _schedule_key(config, datetime.fromisoformat(started) if started else run.created_at)
 
 
 def _scope(config, latest, now):
@@ -205,6 +235,11 @@ def _scope(config, latest, now):
     return {"window_start": start, "window_end": now}, None, None
 
 
+def _reserve_publication(connection, tenant_id, run_id):
+    key = f"transaction-investigation:published:{UUID(str(tenant_id))}:{UUID(str(run_id))}"
+    return connection.default_channel.client.set(key, "1", nx=True, ex=_PUBLICATION_COOLDOWN)
+
+
 def publish_investigation(tenant_id, run_id, *, app=celery_app):
     # wait_for cannot cancel a blocking thread, and asyncio.run waits for its
     # executor during shutdown. Bound the real Redis sockets and connection
@@ -219,6 +254,14 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app):
             "max_retries": 0,
         },
     ) as connection:
+        # Repeated Beat ticks and replayed finished parents can all rediscover
+        # the same pending run. Its DB lease prevents duplicate investigation,
+        # but does not prevent thousands of redundant broker deliveries.
+        # Reserve on this bounded private Redis connection before publishing.
+        # Retain the reservation on ambiguous send failures; it expires so a
+        # lost publication cannot strand the durable pending run indefinitely.
+        if not _reserve_publication(connection, tenant_id, run_id):
+            return False
         app.send_task(
             "tasks.transaction_ops_run",
             kwargs={"tenant_id": str(tenant_id), "run_id": str(run_id)},
@@ -228,15 +271,19 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app):
             connection=connection,
             ignore_result=True,
         )
+        return True
 
 
 async def _dispatch(tenant_id, run_id, stats):
     try:
-        await asyncio.wait_for(
+        published = await asyncio.wait_for(
             asyncio.to_thread(publish_investigation, tenant_id, run_id),
             timeout=_DISPATCH_TIMEOUT,
         )
-        stats["dispatched"] += 1
+        if published is False:
+            stats["deduplicated"] = stats.get("deduplicated", 0) + 1
+        else:
+            stats["dispatched"] += 1
     except Exception:
         # A timeout may still have published. The durable run lease makes a
         # repeated publication safe; never remove a pending run here.
@@ -301,11 +348,8 @@ async def collect_due_runs(db, now: datetime) -> dict:
                         # Manual/chat creates take this same lock in state.
                         config = await state.get_config(db, tenant_id, config_id, lock=True)
                         active, latest = await _schedule_history(db, tenant_id, config_id)
-                        key = _bucket(now, config.interval_minutes)
-                        already_due = latest is not None and (
-                            latest.params_json.get("evaluation_key") == key
-                            or _bucket(latest.created_at, config.interval_minutes) >= key
-                        )
+                        key = _schedule_key(config, now)
+                        already_due = latest is not None and _cycle_key(config, latest) >= key
                         policy_catchup = (
                             (getattr(config, "mapping_json", None) or {}).get("reconciliation_policy")
                             and latest is not None

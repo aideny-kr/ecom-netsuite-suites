@@ -68,13 +68,21 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["config_id", "order_references", "window_start", "window_end"],
     },
+    "transaction_ops.accounting_group": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 45,
+        "rate_limit_per_minute": 5,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["group_id", "review_run_ids", "status", "search"],
+    },
     "transaction_ops.accounting_evidence": {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 90,
         "rate_limit_per_minute": 10,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["case_id"],
+        "allowlisted_params": ["case_id", "observation_id", "section"],
     },
     "transaction_ops.status": {
         "default_limit": None,
@@ -404,6 +412,15 @@ def check_rate_limit(tenant_id: str, tool_name: str) -> bool:
     return check_mcp_tool_limit(tenant_id, tool_name, limit)
 
 
+def check_call_rate_limit(tenant_id: str, tool_name: str, params: dict) -> bool:
+    # Saved observations are DB-only and cannot fall back to native collection,
+    # even for a missing/invalid audit ID. Keep them out of the scarce native-read
+    # budget so a group handoff leaves room for actual upstream investigation.
+    if tool_name == "transaction_ops.accounting_evidence" and "observation_id" in params:
+        return check_mcp_tool_limit(tenant_id, tool_name + ":observation", 60)
+    return check_rate_limit(tenant_id, tool_name)
+
+
 def reset_rate_limit(tenant_id: str | None = None) -> None:
     """Clear MCP tool rate-limit state, for one tenant or all of them. Tests only."""
     prefix = f"ratelimit:mcp:{tenant_id}:" if tenant_id else "ratelimit:mcp:"
@@ -513,7 +530,7 @@ async def governed_execute(
     # Off the event loop: the limiter is the SYNC redis client against a remote
     # Redis, and this runs on every tool call. Calling it inline stalled the whole
     # worker's loop, not just this request (cf. api/v1/chat_runs.py, same idiom).
-    if not await asyncio.to_thread(check_rate_limit, tenant_id, tool_name):
+    if not await asyncio.to_thread(check_call_rate_limit, tenant_id, tool_name, params):
         duration_ms = (time.monotonic() - start) * 1000
         logger.warning(
             "mcp.tool_call",

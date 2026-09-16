@@ -229,3 +229,18 @@ async def test_period_groups_match_review_counts_and_keep_agent_members_in_scope
 async def test_invalid_group_scope_does_not_fall_back_to_history(db, tenant_a, scope):
     with pytest.raises(StateError):
         await list_groups(db, tenant_a.id, **scope)
+
+
+@pytest.mark.parametrize("count", [55, 500, 501])
+async def test_preparation_snapshot_is_complete_and_rejects_oversized_group(db, tenant_a, count):
+    from app.services.transaction_ops.case_groups import preparation_members
+
+    await seed(db, tenant_a.id, count)
+    groups = await list_groups(db, tenant_a.id)
+    group_id = groups["groups"][0]["group_id"]
+    if count > 500:
+        with pytest.raises(StateError, match="exceeds 500"):
+            await preparation_members(db, tenant_a.id, group_id)
+    else:
+        members = await preparation_members(db, tenant_a.id, group_id)
+        assert len(members) == count and len({m["case_id"] for m in members}) == count

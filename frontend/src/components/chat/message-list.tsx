@@ -8,6 +8,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
+import { tokenUsageSummary } from "@/lib/token-usage";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage, ClarificationData, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
@@ -959,6 +960,7 @@ export function MessageList({
             onChangesetAction={onChangesetAction}
             onImportanceOverride={onImportanceOverride}
             onWriteConfirm={onWriteConfirm}
+            writeDisabled={isWaitingForReply}
             onClarificationChoose={onClarificationChoose}
             onClarificationManual={onClarificationManual}
             financialReportData={financialReports?.get(message.id) ?? null}
@@ -1027,6 +1029,7 @@ export function MessageList({
           onViewDiff={onViewDiff}
           onChangesetAction={onChangesetAction}
           onWriteConfirm={onWriteConfirm}
+          writeDisabled={isWaitingForReply}
           onClarificationChoose={onClarificationChoose}
           onClarificationManual={onClarificationManual}
           isStreamingPreview
@@ -1170,6 +1173,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onViewDiff,
   onChangesetAction,
   isStreamingPreview = false,
+  writeDisabled = false,
   onImportanceOverride,
   onWriteConfirm,
   onClarificationChoose,
@@ -1189,6 +1193,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onViewDiff?: (changesetId: string) => void;
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
+  writeDisabled?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   onWriteConfirm?: (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
@@ -1216,6 +1221,10 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
       ? (structuredOutput.data as Record<string, string> | undefined)
       : undefined;
   const displayContent = applyDriveCitations(message.content, driveSources);
+  const tokenUsage = tokenUsageSummary(message);
+
+  // Exact child cards are displayed inside their signed group review.
+  if (structuredOutput?.accounting_group_child) return null;
 
   if (structuredOutput?.type === "write_confirmation") {
     return (
@@ -1230,12 +1239,13 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           </div>
         )}
         <div className="flex min-w-0 flex-1 flex-col">
-          {message.content && (
+          {message.content && !structuredOutput.accounting_review && !structuredOutput.accounting_group && (
             <div className="mb-2 text-[13px] text-foreground">
-              {message.content}
+              <MarkdownRenderer content={message.content} isTerminal={isTerminal} />
             </div>
           )}
           <WriteConfirmationCard
+            disabled={writeDisabled}
             data={structuredOutput as unknown as WriteConfirmationData}
             onConfirm={(slotValues) => onWriteConfirm?.(message.id, "approve", slotValues)}
             onReject={() => onWriteConfirm?.(message.id, "reject")}
@@ -1463,10 +1473,10 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
             <span>{message.provider_used}</span>
             <span>/</span>
             <span>{message.model_used}</span>
-            {message.input_tokens != null && message.output_tokens != null && (
+            {tokenUsage && (
               <>
                 <span className="ml-1">·</span>
-                <span>{(message.input_tokens + message.output_tokens).toLocaleString()} tokens</span>
+                <span title={tokenUsage.detail}>{tokenUsage.label}</span>
               </>
             )}
             {message.confidence_score != null && (

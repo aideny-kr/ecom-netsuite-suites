@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from app.schemas.transaction_ops import _decimal
-from app.services.transaction_ops.source_reader import read_framework_order
+from app.services.transaction_ops.source_eligibility import FAILED_PAYMENT, payment_failed
+from app.services.transaction_ops.source_reader import SourceReadError, read_framework_order
 
 SOURCE_FIELDS = (
     "business_entity",
@@ -24,10 +25,15 @@ SOURCE_FIELDS = (
     "adjustment_total",
     "item_total",
     "line_items",
+    "adjustments",
+    "payment_total",
+    "payment_state",
+    "payments",
 )
+ACCOUNTING_DETAIL_SOURCE_FIELDS = ("taxes", "shipments", "tax_jurisdiction")
 
 
-async def refresh_source(db, tenant_id, scope, reference):
+async def refresh_source(db, tenant_id, scope, reference, *, include_accounting_detail=False):
     import uuid
 
     envelope = await read_framework_order(
@@ -37,8 +43,14 @@ async def refresh_source(db, tenant_id, scope, reference):
         reference,
         source_connection_id=uuid.UUID(scope["source_connection_id"]) if scope.get("source_connection_id") else None,
     )
+    if payment_failed(envelope["orders"][0]):
+        raise SourceReadError(FAILED_PAYMENT)
+    # Preserve the exact source envelope signed by existing correction cards.
+    # Richer investigation detail must not invalidate an unchanged pending
+    # approval simply because a software release added observation fields.
+    fields = SOURCE_FIELDS + ACCOUNTING_DETAIL_SOURCE_FIELDS if include_accounting_detail else SOURCE_FIELDS
     return json.loads(
-        json.dumps({k: envelope["orders"][0][k] for k in SOURCE_FIELDS if k in envelope["orders"][0]}, default=str)
+        json.dumps({k: envelope["orders"][0][k] for k in fields if k in envelope["orders"][0]}, default=str)
     )
 
 
@@ -51,6 +63,7 @@ def candidate(evidence, report, review, source):
     try:
         if (
             not review.get("native_mcp_connector_id")
+            or payment_failed(source)
             or source.get("state") != "complete"
             or source.get("requires_review") not in (False, None)
             or not source.get("completed_at")
@@ -184,6 +197,32 @@ def is_tax_update(record_type, fields):
 
 
 def review_for_card(db, tenant_id, tool_name, record_type, normalized):
+    info = getattr(db, "info", {})
+    cached = info.get("accounting_correction_candidate") if isinstance(info, dict) else None
+    if (
+        record_type.lower() == "creditmemo"
+        and normalized.record_id
+        and isinstance(cached, dict)
+        and cached.get("execution_transport") == "mcp_record_api"
+    ):
+        from app.services.transaction_ops.credit_api_correction import review_for_card as credit_review
+
+        return credit_review(db, tenant_id, tool_name, record_type, normalized)
+    from app.services.transaction_ops import sales_order_alignment
+
+    if sales_order_alignment.is_update(record_type, normalized):
+        return sales_order_alignment.review_for_card(db, tenant_id, tool_name, record_type, normalized)
+    from app.services.chat.tools import parse_external_tool_name
+    from app.services.transaction_ops.invoice_discount import is_discount_update
+    from app.services.transaction_ops.invoice_discount import review_for_card as discount_review
+
+    if is_discount_update(record_type, normalized):
+        return discount_review(db, tenant_id, tool_name, record_type, normalized)
+    parsed = parse_external_tool_name(tool_name)
+    if record_type.lower() == "creditmemo" and parsed and parsed[1] == "ns_createRecord":
+        from app.services.transaction_ops.sales_credit import review_for_card as credit_review
+
+        return credit_review(db, tenant_id, tool_name, record_type, normalized)
     if not is_tax_update(record_type, normalized.fields):
         return None
     from app.services.chat.tools import parse_external_tool_name
@@ -253,8 +292,33 @@ async def revalidate(db, tenant_id, proposal):
             raise ValueError("Tax-item configuration changed after the proposal. A fresh approval card is required.")
 
 
-async def verify_after(db, tenant_id, proposal):
+async def verify_after(db, tenant_id, proposal, receipt=None):
+    if proposal.get("execution_transport") == "mcp_record_api":
+        from app.services.transaction_ops.credit_api_correction import verify_after as verify_credit
+
+        return await verify_credit(db, tenant_id, proposal, receipt)
+    if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+        from app.services.transaction_ops.native_accounting_service import verify_after as verify_native
+
+        return await verify_native(db, tenant_id, proposal, receipt)
+    if proposal.get("kind") == "sales_order_source_alignment":
+        from app.services.transaction_ops.sales_order_alignment import verify_after as verify_order
+
+        return await verify_order(db, tenant_id, proposal, receipt)
+    if proposal.get("kind") == "invoice_sales_adjustment":
+        from app.services.transaction_ops.invoice_discount import verify_after as verify_discount
+
+        return await verify_discount(db, tenant_id, proposal, receipt)
+    if proposal.get("kind") == "sales_adjustment_credit":
+        from app.services.transaction_ops.sales_credit import verify_after as verify_credit
+
+        return await verify_credit(db, tenant_id, proposal, receipt or {})
     from app.services.transaction_ops.netsuite_reader import _collection, authenticated_reader
+
+    if isinstance(receipt, dict) and any(
+        str(receipt[k]) != proposal["record_id"] for k in ("id", "recordId", "internalId") if receipt.get(k)
+    ):
+        return {"status": "needs_review", "reason": "invoice_receipt_identity_conflict", "retry_allowed": False}
 
     async with authenticated_reader(
         db, tenant_id, proposal["connection_id"], proposal["scope"]["netsuite_account_id"]
@@ -309,6 +373,20 @@ async def verify_after(db, tenant_id, proposal):
 
 
 async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
+    if proposal and proposal.get("case_id"):
+        from app.services.transaction_ops.case_resolution_scope import validate
+
+        await validate(db, tenant_id, proposal)
+    if (proposal or {}).get("execution_transport") == "mcp_record_api":
+        from app.services.transaction_ops.credit_api_correction import validate_approved as validate_credit
+
+        return await validate_credit(db, tenant_id, tool_name, tool_input, proposal)
+    if tool_name == "transaction_ops_accounting_amendment_apply":
+        from app.services.transaction_ops.native_accounting_service import validate_binding
+
+        # Full fresh evidence runs once in the durable native send dispatcher.
+        validate_binding(tenant_id, tool_name, tool_input, proposal)
+        return
     from urllib.parse import urlsplit
 
     from app.services.chat.tools import parse_external_tool_name
@@ -316,9 +394,28 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
     from app.services.mcp_connector_service import get_mcp_connector
 
     parsed = parse_external_tool_name(tool_name)
+    if parsed and parsed[1] == "ns_createRecord" and tool_input.get("recordType", "").lower() == "creditmemo":
+        from app.services.transaction_ops.sales_credit import validate_approved as validate_credit
+
+        return await validate_credit(db, tenant_id, tool_name, tool_input, proposal)
     if not parsed or parsed[1] != "ns_updateRecord":
         return
     normalized = normalize_write_payload(tool_input)
+    from app.services.transaction_ops import sales_order_alignment
+
+    if (
+        sales_order_alignment.is_update(str(tool_input.get("recordType", "")), normalized)
+        or (proposal or {}).get("kind") == sales_order_alignment.KIND
+    ):
+        return await sales_order_alignment.validate_approved(db, tenant_id, tool_name, tool_input, proposal)
+    from app.services.transaction_ops.invoice_discount import is_discount_update
+    from app.services.transaction_ops.invoice_discount import validate_approved as validate_discount
+
+    if (
+        is_discount_update(str(tool_input.get("recordType", "")), normalized)
+        or (proposal or {}).get("kind") == "invoice_sales_adjustment"
+    ):
+        return await validate_discount(db, tenant_id, tool_name, tool_input, proposal)
     if not is_tax_update(str(tool_input.get("recordType", "")), normalized.fields):
         return
     parsed = parse_external_tool_name(tool_name)
@@ -344,6 +441,23 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
 
 
 def approval_text(p):
+    if p.get("execution_transport") == "mcp_record_api":
+        return (
+            f"Correct existing credit allocation for {p['order_reference']}. "
+            "The invoice and sales order are preserved. Review the exact amounts and accounting basis below."
+        )
+    if p.get("kind") == "sales_order_source_alignment":
+        return (
+            f"Align sales order {p['order_reference']} with the finalized source. "
+            "Its corrected invoice is retained. Review the exact amendment below."
+        )
+    if p.get("kind") == "invoice_sales_adjustment":
+        return f"Sales Adjustment for unpaid invoice {p['order_reference']}. Review the exact invoice discount below."
+    if p.get("kind") == "sales_adjustment_credit":
+        return (
+            f"Sales Adjustments credit for {p['order_reference']}. "
+            "Review the exact credit and invoice application below."
+        )
     return (
         f"**Accounting correction for approval — {p['order_reference']}**\n\n"
         f"Invoice {p['record_id']}: total {p['before']['total']} → {p['expected_after']['total']}; "
@@ -377,19 +491,46 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         return None
     if not p or p.get("case_id") != case_id:
         return None
-    name = f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord"
-    params = {"recordType": p["record_type"], "recordId": p["record_id"], "data": json.dumps(p["proposed_fields"])}
+    from app.services.transaction_ops.case_resolution_scope import validate
+
+    await validate(db, tenant_id, p)
+    if (
+        p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
+        and p.get("execution_transport") != "mcp_record_api"
+    ):
+        from app.services.transaction_ops.native_accounting_service import confirmation
+
+        return await confirmation(db, tenant_id, actor_id, session_id, p, policy, correlation_id)
+    creating_credit = p.get("kind") == "sales_adjustment_credit"
+    mutation = "create" if creating_credit else "update"
+    operation = "ns_createRecord" if creating_credit else "ns_updateRecord"
+    name = f"ext__{p['connector_id'].replace('-', '')}__{operation}"
+    params = {
+        "recordType": p["record_type"],
+        "data": p["wire_record_json"]
+        if p.get("execution_transport") == "mcp_record_api"
+        else json.dumps(p["proposed_fields"]),
+    }
+    if not creating_credit:
+        params["recordId"] = p["record_id"]
     if name not in {t.get("name") for t in tools or []}:
         raise ValueError("The scoped NetSuite update tool is unavailable; no approval card was created.")
     review_for_card(db, tenant_id, name, p["record_type"], normalize_write_payload(params))
     if not evaluate_tool_call(policy, name, params)["allowed"]:
         raise ValueError("The configured policy blocks this correction.")
-    if await classify_connector_mutation(name, db, tenant_id) != "update":
+    if await classify_connector_mutation(name, db, tenant_id) != mutation:
         raise ValueError("The scoped connector does not expose a verified update operation.")
+    if (
+        p.get("kind") in {"invoice_sales_adjustment", "sales_order_source_alignment"}
+        or p.get("execution_transport") == "mcp_record_api"
+    ):
+        from app.services.chat.record_metadata_service import prefetch_scoped_invoice_metadata
+
+        await prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, p, correlation_id)
     validation = await validate_mutation(
         tool_name=name,
         tool_input=params,
-        mutation_type="update",
+        mutation_type=mutation,
         record_type=p["record_type"],
         tenant_id=tenant_id,
         actor_id=actor_id,
@@ -399,14 +540,18 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
     )
     if not validation.ok:
         raise ValueError("Native write validation needs review: " + json.dumps(validation.as_model_error()))
+    from app.services.chat.tools import netsuite_environment_of
+
     card = build_confirmation_payload(
-        mutation_type="update",
+        mutation_type=mutation,
         record_type=p["record_type"],
         tool_name=name,
         tool_input=params,
         session_id=session_id,
         current_record=p["before"],
         validation=validation,
+        target_account=p["scope"]["netsuite_account_id"],
+        target_environment=netsuite_environment_of(p["scope"]["netsuite_account_id"]),
     )
     if card is None:
         raise ValueError("The verified invoice update could not be represented by an approval card.")
