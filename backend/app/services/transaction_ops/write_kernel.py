@@ -93,7 +93,7 @@ def _outcome_after(row, exc) -> tuple[str, str]:
     keep their code; any other exception is recorded under a generic code so an internal
     message never becomes ledger evidence.
     """
-    sent = row.status == "committed_unverified" or state.permit_consumed(row)
+    sent = state.permit_consumed(row)  # a receipt is only ever recorded behind the permit
     if isinstance(exc, PreconditionChangedError) or (isinstance(exc, ExecutionStoppedError) and exc.keep_code):
         code = exc.code
     else:
@@ -134,12 +134,13 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
             row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
         return result_of(row)
 
-    receipt = None
-    try:
+    async def attempt():
+        """The attempt itself: what the adapter found, sent and read back, as a decision
+        (outcome, code, details). Recording the decision is not part of it."""
         preflight = await adapter.preflight(db, tenant_id, claimed, read=read)
         receipt = await adapter.send(db, tenant_id, claimed, preflight)
         if receipt["status"] == "failed":
-            return await complete("rejected_before_effect", "provider_rejected_without_save")
+            return "rejected_before_effect", "provider_rejected_without_save", {}
         if receipt["status"] == "accepted":
             # Saved by the provider's own account, not yet proven by an independent read:
             # the row says so before the readback, in case nothing after this runs.
@@ -150,15 +151,16 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
                     raise
                 # The adapter reported a save without consuming the permit. That is an
                 # adapter defect a person must look at; the kernel will not guess.
-                return await complete("needs_review", "adapter_receipt_without_permit")
+                return "needs_review", "adapter_receipt_without_permit", {}
         proof = await adapter.verify(db, tenant_id, claimed, preflight, read=read)
         if proof is not None:
-            return await complete("verified", "independently_verified", verification=proof)
+            return "verified", "independently_verified", {"verification": proof}
         # A receipt without proof stays committed_unverified (readback again later); no
         # receipt at all is unknown (existence must be reconciled first). Never a resend.
-        return await complete(
-            "committed_unverified" if receipt["status"] == "accepted" else "unknown", "verification_unproven"
-        )
+        return ("committed_unverified" if receipt["status"] == "accepted" else "unknown"), "verification_unproven", {}
+
+    try:
+        outcome, code, details = await attempt()
     except Exception as exc:
         # An exception may follow an actual send (a permit reserved, a receipt recorded);
         # only the committed ledger row decides what the failure is. Preflight must never
@@ -173,4 +175,9 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
         if _recorded(row):
             return result_of(row)
         outcome, code = _outcome_after(row, exc)
-        return await complete(outcome, code)
+        details = {}
+    # Recording is outside the attempt on purpose: a failure here is raised as itself and
+    # leaves the row as the attempt left it (a receipt stays a receipt; recovery reads it
+    # again), instead of being mistaken for an adapter failure and re-derived into a
+    # different outcome.
+    return await complete(outcome, code, **details)
