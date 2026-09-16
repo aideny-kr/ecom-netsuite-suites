@@ -47,8 +47,14 @@ async def _seed_incidents(db, tenant_id, now):
 
 
 async def _digest_rows(db, tenant_id):
+    # Ordered by the window end each row reports: inside one test transaction every row
+    # shares the transaction's now(), and primary keys are random, so nothing else orders them.
     return list(
-        await db.scalars(select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "ops.digest"))
+        await db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "ops.digest")
+            .order_by(AuditEvent.payload["until"].astext)
+        )
     )
 
 
@@ -237,7 +243,8 @@ async def test_an_undelivered_digest_does_not_move_the_window(db, unknown_case):
     rows = await _digest_rows(db, tenant_id)
     assert rows[-1].payload["delivery"] == "sent"
     assert rows[-1].payload["counts"]["operations"] == 1  # still reported: nobody had seen it
-    assert rows[-1].payload["since"] == (first + timedelta(hours=1) - ops_digest.WINDOW).isoformat()
+    # The window floor is the failed digest's own start, not a fresh 24 hours from now.
+    assert rows[-1].payload["since"] == (first - ops_digest.WINDOW).isoformat()
 
     await ops_digest.run_ops_digest(db, now=first + timedelta(hours=2), sender=working, tenant_ids=[tenant_id])
     rows = await _digest_rows(db, tenant_id)
@@ -257,3 +264,22 @@ async def test_email_disabled_still_counts_as_delivered(db, unknown_case, monkey
     rows = await _digest_rows(db, tenant_id)
     assert rows[-2].payload["delivery"] == "disabled"
     assert rows[-1].payload["since"] == rows[-2].timestamp.isoformat()  # the audit row was the digest; the window moved
+
+
+async def test_a_tenant_never_delivered_to_keeps_the_oldest_failed_window(db, unknown_case):
+    """No delivered digest ever: the window floor is the first failed digest's own start, so the
+    first digest a person receives covers the whole backlog instead of a fresh 24 hours."""
+    tenant_id = unknown_case.actor.tenant_id
+    await operation(db, unknown_case)
+    first = datetime.now(timezone.utc)
+    broken = AsyncMock(side_effect=RuntimeError("smtp down"))
+    await ops_digest.run_ops_digest(db, now=first, sender=broken, tenant_ids=[tenant_id])
+    await ops_digest.run_ops_digest(db, now=first + timedelta(hours=25), sender=broken, tenant_ids=[tenant_id])
+    rows = await _digest_rows(db, tenant_id)
+    assert [r.payload["delivery"] for r in rows[-2:]] == ["failed", "failed"]
+    assert rows[-1].payload["since"] == rows[-2].payload["since"] == (first - ops_digest.WINDOW).isoformat()
+
+    await ops_digest.run_ops_digest(db, now=first + timedelta(hours=26), sender=AsyncMock(), tenant_ids=[tenant_id])
+    rows = await _digest_rows(db, tenant_id)
+    assert rows[-1].payload["delivery"] == "sent"
+    assert rows[-1].payload["since"] == (first - ops_digest.WINDOW).isoformat()  # the backlog, not 24h

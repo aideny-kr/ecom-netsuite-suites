@@ -76,13 +76,34 @@ DELIVERED = ("sent", "nothing_to_report", "disabled")
 
 
 async def last_delivered_at(db) -> dict[UUID, datetime]:
-    """Per tenant, when the last digest that reached (or could reach) a person was written."""
+    """Per tenant, when the last digest that reached (or could reach) a person was written.
+
+    Runs once for every tenant before any tenant context is set. audit_events carries a
+    row-level policy without FORCE, and the worker connects as the owning role, which
+    bypasses it; a role subject to the policy would not get an empty map here, it would
+    raise (the tenant function has no setting to read) and the run would fail loudly.
+    """
     rows = await db.execute(
         select(AuditEvent.tenant_id, func.max(AuditEvent.timestamp))
         .where(AuditEvent.action == ACTION, AuditEvent.payload["delivery"].astext.in_(DELIVERED))
         .group_by(AuditEvent.tenant_id)
     )
     return dict(rows.all())
+
+
+async def undelivered_since(db) -> dict[UUID, datetime]:
+    """Per tenant, the earliest window start among digests nobody received.
+
+    A tenant that has never had a delivered digest must not get a fresh 24-hour window
+    every night: the first digest a person does receive has to cover everything the
+    failed ones carried, so the window floor is the oldest undelivered digest's own start.
+    """
+    rows = await db.execute(
+        select(AuditEvent.tenant_id, func.min(AuditEvent.payload["since"].astext))
+        .where(AuditEvent.action == ACTION, AuditEvent.payload["delivery"].astext.notin_(DELIVERED))
+        .group_by(AuditEvent.tenant_id)
+    )
+    return {tenant_id: datetime.fromisoformat(value) for tenant_id, value in rows.all() if value}
 
 
 async def _category(db, stmt, order_by):
@@ -174,11 +195,16 @@ async def tenants_due(db, *, tenant_ids: list[UUID] | None = None) -> tuple[list
     run. With explicit ``tenant_ids`` the caller's order is kept and the cap does not apply.
     """
     last = await last_delivered_at(db)
+    floor = await undelivered_since(db)
+    for tenant_id, since in floor.items():
+        # Only when nothing was ever delivered: a delivered digest is always the newer boundary.
+        last.setdefault(tenant_id, since)
     if tenant_ids is not None:
         rows = {t.id: t for t in await db.scalars(select(Tenant).where(Tenant.id.in_(tenant_ids)))}
         return [rows[i] for i in tenant_ids if i in rows], False, last
     tenants = list(await db.scalars(select(Tenant).where(Tenant.is_active.is_(True))))
-    tenants.sort(key=lambda t: (last.get(t.id) is not None, _epoch(last.get(t.id)), str(t.id)))
+    delivered = await last_delivered_at(db) if floor else last
+    tenants.sort(key=lambda t: (delivered.get(t.id) is not None, _epoch(delivered.get(t.id)), str(t.id)))
     return tenants[:TENANT_LIMIT], len(tenants) > TENANT_LIMIT, last
 
 
