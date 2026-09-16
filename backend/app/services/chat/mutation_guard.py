@@ -59,6 +59,7 @@ _BLOCKED_RECORD_TYPES: frozenset[str] = frozenset(
         "integration",
     }
 )
+_BLOCKED_RECORD_TYPES_LOWER = frozenset(t.lower() for t in _BLOCKED_RECORD_TYPES)
 
 
 # ---------------------------------------------------------------------------
@@ -122,13 +123,18 @@ def get_mutation_type(tool_name: str) -> str | None:
     return classify_mutation(tool_name)
 
 
-def is_record_type_allowed(record_type: str) -> bool:
+def is_record_type_allowed(record_type: str | None) -> bool:
     """Return True unless *record_type* is on the blocklist.
 
     Only system/security records are blocked. Everything else is allowed —
-    HITL confirmation is the primary safety layer.
+    HITL confirmation is the primary safety layer. The model supplies the record
+    type verbatim and NetSuite spells them in camelCase, so the comparison is
+    case-insensitive and ignores padding: ``Employee`` is ``employee``. An empty
+    or missing type is not allowed either; it cannot be checked.
     """
-    return record_type not in _BLOCKED_RECORD_TYPES
+    if not isinstance(record_type, str) or not record_type.strip():
+        return False
+    return record_type.strip().lower() not in _BLOCKED_RECORD_TYPES_LOWER
 
 
 def generate_confirmation_token(
