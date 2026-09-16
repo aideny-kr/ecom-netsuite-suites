@@ -157,6 +157,7 @@ def execution_projection(message_id, operation, approval_context=None) -> dict:
         "next_at": operation.attempted_at.isoformat(),
         "receipt": receipt,
         "termination_reason": result.get("termination_reason", "stall"),
+        "recovery_scope": result.get("recovery_scope") or {},
     }
 
 
@@ -165,9 +166,6 @@ async def session_owner(db, tenant_id, message):
     return await db.scalar(
         select(ChatSession.user_id).where(ChatSession.id == message.session_id, ChatSession.tenant_id == tenant_id)
     )
-
-
-_session_owner = session_owner
 
 
 async def claim(db, tenant_id, message, *, actor_id, now=None):
@@ -181,7 +179,7 @@ async def claim(db, tenant_id, message, *, actor_id, now=None):
         raise state.StateError("confirmation_token_invalid")
     if so.get("status") != "executing":
         raise state.StateError("confirmation_not_executing")
-    if message.tenant_id != tenant_id or await _session_owner(db, tenant_id, message) != actor_id:
+    if message.tenant_id != tenant_id or await session_owner(db, tenant_id, message) != actor_id:
         raise state.StateError("approver_not_session_owner", 403)
     await authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_input)
     retry_of = await _retryable_attempt(db, tenant_id, so)
@@ -261,7 +259,7 @@ async def authorize_dispatch(db, tenant_id, operation, claimed, now):
     ):
         raise state.StateError("confirmation_changed")
     approver = UUID(str(recorded.get("approved_by")))
-    if await _session_owner(db, tenant_id, message) != approver:
+    if await session_owner(db, tenant_id, message) != approver:
         raise state.StateError("approver_not_session_owner", 403)
     try:
         await authorize_accounting_write(db, tenant_id, approver, tool_name, tool_input)

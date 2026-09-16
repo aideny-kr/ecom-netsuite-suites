@@ -2556,10 +2556,31 @@ async def run_chat_turn(
                         await _refuse_before_send(_reason)
                         yield {"type": "error", "error": f"No change was sent to NetSuite: {_reason}"}
                         return
-                    # The card stores the ledger row it is bound to; the permit checks it.
-                    _so = {**_so, "operation_id": str(_claimed.operation_id)}
+                    # The card stores the ledger row it is bound to (the permit checks it) and a
+                    # projection of that row in the shape the completion, history and group
+                    # readers consume; the approval-claimed audit those readers prove
+                    # provenance by is written from the same projection.
+                    from app.models.transaction_ops import TransactionOperation as _Operation
+                    from app.services.transaction_ops import state_service as _state
+                    from app.services.transaction_ops.accounting_recovery import CLAIM_ACTION as _CLAIM_ACTION
+
+                    _kernel_row = await _state._one(db, tenant_id, _Operation, _claimed.operation_id)
+                    _projection = _chat_confirmation.execution_projection(
+                        _confirm_msg.id, _kernel_row, _approval_context
+                    )
+                    _so = {**_so, "operation_id": str(_claimed.operation_id), "accounting_execution": _projection}
                     _confirm_msg.structured_output = {**_so, "status": "executing"}
                     _wc_flag_modified(_confirm_msg, "structured_output")
+                    await log_event(
+                        db,
+                        tenant_id,
+                        "transaction_ops",
+                        _CLAIM_ACTION,
+                        actor_id=user_id,
+                        resource_type="chat_message",
+                        resource_id=str(_confirm_msg.id),
+                        payload={**_projection, "financial_writes": 0},
+                    )
                     await db.commit()
                     await set_tenant_context(db, str(tenant_id))
                     _kernel_adapter = AccountingCardAdapter(
@@ -2577,11 +2598,7 @@ async def run_chat_turn(
                     )
                     _kernel_result = await _write_kernel.execute(db, tenant_id, _claimed, _kernel_adapter)
                     await set_tenant_context(db, str(tenant_id))
-                    # The row is the claim; the card carries a projection of it for the
-                    # completion, history and group readers.
-                    from app.models.transaction_ops import TransactionOperation as _Operation
-                    from app.services.transaction_ops import state_service as _state
-
+                    # The projection is refreshed from the row the kernel just completed.
                     _kernel_row = await _state._one(db, tenant_id, _Operation, _claimed.operation_id)
                     _so = {
                         **_so,
