@@ -2427,10 +2427,11 @@ async def run_chat_turn(
                     # not restored: a halted send needs a fresh human decision once
                     # dispatch is re-enabled. Terminal, and never a repair re-entry:
                     # nothing was rejected by NetSuite, so there is nothing to repair.
+                    _disabled_error = "Sending to connected systems is disabled by the operator. No change was sent."
                     _confirm_msg.structured_output = {
                         **_so,
                         "status": "failed",
-                        "error": "Sending to connected systems is disabled by the operator. No change was sent.",
+                        "error": _disabled_error,
                         "repair_exit_reason": "dispatch_disabled",
                     }
                     await log_event(
@@ -2449,8 +2450,7 @@ async def run_chat_turn(
                     yield {
                         "type": "error",
                         "code": "dispatch_disabled",
-                        "error": "Sending to connected systems is disabled by the operator. No change was sent. "
-                        "Prepare a fresh approval once dispatch is re-enabled.",
+                        "error": f"{_disabled_error} Prepare a fresh approval once dispatch is re-enabled.",
                     }
                     return
 

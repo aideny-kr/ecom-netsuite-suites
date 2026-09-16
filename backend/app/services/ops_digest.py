@@ -45,7 +45,10 @@ WINDOW = timedelta(hours=24)
 ROW_LIMIT = 50  # ids carried per category in the audit row; counts stay exact
 TENANT_LIMIT = 500  # tenants per run; more than this ends the run with reason "budget"
 STALE_GRACE = timedelta(minutes=10)
-SETTLEMENT_NEEDS_HUMAN = ("unverified", "not_verified", "difference")
+# `settlement.status` is written as unverified | succeeded | difference (settlement.py,
+# accounting_recheck.py). "not_verified" is the sibling balance/cash_settlement value and
+# never appears here.
+SETTLEMENT_NEEDS_HUMAN = ("unverified", "difference")
 # One source of truth for the category names: the labels. collect() asserts against it.
 _LABELS = {
     "operations": "Transaction operations ended unknown or failed",
@@ -132,9 +135,11 @@ async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dic
             func.coalesce(Job.completed_at, Job.updated_at).desc(),
         ),
     }
-    assert tuple(queries) == CATEGORIES, "digest categories drifted from their labels"
+    if tuple(queries) != CATEGORIES:  # a plain check, so `python -O` cannot strip it
+        raise RuntimeError(f"digest categories {tuple(queries)} drifted from labels {CATEGORIES}")
     counts, ids, truncated = {}, {}, {}
-    for name, (stmt, order_by) in queries.items():
+    for name in CATEGORIES:
+        stmt, order_by = queries[name]
         counts[name], ids[name] = await _category(db, stmt, order_by)
         truncated[name] = counts[name] > len(ids[name])
     return {"counts": counts, "ids": ids, "truncated": truncated}
@@ -220,8 +225,9 @@ async def run_ops_digest(
                 continue
             since = (await previous_digest_at(db, tenant_id)) or (now - window)
             digest = await collect(db, tenant_id, now=now, since=since)
-            recipients = await admin_emails(db, tenant_id)
             total = sum(digest["counts"].values())
+            # Recipients are only looked up when there is something to send them.
+            recipients = await admin_emails(db, tenant_id) if total else []
             failed_recipients = []
             if not total:
                 delivery = "nothing_to_report"

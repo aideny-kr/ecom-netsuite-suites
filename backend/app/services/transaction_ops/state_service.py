@@ -1073,9 +1073,6 @@ async def reserve_operation_dispatch(
         return False
     if operation.status != "executing" or proposal.status != "approved":
         raise StateError("operation_not_executable")
-    if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
-        await _block_operation(db, tenant_id, operation, now, "dispatch_disabled")
-        raise StateError("dispatch_disabled")
     required_provider = {
         "correct_amounts": "netsuite",
         "sync_missing_order": "netsuite",
@@ -1102,6 +1099,12 @@ async def reserve_operation_dispatch(
     if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
         raise StateError("operation_budget_exhausted")
+    if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+        # The operator switch is the LAST refusal before the permit, so it only
+        # speaks for operations that would otherwise have been sent. Anything a more
+        # specific check would have refused anyway keeps that reason.
+        await _block_operation(db, tenant_id, operation, now, "dispatch_disabled")
+        raise StateError("dispatch_disabled")
     operation.api_calls_used += 1
     operation.result_json = {
         **(operation.result_json or {}),
@@ -1126,7 +1129,9 @@ async def _block_operation(db, tenant_id, operation, now, code):
 
     Nothing was sent, so this is a known failure, never an unknown: ``dispatch_reserved``
     is never set, a duplicate delivery reads the terminal row and spends nothing, and the
-    approved work needs a fresh human decision once dispatch is re-enabled.
+    approved work needs a fresh human decision once dispatch is re-enabled. Every more
+    specific refusal (provider, stale evidence, config, flags, actor, budget) runs first,
+    so a ``blocked`` row always means "this would have been sent".
     """
     operation.status = "failed"
     operation.completed_at = now

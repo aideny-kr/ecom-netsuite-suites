@@ -11,17 +11,21 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.config import settings
 from app.models.audit import AuditEvent
+from app.models.transaction_ops import TransactionOperation
 from app.services.transaction_ops import accounting_dispatch as dispatch
 from app.services.transaction_ops import accounting_group as group
 from app.services.transaction_ops import action_scheduler
+from app.services.transaction_ops.state_service import StateError
 from app.workers.base_task import InstrumentedTask
+from tests import test_transaction_ops_dispatch as dispatch_fixtures
 from tests import test_transaction_ops_executor as execution_fixtures
 from tests import test_transaction_ops_recovery as recovery_fixtures
 from tests.test_accounting_dispatch import seeded_group, simulated_executor
+from tests.test_transaction_ops_dispatch import reserve
 from tests.test_transaction_ops_executor import execute, operation
 from tests.test_write_confirm_orchestrator import (
     _TENANT_ID,
@@ -34,6 +38,7 @@ from tests.test_write_confirm_orchestrator import (
 
 execution_case = execution_fixtures.execution_case
 unknown_case = recovery_fixtures.unknown_case
+ready = dispatch_fixtures.ready
 
 
 @pytest.fixture
@@ -64,6 +69,33 @@ async def test_kernel_refuses_the_send_permit_and_fails_the_operation_blocked(db
     # A duplicate delivery reads the terminal row and spends nothing.
     assert (await execute(db, execution_case))["status"] == "failed"
     assert execution_case.case.dispatch.await_count == 1
+
+
+async def test_kernel_reports_budget_exhaustion_over_the_switch_when_both_apply(db, ready, dispatch_disabled):
+    """The switch is the LAST refusal before the permit. An operation that would have
+    failed anyway keeps its more specific terminal reason, so an operator reading the
+    failed rows after re-enabling dispatch can tell which ones a retry could not save."""
+    actor, _, _, claim = ready
+    await db.execute(
+        text("UPDATE transaction_ops_operations SET api_calls_used = max_api_calls WHERE id = :operation"),
+        {"operation": claim.operation_id},
+    )
+    await db.flush()
+
+    with pytest.raises(StateError) as refused:
+        await reserve(db, actor.tenant_id, claim)
+
+    assert refused.value.code == "operation_budget_exhausted"
+    row = await db.scalar(
+        select(TransactionOperation)
+        .where(TransactionOperation.id == claim.operation_id)
+        .execution_options(populate_existing=True)
+    )
+    assert row.status == "failed"
+    assert row.result_json["termination_reason"] == "budget"
+    assert row.result_json["code"] == "operation_budget_exhausted"
+    assert row.result_json.get("dispatch_reserved") is not True
+    assert await _audits(db, actor.tenant_id, "transaction_ops.operation.blocked") == []
 
 
 async def test_collector_withholds_sends_audits_once_and_keeps_approved_work(
