@@ -84,7 +84,7 @@ async def _candidates(db, tenant_id, now):
         .join(related, and_(related.id == Operation.proposal_id, related.tenant_id == tenant_id))
         .where(
             Operation.tenant_id == tenant_id,
-            Operation.status.in_(("executing", "unknown")),
+            Operation.status.in_(("executing", "unknown", "committed_unverified")),
             func.lower(func.replace(related.netsuite_account_id, "_", "-"))
             == func.lower(func.replace(Proposal.netsuite_account_id, "_", "-")),
             related.subsidiary_id == Proposal.subsidiary_id,
@@ -131,7 +131,7 @@ async def _candidates(db, tenant_id, now):
                     ~recovery_busy_or_done,
                     or_(
                         and_(Operation.status == "executing", Operation.deadline_at <= now),
-                        Operation.status == "unknown",
+                        Operation.status.in_(("unknown", "committed_unverified")),
                     ),
                 )
                 .order_by(Operation.attempted_at, Operation.id)

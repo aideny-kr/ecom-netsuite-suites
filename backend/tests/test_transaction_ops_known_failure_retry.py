@@ -29,7 +29,7 @@ async def replan(db, case, key):
 async def test_known_no_write_failure_allows_one_fresh_human_approval_for_identical_work(db, execution_case):
     case = execution_case
     case.case.read_source.side_effect = RuntimeError("temporary read unavailable")
-    assert (await fixtures.execute(db, case))["status"] == "failed"
+    assert (await fixtures.execute(db, case))["status"] == "rejected_before_effect"
     previous = await fixtures.operation(db, case)
     retry = await replan(db, case, "retry-1")
     assert retry.id != case.proposal.id and retry.work_key != case.proposal.work_key
@@ -48,7 +48,9 @@ async def test_known_no_write_failure_allows_one_fresh_human_approval_for_identi
         ProposalDecision(decision="approve", evidence_fingerprint=retry.evidence_fingerprint),
         actor=case.actor,
     )
-    assert (await fixtures.mod.execute_proposal(db, case.actor.tenant_id, retry.id))["status"] == "failed"
+    assert (await fixtures.mod.execute_proposal(db, case.actor.tenant_id, retry.id))[
+        "status"
+    ] == "rejected_before_effect"
     assert (await replan(db, case, "retry-3-blocked")).id == retry.id
 
 
@@ -68,10 +70,12 @@ async def test_rejection_of_the_retry_is_sticky_across_subsequent_investigations
     case.case.dispatch.assert_not_awaited()
 
 
-async def test_unknown_outcome_cannot_be_replanned_into_a_new_attempt(db, execution_case):
+async def test_a_settled_outcome_cannot_be_replanned_into_a_new_attempt(db, execution_case):
+    """A receipt exists and the readback has not proven it: committed_unverified. Like unknown,
+    it is settled (a permit was consumed) and only reads may follow, never a fresh proposal."""
     case = execution_case
     case.case.read_target.side_effect = [case.before, case.before]
     case.case.read_guard.side_effect = [case.case.guard, case.case.guard]
-    assert (await fixtures.execute(db, case))["status"] == "unknown"
+    assert (await fixtures.execute(db, case))["status"] == "committed_unverified"
     assert (await replan(db, case, "unknown-retry-blocked")).id == case.proposal.id
     case.case.dispatch.assert_awaited_once()
