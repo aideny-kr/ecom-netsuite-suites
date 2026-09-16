@@ -65,6 +65,9 @@ _LEDGER_RESULT_KEYS = frozenset(
 OUTCOMES = frozenset({"rejected_before_effect", "committed_unverified", "unknown", "verified", "needs_review"})
 TERMINAL = frozenset({"verified", "rejected_before_effect", "needs_review"})
 SETTLED = frozenset({"unknown", "committed_unverified"})  # a permit was consumed; reads only from here
+# The states the write kernel may still write to. ``unknown`` is settled but not open: only
+# read-only reconciliation (recovery) may move it, never the attempt that produced it.
+OPEN = frozenset({"executing", "committed_unverified"})
 TERMINATION = {
     "verified": "done",
     "unknown": "stall",
@@ -81,6 +84,12 @@ class StateError(ValueError):
         super().__init__(code)
         self.code = code
         self.http_status = http_status
+
+
+def permit_consumed(operation) -> bool:
+    """Whether the one-use send permit was reserved on this row. A consumed permit cannot be
+    told apart from a sent request, so every outcome after it is at least ``unknown``."""
+    return (operation.result_json or {}).get("dispatch_reserved") is True
 
 
 def _clock(now=None):
@@ -1048,7 +1057,7 @@ async def record_receipt(db, tenant_id, operation_id, receipt, *, now=None):
     if row.status != "executing":
         await _commit(db, tenant_id)
         return row
-    if (row.result_json or {}).get("dispatch_reserved") is not True:
+    if not permit_consumed(row):
         raise StateError("receipt_without_permit")
     row.status = "committed_unverified"
     row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": "stall"}
@@ -1144,7 +1153,7 @@ async def reserve_operation_dispatch(
     )
     if claimed != expected or operation.proposal_id != proposal.id or operation.work_key != proposal.work_key:
         raise StateError("claimed_operation_mismatch")
-    if (operation.result_json or {}).get("dispatch_reserved") is True:
+    if permit_consumed(operation):
         await _commit(db, tenant_id)
         return False
     if operation.status != "executing" or proposal.status != "approved":
@@ -1215,11 +1224,10 @@ async def _exhaust_operation(db, tenant_id, operation, now, code):
     # This lock is shared with the dispatch permit. An old worker cannot send
     # after recovery marks a pre-dispatch operation failed. A consumed permit
     # cannot be distinguished from a sent request, so it always stays unknown.
-    sent = (operation.result_json or {}).get("dispatch_reserved") is True
-    if operation.status == "committed_unverified":
-        pass  # a receipt exists; the budget ran out before the readback proved it, so it stays as it is
-    else:
-        operation.status = "unknown" if sent else "rejected_before_effect"
+    if operation.status == "executing":
+        # Only an executing attempt changes state on exhaustion; a settled one (a receipt
+        # exists, the readback ran out of budget) keeps its state and gains the reason.
+        operation.status = "unknown" if permit_consumed(operation) else "rejected_before_effect"
     operation.completed_at = now
     operation.result_json = {**(operation.result_json or {}), "termination_reason": "budget", "code": code}
     await _audit(db, tenant_id, "operation.exhaust", operation, payload={"outcome": operation.status, "code": code})
@@ -1248,7 +1256,7 @@ async def reserve_operation_budget(db, tenant_id, operation_id, *, api_calls, no
     # Reads are budgeted while the attempt is executing and, after a receipt, while it is
     # committed but unverified: the independent readback is what proves it. A send permit
     # still requires `executing` (reserve_operation_dispatch), so this never enables a resend.
-    if operation.status not in ("executing", "committed_unverified"):
+    if operation.status not in OPEN:
         raise StateError("operation_not_executable")
     if now >= operation.deadline_at or operation.api_calls_used + api_calls > operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
@@ -1272,9 +1280,12 @@ async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
     if operation.status != "executing" or now < operation.deadline_at:
         await _commit(db, tenant_id)
         return None
-    sent = (operation.result_json or {}).get("dispatch_reserved") is True
     await _exhaust_operation(
-        db, tenant_id, operation, now, "interrupted_after_dispatch" if sent else "interrupted_before_dispatch"
+        db,
+        tenant_id,
+        operation,
+        now,
+        "interrupted_after_dispatch" if permit_consumed(operation) else "interrupted_before_dispatch",
     )
     return operation
 
@@ -1308,7 +1319,7 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
     if existing:
         await _commit(db, tenant_id)
         return existing
-    if operation.status not in SETTLED or (operation.result_json or {}).get("dispatch_reserved") is not True:
+    if operation.status not in SETTLED or not permit_consumed(operation):
         raise StateError("operation_not_recoverable")
     proposal = await get_proposal(db, tenant_id, operation.proposal_id)
     config = await get_config(db, tenant_id, proposal.config_id)

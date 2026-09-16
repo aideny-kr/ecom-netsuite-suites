@@ -371,6 +371,39 @@ async def test_a_receipt_becomes_verified_only_with_a_readback_proof(db, ready):
     assert row.status == "verified"
 
 
+@pytest.mark.parametrize("status", ["rejected_before_effect", "unknown"])
+async def test_the_database_refuses_to_downgrade_a_receipt(db, ready, status):
+    """The receipt invariant is the database's, not only complete_operation's: no writer,
+    however it reaches the table, can call a receipted attempt before-effect or unknown."""
+    actor, _, _, claim = ready
+    assert await reserve(db, actor.tenant_id, claim)
+    await state.complete_operation(
+        db, actor.tenant_id, claim.operation_id, outcome="committed_unverified", result_json={"code": "x"}
+    )
+    with pytest.raises(Exception) as exc:
+        await db.execute(
+            text("UPDATE transaction_ops_operations SET status = :status WHERE id = :id"),
+            {"id": claim.operation_id, "status": status},
+        )
+    assert "immutable operation receipt" in str(exc.value)
+    await db.rollback()
+
+
+async def test_the_database_refuses_to_verify_a_receipt_without_a_readback_proof(db, ready):
+    actor, _, _, claim = ready
+    assert await reserve(db, actor.tenant_id, claim)
+    await state.complete_operation(
+        db, actor.tenant_id, claim.operation_id, outcome="committed_unverified", result_json={"code": "x"}
+    )
+    with pytest.raises(Exception) as exc:
+        await db.execute(
+            text("UPDATE transaction_ops_operations SET status = 'verified' WHERE id = :id"),
+            {"id": claim.operation_id},
+        )
+    assert "immutable operation receipt" in str(exc.value)
+    await db.rollback()
+
+
 async def test_a_committed_unverified_attempt_blocks_a_new_claim_on_the_same_order(db, ready):
     """The in-flight guard at claim time counts a receipted-but-unproven attempt as in flight,
     like the partial unique index, settlement and the scheduler already do."""

@@ -17,8 +17,17 @@ The operation ledger becomes the only way any surface sends a mutation
   accepted by the CHECK for one release so branches that still write it keep working
   against a shared database; the service no longer writes it.
 
-The guard trigger from 100 is recreated with the wider terminal set; the new columns are
-frozen by it automatically because they are not in its mutable list.
+The guard trigger from 100 is recreated with the wider terminal set and the receipt rule
+(a ``committed_unverified`` row can never be called before-effect or unknown again and
+becomes ``verified`` only with a readback proof); the new columns are frozen by it
+automatically because they are not in its mutable list.
+
+Two compatibility measures are deliberate and temporary, and one follow-up migration
+removes both once every branch writing this table has landed: the ``failed`` value in the
+status CHECK, and the BEFORE INSERT defaults trigger that completes ``approval_id`` and
+``base_work_key`` for writers that predate these columns. That migration drops the trigger,
+drops ``failed`` from the CHECK and adds NOT NULL defaults-free columns; until it exists the
+trigger is the only thing that keeps a rolling deploy from failing inserts.
 """
 
 import sqlalchemy as sa
@@ -59,7 +68,20 @@ DEFAULTS_TRIGGER = (
 )
 
 
-def _guard(terminal: str, settled: str) -> str:
+RECEIPT_RULE = """
+            IF OLD.status = 'committed_unverified' AND (
+                NEW.status IN ('rejected_before_effect', 'unknown')
+                OR (NEW.status = 'verified' AND jsonb_typeof(NEW.result_json->'verification') IS DISTINCT FROM 'object')
+            ) THEN
+                RAISE EXCEPTION 'immutable operation receipt';
+            END IF;
+"""
+
+
+def _guard(terminal: str, settled: str, receipt: str = "") -> str:
+    """The guard trigger body. ``receipt`` is the rule that a receipted attempt can never be
+    called before-effect or unknown again and becomes verified only with a readback proof;
+    the legacy body (downgrade) has no receipt state and passes none."""
     return f"""
         CREATE OR REPLACE FUNCTION transaction_ops_operation_guard() RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE mutable text[] := ARRAY['status','completed_at','result_json','updated_at','api_calls_used'];
@@ -73,6 +95,7 @@ def _guard(terminal: str, settled: str) -> str:
                 OR (OLD.status IN {settled} AND NEW.status = 'executing') THEN
                 RAISE EXCEPTION 'immutable operation attempt';
             END IF;
+            {receipt}
             IF OLD.result_json->'dispatch_reserved' = 'true'::jsonb AND (
                 NEW.result_json->'dispatch_reserved' IS DISTINCT FROM OLD.result_json->'dispatch_reserved'
                 OR NEW.result_json->'provider' IS DISTINCT FROM OLD.result_json->'provider'
@@ -107,11 +130,11 @@ def upgrade():
     op.add_column(TABLE, sa.Column("retry_of_operation_id", postgresql.UUID(as_uuid=True), nullable=True))
     op.execute(
         f"UPDATE {TABLE} SET approval_id = proposal_id, base_work_key = work_key, "
-        "provider = COALESCE(result_json->>'provider', provider)"
+        "provider = COALESCE(result_json->>'provider', provider), "
+        "status = CASE WHEN status = 'failed' THEN 'rejected_before_effect' ELSE status END"
     )
     op.alter_column(TABLE, "approval_id", nullable=False)
     op.alter_column(TABLE, "base_work_key", nullable=False)
-    op.execute(f"UPDATE {TABLE} SET status = 'rejected_before_effect' WHERE status = 'failed'")
     op.drop_constraint(f"{TABLE}_tenant_id_proposal_id_key", TABLE, type_="unique")
     op.create_unique_constraint("uq_tx_operation_approval", TABLE, ["tenant_id", "approval_kind", "approval_id"])
     # The sibling transaction_ops tables carry (tenant_id, id); the ledger did not, and the
@@ -143,6 +166,7 @@ def upgrade():
         _guard(
             terminal="('verified','rejected_before_effect','needs_review','failed')",
             settled="('unknown','committed_unverified')",
+            receipt=RECEIPT_RULE,
         )
     )
     op.execute(TRIGGER)

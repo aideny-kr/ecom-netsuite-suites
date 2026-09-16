@@ -156,6 +156,38 @@ async def test_a_readback_failure_after_a_receipt_stays_committed_unverified(db,
     assert row.result_json["code"] == "verification_unavailable"
 
 
+async def test_a_documented_stop_during_the_readback_keeps_its_code_and_the_receipt(db, ready):
+    """A stop the adapter documents (the source order's payment failed) is ledger evidence
+    whether it is found before the send or during the readback after a receipt."""
+    adapter = FakeAdapter(verify_error=ExecutionStoppedError("source_payment_failed", keep_code=True))
+    result, row = await _run(db, ready, adapter)
+    assert result["status"] == "committed_unverified"
+    assert row.result_json["code"] == "source_payment_failed"
+    assert row.result_json["receipt"]["record_id"] == "63"
+
+
+async def test_changed_evidence_during_the_readback_keeps_the_receipt(db, ready):
+    """After a receipt the attempt can never be 'before effect' again, whatever the readback
+    finds; the kernel records the finding on the receipted row instead of raising."""
+    adapter = FakeAdapter(verify_error=PreconditionChangedError("approved_evidence_changed"))
+    result, row = await _run(db, ready, adapter)
+    assert result["status"] == "committed_unverified"
+    assert row.result_json["code"] == "approved_evidence_changed"
+    assert row.result_json["receipt"]["record_id"] == "63"
+
+
+async def test_a_second_delivery_after_a_closed_receipt_keeps_the_recorded_outcome(db, ready):
+    """A committed_unverified attempt the kernel already closed is durable: a re-delivered
+    claim (whose send the permit refuses) must not rewrite its recorded code."""
+    actor, _, _, claim = ready
+    first = await write_kernel.execute(db, actor.tenant_id, claim, FakeAdapter(proof=None))
+    assert first["status"] == "committed_unverified"
+    second = await write_kernel.execute(db, actor.tenant_id, claim, FakeAdapter(proof=None))
+    row = await _row(db, claim)
+    assert second["status"] == "committed_unverified"
+    assert row.result_json["code"] == "verification_unproven"
+
+
 async def test_an_adapter_cannot_report_a_save_without_the_permit(db, ready):
     """The guard trigger refuses a receipt on a row that never consumed a permit; the kernel
     turns that refusal into needs_review instead of guessing what happened."""
