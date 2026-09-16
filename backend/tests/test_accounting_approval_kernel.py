@@ -210,6 +210,8 @@ async def test_an_indeterminate_send_verified_by_reads_is_recovered(db, card, ra
     assert row.status == "verified" and "receipt" not in row.result_json
     assert so["status"] == "approved" and so["accounting_verification"]["recovered_by_read"] is True
     assert "verified using fresh NetSuite reads" in _text(events)
+    # an update names its record, so the link survives the recovery sentence
+    assert ("[View" in _text(events)) == (so["mutation_type"] == "update")
     stubs["recheck"].assert_awaited_once()
 
 

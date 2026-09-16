@@ -53,12 +53,14 @@ def provider_of(so) -> str:
     return PROVIDER_NATIVE if so.get("tool_name") == NATIVE_TOOL else PROVIDER_MCP
 
 
-def intent_of(tenant_id, message, so, *, actor_id, now, retry_of=None) -> state.ApprovedIntent:
+def intent_of(tenant_id, message, so, *, actor_id, now, retry_of=None, recovery=None) -> state.ApprovedIntent:
     """The ledger's view of an accounting card: identity, scope, provider, adapter.
 
     ``retry_of`` is the rejected_before_effect row this approval retries: the intent then
     carries a lineage work key (the business identity plus the attempt it retries) so the
     ledger's one-attempt-per-work rule admits it and the new row inherits the base key.
+    ``recovery`` is the scope (config, order) a read-only recovery runs under when the
+    card does not name it itself.
     """
     p = so.get("accounting_review") or {}
     if not p:
@@ -82,7 +84,7 @@ def intent_of(tenant_id, message, so, *, actor_id, now, retry_of=None) -> state.
         action=treatment.kind,
         work_key=work_key,
         retry_of_operation_id=retry_of.id if retry_of is not None else None,
-        order_reference=str(p.get("order_reference") or "") or None,
+        order_reference=(recovery or {}).get("order_reference") or str(p.get("order_reference") or "") or None,
         # The collision scope is the business document, in the shape the scheduled path
         # uses (state_service.claim_approved_operation), so an attempt in flight from
         # either approval source blocks the other on the same order.
@@ -100,7 +102,7 @@ def intent_of(tenant_id, message, so, *, actor_id, now, retry_of=None) -> state.
         target_record_id=str(p["record_id"]) if p.get("record_id") is not None else None,
         evidence_digest=evidence_digest(so),
         valid_until=now + state._OPERATION_TIME,
-        config_id=_uuid_or_none(p.get("config_id")),
+        config_id=(recovery or {}).get("config_id") or _uuid_or_none(p.get("config_id")),
     )
 
 
@@ -158,10 +160,14 @@ def execution_projection(message_id, operation, approval_context=None) -> dict:
     }
 
 
-async def _session_owner(db, tenant_id, message):
+async def session_owner(db, tenant_id, message):
+    """The user who owns the session a card lives in: the only one who may approve it."""
     return await db.scalar(
         select(ChatSession.user_id).where(ChatSession.id == message.session_id, ChatSession.tenant_id == tenant_id)
     )
+
+
+_session_owner = session_owner
 
 
 async def claim(db, tenant_id, message, *, actor_id, now=None):
@@ -179,8 +185,43 @@ async def claim(db, tenant_id, message, *, actor_id, now=None):
         raise state.StateError("approver_not_session_owner", 403)
     await authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_input)
     retry_of = await _retryable_attempt(db, tenant_id, so)
-    intent = intent_of(tenant_id, message, so, actor_id=actor_id, now=now, retry_of=retry_of)
+    scope = await _recovery_scope(db, tenant_id, so)
+    intent = intent_of(tenant_id, message, so, actor_id=actor_id, now=now, retry_of=retry_of, recovery=scope)
     return await state.claim_intent(db, tenant_id, intent, now=now)
+
+
+async def _recovery_scope(db, tenant_id, so):
+    """The config and order a read-only recovery of this card runs under. The card names
+    them when its builder set them; otherwise the one enabled config whose scope is the
+    card's (the rule case_service.investigate_cases uses; the invoice-tax builder never
+    sets a config) and the card's case. Recorded on the row at the claim, so recovery
+    never guesses."""
+    from app.services.transaction_ops.case_service import get_case
+
+    p = so.get("accounting_review") or {}
+    config_id, order_reference = _uuid_or_none(p.get("config_id")), p.get("order_reference")
+    if config_id is None and p.get("scope"):
+        config_id = await _config_for_scope(db, tenant_id, p["scope"])
+    if not order_reference and p.get("case_id"):
+        try:
+            order_reference = (await get_case(db, tenant_id, UUID(str(p["case_id"])))).order_reference
+        except (state.StateError, ValueError):
+            order_reference = None
+    return {"config_id": config_id, "order_reference": order_reference}
+
+
+async def _config_for_scope(db, tenant_id, scope):
+    """The single enabled config whose scope matches the card's, else None."""
+    matching = []
+    for config in await state.list_configs(db, tenant_id):
+        if not config.enabled:
+            continue
+        own = {key: str(getattr(config, key)) if getattr(config, key, None) is not None else None for key in scope}
+        own["netsuite_account_id"] = str(own.get("netsuite_account_id") or "").replace("_", "-").lower()
+        theirs = {**scope, "netsuite_account_id": str(scope.get("netsuite_account_id") or "").replace("_", "-").lower()}
+        if own == theirs:
+            matching.append(config)
+    return matching[0].id if len(matching) == 1 else None
 
 
 async def _retryable_attempt(db, tenant_id, so):

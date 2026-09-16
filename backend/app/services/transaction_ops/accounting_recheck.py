@@ -40,7 +40,9 @@ def recheck_call_ceiling(proposal):
     return RECHECK_CALLS
 
 
-async def queue(db, tenant_id, message, actor_id, *, now):
+async def queue(db, tenant_id, message, actor_id, *, now, config_id=None):
+    """``config_id`` is the config the card's ledger claim recorded as its recovery scope,
+    for a card whose review does not name one (the invoice-tax builder never does)."""
     so = message.structured_output or {}
     p = so.get("accounting_review") or {}
     verification = so.get("accounting_verification") or {}
@@ -63,7 +65,7 @@ async def queue(db, tenant_id, message, actor_id, *, now):
         )
         if existing:
             return existing
-        config = await state.get_config(db, tenant_id, UUID(p["config_id"]))
+        config = await state.get_config(db, tenant_id, UUID(str(config_id or p["config_id"])))
         snapshot = ConfigOut.model_validate(config).model_dump(mode="json")
         for field in ("source_connection_id", "source_step_id", "netsuite_account_id", "subsidiary_id", "record_type"):
             actual, approved = snapshot.get(field), p["scope"].get(field)

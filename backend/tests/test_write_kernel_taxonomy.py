@@ -591,3 +591,26 @@ async def test_a_committed_unverified_attempt_blocks_a_new_claim_on_the_same_ord
         await state.claim_approved_operation(
             db, actor.tenant_id, other.id, expected_evidence_fingerprint=other.evidence_fingerprint
         )
+
+
+async def test_a_proposal_claim_records_the_scope_its_recovery_reads_under(db, ready):
+    actor, config, proposal, claim = ready
+    row = await _claimed_row(db, claim)
+    assert row.result_json["recovery_scope"] == {
+        "config_id": str(config.id),
+        "order_reference": proposal.order_reference,
+    }
+
+
+async def test_unknown_may_be_handed_to_a_person_without_reads(db, ready):
+    """Escalation is not reconciliation: an unknown attempt that cannot be read (no scope to
+    read under) may end needs_review so a person decides and the document is freed."""
+    actor, _, _, claim = ready
+    assert await reserve(db, actor.tenant_id, claim)
+    await state.complete_operation(
+        db, actor.tenant_id, claim.operation_id, outcome="unknown", result_json={"code": "t"}
+    )
+    row = await state.complete_operation(
+        db, actor.tenant_id, claim.operation_id, outcome="needs_review", result_json={"code": "recovery_unscoped"}
+    )
+    assert row.status == "needs_review"
