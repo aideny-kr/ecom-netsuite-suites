@@ -96,6 +96,11 @@ class AccountingCardAdapter:
         except ValueError as exc:
             self.refusal = str(exc)
             raise PreconditionChangedError(refusal_code(exc)) from exc
+        except Exception as exc:
+            # Not a changed precondition: a read that could not complete. The ledger records
+            # the generic code; the card says what actually happened, as the old path did.
+            self.refusal = f"the approved evidence could not be revalidated ({type(exc).__name__}: {exc})"[:300]
+            raise
         return {}
 
     async def send(self, db, tenant_id, claimed, preflight) -> dict:

@@ -9,6 +9,7 @@ budget, and only a proof moves it to verified. The card is rendered from the row
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
@@ -414,3 +415,183 @@ async def test_a_card_edited_since_its_claim_is_not_read_back_but_handed_to_a_pe
     readback.assert_not_awaited()
     row = await _row(db, claimed)
     assert row.status == "needs_review" and row.result_json["code"] == "confirmation_changed"
+
+
+@pytest.fixture
+async def claimed_no_permit(db, approved_credit, authorized):  # noqa: F811
+    """A kernel-claimed card whose sender died before the permit (row executing, no permit)."""
+    actor, config, case, verified_message, _, _ = approved_credit
+    p = verified_message.structured_output["accounting_review"]
+    name, params = inputs(p)
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type=p["record_type"],
+        tool_name=name,
+        tool_input=params,
+        session_id=str(verified_message.session_id),
+        current_record=p["before"],
+    )
+    payload.accounting_review = p
+    message = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=verified_message.session_id,
+        role="assistant",
+        content="",
+        structured_output={**payload.model_dump(mode="json"), "status": "executing"},
+    )
+    db.add(message)
+    await db.flush()
+    claimed = await chat_confirmation.claim(db, actor.tenant_id, message, actor_id=actor.id)
+    message.structured_output = {**message.structured_output, "operation_id": str(claimed.operation_id)}
+    await db.flush()
+    return actor.tenant_id, actor.id, message.id, claimed, p
+
+
+async def test_an_attempt_expired_before_any_send_releases_the_intent_for_a_fresh_card(db, claimed_no_permit):
+    """The same audit every other before-effect refusal writes: the cross-card history check
+    releases the intent by it, and the ledger admits a lineage retry of the row."""
+    from app.services.transaction_ops.resolution_plan import previous_execution
+
+    tenant_id, actor_id, message_id, claimed, p = claimed_no_permit
+    later = (await _row(db, claimed)).deadline_at + timedelta(seconds=1)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        assert (await mod.recover(db, tenant_id, message_id, now=later))["termination_reason"] == "done"
+    row = await _row(db, claimed)
+    assert row.status == "rejected_before_effect" and not state.permit_consumed(row)
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    so = message.structured_output
+    assert so["status"] == "failed"
+    assert (await chat_confirmation._retryable_attempt(db, tenant_id, so)).id == row.id
+    released = await db.scalar(
+        select(AuditEvent).where(
+            AuditEvent.resource_id == str(message_id),
+            AuditEvent.action == "accounting_correction.precondition_failed",
+        )
+    )
+    assert released is not None and released.payload["financial_writes"] == 0
+    assert released.payload["approved_by"] == str(actor_id)
+    fresh = ChatMessage(
+        tenant_id=tenant_id,
+        session_id=message.session_id,
+        role="assistant",
+        content="",
+        structured_output={
+            **{k: v for k, v in so.items() if k not in ("operation_id", "accounting_execution", "error")},
+            "status": "pending",
+        },
+    )
+    db.add(fresh)
+    await db.flush()
+    assert await previous_execution(db, tenant_id, fresh.id, p) is None
+
+
+async def test_a_row_verified_while_its_card_never_heard_queues_the_recheck_like_every_verified_path(
+    db, interrupted, readback
+):
+    tenant_id, actor_id, message_id, claimed = interrupted
+    await state.complete_operation(
+        db,
+        tenant_id,
+        claimed.operation_id,
+        outcome="verified",
+        result_json={"code": "independently_verified", "verification": {"status": "verified", "credit_memo_id": "31"}},
+    )
+    now = datetime.now(timezone.utc)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        assert (await mod.recover(db, tenant_id, message_id, now=now))["termination_reason"] == "done"
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    so = message.structured_output
+    assert so["status"] == "approved" and so["accounting_verification"]["status"] == "verified"
+    assert so["accounting_recheck"]["status"] == "queued"
+
+
+async def test_the_scheduler_reaches_a_flagless_tenant_whose_card_sits_on_a_terminal_row(db, interrupted, monkeypatch):
+    from app.services import feature_flag_service
+    from app.services.transaction_ops import action_scheduler
+
+    tenant_id, _, message_id, claimed = interrupted
+    await state.complete_operation(
+        db, tenant_id, claimed.operation_id, outcome="needs_review", result_json={"code": "adapter_defect"}
+    )
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[]))
+    publish = AsyncMock()
+    monkeypatch.setattr(action_scheduler, "_dispatch", publish)
+    stats = await action_scheduler.collect_due_actions(db, now)
+    assert stats["credit_recoveries"] == 1
+    assert publish.call_args.args[:3] == (tenant_id, "credit_recover", message_id)
+
+
+async def test_a_receipted_row_the_kernel_already_closed_is_not_rendered_as_interrupted(db, interrupted, readback):
+    """The card said "sent and saved, not yet verified"; a later readback that still finds no
+    proof keeps that truth (approved, unverified, receipt accepted), never "interrupted"."""
+    tenant_id, actor_id, message_id, claimed = interrupted
+    await state.record_receipt(
+        db, tenant_id, claimed.operation_id, {"status": "accepted", "verified": False, "id": "30"}
+    )
+    await state.complete_operation(
+        db,
+        tenant_id,
+        claimed.operation_id,
+        outcome="committed_unverified",
+        result_json={"code": "verification_unproven"},
+    )
+    message = await db.get(ChatMessage, message_id)
+    message.structured_output = {
+        **message.structured_output,
+        "status": "approved",
+        "accounting_verification": {"status": "needs_review", "reason": "gl_mismatch"},
+    }
+    await db.commit()
+    readback.return_value = {"status": "needs_review", "reason": "gl_mismatch", "retry_allowed": False}
+    later = (await _row(db, claimed)).deadline_at + timedelta(seconds=1)
+    assert await mod.candidates(db, tenant_id, later, limit=10) == [message_id]
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        await mod.recover(db, tenant_id, message_id, now=later)
+    await db.refresh(message)
+    so = message.structured_output
+    assert (await _row(db, claimed)).status == "committed_unverified"
+    assert so["status"] == "approved" and "interrupted" not in message.content
+    assert so["accounting_verification"]["receipt_outcome"] == "accepted"
+    assert so["accounting_verification"]["recovered_by_read"] is False
+
+
+async def test_a_recovery_that_cannot_run_hands_the_row_to_a_person_instead_of_raising_forever(
+    db, interrupted, readback
+):
+    from sqlalchemy import update
+
+    from app.models.transaction_ops import TransactionConfig
+
+    tenant_id, _, message_id, claimed = interrupted
+    row = await _row(db, claimed)
+    config_id = UUID(row.result_json["recovery_scope"]["config_id"])
+    await db.execute(
+        update(TransactionConfig).where(TransactionConfig.id == config_id).values(enabled=False, schedule_enabled=False)
+    )
+    await db.commit()
+    later = row.deadline_at + timedelta(seconds=1)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        result = await mod.recover(db, tenant_id, message_id, now=later)
+    row = await _row(db, claimed)
+    assert result["termination_reason"] == "blocked" and row.status == "needs_review"
+    assert row.result_json["code"] == "config_disabled"
+    assert await mod.candidates(db, tenant_id, later, limit=10) == []
+    readback.assert_not_awaited()
+
+
+async def test_a_row_whose_card_was_deleted_is_settled_and_not_redispatched(db, interrupted):
+    from sqlalchemy import delete
+
+    tenant_id, _, message_id, claimed = interrupted
+    await db.execute(delete(ChatMessage).where(ChatMessage.id == message_id))
+    await db.commit()
+    later = (await _row(db, claimed)).deadline_at + timedelta(seconds=1)
+    assert await mod.candidates(db, tenant_id, later, limit=10) == [message_id]
+    result = await mod.recover(db, tenant_id, message_id, now=later)
+    assert result["termination_reason"] == "blocked"
+    row = await _row(db, claimed)
+    assert row.status == "needs_review" and row.result_json["code"] == "card_missing"
+    assert await mod.candidates(db, tenant_id, later + timedelta(hours=1), limit=10) == []
