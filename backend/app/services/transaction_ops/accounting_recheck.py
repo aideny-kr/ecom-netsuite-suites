@@ -12,9 +12,32 @@ from sqlalchemy import select
 from app.models.chat import ChatMessage
 from app.models.transaction_ops import TransactionFinding, TransactionRun
 from app.schemas.transaction_runs import ConfigOut
+from app.services.transaction_ops import accounting_credit_recheck
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.settlement import SCOPE
+
+# Provider-call ceiling of one recheck run. The MCP existing-credit recheck adds the
+# subledger read budget it reserves in accounting_credit_recheck plus a small headroom,
+# so the two numbers cannot drift apart: raising READ_CALLS raises the ceiling that has
+# to afford it. 64 + 56 + 8 preserves the 128 the previous literal allowed.
+RECHECK_CALLS = 64
+MCP_RECHECK_HEADROOM = 8
+MCP_TRANSPORT = "mcp_record_api"  # the treatment registry (PR #264) owns this once it lands
+
+
+def needs_subledger_recheck(proposal):
+    """The one recheck that re-reads the subledger: an existing-credit correction sent over MCP."""
+    return proposal.get("kind") == "credit_tax_reallocation" and proposal.get("execution_transport") == MCP_TRANSPORT
+
+
+def recheck_call_ceiling(proposal):
+    # Keyed on transport, not kind: every MCP-transported recheck kept the larger
+    # ceiling before, and narrowing it to one kind would halve the budget of the
+    # others without any change in what they read.
+    if proposal.get("execution_transport") == MCP_TRANSPORT:
+        return RECHECK_CALLS + accounting_credit_recheck.READ_CALLS + MCP_RECHECK_HEADROOM
+    return RECHECK_CALLS
 
 
 def supports(proposal):
@@ -81,7 +104,7 @@ async def queue(db, tenant_id, message, actor_id, *, now):
                 "order_references": [p["order_reference"]],
             },
             config_snapshot=snapshot,
-            max_api_calls=min(config.max_api_calls, 128 if p.get("execution_transport") == "mcp_record_api" else 64),
+            max_api_calls=min(config.max_api_calls, recheck_call_ceiling(p)),
             max_orders=1,
             deadline_at=now + timedelta(seconds=config.deadline_seconds),
             progress_json={},
@@ -149,23 +172,30 @@ def report_in_scope(run, p, report, now):
         return False
 
 
-async def bound_report(db, tenant_id, run, report, *, now):
-    _, p = await approval_for_run(db, tenant_id, run)
-    if report_in_scope(run, p, report, now):
-        if p.get("kind") == "credit_tax_reallocation" and p.get("execution_transport") == "mcp_record_api":
-            from app.services.transaction_ops.accounting_credit_recheck import reconcile
+async def bound_report(db, tenant_id, run, report, *, now, subledger_recheck=True):
+    """Bind a recheck run's report to its approval.
 
-            return await reconcile(db, tenant_id, run, p, report)
-        return report
-    return {
-        **report,
-        "balance": {
-            **(report.get("balance") or {}),
-            "status": "not_verified",
-            "reason": "accounting_recheck_identity_or_freshness_unverified",
-        },
-        "evidence_limits": {"code": "accounting_recheck_identity_or_freshness_unverified"},
-    }
+    The scope check is cheap and runs on every write, so an interim finding never
+    sits in the findings list unannotated. The subledger recheck reserves provider
+    budget and re-reads NetSuite, so the caller asks for it only on the final write.
+    """
+    not_verified = accounting_credit_recheck.not_verified_report
+    try:
+        _, p = await approval_for_run(db, tenant_id, run)
+    except state.StateError as exc:
+        # The approval this run was queued for no longer matches, or its message is
+        # gone. Binding fails closed on the report; the run itself must still
+        # terminate normally, so this never raises out of a finding write. Only this
+        # module's own codes are published; any other lookup failure gets one reason.
+        code = getattr(exc, "code", None) or str(exc)
+        if not code.startswith("accounting_recheck_"):
+            code = "accounting_recheck_approval_unavailable"
+        return not_verified(report, code)
+    if not report_in_scope(run, p, report, now):
+        return not_verified(report, "accounting_recheck_identity_or_freshness_unverified")
+    if subledger_recheck and needs_subledger_recheck(p):
+        return await accounting_credit_recheck.reconcile(db, tenant_id, run, p, report)
+    return report
 
 
 async def record_outcome(db, tenant_id, run, reason, *, now):

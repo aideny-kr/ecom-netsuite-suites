@@ -675,11 +675,17 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     )
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
-    if final and run.origin == "recovery" and run.params_json.get("approval_message_id"):
+    if run.origin == "recovery" and run.params_json.get("approval_message_id"):
         from app.services.transaction_ops.accounting_recheck import bound_report
 
+        # Every write is bound to the approval; only the final one may spend the
+        # subledger read budget on the expensive recheck.
         request = request.model_copy(
-            update={"report_json": await bound_report(db, tenant_id, run, request.report_json, now=now)}
+            update={
+                "report_json": await bound_report(
+                    db, tenant_id, run, request.report_json, now=now, subledger_recheck=final
+                )
+            }
         )
     row = (
         await db.execute(
