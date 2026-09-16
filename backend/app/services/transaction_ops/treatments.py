@@ -14,6 +14,27 @@ copy of these kinds.
 from dataclasses import dataclass
 
 
+class TreatmentError(ValueError, KeyError):
+    """A proposal the registry cannot place: an unregistered kind, or a proposal missing
+    the field its treatment needs (its lock document, its profile).
+
+    It is a ValueError because every caller of this module treats a ValueError as the
+    refusal to show a person, and a KeyError because the old inline lookups raised one
+    and their guards still catch it. Being both is what keeps a registry lookup from
+    turning into an unhandled crash at whichever call site forgot the guard.
+    """
+
+    def __str__(self):
+        return self.args[0] if self.args else ""
+
+
+def _field(proposal, key):
+    try:
+        return proposal[key]
+    except (KeyError, TypeError):
+        raise TreatmentError(f"the correction is missing its {key}") from None
+
+
 @dataclass(frozen=True)
 class Treatment:
     kind: str
@@ -108,15 +129,23 @@ DEPENDENT_KINDS = frozenset(row.kind for row in _ROWS if row.dependent_step)
 
 
 def treatment_of(proposal) -> Treatment:
-    """The registry row for a proposal; a missing kind is the legacy invoice-tax treatment."""
-    return REGISTRY[(proposal or {}).get("kind") or DEFAULT_KIND]
+    """The registry row for a proposal; a missing kind is the legacy invoice-tax treatment.
+
+    An unregistered kind is refused (TreatmentError), never routed to a default: the
+    54-case crash was a proposal meeting a branch written for a different kind.
+    """
+    kind = (proposal or {}).get("kind") or DEFAULT_KIND
+    try:
+        return REGISTRY[kind]
+    except KeyError:
+        raise TreatmentError(f"unsupported correction kind: {kind}") from None
 
 
 def family_of(proposal):
     """The treatment family, or None for a proposal whose kind is not a registered treatment."""
     try:
         return treatment_of(proposal).family
-    except KeyError:
+    except TreatmentError:
         return None
 
 
@@ -147,11 +176,11 @@ def treatment_profile(proposal) -> dict:
     treatment = treatment_of(proposal)
     if treatment.family == "amendment":
         if is_mcp(proposal):
-            return {"connector_schema": proposal["connector_schema"]}
-        return proposal["native_profile"]
+            return {"connector_schema": _field(proposal, "connector_schema")}
+        return _field(proposal, "native_profile")
     if treatment.family == "commercial":
-        return proposal["profile"]
-    return {"tax_item_id": proposal["tax_item"].get("id")}
+        return _field(proposal, "profile")
+    return {"tax_item_id": _field(proposal, "tax_item").get("id")}
 
 
 def collision_key(proposal) -> tuple[str, str]:
@@ -159,10 +188,10 @@ def collision_key(proposal) -> tuple[str, str]:
     treatment = treatment_of(proposal)
     if treatment.lock == "invoice":
         # Fail closed: a lock keyed on the wrong document is worse than no lock.
-        return "invoice", str(proposal["invoice_id"])
+        return "invoice", str(_field(proposal, "invoice_id"))
     if treatment.lock == "invoice_record":
-        return "invoice", str(proposal["record_id"])
-    return proposal["record_type"], str(proposal["record_id"])
+        return "invoice", str(_field(proposal, "record_id"))
+    return _field(proposal, "record_type"), str(_field(proposal, "record_id"))
 
 
 def reconciliation_target_id(proposal):
@@ -183,15 +212,15 @@ def reconciliation_target_id(proposal):
         if rule == "record":
             derived = str(proposal["record_id"])
         elif rule == "sales_order":
-            order = proposal.get("sales_order_id")
-            derived = str(order) if order else None
-            candidate = declared or derived
-            if not candidate or (declared and derived and declared != derived):
-                return None
+            # An existing-credit correction binds through the independently collected
+            # invoice -> sales-order edge; neither the proposal's own derivation nor a
+            # declaration can stand in for it. The edge becomes the derived answer and
+            # then meets the same declared-vs-derived check as every other rule.
+            candidate = str(proposal["sales_order_id"]) if proposal.get("sales_order_id") else declared
             edge = (((proposal.get("support") or {}).get("invoice") or {}).get("createdFrom") or {}).get("id")
-            if edge is None or str(edge) != candidate:
-                return None  # no independently collected edge, or one that disagrees: refuse, never guess
-            return candidate
+            if not candidate or edge is None or str(edge) != candidate:
+                return None
+            derived = candidate
         else:
             derived = str(proposal["before"]["createdFrom"]["id"])
         if declared and declared != derived:

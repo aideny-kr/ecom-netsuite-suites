@@ -15,7 +15,7 @@ from app.schemas.transaction_runs import ConfigOut
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.settlement import SCOPE
-from app.services.transaction_ops.treatments import reconciliation_target_id, supports, treatment_of
+from app.services.transaction_ops.treatments import is_mcp, reconciliation_target_id, supports, treatment_of
 
 
 async def queue(db, tenant_id, message, actor_id, *, now):
@@ -126,7 +126,7 @@ def report_in_scope(run, p, report, now):
 async def bound_report(db, tenant_id, run, report, *, now):
     _, p = await approval_for_run(db, tenant_id, run)
     if report_in_scope(run, p, report, now):
-        if p.get("kind") == "credit_tax_reallocation" and p.get("execution_transport") == "mcp_record_api":
+        if p.get("kind") == "credit_tax_reallocation" and is_mcp(p):
             from app.services.transaction_ops.accounting_credit_recheck import reconcile
 
             return await reconcile(db, tenant_id, run, p, report)

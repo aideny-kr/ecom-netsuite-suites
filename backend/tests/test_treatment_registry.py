@@ -160,7 +160,12 @@ def test_supports_is_the_registry_membership_rule(proposal, expected):
 
 
 def _kind_literal_collections(path):
-    """Set, dict-key, list and tuple literals naming two or more registry kinds."""
+    """Literals or boolean chains naming two or more registry kinds.
+
+    A single-kind comparison is adapter behaviour and allowed. Two or more kinds in one
+    set, dict, list or tuple literal, or in one ``==`` / ``in`` chain joined by ``or`` /
+    ``and``, is a second copy of a registry grouping and is not.
+    """
     tree = ast.parse(path.read_text())
     found = []
     for node in ast.walk(tree):
@@ -168,9 +173,11 @@ def _kind_literal_collections(path):
             values = node.elts
         elif isinstance(node, ast.Dict):
             values = node.keys
+        elif isinstance(node, ast.BoolOp):
+            values = [c for v in node.values if isinstance(v, ast.Compare) for c in (v.left, *v.comparators)]
         else:
             continue
-        kinds = [v.value for v in values if isinstance(v, ast.Constant) and v.value in REGISTRY]
+        kinds = {v.value for v in values if isinstance(v, ast.Constant) and v.value in REGISTRY}
         if len(kinds) >= 2:
             found.append((node.lineno, sorted(kinds)))
     return found
@@ -215,15 +222,25 @@ async def test_mcp_credit_prepare_declares_its_reconciliation_target(mcp_credit)
 def test_collision_key_fails_closed_without_the_invoice_id(kind):
     p = _proposal(kind)
     del p["invoice_id"]
-    with pytest.raises(KeyError):
+    with pytest.raises(treatments.TreatmentError) as exc:
         collision_key(p)
+    # One refusal type that every existing guard catches, whichever it was written for.
+    assert isinstance(exc.value, ValueError) and isinstance(exc.value, KeyError)
+    assert str(exc.value) == "the correction is missing its invoice_id"
 
 
 def test_treatment_profile_fails_closed_without_a_tax_item():
     p = _proposal("invoice_tax")
     del p["tax_item"]
-    with pytest.raises(KeyError):
+    with pytest.raises(treatments.TreatmentError):
         treatment_profile(p)
+
+
+def test_an_unregistered_kind_is_a_refusal_not_a_crash():
+    with pytest.raises(treatments.TreatmentError) as exc:
+        treatments.treatment_of({"kind": "tax_reversal"})
+    assert isinstance(exc.value, ValueError)
+    assert "tax_reversal" in str(exc.value)
 
 
 def test_family_of_tolerates_unregistered_kinds():
@@ -231,7 +248,9 @@ def test_family_of_tolerates_unregistered_kinds():
     assert treatments.family_of({}) == "invoice_tax"
 
 
-async def test_group_manifest_rejects_a_member_without_its_lock_document(mcp_credit):  # noqa: F811
+async def test_group_card_refuses_a_member_without_its_lock_document(mcp_credit):  # noqa: F811
+    """The refusal is a ValueError at the builder itself, so the plan-group refresh's and the
+    recovery job's `except ValueError` handlers see a refusal, never an unhandled KeyError."""
     from uuid import uuid4
 
     from app.services.transaction_ops import accounting_group
@@ -239,10 +258,12 @@ async def test_group_manifest_rejects_a_member_without_its_lock_document(mcp_cre
 
     p, _, _ = mcp_credit
     session_id = uuid4()
-    card = accounting_group.build_group_card(
-        [member(p, session_id)], {"group_id": "g", "scope": p["scope"]}, str(session_id)
-    )
-    so = card.model_dump(mode="json")
-    del so["accounting_group"]["members"][0]["card"]["accounting_review"]["invoice_id"]
+    broken = member(p, session_id)
+    del broken["card"]["accounting_review"]["invoice_id"]
+    with pytest.raises(ValueError) as exc:
+        accounting_group.build_group_card([broken], {"group_id": "g", "scope": p["scope"]}, str(session_id))
+    assert str(exc.value) == "the correction is missing its invoice_id"
+    foreign = member(p, session_id)
+    foreign["card"]["accounting_review"]["kind"] = "tax_reversal"
     with pytest.raises(ValueError):
-        accounting_group.validate_manifest(so, str(session_id))
+        accounting_group.build_group_card([foreign], {"group_id": "g", "scope": p["scope"]}, str(session_id))

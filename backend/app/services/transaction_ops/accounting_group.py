@@ -394,11 +394,11 @@ def validate_manifest(so, session_id):
             or p.get("case_id") != member["case_id"]
         ):
             raise ValueError("A group member is not an exact supported pending correction.")
-        try:
-            document = collision_key(p)[1]
-        except KeyError:
-            raise ValueError("A group member is not an exact supported pending correction.") from None
-        targets.append((p["scope"]["netsuite_account_id"], p.get("lock_record_type", card["record_type"]), document))
+        # collision_key refuses with TreatmentError (a ValueError) when the member has no
+        # lock document; build_group_card gets the same refusal from the same call.
+        targets.append(
+            (p["scope"]["netsuite_account_id"], p.get("lock_record_type", card["record_type"]), collision_key(p)[1])
+        )
     if len(set(targets)) != len(targets):
         raise ValueError("Overlapping document corrections cannot be approved together.")
     return members

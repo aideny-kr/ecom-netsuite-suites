@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops.source_eligibility import FAILED_PAYMENT, payment_failed
 from app.services.transaction_ops.source_reader import SourceReadError, read_framework_order
-from app.services.transaction_ops.treatments import is_mcp, treatment_of
+from app.services.transaction_ops.treatments import family_of, is_mcp, treatment_of
 
 SOURCE_FIELDS = (
     "business_entity",
@@ -298,7 +298,7 @@ async def verify_after(db, tenant_id, proposal, receipt=None):
         from app.services.transaction_ops.credit_api_correction import verify_after as verify_credit
 
         return await verify_credit(db, tenant_id, proposal, receipt)
-    if treatment_of(proposal).family == "amendment":
+    if family_of(proposal) == "amendment":  # an unregistered kind falls through to the readback below
         from app.services.transaction_ops.native_accounting_service import verify_after as verify_native
 
         return await verify_native(db, tenant_id, proposal, receipt)
