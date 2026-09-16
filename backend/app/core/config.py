@@ -223,6 +223,9 @@ class Settings(BaseSettings):
     # audited `dispatch_disabled` reason at each point. Default on; set it to
     # false in the environment to halt mid-run.
     TRANSACTION_OPS_DISPATCH_ENABLED: bool = True
+    # The daily ops digest always writes its per-tenant audit row; this only
+    # controls whether the same digest is also emailed to the tenant's admins.
+    OPS_DIGEST_EMAIL_ENABLED: bool = True
 
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False

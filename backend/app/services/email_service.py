@@ -99,3 +99,21 @@ async def _send_via_resend(to: str, subject: str, html: str, text: str) -> None:
         raise RuntimeError(f"Resend API error: {response.status_code} — {response.text}")
 
     logger.info("email.sent", provider="resend", to=to, subject=subject)
+
+
+async def send_ops_digest_email(*, to_email: str, subject: str, text_body: str, html_body: str) -> None:
+    """Deliver the daily ops digest through the same provider as invitations."""
+    if EMAIL_PROVIDER == "console":
+        print(f"\n{'=' * 60}", flush=True)
+        print("OPS DIGEST EMAIL (console mode)", flush=True)
+        print(f"To: {to_email}", flush=True)
+        print(f"Subject: {subject}", flush=True)
+        print(f"Body:\n{text_body}", flush=True)
+        print(f"{'=' * 60}\n", flush=True)
+        return
+
+    if EMAIL_PROVIDER == "resend":
+        await _send_via_resend(to_email, subject, html_body, text_body)
+        return
+
+    raise NotImplementedError(f"Email provider '{EMAIL_PROVIDER}' not yet implemented")

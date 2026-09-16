@@ -129,6 +129,7 @@ celery_app.conf.include = [
     "app.workers.tasks.metadata_discovery",
     "app.workers.tasks.metric_catalog_reseed",
     "app.workers.tasks.onboarding_discovery",
+    "app.workers.tasks.ops_digest",
     "app.workers.tasks.oracle_skill_reseed",
     "app.workers.tasks.proactive_token_refresh",
     "app.workers.tasks.shopify_sync",
@@ -153,6 +154,12 @@ celery_app.conf.include = [
 ]
 
 celery_app.conf.beat_schedule = {
+    "ops-digest-daily": {
+        # After the nightly syncs and recon sweeps (01:00-06:30 UTC) so the digest
+        # covers their outcomes. One audit row per tenant per run, email optional.
+        "task": "tasks.ops_digest",
+        "schedule": crontab(hour=7, minute=0),
+    },
     "transaction-operations-actions-minute": {
         "task": "tasks.transaction_ops_collect_actions",
         "schedule": 60.0,
