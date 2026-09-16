@@ -1160,6 +1160,22 @@ async def claim_intent(db, tenant_id, intent: ApprovedIntent, *, now=None) -> Cl
     return claimed
 
 
+async def operation_for_approval(db, tenant_id, approval_kind, approval_id):
+    """The ledger row an approval claimed, or None."""
+    await set_tenant_context(db, str(tenant_id))
+    return (
+        await db.execute(
+            select(TransactionOperation)
+            .where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.approval_kind == approval_kind,
+                TransactionOperation.approval_id == approval_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
 async def operation_for_work(db, tenant_id, work_key):
     """The ledger row for a piece of work, or None; the duplicate check's own lookup."""
     await set_tenant_context(db, str(tenant_id))
@@ -1404,9 +1420,13 @@ async def reserve_operation_budget(db, tenant_id, operation_id, *, api_calls, no
     if now >= operation.deadline_at or operation.api_calls_used + api_calls > operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
         return None
-    flags = await get_all_flags(db, tenant_id)
-    if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
-        raise StateError("feature_disabled", 403)
+    if operation.proposal_id is not None:
+        # The scheduled feature's flags gate a proposal's reads mid-flight. Any other
+        # approval source (a chat confirmation) is gated by its own policy at the claim
+        # and at the permit, not by the reconciliation product's flags.
+        flags = await get_all_flags(db, tenant_id)
+        if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
+            raise StateError("feature_disabled", 403)
     operation.api_calls_used += api_calls
     permit = OperationReadPermit(
         deadline_at=operation.deadline_at, remaining_api_calls=operation.max_api_calls - operation.api_calls_used
@@ -1433,12 +1453,18 @@ async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
     return operation
 
 
-async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, evaluation_key=None, now=None):
+async def create_operation_recovery(
+    db, tenant_id, operation_id, *, actor=None, evaluation_key=None, now=None, config_id=None, order_reference=None
+):
     """One automatic pass, plus explicit, idempotent human read-only rechecks.
 
     Every recheck gets its own fixed run budget. No operation spend, approval,
     deadline or dispatch reservation is reset. No schedule/model may supply a
     new read-request key without a current authenticated human actor.
+
+    A proposal's row takes its scope from the proposal; a row from another approval
+    source (a chat confirmation) is scoped by the caller's ``config_id`` and
+    ``order_reference`` (the card's), without which there is no budgeted read.
     """
     now = _clock(now)
     manual = evaluation_key is not None
@@ -1464,8 +1490,12 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
         return existing
     if operation.status not in SETTLED or not permit_consumed(operation):
         raise StateError("operation_not_recoverable")
-    proposal = await get_proposal(db, tenant_id, operation.proposal_id)
-    config = await get_config(db, tenant_id, proposal.config_id)
+    if operation.proposal_id is not None:
+        proposal = await get_proposal(db, tenant_id, operation.proposal_id)
+        config_id, order_reference = proposal.config_id, proposal.order_reference
+    elif config_id is None or order_reference is None:
+        raise StateError("recovery_unscoped")
+    config = await get_config(db, tenant_id, config_id)
     if not config.enabled:
         raise StateError("config_disabled")
     pending = (
@@ -1494,7 +1524,7 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
         origin="recovery",
         params_json={
             "operation_id": str(operation.id),
-            "order_references": [proposal.order_reference],
+            "order_references": [order_reference],
             **({"manual_recheck": True, "evaluation_key": str(evaluation_key)} if manual else {}),
         },
         config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),

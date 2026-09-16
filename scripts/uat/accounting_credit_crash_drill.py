@@ -26,15 +26,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Reuse the strict loopback database guard and exact ephemeral-tenant cleanup.
-import transaction_ops_crash_drill as base
-
 import httpx
+import transaction_ops_crash_drill as base
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.models.chat import ChatMessage, ChatSession
+from app.models.transaction_ops import TransactionOperation
 from app.schemas.transaction_runs import ConfigOut
 from app.services.chat.orchestrator import run_chat_turn
 from app.services.chat.write_confirmation_service import build_confirmation_payload
@@ -50,28 +50,27 @@ async def child(path, port):
     data = json.loads(Path(path).read_text())
     engine = create_async_engine(base.DATABASE)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    tenant, actor, session_id, message_id = (
-        UUID(data[k]) for k in ("tenant", "actor", "session", "message")
-    )
+    tenant, actor, session_id, message_id = (UUID(data[k]) for k in ("tenant", "actor", "session", "message"))
 
     async def send(**kwargs):
         assert kwargs["human_approved"] is True
         assert kwargs["approval_context"]["confirmation_id"] == str(message_id)
-        # Assert durable attribution exists on ANOTHER committed connection.
+        # Assert durable attribution exists on ANOTHER committed connection: the ledger
+        # row the card claimed, executing, with the one-use permit already consumed.
         async with factory() as audit_db:
             await set_tenant_context(audit_db, str(tenant))
-            assert await audit_db.scalar(
-                select(AuditEvent.id).where(
-                    AuditEvent.tenant_id == tenant,
-                    AuditEvent.resource_id == str(message_id),
-                    AuditEvent.action == accounting_recovery.CLAIM_ACTION,
-                    AuditEvent.actor_id == actor,
+            row = await audit_db.scalar(
+                select(TransactionOperation).where(
+                    TransactionOperation.tenant_id == tenant,
+                    TransactionOperation.approval_kind == "chat_confirmation",
+                    TransactionOperation.approval_id == message_id,
                 )
             )
+            assert row is not None and row.status == "executing"
+            assert row.result_json.get("dispatch_reserved") is True
+            assert row.result_json.get("approved_by") == str(actor)
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"http://127.0.0.1:{port}/credit", json=kwargs["tool_input"]
-            )
+            response = await client.post(f"http://127.0.0.1:{port}/credit", json=kwargs["tool_input"])
             return response.text
 
     try:
@@ -80,9 +79,7 @@ async def child(path, port):
             session = await db.get(ChatSession, session_id)
             with (
                 patch.object(accounting_group, "engine", engine),
-                patch.object(
-                    accounting_group, "authorize_accounting_write", AsyncMock()
-                ),
+                patch.object(accounting_group, "authorize_accounting_write", AsyncMock()),
                 patch(
                     "app.services.transaction_ops.tax_correction.validate_approved",
                     AsyncMock(),
@@ -118,9 +115,7 @@ async def run(output):
     provider = {"writes": 0, "reads": 0, "payload": None}
     journal = Path(str(output) + ".state.json")
     if journal.exists():
-        raise RuntimeError(
-            "An unfinished cleanup journal exists; stop its worker and run --cleanup-state"
-        )
+        raise RuntimeError("An unfinished cleanup journal exists; stop its worker and run --cleanup-state")
     journal_data = {
         "database": base.parsed.database,
         "host": base.parsed.host,
@@ -133,9 +128,7 @@ async def run(output):
 
         def do_POST(self):
             assert self.path == "/credit"
-            provider["payload"] = json.loads(
-                self.rfile.read(int(self.headers["Content-Length"]))
-            )
+            provider["payload"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             provider["writes"] += 1
             saved.set()
             release.wait(45)
@@ -151,18 +144,14 @@ async def run(output):
 
     try:
         async with factory() as db:
-            tenant = await create_test_tenant(
-                db, name="Ephemeral chat credit crash drill", slug=slug
-            )
+            tenant = await create_test_tenant(db, name="Ephemeral chat credit crash drill", slug=slug)
             tenant_id = tenant.id
             journal_data["tenant_id"] = str(tenant_id)
             base.write_journal(journal, journal_data)
             actor, _ = await create_test_user(db, tenant)
             for flag in ("celigo", "reconciliation"):
                 await enable_feature_flag(db, tenant_id, flag)
-            config = await seed_config(
-                db, tenant_id, actor, netsuite_account_id="123", subsidiary_id="1"
-            )
+            config = await seed_config(db, tenant_id, actor, netsuite_account_id="123", subsidiary_id="1")
             p = kind_proposal("credit")
             snapshot = ConfigOut.model_validate(config).model_dump(mode="json")
             p.update(tenant_id=str(tenant_id), config_id=str(config.id))
@@ -239,7 +228,7 @@ async def run(output):
             assert child_process.returncode == -signal.SIGKILL
 
             async def verify(db, tenant_id, proposal, receipt):
-                assert receipt is None
+                assert not receipt  # the kill came before any receipt; the dispatcher passes {}
                 async with httpx.AsyncClient() as client:
                     response = await client.get(f"http://127.0.0.1:{port}/credit")
                 assert response.json() == params
@@ -255,33 +244,21 @@ async def run(output):
                 assert durable.structured_output["status"] == "executing"
                 with (
                     patch.object(accounting_group, "engine", engine),
-                    patch(
-                        "app.services.transaction_ops.sales_credit.verify_after", verify
-                    ),
+                    patch("app.services.transaction_ops.sales_credit.verify_after", verify),
                 ):
                     now = datetime.now(timezone.utc) + timedelta(minutes=6)
-                    result = await accounting_recovery.recover(
-                        db, tenant_id, durable.id, now=now
-                    )
+                    result = await accounting_recovery.recover(db, tenant_id, durable.id, now=now)
                     assert result["termination_reason"] == "done"
-                    await accounting_recovery.recover(
-                        db, tenant_id, durable.id, now=now + timedelta(minutes=10)
-                    )
+                    await accounting_recovery.recover(db, tenant_id, durable.id, now=now + timedelta(minutes=10))
                 assert durable.structured_output["status"] == "approved"
-                assert (
-                    durable.structured_output["accounting_recheck"]["status"]
-                    == "queued"
-                )
+                assert durable.structured_output["accounting_recheck"]["status"] == "queued"
                 event = await db.scalar(
                     select(AuditEvent).where(
                         AuditEvent.tenant_id == tenant_id,
                         AuditEvent.action == "accounting_recovery.completed",
                     )
                 )
-                assert (
-                    event.payload["approved_by"] == ids["actor"]
-                    and event.actor_type == "system"
-                )
+                assert event.payload["approved_by"] == ids["actor"] and event.actor_type == "system"
                 assert provider["writes"] == 1 and provider["reads"] == 1
     finally:
         if child_process:
