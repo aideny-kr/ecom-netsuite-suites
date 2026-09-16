@@ -12,9 +12,20 @@ from sqlalchemy import select
 from app.models.chat import ChatMessage
 from app.models.transaction_ops import TransactionFinding, TransactionRun
 from app.schemas.transaction_runs import ConfigOut
+from app.services.transaction_ops import accounting_credit_recheck
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.settlement import SCOPE
+
+# Provider-call ceiling of one recheck run. The MCP existing-credit recheck adds the
+# subledger read budget it reserves in accounting_credit_recheck, so the two numbers
+# cannot drift apart: raising READ_CALLS raises the ceiling that has to afford it.
+RECHECK_CALLS = 64
+
+
+def recheck_call_ceiling(proposal):
+    extra = accounting_credit_recheck.READ_CALLS if proposal.get("execution_transport") == "mcp_record_api" else 0
+    return RECHECK_CALLS + extra
 
 
 def supports(proposal):
@@ -81,7 +92,7 @@ async def queue(db, tenant_id, message, actor_id, *, now):
                 "order_references": [p["order_reference"]],
             },
             config_snapshot=snapshot,
-            max_api_calls=min(config.max_api_calls, 128 if p.get("execution_transport") == "mcp_record_api" else 64),
+            max_api_calls=min(config.max_api_calls, recheck_call_ceiling(p)),
             max_orders=1,
             deadline_at=now + timedelta(seconds=config.deadline_seconds),
             progress_json={},
@@ -149,13 +160,21 @@ def report_in_scope(run, p, report, now):
         return False
 
 
-async def bound_report(db, tenant_id, run, report, *, now):
+async def bound_report(db, tenant_id, run, report, *, now, reconcile=True):
+    """Bind a recheck run's report to its approval.
+
+    The scope check is cheap and runs on every write, so an interim finding never
+    sits in the findings list unannotated. The subledger recheck reserves provider
+    budget and re-reads NetSuite, so the caller asks for it only on the final write.
+    """
     _, p = await approval_for_run(db, tenant_id, run)
     if report_in_scope(run, p, report, now):
-        if p.get("kind") == "credit_tax_reallocation" and p.get("execution_transport") == "mcp_record_api":
-            from app.services.transaction_ops.accounting_credit_recheck import reconcile
-
-            return await reconcile(db, tenant_id, run, p, report)
+        if (
+            reconcile
+            and p.get("kind") == "credit_tax_reallocation"
+            and p.get("execution_transport") == "mcp_record_api"
+        ):
+            return await accounting_credit_recheck.reconcile(db, tenant_id, run, p, report)
         return report
     return {
         **report,

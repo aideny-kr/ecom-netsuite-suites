@@ -8,10 +8,13 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import httpx
+
 from app.services.transaction_ops import credit_api_correction
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.native_accounting_service import _stable
 from app.services.transaction_ops.posting_balance import repriced_credit_balance
+from app.services.transaction_ops.source_reader import SourceReadError
 
 READ_CALLS = 56  # Accounting (20), support (24), source and OAuth maintenance allowance.
 
@@ -40,15 +43,22 @@ def project(p, report, current, *, verified_at, now):
         or support["credit"].get("application_evidence") != p["support"]["credit"].get("application_evidence")
     ):
         raise ValueError("credit_recheck_identity_changed")
-    for value in [support, evidence, *report["refund_evidence"].values()]:
+    refunds = report.get("refund_evidence") or {}
+    amounts = (report.get("balance") or {}).get("amounts") or {}
+    if not isinstance(refunds.get("target"), dict) or not all(
+        isinstance(amounts.get(metric), dict) and "source" in amounts[metric] for metric in ("order_total", "tax")
+    ):
+        # A report that never collected refunds or amounts is missing evidence, not a defect.
+        raise ValueError("credit_recheck_incomplete_report")
+    for value in [support, evidence, *refunds.values()]:
         observed = datetime.fromisoformat(value["observed_at"])
         if not verified_at <= observed <= now or now - observed > timedelta(minutes=15):
             raise ValueError("credit_recheck_stale_evidence")
     # The full fresh order and posting records must describe this same revision.
     for metric, key in (("order_total", "total"), ("tax", "tax_total")):
-        if Decimal(report["balance"]["amounts"][metric]["source"]) != Decimal(source[key]):
+        if Decimal(amounts[metric]["source"]) != Decimal(source[key]):
             raise ValueError("credit_recheck_source_changed")
-    target_refund = report["refund_evidence"]["target"]
+    target_refund = refunds["target"]
     if (
         target_refund.get("complete") is not True
         or target_refund.get("record_ids") != [str(support["refund"]["id"])]
@@ -77,10 +87,18 @@ def project(p, report, current, *, verified_at, now):
     }
 
 
+# Failures of the evidence itself: a fresh read that could not complete, timed out, or did
+# not describe the approved revision. These degrade to not_verified. Anything else is a
+# defect in this code: it is audited like every other exit and then surfaced, never
+# reclassified as missing evidence.
+EVIDENCE_FAILURES = (ValueError, ArithmeticError, TimeoutError, SourceReadError, httpx.HTTPError)
+
+
 async def reconcile(db, tenant_id, run, p, report):
     now = datetime.now(timezone.utc)
     reason = "credit_recheck_evidence_unavailable"
     result = None
+    defect = None
     remaining = (run.deadline_at - now).total_seconds()
     if remaining <= 0 or run.api_calls_used + READ_CALLS > run.max_api_calls:
         reason = "credit_recheck_budget_exhausted"
@@ -100,12 +118,15 @@ async def reconcile(db, tenant_id, run, p, report):
                 verified_at=datetime.fromisoformat(run.params_json["verified_at"]),
                 now=datetime.now(timezone.utc),
             )
-        except (ValueError, KeyError, TypeError, ArithmeticError, TimeoutError):
+        except EVIDENCE_FAILURES:
             # Never reuse the approval-time snapshot or raw order balance as a
             # successful posting recheck after incomplete fresh evidence.
             pass
+        except Exception as exc:
+            defect, reason = exc, "credit_recheck_internal_error"
         # Reservation releases the database lock during provider I/O. Recheck
-        # ownership before publishing evidence or changing the case verdict.
+        # ownership before publishing evidence or changing the case verdict —
+        # on every exit, including the ones that will be re-raised below.
         run = await state.get_run(db, tenant_id, run.id, lock=True)
         state._lease(run, lease_token, datetime.now(timezone.utc))
     if result is None:
@@ -114,16 +135,15 @@ async def reconcile(db, tenant_id, run, p, report):
             "balance": {**report["balance"], "status": "not_verified", "reason": reason},
             "evidence_limits": {"code": reason},
         }
-    await state._audit(
-        db,
-        tenant_id,
-        "accounting_recheck.posting_observed",
-        run,
-        payload={
-            "approval_message_id": run.params_json["approval_message_id"],
-            "case_id": p["case_id"],
-            "financial_writes": 0,
-            "balance": result["balance"],
-        },
-    )
+    payload = {
+        "approval_message_id": run.params_json["approval_message_id"],
+        "case_id": p["case_id"],
+        "financial_writes": 0,
+        "balance": result["balance"],
+    }
+    if defect is not None:
+        payload["error_type"] = type(defect).__name__
+    await state._audit(db, tenant_id, "accounting_recheck.posting_observed", run, payload=payload)
+    if defect is not None:
+        raise defect
     return result
