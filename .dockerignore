@@ -54,6 +54,8 @@ memory/
 # Secrets — belt and suspenders
 .env
 .env.production
+.env*
+**/.env*
 *.pem
 *.key
 *.p12

@@ -332,3 +332,40 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
     async with factory() as db:
         with pytest.raises(ValueError, match="inventory"):
             await validate_runtime_database(db)
+
+
+def test_operator_cli_does_not_print_database_errors(monkeypatch, capsys):
+    from app.cli import runtime_role
+
+    async def refuse(_args):
+        raise RuntimeError("postgresql://operator:must-not-appear@private.example/db")
+
+    monkeypatch.setattr(runtime_role, "run", refuse)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "runtime_role",
+            "--database",
+            "test",
+            "--cluster",
+            "1",
+            "--company",
+            str(uuid.uuid4()),
+            "--password-file",
+            "/unused",
+        ],
+    )
+    assert runtime_role.main() == 1
+    captured = capsys.readouterr()
+    assert "must-not-appear" not in captured.out + captured.err
+    assert "Runtime provisioning refused" in captured.err
+
+
+def test_dedicated_catalog_tasks_do_not_run_as_runtime(monkeypatch):
+    from app.workers.tasks.metric_catalog_reseed import reseed_system_metrics_task
+    from app.workers.tasks.oracle_skill_reseed import reseed_oracle_skills_task
+
+    monkeypatch.setattr(settings, "DEDICATED_RUNTIME", True)
+    assert reseed_system_metrics_task() == {"status": "skipped", "reason": "operator_managed_catalog"}
+    assert reseed_oracle_skills_task() == {"status": "skipped", "reason": "operator_managed_catalog"}

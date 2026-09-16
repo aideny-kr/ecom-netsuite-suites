@@ -28,7 +28,12 @@ named files in `/run/secrets` through Settings (environment values take preceden
 - Only the provider keys actually authorized for this installation, using their
   Settings names, such as `ANTHROPIC_API_KEY` or `OPENAI_EMBEDDING_API_KEY`.
 
-Directory mode 0700 and file mode 0600; restrict host and Docker-daemon access.
+Use the non-root production image (`backend/Dockerfile.prod`). Runtime secret
+directories/files must be owned by that image's `appuser` numeric UID/GID, with
+directory mode 0500/0700 and file mode 0400/0600; verify readability as that user.
+Do not make secrets world-readable or run runtime as root to fix a mount error.
+Workspace storage must likewise be writable by that UID/GID. Operator credentials
+have separate operator-only ownership. Restrict host and Docker-daemon access.
 API/worker/Beat receive this runtime directory only. They must never receive
 `DATABASE_URL_DIRECT`, `DATABASE_URL_DIRECT_SYNC`, the Postgres operator password,
 `RUNTIME_OPERATOR_DATABASE_URL`, or backup keys. No database/Redis ports are

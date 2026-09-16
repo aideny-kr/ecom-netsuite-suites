@@ -5,6 +5,9 @@ name: suite-studio-dedicated
 
 x-runtime: &runtime
   image: ${BACKEND_IMAGE:?Set reviewed backend image digest}
+  # Production image has no default entrypoint. Apply the same preflight to
+  # API, both worker queues and Beat, independent of the image's CMD.
+  entrypoint: [/app/entrypoint.sh]
   restart: unless-stopped
   environment:
     SINGLE_COMPANY: "true"
