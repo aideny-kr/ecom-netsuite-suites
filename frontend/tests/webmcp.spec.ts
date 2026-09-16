@@ -288,6 +288,40 @@ test("native chat cancellation reports a request and waits for terminal status",
   expect(cancelCalls).toBe(1);
 });
 
+test("switching away from a running chat cannot cancel that run through another session", async ({ page }) => {
+  const nextId = "22222222-2222-4222-8222-222222222222";
+  const sessions = [
+    { id: sessionId, title: "Running fixture", status: "running", active_run_id: runId },
+    { id: nextId, title: "Idle fixture", status: "idle", active_run_id: null },
+  ];
+  let releaseStream: (() => void) | undefined;
+  let cancelCalls = 0;
+  await page.route("**/api/v1/chat/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/sessions")) return route.fulfill({ json: sessions });
+    const session = sessions.find(({ id }) => path.endsWith(`/sessions/${id}`));
+    if (session) return route.fulfill({ json: { ...session, messages: [] } });
+    if (path.endsWith("/stream")) {
+      await new Promise<void>((resolve) => { releaseStream = resolve; });
+      return route.fulfill({ contentType: "text/event-stream", body: "" });
+    }
+    if (path.endsWith("/cancel")) cancelCalls++;
+    return route.fulfill({ json: {} });
+  });
+  try {
+    await page.goto("/chat");
+    await expect.poll(() => !!releaseStream).toBe(true);
+    await callTool(page, "chat_select_session", { session_id: null });
+    await expect.poll(async () => JSON.parse(await callTool(page, "chat_get_state")).active_run_id ?? null).toBeNull();
+    await callTool(page, "chat_select_session", { session_id: nextId });
+    await expect.poll(async () => JSON.parse(await callTool(page, "chat_get_state")).ready).toBe(true);
+    await expect(callTool(page, "chat_cancel_run", { session_id: nextId, run_id: runId })).rejects.toThrow(/invocation failed/);
+    expect(cancelCalls).toBe(0);
+  } finally {
+    releaseStream?.();
+  }
+});
+
 test("navigation during capability lookup prevents a stale chat submission", async ({ page }) => {
   let holdHealth = false;
   let releaseHealth: (() => void) | undefined;
