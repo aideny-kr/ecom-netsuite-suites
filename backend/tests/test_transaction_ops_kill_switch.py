@@ -56,18 +56,18 @@ async def test_kernel_refuses_the_send_permit_and_fails_the_operation_blocked(db
     result = await execute(db, execution_case)
 
     row = await operation(db, execution_case)
-    assert row.status == "failed"
+    assert row.status == "rejected_before_effect"
     assert row.result_json.get("dispatch_reserved") is not True  # refused BEFORE the one-use permit
     assert row.result_json["termination_reason"] == "blocked"
     assert row.result_json["code"] == "dispatch_disabled"
-    assert result["status"] == "failed"
+    assert result["status"] == "rejected_before_effect"
     audits = await _audits(db, execution_case.actor.tenant_id, "transaction_ops.operation.blocked")
     assert len(audits) == 1
     assert audits[0].payload["code"] == "dispatch_disabled"
     assert audits[0].payload["financial_writes"] == 0
     assert audits[0].payload["operation_id"] == str(row.id)
     # A duplicate delivery reads the terminal row and spends nothing.
-    assert (await execute(db, execution_case))["status"] == "failed"
+    assert (await execute(db, execution_case))["status"] == "rejected_before_effect"
     assert execution_case.case.dispatch.await_count == 1
 
 
@@ -91,7 +91,7 @@ async def test_kernel_reports_budget_exhaustion_over_the_switch_when_both_apply(
         .where(TransactionOperation.id == claim.operation_id)
         .execution_options(populate_existing=True)
     )
-    assert row.status == "failed"
+    assert row.status == "rejected_before_effect"
     assert row.result_json["termination_reason"] == "budget"
     assert row.result_json["code"] == "operation_budget_exhausted"
     assert row.result_json.get("dispatch_reserved") is not True

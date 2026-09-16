@@ -1219,13 +1219,14 @@ async def reserve_operation_dispatch(
 async def _block_operation(db, tenant_id, operation, now, code):
     """The operator switch refused the send before the one-use permit existed.
 
-    Nothing was sent, so this is a known failure, never an unknown: ``dispatch_reserved``
-    is never set, a duplicate delivery reads the terminal row and spends nothing, and the
-    approved work needs a fresh human decision once dispatch is re-enabled. Every more
-    specific refusal (provider, stale evidence, config, flags, actor, budget) runs first,
-    so a ``blocked`` row always means "this would have been sent".
+    Nothing was sent, so this is a refusal before any effect, never an unknown:
+    ``dispatch_reserved`` is never set, a duplicate delivery reads the terminal row and
+    spends nothing, and the approved work needs a fresh human decision once dispatch is
+    re-enabled (the taxonomy admits a lineage retry from this state). Every more specific
+    refusal (provider, stale evidence, config, flags, actor, budget) runs first, so a
+    ``blocked`` row always means "this would have been sent".
     """
-    operation.status = "failed"
+    operation.status = "rejected_before_effect"
     operation.completed_at = now
     operation.result_json = {**(operation.result_json or {}), "termination_reason": "blocked", "code": code}
     await _audit(db, tenant_id, "operation.blocked", operation, payload={"code": code, "financial_writes": 0})
