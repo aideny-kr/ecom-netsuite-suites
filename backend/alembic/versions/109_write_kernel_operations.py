@@ -128,10 +128,17 @@ def upgrade():
     op.add_column(TABLE, sa.Column("adapter", sa.String(64), nullable=True))
     op.add_column(TABLE, sa.Column("base_work_key", sa.String(64), nullable=True))
     op.add_column(TABLE, sa.Column("retry_of_operation_id", postgresql.UUID(as_uuid=True), nullable=True))
+    # The CHECK must admit the new vocabulary before any row is renamed into it: with the
+    # legacy CHECK still in force the rename below fails on the first ``failed`` row
+    # (tests/test_write_kernel_taxonomy.py runs this upgrade with one present).
+    op.drop_constraint("ck_tx_operation_status", TABLE, type_="check")
+    op.create_check_constraint("ck_tx_operation_status", TABLE, f"status IN {STATUSES}")
     op.execute(
-        f"UPDATE {TABLE} SET approval_id = proposal_id, base_work_key = work_key, "
-        "provider = COALESCE(result_json->>'provider', provider), "
-        "status = CASE WHEN status = 'failed' THEN 'rejected_before_effect' ELSE status END"
+        f"UPDATE {TABLE} o SET approval_id = o.proposal_id, base_work_key = o.work_key, "
+        "provider = COALESCE(o.result_json->>'provider', "
+        "CASE p.action WHEN 'resolve_celigo_error' THEN 'celigo' ELSE 'netsuite' END), "
+        "status = CASE WHEN o.status = 'failed' THEN 'rejected_before_effect' ELSE o.status END "
+        "FROM transaction_ops_proposals p WHERE p.tenant_id = o.tenant_id AND p.id = o.proposal_id"
     )
     op.alter_column(TABLE, "approval_id", nullable=False)
     op.alter_column(TABLE, "base_work_key", nullable=False)
@@ -143,8 +150,6 @@ def upgrade():
     op.create_foreign_key(
         "fk_tx_operation_retry_of", TABLE, TABLE, ["tenant_id", "retry_of_operation_id"], ["tenant_id", "id"]
     )
-    op.drop_constraint("ck_tx_operation_status", TABLE, type_="check")
-    op.create_check_constraint("ck_tx_operation_status", TABLE, f"status IN {STATUSES}")
     op.create_check_constraint(
         "ck_tx_operation_approval_kind", TABLE, "approval_kind IN ('transaction_proposal','chat_confirmation')"
     )

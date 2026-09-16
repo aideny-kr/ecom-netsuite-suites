@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionCase, TransactionCaseObservation, TransactionOperation
+from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.source_eligibility import eligible_reports, excluded_report
 
 
@@ -77,7 +78,7 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
             .where(
                 TransactionOperation.tenant_id == tenant_id,
                 TransactionOperation.entity_key == entity_key,
-                TransactionOperation.status.in_(["executing", "unknown", "committed_unverified"]),
+                TransactionOperation.status.in_(state.IN_FLIGHT),
             )
             .limit(1)
         )

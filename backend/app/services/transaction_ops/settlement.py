@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.models.transaction_ops import TransactionFinding, TransactionOperation, TransactionRun
 from app.schemas.transaction_runs import ConfigOut
+from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.case_service import _cleared
 
 SCOPE = "order_total_tax_refunds"
@@ -23,8 +24,6 @@ def is_settlement(run):
 
 async def queue(db, tenant_id, operation, proposal, *, now):
     """Called under the operation lock and committed with its verified outcome."""
-    from app.services.transaction_ops import state_service as state
-
     if operation.status != "verified" or proposal.status != "approved":
         raise state.StateError("settlement_requires_verified_operation")
     key = state.business_digest({"settlement_operation": operation.id})
@@ -78,8 +77,6 @@ async def record_outcome(db, tenant_id, run, reason, *, now):
         from app.services.transaction_ops.accounting_recheck import record_outcome as record_chat_outcome
 
         return await record_chat_outcome(db, tenant_id, run, reason, now=now)
-    from app.services.transaction_ops import state_service as state
-
     operation = await state._one(db, tenant_id, TransactionOperation, UUID(run.params_json["operation_id"]))
     proposal = await state.get_proposal(db, tenant_id, operation.proposal_id)
     if run.config_id != proposal.config_id or run.params_json["order_references"] != [proposal.order_reference]:
@@ -128,7 +125,7 @@ async def record_outcome(db, tenant_id, run, reason, *, now):
                 .where(
                     TransactionOperation.tenant_id == tenant_id,
                     TransactionOperation.entity_key == operation.entity_key,
-                    TransactionOperation.status.in_(("executing", "unknown", "committed_unverified")),
+                    TransactionOperation.status.in_(state.IN_FLIGHT),
                 )
                 .limit(1)
             )
@@ -156,8 +153,6 @@ async def record_outcome(db, tenant_id, run, reason, *, now):
 
 
 async def status(db, tenant_id, operation_id):
-    from app.services.transaction_ops import state_service as state
-
     operation = await state._one(db, tenant_id, TransactionOperation, operation_id)
     run = await db.scalar(
         select(TransactionRun).where(
