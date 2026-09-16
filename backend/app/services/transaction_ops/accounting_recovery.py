@@ -16,6 +16,7 @@ from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.models.chat import ChatMessage, ChatSession
 from app.services.audit_service import log_event
+from app.services.transaction_ops.treatments import VERIFIED_KINDS
 
 MAX_ATTEMPTS = 3
 DELAY = timedelta(minutes=5)
@@ -78,15 +79,7 @@ async def candidates(db, tenant_id, now, *, limit):
                 .where(
                     ChatMessage.tenant_id == tenant_id,
                     or_(
-                        so["accounting_review"]["kind"].astext.in_(
-                            (
-                                "sales_adjustment_credit",
-                                "invoice_sales_adjustment",
-                                "sales_order_source_alignment",
-                                "credit_tax_reallocation",
-                                "sales_order_line_alignment",
-                            )
-                        ),
+                        so["accounting_review"]["kind"].astext.in_(VERIFIED_KINDS),
                         and_(
                             so["accounting_review"]["record_type"].astext == "invoice",
                             or_(

@@ -9,8 +9,9 @@ from decimal import Decimal
 from app.services.transaction_ops.accounting_preview import PreviewContractError, validate_receipt
 from app.services.transaction_ops.native_accounting_profile import NativeAccountingProfile
 from app.services.transaction_ops.netsuite_reader import _invalid_constant, _object
+from app.services.transaction_ops.treatments import AMENDMENT_RECORD_TYPES
 
-KINDS = {"credit_tax_reallocation": "creditmemo", "sales_order_line_alignment": "salesorder"}
+KINDS = AMENDMENT_RECORD_TYPES  # the amendment kinds and the document each writes
 WORK_FIELD = "custbody_ecom_tx_ops_work_key"
 PROFILE_KEYS = ("schema_version", "account_id", "subsidiary_id", "role_id", "tax_regime", "fields")
 

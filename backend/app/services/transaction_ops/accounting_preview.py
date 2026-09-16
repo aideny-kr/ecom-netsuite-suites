@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from app.services.transaction_ops.accounting_field_map import LEGACY_FIELDS
 from app.services.transaction_ops.credit_classification import reference
+from app.services.transaction_ops.treatments import AMENDMENT_RECORD_TYPES
 
 BODY = {"taxItem": "taxitem", "taxRate": "taxrate", "taxTotal": "taxtotal", "isTaxable": "istaxable"}
 LINE = {"rate": "rate", "amount": "amount", "isTaxable": "istaxable", "custcol_fw_vat_amount": "custcol_fw_vat_amount"}
@@ -61,8 +62,7 @@ def build_request(intent, *, account_id, subsidiary_id, currency_id, field_map=N
             "isTaxable": "istaxable",
             fields_map["vat_amount"]: fields_map["vat_amount"],
         }
-        expected_type = {"credit_tax_reallocation": "creditmemo", "sales_order_line_alignment": "salesorder"}
-        if expected_type.get(intent["kind"]) != intent["record_type"]:
+        if AMENDMENT_RECORD_TYPES.get(intent["kind"]) != intent["record_type"]:
             raise PreviewContractError("unsupported_preview_kind")
         fields = intent["proposed_fields"]
         if set(fields) - (set(BODY) | {"item"}):

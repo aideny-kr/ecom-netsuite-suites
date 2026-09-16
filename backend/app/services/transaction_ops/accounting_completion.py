@@ -19,6 +19,7 @@ from app.models.user import User
 from app.services.audit_service import log_event
 from app.services.transaction_ops.accounting_history import _claim, verified_resolution
 from app.services.transaction_ops.resolution_plan import completed_plan, operation_identity
+from app.services.transaction_ops.treatments import treatment_of
 
 MAX_ATTEMPTS = 3
 RETRY_DELAY = timedelta(minutes=3)
@@ -164,7 +165,7 @@ def record_links(p, verification, report):
         order = {"id": report["targets"][0].get("record_id"), "tranId": p["order_reference"]}
     documents = []
     invoice = verification.get("invoice") or (p.get("support") or {}).get("invoice")
-    if not invoice and p.get("kind") not in {"sales_order_source_alignment", "sales_order_line_alignment"}:
+    if not invoice and treatment_of(p).record_type != "salesorder":
         invoice = {**p["before"], "id": p["record_id"]}
     if invoice:
         documents.append({**invoice, "record_type": "invoice"})

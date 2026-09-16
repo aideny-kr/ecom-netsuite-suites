@@ -173,11 +173,15 @@ async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, co
     from app.services.transaction_ops.netsuite_reader import authenticated_reader
 
     p = proposal or {}
-    if p.get("tenant_id") != str(tenant_id) or (p.get("kind"), p.get("record_type")) not in {
-        ("invoice_sales_adjustment", "invoice"),
-        ("sales_order_source_alignment", "salesorder"),
-        ("credit_tax_reallocation", "creditmemo"),
-    }:
+    from app.services.transaction_ops.treatments import REGISTRY, is_mcp
+
+    treatment = REGISTRY.get(p.get("kind"))
+    if (
+        p.get("tenant_id") != str(tenant_id)
+        or treatment is None
+        or treatment.record_type != p.get("record_type")
+        or not (treatment.prefetch_metadata or is_mcp(p))
+    ):
         raise ValueError("Native accounting record metadata requires the current scoped accounting proposal.")
     connector = await get_mcp_connector(db, UUID(p["connector_id"]), tenant_id)
     account = p["scope"]["netsuite_account_id"]
