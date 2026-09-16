@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.middleware import CorrelationIdMiddleware
+from app.core.observability import init_sentry as _init_sentry
 from app.services.celigo_write_guard import CeligoManagedElsewhereError
 
 
@@ -45,23 +46,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if settings.APP_ENV != "development":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
-
-
-def _init_sentry() -> None:
-    """Initialize Sentry error tracking if DSN is configured."""
-    if not settings.SENTRY_DSN:
-        return
-    try:
-        import sentry_sdk
-
-        sentry_sdk.init(
-            dsn=settings.SENTRY_DSN,
-            traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
-            environment=settings.APP_ENV,
-            send_default_pii=False,
-        )
-    except Exception:
-        pass  # Sentry is optional — don't crash the app if it fails
 
 
 async def _cleanup_stale_jobs() -> None:

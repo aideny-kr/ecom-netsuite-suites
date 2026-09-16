@@ -1,5 +1,6 @@
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_init
 
 from app.core.config import settings
 
@@ -262,3 +263,16 @@ celery_app.conf.beat_schedule = {
         "options": {"expires": 120},
     },
 }
+
+
+@worker_init.connect
+def init_worker_observability(**_kwargs):
+    """Initialise Sentry in every Celery worker process.
+
+    Before this hook, ``sentry_sdk.init`` ran only inside the FastAPI lifespan, so an
+    unattended worker exception surfaced nowhere but the job row. The API and the
+    workers share one initialiser so the two processes cannot drift apart.
+    """
+    from app.core.observability import init_sentry
+
+    init_sentry()
