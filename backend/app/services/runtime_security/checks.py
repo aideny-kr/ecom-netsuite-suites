@@ -8,7 +8,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, settings
-from app.services.runtime_security.provision import READ_ONLY, RUNTIME_ROLE, SYSTEM_READ
+from app.services.runtime_security.provision import READ_ONLY, RUNTIME_ROLE, SHARED_TABLES
 
 
 def validate_runtime_configuration(config: Settings = settings) -> None:
@@ -115,7 +115,9 @@ async def validate_runtime_database(db: AsyncSession) -> None:
         has_table_privilege(c.oid,'TRIGGER') triggers,
         EXISTS(SELECT FROM pg_policy p WHERE p.polrelid=c.oid AND p.polname='suite_runtime_bound'
           AND NOT p.polpermissive AND (SELECT oid FROM pg_roles WHERE rolname=current_user)=ANY(p.polroles)) bound,
-        has_table_privilege(c.oid,'SELECT') readable
+        has_table_privilege(c.oid,'SELECT') readable,
+        ARRAY(SELECT p.polcmd::text FROM pg_policy p WHERE p.polrelid=c.oid AND p.polpermissive
+          AND (0=ANY(p.polroles) OR (SELECT oid FROM pg_roles WHERE rolname=current_user)=ANY(p.polroles))) commands
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p')""")
             )
@@ -128,6 +130,12 @@ async def validate_runtime_database(db: AsyncSession) -> None:
             raise ValueError("Runtime has excessive table authority")
         if not row["readable"] or (row["relname"] not in READ_ONLY and (not row["relrowsecurity"] or not row["bound"])):
             raise ValueError("Runtime table inventory changed; operator provisioning is required")
+        if row["relname"] not in READ_ONLY:
+            required = {"r", "w"} if row["relname"] == "tenants" else {"r", "a", "w", "d"}
+            if row["relname"] == "audit_events":
+                required = {"r", "a"}
+            if "*" not in row["commands"] and not required.issubset(row["commands"]):
+                raise ValueError("Runtime RLS command coverage is incomplete")
     elevated = (
         await db.execute(
             text("""SELECT has_database_privilege(current_database(),'CREATE')
@@ -146,7 +154,7 @@ async def validate_runtime_database(db: AsyncSession) -> None:
             )
         ).scalar():
             raise ValueError("System catalogs must be read-only for runtime")
-    for table in SYSTEM_READ:
+    for table in SHARED_TABLES:
         policies = (
             await db.execute(
                 text(

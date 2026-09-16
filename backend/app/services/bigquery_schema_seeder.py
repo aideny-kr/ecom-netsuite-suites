@@ -7,13 +7,16 @@ Idempotent — deletes existing bi/schema-docs chunks before re-seeding.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete
 
+from app.core.config import settings
 from app.models.domain_knowledge import DomainKnowledgeChunk
+from app.services.runtime_security import bigquery_schema_prefix
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,13 +65,16 @@ async def seed_bigquery_schema(
     Returns:
         Number of chunks created.
     """
-    # Delete existing chunks for this partition (idempotent)
-    await db.execute(
-        delete(DomainKnowledgeChunk).where(
-            DomainKnowledgeChunk.partition_id == _PARTITION_ID,
-            DomainKnowledgeChunk.source_type == "bigquery_schema",
-        )
+    # Dedicated runtime can write only its own schema namespace. Shared curated
+    # knowledge and unscoped legacy schema remain operator-owned.
+    prefix = bigquery_schema_prefix(tenant_id) if settings.DEDICATED_RUNTIME else "bi/schema-docs/"
+    deletion = delete(DomainKnowledgeChunk).where(
+        DomainKnowledgeChunk.partition_id == _PARTITION_ID,
+        DomainKnowledgeChunk.source_type == "bigquery_schema",
     )
+    if settings.DEDICATED_RUNTIME:
+        deletion = deletion.where(DomainKnowledgeChunk.source_uri.startswith(prefix))
+    await db.execute(deletion)
 
     datasets = schema.get("datasets", [])
     count = 0
@@ -88,8 +94,14 @@ async def seed_bigquery_schema(
 
             raw_text = _build_table_chunk(dataset_id, table)
 
+            identity = f"{dataset_id}.{table_id}"
+            # Keep arbitrarily long BigQuery identifiers inside the existing
+            # source_uri length; full identity remains in the chunk content.
+            source_uri = prefix + (
+                hashlib.sha256(identity.encode()).hexdigest() if settings.DEDICATED_RUNTIME else identity
+            )
             chunk = DomainKnowledgeChunk(
-                source_uri=f"bi/schema-docs/{dataset_id}.{table_id}",
+                source_uri=source_uri,
                 chunk_index=0,
                 raw_text=raw_text,
                 token_count=len(raw_text) // 4,

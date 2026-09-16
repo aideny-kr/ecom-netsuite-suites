@@ -51,7 +51,9 @@ not put a connection URL/password in shell arguments, logs or a PR body.
 1. Pin reviewed backend/frontend/pgvector/Redis image digests. Configure the exact
    HTTPS `PUBLIC_ORIGIN` and same-origin NetSuite callback
    `/api/v1/connections/netsuite/callback`. The frontend image must have been built
-   for this API origin and `NEXT_PUBLIC_SINGLE_COMPANY=true`. The reverse proxy
+   with `NEXT_PUBLIC_API_URL` matching this API origin,
+   `NEXT_PUBLIC_SINGLE_COMPANY=true`, and `NEXT_PUBLIC_BUILD_ID` identifying the
+   reviewed revision. Verify these baked values before starting it. The reverse proxy
    forwards `/api/` to backend and other routes to frontend, preserving streaming.
 2. Create or restore the explicitly chosen database/workspace volumes. Set
    `DATABASE_VOLUME`, `WORKSPACE_VOLUME`, `POSTGRES_PASSWORD_FILE` and
@@ -90,7 +92,8 @@ not put a connection URL/password in shell arguments, logs or a PR body.
    scheduled job and negative cross-company/permission checks. No live financial
    write is authorized by this procedure. Record exact revision and evidence.
 
-Every upgrade follows the same stop → backup → migrate → seed → provision →
+Reserve a maintenance window: provisioning takes table locks and fails quickly
+when an active transaction holds them. Every upgrade follows the same stop → backup → migrate → seed → provision →
 verify → start order. Never grant runtime `BYPASSRLS`, table ownership, schema
 creation, membership in operator roles, or write access to global permissions to
 make a failing startup pass. An error is a release blocker to investigate.
@@ -104,8 +107,13 @@ added. A restrictive policy pins every writable scoped table to the installed
 company independently of the session's freely settable tenant GUC. Changing that
 GUC can deny access but cannot reveal another company. Cursor state is bounded
 through its connection. Global roles, permissions, schema version and curated
-knowledge are read-only. Shared SYSTEM document/metric rows are readable, but
-INSERT/UPDATE/DELETE and moving their ownership are blocked. Audit is append-only.
+knowledge are read-only. BigQuery discovery may replace only schema chunks in
+`bi/schema-docs/<installed-company-uuid>/`; database policies enforce that namespace
+and preserve curated rules. Legacy unscoped BigQuery chunks remain intact but are
+hidden from runtime until authorized re-discovery creates scoped replacements.
+Shared SYSTEM document/metric rows are readable, but
+INSERT/UPDATE/DELETE and moving their ownership are blocked. Audit is append-only. Retention/deletion requires a separately authorized operator
+maintenance process; do not dispatch audit-retention tasks with runtime authority.
 
 This is a **company** database boundary. Existing application permissions still
 separate users/tools within the company; runtime database credentials are not

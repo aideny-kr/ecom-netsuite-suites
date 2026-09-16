@@ -9,10 +9,13 @@ import uuid
 
 import asyncpg
 
+from app.services.runtime_security import bigquery_schema_prefix
+
 RUNTIME_ROLE = "suite_runtime"
 SYSTEM = uuid.UUID(int=0)
-READ_ONLY = {"roles", "permissions", "role_permissions", "domain_knowledge_chunks", "alembic_version"}
+READ_ONLY = {"roles", "permissions", "role_permissions", "alembic_version"}
 SYSTEM_READ = {"doc_chunks", "metric_definitions"}
+SHARED_TABLES = SYSTEM_READ | {"domain_knowledge_chunks"}
 
 
 def quote(identifier: str) -> str:
@@ -63,7 +66,8 @@ async def provision(
         unknown = [
             r["relname"]
             for r in tables
-            if not r["scoped"] and r["relname"] not in READ_ONLY | {"tenants", "cursor_states"}
+            if not r["scoped"]
+            and r["relname"] not in READ_ONLY | {"tenants", "cursor_states", "domain_knowledge_chunks"}
         ]
         if unknown:
             raise ValueError("Unclassified tables require operator review: " + ", ".join(unknown))
@@ -106,11 +110,42 @@ async def provision(
                 r["oid"],
             ):
                 raise ValueError("Runtime must not own database objects")
+        allow_tables = set()
+        for row in tables:
+            name = row["relname"]
+            if name in READ_ONLY:
+                continue
+            table = "public." + quote(name)
+            needs_allow = (
+                not row["relrowsecurity"]
+                or name in {"tenants", "cursor_states"}
+                or await conn.fetchval(
+                    "SELECT EXISTS(SELECT FROM pg_policy WHERE polrelid=$1::regclass "
+                    "AND polname='suite_runtime_allow')",
+                    table,
+                )
+            )
+            if not needs_allow:
+                commands = await conn.fetch(
+                    "SELECT polcmd::text polcmd FROM pg_policy WHERE polrelid=$1::regclass AND polpermissive "
+                    "AND (0=ANY(polroles) OR (SELECT oid FROM pg_roles WHERE rolname=$2)=ANY(polroles))",
+                    table,
+                    RUNTIME_ROLE,
+                )
+                covered = {r["polcmd"] for r in commands}
+                required = {"r", "a"} if name == "audit_events" else {"r", "a", "w", "d"}
+                if "*" not in covered and not required.issubset(covered):
+                    raise ValueError(
+                        f"Existing RLS lacks runtime command coverage on {name}; review policies before provisioning"
+                    )
+            if needs_allow:
+                allow_tables.add(name)
         result = {
             "tables": len(tables),
             "company_tables": sum(r["scoped"] for r in tables),
             "applied": apply,
             "role": RUNTIME_ROLE,
+            "password_set": apply and not exists,
         }
         if not apply:
             return result
@@ -156,7 +191,18 @@ async def provision(
                 await conn.execute(f"GRANT SELECT ON {table} TO {RUNTIME_ROLE}")
                 continue
             await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-            if name == "tenants":
+            if name == "domain_knowledge_chunks":
+                # Global curated knowledge stays read-only. The existing BQ
+                # selection flow can replace only this company's schema rows.
+                # Legacy unscoped BQ rows are hidden until verified re-discovery.
+                own_schema = (
+                    "source_type = 'bigquery_schema' AND partition_id = 'bi/schema-docs' "
+                    f"AND starts_with(source_uri, '{bigquery_schema_prefix(company)}')"
+                )
+                predicate = f"(source_type <> 'bigquery_schema' OR ({own_schema}))"
+                write = f"({own_schema}) AND public.get_current_tenant_id() = '{company}'::uuid"
+                grants = "SELECT, INSERT, UPDATE, DELETE"
+            elif name == "tenants":
                 predicate = f"id = '{company}'::uuid"
                 write = predicate
                 grants = "SELECT, UPDATE"
@@ -170,15 +216,7 @@ async def provision(
                 if name in SYSTEM_READ:
                     predicate = f"({predicate} OR tenant_id = '{SYSTEM}'::uuid)"
                 grants = "SELECT, INSERT" if name == "audit_events" else "SELECT, INSERT, UPDATE, DELETE"
-            needs_allow = (
-                not row["relrowsecurity"]
-                or name in {"tenants", "cursor_states"}
-                or await conn.fetchval(
-                    "SELECT EXISTS(SELECT FROM pg_policy WHERE polrelid=$1::regclass "
-                    "AND polname='suite_runtime_allow')",
-                    table,
-                )
-            )
+            needs_allow = name in allow_tables
             for policy in (
                 "suite_runtime_allow",
                 "suite_runtime_bound",
@@ -198,7 +236,7 @@ async def provision(
                 f"CREATE POLICY suite_runtime_bound ON {table} AS RESTRICTIVE TO {RUNTIME_ROLE} "
                 f"USING ({predicate}) WITH CHECK ({write})"
             )
-            if name in SYSTEM_READ:
+            if name in SHARED_TABLES:
                 # A read-visible SYSTEM row must not be deletable or movable
                 # into company ownership by UPDATE tenant_id.
                 await conn.execute(

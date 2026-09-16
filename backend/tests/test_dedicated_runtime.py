@@ -141,9 +141,18 @@ async def installation(monkeypatch, tmp_path):
             with pytest.raises(ValueError):
                 await provision(operator, **{**args, **overrides}, apply=True)
         assert not await control.fetchval("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1)", RUNTIME_ROLE)
-        await provision(operator, **args, apply=True)
+        await operator.execute("CREATE TABLE policy_gap(id uuid,tenant_id uuid)")
+        await operator.execute("ALTER TABLE policy_gap ENABLE ROW LEVEL SECURITY")
+        for apply in (False, True):
+            with pytest.raises(ValueError, match="coverage"):
+                await provision(operator, **args, apply=apply)
+        assert not await control.fetchval("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1)", RUNTIME_ROLE)
+        await operator.execute("DROP TABLE policy_gap")
+        assert (await provision(operator, **args, apply=True))["password_set"]
         # Rerun must preserve the original password and permissive-policy coverage.
-        await provision(operator, **{**args, "password": secrets.token_urlsafe(36)}, apply=True)
+        assert not (await provision(operator, **{**args, "password": secrets.token_urlsafe(36)}, apply=True))[
+            "password_set"
+        ]
         runtime_url = op_url.set(username=RUNTIME_ROLE, password=runtime_password)
         runtime_engine = create_async_engine(runtime_url, echo=False)
         yield dict(operator=operator, engine=runtime_engine, company=company, args=args, url=runtime_url)
@@ -160,6 +169,7 @@ async def installation(monkeypatch, tmp_path):
 
 async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
     i = installation
+    monkeypatch.setattr(settings, "DEDICATED_RUNTIME", True)
     op, company = i["operator"], i["company"]
     await op.execute(
         "INSERT INTO metric_definitions(tenant_id,key,display_name,definition,unit,source_kind) "
@@ -173,6 +183,44 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
         SYSTEM,
     )
     factory = async_sessionmaker(i["engine"], expire_on_commit=False)
+    await op.execute(
+        "INSERT INTO domain_knowledge_chunks(id,source_uri,chunk_index,raw_text,token_count,source_type,is_deprecated) "
+        "VALUES($1,'shared-fixture',0,'Protected curated rule',3,'expert_rules',false)",
+        uuid.uuid4(),
+    )
+    await op.execute(
+        "INSERT INTO domain_knowledge_chunks(id,source_uri,chunk_index,raw_text,token_count,source_type,partition_id,is_deprecated) "
+        "VALUES($1,'bi/schema-docs/legacy',0,'Legacy unscoped schema',3,'bigquery_schema','bi/schema-docs',false)",
+        uuid.uuid4(),
+    )
+    from app.core.encryption import encrypt_credentials
+    from app.models.mcp_connector import McpConnector
+    from app.services.bigquery_schema_seeder import seed_bigquery_schema
+
+    schema = {"datasets": [{"dataset_id": "synthetic", "tables": [{"table_id": "orders", "columns": []}]}]}
+    async with factory() as db:
+        connector = McpConnector(
+            tenant_id=company,
+            provider="bigquery",
+            label="Synthetic",
+            server_url="https://unused.example",
+            encrypted_credentials=encrypt_credentials({"service_account_json": {}, "project_id": "synthetic"}),
+            metadata_json={},
+        )
+        db.add(connector)
+        await db.commit()
+        connector_id = connector.id
+        for _ in range(2):
+            assert await seed_bigquery_schema(db, company, schema) == 1
+            await db.commit()
+        assert (await db.execute(text("SELECT count(*) FROM domain_knowledge_chunks"))).scalar_one() == 2
+        assert (
+            await db.execute(
+                text("UPDATE domain_knowledge_chunks SET raw_text='polluted' WHERE source_type='expert_rules'")
+            )
+        ).rowcount == 0
+        await db.commit()
+    assert await op.fetchval("SELECT count(*) FROM domain_knowledge_chunks") == 3
     async with factory() as db:
         await validate_runtime_database(db)
         assert (await db.execute(text("SELECT id FROM tenants"))).scalars().all() == [company]
@@ -231,11 +279,22 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
             "TRUNCATE users",
             "ALTER TABLE users DISABLE ROW LEVEL SECURITY",
             "UPDATE suite_runtime_meta.binding SET company_id=gen_random_uuid()",
-            "UPDATE domain_knowledge_chunks SET raw_text='polluted'",
             "DELETE FROM audit_events",
         ]:
             with pytest.raises(asyncpg.InsufficientPrivilegeError):
                 await raw.execute(statement)
+        for source_type, source_uri in (
+            ("expert_rules", "forged-global"),
+            ("bigquery_schema", f"bi/schema-docs/{outsider}/forged"),
+        ):
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await raw.execute(
+                    "INSERT INTO domain_knowledge_chunks(id,source_uri,chunk_index,raw_text,token_count,source_type,partition_id,is_deprecated) "
+                    "VALUES($1,$2,0,'forged',1,$3,'bi/schema-docs',false)",
+                    uuid.uuid4(),
+                    source_uri,
+                    source_type,
+                )
         await raw.execute(f"SET app.current_tenant_id='{SYSTEM}'")
         assert await raw.fetchval("SELECT count(*) FROM users") == 0
         with pytest.raises(asyncpg.InsufficientPrivilegeError):
@@ -257,6 +316,12 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
             yield db
 
     app.dependency_overrides[get_db] = runtime_db
+    from app.api.v1 import mcp_connectors
+
+    async def synthetic_schema(**kwargs):
+        return schema
+
+    monkeypatch.setattr(mcp_connectors, "discover_schema", synthetic_schema)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://company.example") as client:
         r = await client.post(
             "/api/v1/auth/login", json={"email": "admin@runtime.example", "password": "Synthetic-Only-Password7!"}
@@ -268,6 +333,13 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
             and "SameSite=lax" in r.headers["set-cookie"]
         )
         headers = {"Authorization": "Bearer " + r.json()["access_token"]}
+        selected = await client.put(
+            f"/api/v1/mcp-connectors/bigquery/{connector_id}/tables",
+            headers=headers,
+            json={"selected_tables": {"synthetic": ["orders"]}},
+        )
+        assert selected.status_code == 200, selected.text
+        assert selected.json()["seeded_chunks"] == 1
         assert (await client.get("/api/v1/auth/me", headers=headers)).status_code == 200
         assert (await client.post("/api/v1/auth/refresh")).status_code == 200
         from app.core.security import create_access_token
@@ -327,6 +399,11 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
         assert await op.fetchval("SELECT count(*) FROM audit_events WHERE job_id=$1", job_id) == 2
     finally:
         sync_engine.dispose()
+    await op.execute("DROP POLICY users_tenant_isolation ON users")
+    async with factory() as db:
+        with pytest.raises(ValueError, match="coverage"):
+            await validate_runtime_database(db)
+    await op.execute("CREATE POLICY users_tenant_isolation ON users USING (tenant_id=get_current_tenant_id())")
     # New tables stop startup until the operator classifies/provisions them.
     await op.execute("CREATE TABLE newly_added(id uuid, tenant_id uuid)")
     async with factory() as db:
