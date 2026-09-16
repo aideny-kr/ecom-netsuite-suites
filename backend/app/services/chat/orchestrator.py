@@ -2418,6 +2418,39 @@ async def run_chat_turn(
                 # final message write below are tenant-scoped writes.
                 await set_tenant_context(db, str(tenant_id))
 
+                if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+                    # Operator kill switch, checked after the single-use claim and
+                    # before anything can leave the system. The approval is consumed,
+                    # not restored: a halted send needs a fresh human decision once
+                    # dispatch is re-enabled. Terminal, and never a repair re-entry:
+                    # nothing was rejected by NetSuite, so there is nothing to repair.
+                    _confirm_msg.structured_output = {
+                        **_so,
+                        "status": "failed",
+                        "error": "Sending to connected systems is disabled by the operator. No change was sent.",
+                        "repair_exit_reason": "dispatch_disabled",
+                    }
+                    await log_event(
+                        db=db,
+                        tenant_id=tenant_id,
+                        actor_id=user_id,
+                        category="write",
+                        action="write.dispatch_disabled",
+                        resource_type="chat_message",
+                        resource_id=str(_confirm_msg.id),
+                        correlation_id=correlation_id,
+                        payload={"setting": "TRANSACTION_OPS_DISPATCH_ENABLED", "financial_writes": 0},
+                        status="error",
+                    )
+                    await db.commit()
+                    yield {
+                        "type": "error",
+                        "code": "dispatch_disabled",
+                        "error": "Sending to connected systems is disabled by the operator. No change was sent. "
+                        "Prepare a fresh approval once dispatch is re-enabled.",
+                    }
+                    return
+
                 # A crash leaves the claim executing. Credit recovery may only
                 # read its stable external ID and prove the exact application/GL;
                 # it never resubmits a write or restores a pending approval.

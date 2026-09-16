@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.core.config import settings
 from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.models.chat import ChatMessage, ChatSession
@@ -291,6 +292,8 @@ async def _drain(db, tenant_id, parent_id, factory):
     ]
     remaining.sort(key=lambda m: work["members"][m["confirmation_id"]].get("attempts", 0))
 
+    halted = []
+
     async def process(member):
         identifier = member["confirmation_id"]
         async with factory() as child_db:
@@ -299,6 +302,13 @@ async def _drain(db, tenant_id, parent_id, factory):
             before = current["members"][identifier]["status"]
             error = None
             if before not in {"queued", "dispatching"}:
+                await child_db.rollback()
+                return
+            if before == "queued" and not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+                # Operator kill switch: never reserve or invoke this member. It stays
+                # queued and untouched, and resumes when dispatch is re-enabled. A
+                # member already dispatching is only inspected below, never resent.
+                halted.append(identifier)
                 await child_db.rollback()
                 return
             if before == "queued":
@@ -383,10 +393,15 @@ async def _drain(db, tenant_id, parent_id, factory):
     work = deepcopy(parent.structured_output["accounting_group_dispatch"])
     pending = sum(m["status"] in {"queued", "dispatching"} for m in work["members"].values())
     waiting = pending and all(m.get("attempts", 0) > 0 for m in work["members"].values() if m["status"] == "queued")
-    work.update(
-        status="queued" if pending else "finished",
-        next_at=((await clock(db)) + timedelta(seconds=30 if waiting else 0)).isoformat(),
-    )
+    # A halted group re-checks the switch every five minutes instead of spinning on
+    # the collector's cadence; the marker keeps the audit to one row per halt.
+    delay = timedelta(minutes=5) if halted else timedelta(seconds=30 if waiting else 0)
+    newly_halted = bool(halted) and not work.get("dispatch_disabled")
+    work.update(status="queued" if pending else "finished", next_at=((await clock(db)) + delay).isoformat())
+    if halted:
+        work["dispatch_disabled"] = True
+    else:
+        work.pop("dispatch_disabled", None)
     if not pending:
         work["finished_at"] = work["next_at"]
     parent.structured_output = {**parent.structured_output, "accounting_group_dispatch": work}
@@ -411,6 +426,22 @@ async def _drain(db, tenant_id, parent_id, factory):
         resource_id=str(parent_id),
         payload={"status": work["status"], "remaining": pending, "orders": len(work["members"]), "model_calls": 0},
     )
+    if newly_halted:
+        await log_event(
+            db,
+            tenant_id,
+            "transaction_ops",
+            "accounting_group.dispatch.disabled",
+            actor_id=UUID(auth["actor_id"]),
+            resource_type="chat_message",
+            resource_id=str(parent_id),
+            payload={
+                "group_approval_id": str(parent_id),
+                "halted_members": len(halted),
+                "setting": "TRANSACTION_OPS_DISPATCH_ENABLED",
+                "financial_writes": 0,
+            },
+        )
     if not pending:
         await log_event(
             db,
@@ -429,4 +460,5 @@ async def _drain(db, tenant_id, parent_id, factory):
             },
         )
     await db.commit()
-    return {"status": "waiting" if waiting else work["status"], "remaining": pending, "orders": len(work["members"])}
+    status = "blocked" if halted else "waiting" if waiting else work["status"]
+    return {"status": status, "remaining": pending, "orders": len(work["members"])}

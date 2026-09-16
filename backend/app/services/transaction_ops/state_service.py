@@ -19,6 +19,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core.config import settings
 from app.core.database import set_tenant_context
 from app.models.celigo import CeligoFlow, CeligoFlowStep
 from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
@@ -1072,6 +1073,9 @@ async def reserve_operation_dispatch(
         return False
     if operation.status != "executing" or proposal.status != "approved":
         raise StateError("operation_not_executable")
+    if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+        await _block_operation(db, tenant_id, operation, now, "dispatch_disabled")
+        raise StateError("dispatch_disabled")
     required_provider = {
         "correct_amounts": "netsuite",
         "sync_missing_order": "netsuite",
@@ -1115,6 +1119,20 @@ async def reserve_operation_dispatch(
     )
     await _commit(db, tenant_id)
     return True
+
+
+async def _block_operation(db, tenant_id, operation, now, code):
+    """The operator switch refused the send before the one-use permit existed.
+
+    Nothing was sent, so this is a known failure, never an unknown: ``dispatch_reserved``
+    is never set, a duplicate delivery reads the terminal row and spends nothing, and the
+    approved work needs a fresh human decision once dispatch is re-enabled.
+    """
+    operation.status = "failed"
+    operation.completed_at = now
+    operation.result_json = {**(operation.result_json or {}), "termination_reason": "blocked", "code": code}
+    await _audit(db, tenant_id, "operation.blocked", operation, payload={"code": code, "financial_writes": 0})
+    await _commit(db, tenant_id)
 
 
 async def _exhaust_operation(db, tenant_id, operation, now, code):

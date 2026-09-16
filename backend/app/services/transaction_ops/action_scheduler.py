@@ -1,21 +1,29 @@
 """Bounded durable dispatch of approved intents and read-only outcome recovery."""
 
 import asyncio
+import logging
+import uuid
 from datetime import timezone
 
 from sqlalchemy import String, and_, cast, exists, func, or_, select
 from sqlalchemy.orm import aliased
 
+from app.core.config import settings
 from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionConfig as Config
 from app.models.transaction_ops import TransactionOperation as Operation
 from app.models.transaction_ops import TransactionProposal as Proposal
 from app.models.transaction_ops import TransactionRun as Run
 from app.services import feature_flag_service
+from app.services.audit_service import log_event
 from app.services.transaction_ops.scheduler import _BROKER_IO_TIMEOUT, _DISPATCH_TIMEOUT
 from app.workers.celery_app import celery_app
 
+logger = logging.getLogger(__name__)
+
 _LIMIT = 200
+# Audit rows that belong to no tenant use the same sentinel as InstrumentedTask.
+SYSTEM_TENANT_ID = uuid.UUID(int=0)
 _TASKS = {
     "execute": "tasks.transaction_ops_execute",
     "recover": "tasks.transaction_ops_recover",
@@ -151,6 +159,24 @@ async def collect_due_actions(db, now):
         "truncated": False,
         "termination_reason": "done",
     }
+    if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+        # Operator kill switch: publish nothing. Approved work stays approved and is
+        # picked up by the first sweep after the switch is re-enabled. One audit row
+        # per sweep is the durable trace that the halt, not an empty queue, is why
+        # nothing moved.
+        stats["dispatch_disabled"] = True
+        stats["termination_reason"] = "blocked"
+        logger.warning("transaction_ops.dispatch.disabled", extra={"setting": "TRANSACTION_OPS_DISPATCH_ENABLED"})
+        await log_event(
+            db,
+            SYSTEM_TENANT_ID,
+            "transaction_ops",
+            "transaction_ops.dispatch.disabled",
+            actor_type="system",
+            payload={"setting": "TRANSACTION_OPS_DISPATCH_ENABLED", "financial_writes": 0},
+        )
+        await db.commit()
+        return stats
     try:
         async with asyncio.timeout(40):
             tenants = await feature_flag_service.list_tenants_with_flags(db, ("celigo", "reconciliation"))

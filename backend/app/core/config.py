@@ -216,6 +216,13 @@ class Settings(BaseSettings):
     # person approves a job. This flag exists as an emergency kill-switch, not
     # an opt-in gate.
     SCHEDULED_JOBS_ENABLED: bool = True
+    # Operator kill switch for every path that can SEND a financial write out of
+    # transaction_ops: the kernel's one-use send permit, the Beat collector, the
+    # chat-card approve branch and the durable group drain. Reads, recovery,
+    # evidence and existing approvals are untouched; only sending stops, with an
+    # audited `dispatch_disabled` reason at each point. Default on; set it to
+    # false in the environment to halt mid-run.
+    TRANSACTION_OPS_DISPATCH_ENABLED: bool = True
 
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False
