@@ -117,6 +117,7 @@ class ApprovedIntent:
     valid_until: datetime
     currency: str | None = None
     config_id: uuid.UUID | None = None
+    order_reference: str | None = None  # with config_id, the scope a read-only recovery runs under
     retry_of_operation_id: uuid.UUID | None = None
 
 
@@ -1125,7 +1126,16 @@ async def claim_intent(db, tenant_id, intent: ApprovedIntent, *, now=None) -> Cl
         max_api_calls=_OPERATION_CALLS,
         api_calls_used=0,
         status="executing",
-        result_json={"evidence_digest": intent.evidence_digest, "approved_by": str(intent.approved_by)},
+        result_json={
+            "evidence_digest": intent.evidence_digest,
+            "approved_by": str(intent.approved_by),
+            # Recorded at the claim so a recovery pass reads under the scope the approval had,
+            # never one a later caller supplies.
+            "recovery_scope": {
+                "config_id": str(intent.config_id) if intent.config_id else None,
+                "order_reference": intent.order_reference,
+            },
+        },
     )
     db.add(operation)
     await db.flush()
@@ -1171,6 +1181,20 @@ async def operation_for_approval(db, tenant_id, approval_kind, approval_id):
                 TransactionOperation.approval_kind == approval_kind,
                 TransactionOperation.approval_id == approval_id,
             )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def latest_operation_for_base(db, tenant_id, base_work_key):
+    """The most recent attempt on a business identity across its retry lineage, or None."""
+    await set_tenant_context(db, str(tenant_id))
+    return (
+        await db.execute(
+            select(TransactionOperation)
+            .where(TransactionOperation.tenant_id == tenant_id, TransactionOperation.base_work_key == base_work_key)
+            .order_by(TransactionOperation.attempted_at.desc(), TransactionOperation.id.desc())
+            .limit(1)
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
@@ -1274,9 +1298,10 @@ async def reserve_operation_dispatch(
     its single mutation. No job retry or reconstructed claim can reserve again.
     Provider receipts never grant approval, reset the permit, or prove success.
 
-    A transaction proposal's claim is re-checked against the proposal here. Any other
-    approval source passes ``authorize(db, tenant_id, operation, claimed, now)``, which
-    raises StateError when the approval no longer holds; without it no permit is minted.
+    Every approval source authorizes the same way: ``authorize(db, tenant_id, operation,
+    claimed, now)`` raises StateError when the approval no longer holds. A transaction
+    proposal's claim brings its own (the proposal re-check); any other source must pass
+    one, or no permit is minted.
     """
     now = _clock(now)
     if not isinstance(payload_fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", payload_fingerprint):
@@ -1289,28 +1314,34 @@ async def reserve_operation_dispatch(
     ).scalar_one_or_none()
     if tenant is None or not tenant.is_active:
         raise StateError("tenant_unavailable", 403)
-    if claimed.proposal_id is None:
-        operation = await _one(db, tenant_id, TransactionOperation, claimed.operation_id, lock=True)
-        if (
-            operation.proposal_id is not None
-            or operation.approval_kind != claimed.approval_kind
-            or operation.approval_id != claimed.approval_id
-            or operation.work_key != claimed.work_key
-        ):
-            raise StateError("claimed_operation_mismatch")
-        if permit_consumed(operation):
-            await _commit(db, tenant_id)
-            return False
-        if operation.status != "executing":
-            raise StateError("operation_not_executable")
-        if operation.provider != provider:
-            raise StateError("unsupported_dispatch_provider")
-        if authorize is None:
-            raise StateError("approval_source_required")
-        await authorize(db, tenant_id, operation, claimed, now)
-        return await _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now)
-    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
+    if claimed.proposal_id is not None:
+        authorize = _proposal_still_authorized
+    elif authorize is None:
+        raise StateError("approval_source_required")
     operation = await _one(db, tenant_id, TransactionOperation, claimed.operation_id, lock=True)
+    if (
+        operation.proposal_id != claimed.proposal_id
+        or operation.approval_kind != claimed.approval_kind
+        or operation.approval_id != claimed.approval_id
+        or operation.work_key != claimed.work_key
+    ):
+        raise StateError("claimed_operation_mismatch")
+    if permit_consumed(operation):
+        await _commit(db, tenant_id)
+        return False
+    if operation.status != "executing":
+        raise StateError("operation_not_executable")
+    if operation.provider != provider:
+        raise StateError("unsupported_dispatch_provider")
+    await authorize(db, tenant_id, operation, claimed, now)
+    return await _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now)
+
+
+async def _proposal_still_authorized(db, tenant_id, operation, claimed, now):
+    """The transaction proposal's permit-time re-check: the claim still matches the
+    proposal exactly, the proposal is approved and fresh, the config still proposes
+    actions, the feature is on, and the decider is still a permitted human."""
+    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
     expected = ClaimedOperation(
         operation_id=operation.id,
         proposal_id=proposal.id,
@@ -1326,15 +1357,10 @@ async def reserve_operation_dispatch(
         before_json=proposal.before_json,
         after_json=proposal.after_json,
     )
-    if claimed != expected or operation.proposal_id != proposal.id or operation.work_key != proposal.work_key:
+    if claimed != expected:
         raise StateError("claimed_operation_mismatch")
-    if permit_consumed(operation):
-        await _commit(db, tenant_id)
-        return False
-    if operation.status != "executing" or proposal.status != "approved":
+    if proposal.status != "approved":
         raise StateError("operation_not_executable")
-    if PROVIDERS.get(proposal.action) != provider:
-        raise StateError("unsupported_dispatch_provider")
     if now >= proposal.valid_until:
         raise StateError("stale_evidence")
     config = await get_config(db, tenant_id, proposal.config_id)
@@ -1351,7 +1377,6 @@ async def reserve_operation_dispatch(
         )
     ).scalar_one_or_none()
     await _human(db, tenant_id, actor, "recon.run")
-    return await _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now)
 
 
 async def _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now):
@@ -1453,9 +1478,7 @@ async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
     return operation
 
 
-async def create_operation_recovery(
-    db, tenant_id, operation_id, *, actor=None, evaluation_key=None, now=None, config_id=None, order_reference=None
-):
+async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, evaluation_key=None, now=None):
     """One automatic pass, plus explicit, idempotent human read-only rechecks.
 
     Every recheck gets its own fixed run budget. No operation spend, approval,
@@ -1463,8 +1486,8 @@ async def create_operation_recovery(
     new read-request key without a current authenticated human actor.
 
     A proposal's row takes its scope from the proposal; a row from another approval
-    source (a chat confirmation) is scoped by the caller's ``config_id`` and
-    ``order_reference`` (the card's), without which there is no budgeted read.
+    source takes it from the ``recovery_scope`` its claim recorded, never from the
+    caller; without one there is no budgeted read.
     """
     now = _clock(now)
     manual = evaluation_key is not None
@@ -1493,8 +1516,12 @@ async def create_operation_recovery(
     if operation.proposal_id is not None:
         proposal = await get_proposal(db, tenant_id, operation.proposal_id)
         config_id, order_reference = proposal.config_id, proposal.order_reference
-    elif config_id is None or order_reference is None:
-        raise StateError("recovery_unscoped")
+    else:
+        scope = (operation.result_json or {}).get("recovery_scope") or {}
+        config_id = uuid.UUID(str(scope["config_id"])) if scope.get("config_id") else None
+        order_reference = scope.get("order_reference")
+        if config_id is None or not order_reference:
+            raise StateError("recovery_unscoped")
     config = await get_config(db, tenant_id, config_id)
     if not config.enabled:
         raise StateError("config_disabled")

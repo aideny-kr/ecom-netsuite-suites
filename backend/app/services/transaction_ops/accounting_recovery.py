@@ -21,6 +21,9 @@ from app.services.transaction_ops.treatments import VERIFIED_KINDS
 
 MAX_ATTEMPTS = 3
 DELAY = timedelta(minutes=5)
+# A card CAS-accepted to executing whose process died before the ledger claim: after this
+# long with no ledger row and no legacy claim, nothing was sent (no row, no permit).
+ORPHAN_GRACE = timedelta(minutes=10)
 CLAIM_ACTION = "accounting_correction.approval_claimed"
 
 
@@ -112,12 +115,50 @@ async def ledger_candidates(db, tenant_id, now, *, limit):
     )
 
 
+async def orphan_candidates(db, tenant_id, now, *, limit):
+    """Accounting cards accepted to executing that never reached a claim of either kind:
+    no ledger row for the card, no legacy accounting_execution, and older than the grace
+    period. No row means no permit, so nothing was sent; they are released, not read."""
+    await set_tenant_context(db, str(tenant_id))
+    so = ChatMessage.structured_output
+    claimed = exists(
+        select(TransactionOperation.id).where(
+            TransactionOperation.tenant_id == tenant_id,
+            TransactionOperation.approval_kind == "chat_confirmation",
+            TransactionOperation.approval_id == ChatMessage.id,
+        )
+    )
+    return list(
+        (
+            await db.scalars(
+                select(ChatMessage.id)
+                .where(
+                    ChatMessage.tenant_id == tenant_id,
+                    so["accounting_review"].astext.isnot(None),
+                    so["status"].astext == "executing",
+                    so["operation_id"].astext.is_(None),
+                    so["accounting_execution"].astext.is_(None),
+                    ChatMessage.updated_at <= now - ORPHAN_GRACE,
+                    ~claimed,
+                )
+                .order_by(ChatMessage.updated_at, ChatMessage.id)
+                .limit(limit)
+            )
+        ).all()
+    )
+
+
 async def candidates(db, tenant_id, now, *, limit):
-    """Cards due for recovery: those the kernel claimed (the ledger says so) and, until
-    the native amendment card moves onto the kernel, those carrying their own claim."""
-    ledger = await ledger_candidates(db, tenant_id, now, limit=limit)
-    legacy = await _legacy_candidates(db, tenant_id, now, limit=limit)
-    return (ledger + [m for m in legacy if m not in ledger])[:limit]
+    """Cards due for recovery: those the kernel claimed (the ledger says so), those that
+    never reached a claim (released), and, until the native amendment card moves onto the
+    kernel, those carrying their own claim."""
+    found = await ledger_candidates(db, tenant_id, now, limit=limit)
+    for more in (
+        await orphan_candidates(db, tenant_id, now, limit=limit),
+        await _legacy_candidates(db, tenant_id, now, limit=limit),
+    ):
+        found += [m for m in more if m not in found]
+    return found[:limit]
 
 
 async def _legacy_candidates(db, tenant_id, now, *, limit):
@@ -254,6 +295,38 @@ async def refresh_group(db, tenant_id, session_id, parent_id, *, depth=0):
 RECOVERY_READ_CALLS = 8
 
 
+def _orphaned(message, now) -> bool:
+    so = message.structured_output or {}
+    return (
+        bool(so.get("accounting_review"))
+        and so.get("status") == "executing"
+        and not so.get("operation_id")
+        and not so.get("accounting_execution")
+        and message.updated_at <= now - ORPHAN_GRACE
+    )
+
+
+async def _release_orphan(db, tenant_id, message):
+    """Release a card whose process died between its own claim and the ledger's: no ledger
+    row means no permit was minted, so nothing was sent and the intent is free again."""
+    reason = "The approval was interrupted before it was claimed on the ledger; nothing was sent."
+    message.structured_output = {**message.structured_output, "status": "failed", "error": reason}
+    message.content = reason + " Prepare a fresh correction to try again."
+    await log_event(
+        db,
+        tenant_id,
+        "transaction_ops",
+        "accounting_correction.precondition_failed",
+        actor_type="system",
+        resource_type="chat_message",
+        resource_id=str(message.id),
+        payload={"financial_writes": 0, "reason": reason, "released_by": "accounting_recovery"},
+        status="error",
+    )
+    await db.commit()
+    return {"termination_reason": "done", "financial_writes": 0}
+
+
 async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):
     from app.services.transaction_ops import accounting_recheck, sales_credit
     from app.services.transaction_ops import state_service as state
@@ -265,6 +338,8 @@ async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):
     if operation is not None:
         return await recover_card(db, tenant_id, operation, now=now, lock_engine=lock_engine)
     message = await _message(db, tenant_id, message_id)
+    if message is not None and _orphaned(message, now):
+        return await _release_orphan(db, tenant_id, message)
     if not message or not eligible(message.structured_output or {}, now):
         return {"termination_reason": "done", "financial_writes": 0}
     locked = False
@@ -392,19 +467,24 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
     """
     from app.services.transaction_ops import accounting_recheck
     from app.services.transaction_ops import state_service as state
-    from app.services.transaction_ops.accounting_adapter import ledger_safe
+    from app.services.transaction_ops.accounting_adapter import json_copy, ledger_safe
     from app.services.transaction_ops.accounting_group import accounting_write_slot
     from app.services.transaction_ops.tax_correction import verify_after
 
     await state.recover_expired_operation(db, tenant_id, operation.id, now=now)
     operation = await state._one(db, tenant_id, TransactionOperation, operation.id)
-    if operation.status not in state.SETTLED:
-        # Terminal already, or still executing before its deadline: the sender may be alive.
-        reason = "done" if operation.status in state.TERMINAL else "busy"
-        return {"termination_reason": reason, "financial_writes": 0}
     message = await _message(db, tenant_id, operation.approval_id)
     if message is None:
         return {"termination_reason": "error", "financial_writes": 0}
+    if operation.status not in state.SETTLED:
+        if operation.status in state.TERMINAL and (message.structured_output or {}).get("status") == "executing":
+            # The row settled (by expiry, or by a sender that died after completing it)
+            # while the card never heard: render the card from the row.
+            await _render_terminal(db, tenant_id, message, operation)
+            return {"termination_reason": "done", "financial_writes": 0}
+        # Terminal already, or still executing before its deadline: the sender may be alive.
+        reason = "done" if operation.status in state.TERMINAL else "busy"
+        return {"termination_reason": reason, "financial_writes": 0}
     so = message.structured_output or {}
     p = so.get("accounting_review") or {}
     approver = (operation.result_json or {}).get("approved_by")
@@ -414,14 +494,7 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
         async with accounting_write_slot(p, **lock_options):
             locked = True
             try:
-                run = await state.create_operation_recovery(
-                    db,
-                    tenant_id,
-                    operation.id,
-                    now=now,
-                    config_id=_uuid_or_none(p.get("config_id")),
-                    order_reference=p.get("order_reference"),
-                )
+                run = await state.create_operation_recovery(db, tenant_id, operation.id, now=now)
             except state.StateError as exc:
                 if exc.code == "operation_not_recoverable":
                     return {"termination_reason": "done", "financial_writes": 0}
@@ -442,7 +515,7 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
                     raise TimeoutError
                 async with asyncio.timeout(90):
                     verification = await verify_after(db, tenant_id, p, receipt=receipt)
-                verification = json.loads(json.dumps(verification, default=str, allow_nan=False))
+                verification = json_copy(verification)
                 if verification.get("status") == "verified":
                     proof, reason = ledger_safe(verification), "done"
             except Exception as exc:
@@ -512,8 +585,38 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
         return {"termination_reason": "busy", "financial_writes": 0}
 
 
-def _uuid_or_none(value):
-    try:
-        return UUID(str(value)) if value else None
-    except ValueError:
-        return None
+async def _render_terminal(db, tenant_id, message, operation):
+    result = operation.result_json or {}
+    so = {**(message.structured_output or {}), "operation_id": str(operation.id)}
+    if operation.status == "rejected_before_effect":
+        reason = "The approval was interrupted before any send; nothing was sent."
+        so.update(status="failed", error=reason)
+        message.content = reason + " Prepare a fresh correction to try again."
+    elif operation.status == "verified":
+        so.update(status="approved", accounting_verification=result.get("verification") or {"status": "verified"})
+        message.content = "The approved accounting correction was verified; the card is updated from the ledger."
+    else:  # needs_review
+        so.update(
+            status="indeterminate",
+            error=result.get("code"),
+            accounting_verification={"status": "needs_review", "reason": result.get("code"), "retry_allowed": False},
+        )
+        message.content = "The accounting correction needs review. Do not repeat this write."
+    message.structured_output = so
+    await log_event(
+        db,
+        tenant_id,
+        "transaction_ops",
+        "accounting_recovery.completed",
+        actor_type="system",
+        resource_type="chat_message",
+        resource_id=str(message.id),
+        payload={
+            "operation_id": str(operation.id),
+            "approved_by": result.get("approved_by"),
+            "termination_reason": "done",
+            "rendered_from_ledger": operation.status,
+            "financial_writes": 0,
+        },
+    )
+    await db.commit()

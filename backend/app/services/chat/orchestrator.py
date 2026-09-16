@@ -1806,7 +1806,9 @@ def _kernel_rendering(result: dict, adapter, *, record_type: str, mutation_type:
             return "success", True, None, f"Done — the {record_type} {mutation_type} has been executed successfully."
         return "indeterminate", True, None, "The approved accounting change was verified using fresh NetSuite reads."
     if status == "committed_unverified":
-        return "success", True, None, f"Done — the {record_type} {mutation_type} has been executed successfully."
+        # Saved by the provider's account, not yet proven by the readback: the card says so
+        # (the verification block appends what the readback found).
+        return "success", True, None, f"The {record_type} {mutation_type} was sent and saved, but is not yet verified."
     if status == "rejected_before_effect":
         error = adapter.refusal or "NetSuite reported this write failed."
         return "failed", False, error, f"The operation failed: {error}"
@@ -2419,7 +2421,10 @@ async def run_chat_turn(
                 _via_kernel = bool(_so.get("accounting_review")) and (
                     _chat_confirmation.provider_of(_so) == _chat_confirmation.PROVIDER_MCP
                 )
-                if _so.get("accounting_review") and not _via_kernel:
+                if _so.get("accounting_review"):
+                    # The ledger's work-key uniqueness only sees attempts the ledger recorded; work
+                    # sent under the card's own claim (before the kernel path, or by the native
+                    # card) lives on earlier cards, so that history is still consulted here.
                     from app.services.transaction_ops.accounting_recovery import execution_claim
                     from app.services.transaction_ops.resolution_plan import previous_execution
 
@@ -2442,9 +2447,10 @@ async def run_chat_turn(
                             "Review the recorded verification or reconciliation result before taking another action.",
                         }
                         return
-                    _so = execution_claim(
-                        _so, _confirm_msg.id, user_id, _approval_context, now=datetime.now(timezone.utc)
-                    )
+                    if not _via_kernel:
+                        _so = execution_claim(
+                            _so, _confirm_msg.id, user_id, _approval_context, now=datetime.now(timezone.utc)
+                        )
                 _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "executing")
                 if not _claimed:
                     yield {

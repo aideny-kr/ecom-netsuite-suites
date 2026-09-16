@@ -165,3 +165,55 @@ from contextlib import asynccontextmanager  # noqa: E402
 @asynccontextmanager
 async def _no_lock(*args, **kwargs):
     yield
+
+
+@pytest.fixture
+async def orphan(db, approved_credit):  # noqa: F811
+    """A card whose process died after the card's own claim (status executing) and before
+    the ledger's: no operation_id, no legacy accounting_execution, no ledger row."""
+    actor, _, _, verified_message, _, _ = approved_credit
+    p = verified_message.structured_output["accounting_review"]
+    name, params = inputs(p)
+    card = build_confirmation_payload(
+        mutation_type="create",
+        record_type=p["record_type"],
+        tool_name=name,
+        tool_input=params,
+        session_id=str(verified_message.session_id),
+        current_record=p["before"],
+    )
+    card.accounting_review = p
+    message = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=verified_message.session_id,
+        role="assistant",
+        content="",
+        structured_output={**card.model_dump(mode="json"), "status": "executing"},
+    )
+    db.add(message)
+    await db.flush()
+    return actor.tenant_id, message.id
+
+
+async def test_a_card_that_died_before_its_ledger_claim_is_released_after_the_grace_period(db, orphan):
+    """No ledger row means no permit was ever minted, so nothing was sent: after the grace
+    period the card is released (failed, with the reason) and the intent is free again."""
+    tenant_id, message_id = orphan
+    now = datetime.now(timezone.utc)
+    assert await mod.candidates(db, tenant_id, now, limit=10) == []  # the sender may still be between commits
+    later = now + mod.ORPHAN_GRACE + timedelta(seconds=1)
+    assert await mod.candidates(db, tenant_id, later, limit=10) == [message_id]
+    result = await mod.recover(db, tenant_id, message_id, now=later)
+    assert result == {"termination_reason": "done", "financial_writes": 0}
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    assert message.structured_output["status"] == "failed"
+    assert "nothing was sent" in message.structured_output["error"]
+    released = await db.scalar(
+        select(AuditEvent).where(
+            AuditEvent.resource_id == str(message_id),
+            AuditEvent.action == "accounting_correction.precondition_failed",
+        )
+    )
+    assert released.payload["financial_writes"] == 0 and released.actor_type == "system"
+    assert await mod.candidates(db, tenant_id, later, limit=10) == []

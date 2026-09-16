@@ -44,6 +44,11 @@ def refusal_code(exc) -> str:
     return text if _CODE.fullmatch(text) else "evidence_revalidation_failed"
 
 
+def json_copy(value):
+    """A plain-JSON copy: Decimals and other exact types become strings, NaN is refused."""
+    return json.loads(json.dumps(value, default=str, allow_nan=False))
+
+
 def ledger_safe(value):
     """The readback as the ledger may store it: exact strings, never binary floats."""
 
@@ -56,7 +61,7 @@ def ledger_safe(value):
             return [visit(v) for v in item]
         return item
 
-    return visit(json.loads(json.dumps(value, default=str, allow_nan=False)))
+    return visit(json_copy(value))
 
 
 @dataclass
@@ -131,7 +136,7 @@ class AccountingCardAdapter:
         if outcome == "failed":
             self.refusal = _extract_error_message(result) or "NetSuite reported the write failed."
             return self._sent({"status": "failed", "code": "provider_rejected", "verified": False})
-        ids = {key: str(result[key]) for key in _RECEIPT_IDS if result.get(key)}
+        ids = {key: str(result[key]) for key in _RECEIPT_IDS if result.get(key) is not None}
         return self._sent({"status": "accepted", "verified": False, **ids})
 
     def _sent(self, receipt: dict) -> dict:
@@ -140,7 +145,7 @@ class AccountingCardAdapter:
 
     async def verify(self, db, tenant_id, claimed, preflight, *, read):
         verification = await read(VERIFY_CALLS, self.readback, self.proposal, receipt=self.receipt)
-        self.verification = json.loads(json.dumps(verification, default=str, allow_nan=False))
+        self.verification = json_copy(verification)
         if self.verification.get("status") != "verified":
             return None
         return ledger_safe(self.verification)

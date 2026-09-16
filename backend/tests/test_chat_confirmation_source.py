@@ -67,7 +67,14 @@ async def test_a_confirmation_claims_one_ledger_row_with_its_business_identity(d
     assert row.adapter == chat_confirmation.adapter_of(p)
     assert row.work_key == operation_identity(p) == claimed.work_key
     assert row.base_work_key == row.work_key and row.retry_of_operation_id is None
-    assert row.result_json == {"evidence_digest": evidence_digest(so), "approved_by": str(actor.id)}
+    assert row.result_json == {
+        "evidence_digest": evidence_digest(so),
+        "approved_by": str(actor.id),
+        "recovery_scope": {
+            "config_id": str(p["config_id"]) if p.get("config_id") else None,
+            "order_reference": p["order_reference"],
+        },
+    }
     assert claimed.approval_kind == "chat_confirmation" and claimed.approval_id == message.id
     assert claimed.action == (p.get("kind") or "invoice_tax") and claimed.before_json == {} == claimed.after_json
     authorized.assert_awaited_once()
