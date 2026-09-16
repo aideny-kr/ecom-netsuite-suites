@@ -165,7 +165,9 @@ def record_links(p, verification, report):
         order = {"id": report["targets"][0].get("record_id"), "tranId": p["order_reference"]}
     documents = []
     invoice = verification.get("invoice") or (p.get("support") or {}).get("invoice")
-    if not invoice and treatment_of(p).record_type != "salesorder":
+    # A correction whose reconciliation target is its own record is the sales order
+    # itself; every other treatment's "before" document is the invoice it corrected.
+    if not invoice and treatment_of(p).reconciliation_target != "record":
         invoice = {**p["before"], "id": p["record_id"]}
     if invoice:
         documents.append({**invoice, "record_type": "invoice"})

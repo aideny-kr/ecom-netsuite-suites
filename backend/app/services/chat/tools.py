@@ -556,6 +556,42 @@ async def _execute_tool_call_once(
             )
     # ── End HITL guard ──
 
+    # ── System-record deny-list, at the same choke point ──
+    # is_record_type_allowed used to be consulted only where a card is minted. A card
+    # minted before the comparison became case-insensitive, or by a caller that never
+    # minted one, would still reach the ERP here: the approval token proves a human saw
+    # this payload, not that the payload was allowed (agent-graph.md #11). So the list
+    # is enforced where the write leaves, for every NetSuite mutation verb, approved or
+    # not. Only the connector-facing verbs carry a recordType; the internal amendment
+    # tool validates its own binding in its dispatcher.
+    if parse_external_tool_name(tool_name) is not None:
+        from app.services.chat.mutation_guard import classify_mutation as _classify_verb
+        from app.services.chat.mutation_guard import is_record_type_allowed
+
+        _verb = _classify_verb(tool_name)
+        _record_type = (tool_input or {}).get("recordType") if isinstance(tool_input, dict) else None
+        if _verb and not is_record_type_allowed(_record_type):
+            logger.warning(
+                "Deny-list refused a %s on record type %r via %s (tenant=%s session=%s approved=%s)",
+                _verb,
+                _record_type,
+                tool_name,
+                tenant_id,
+                session_id,
+                human_approved,
+            )
+            return json.dumps(
+                {
+                    "error": (
+                        f"This {_verb} was NOT executed: {_record_type!r} is a system record type this "
+                        "workspace never writes, or no record type was given."
+                    ),
+                    "blocked_record_type": True,
+                    "instruction": "Do not retry this call with a different spelling of the record type.",
+                }
+            )
+    # ── End deny-list ──
+
     if tool_name == "transaction_ops_accounting_amendment_apply":
         from app.services.transaction_ops.native_accounting_dispatch import execute as execute_native
 

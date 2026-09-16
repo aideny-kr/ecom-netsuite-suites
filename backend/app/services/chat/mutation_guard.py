@@ -132,9 +132,8 @@ def is_record_type_allowed(record_type: str | None) -> bool:
     case-insensitive and ignores padding: ``Employee`` is ``employee``. An empty
     or missing type is not allowed either; it cannot be checked.
     """
-    if not isinstance(record_type, str) or not record_type.strip():
-        return False
-    return record_type.strip().lower() not in _BLOCKED_RECORD_TYPES_LOWER
+    key = record_type.strip().lower() if isinstance(record_type, str) else ""
+    return bool(key) and key not in _BLOCKED_RECORD_TYPES_LOWER
 
 
 def generate_confirmation_token(
