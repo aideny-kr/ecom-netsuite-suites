@@ -18,14 +18,17 @@ from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.settlement import SCOPE
 
 # Provider-call ceiling of one recheck run. The MCP existing-credit recheck adds the
-# subledger read budget it reserves in accounting_credit_recheck, so the two numbers
-# cannot drift apart: raising READ_CALLS raises the ceiling that has to afford it.
+# subledger read budget it reserves in accounting_credit_recheck plus a small headroom,
+# so the two numbers cannot drift apart: raising READ_CALLS raises the ceiling that has
+# to afford it. 64 + 56 + 8 preserves the 128 the previous literal allowed.
 RECHECK_CALLS = 64
+MCP_RECHECK_HEADROOM = 8
 
 
 def recheck_call_ceiling(proposal):
-    extra = accounting_credit_recheck.READ_CALLS if proposal.get("execution_transport") == "mcp_record_api" else 0
-    return RECHECK_CALLS + extra
+    if proposal.get("execution_transport") == "mcp_record_api":
+        return RECHECK_CALLS + accounting_credit_recheck.READ_CALLS + MCP_RECHECK_HEADROOM
+    return RECHECK_CALLS
 
 
 def supports(proposal):
@@ -160,7 +163,7 @@ def report_in_scope(run, p, report, now):
         return False
 
 
-async def bound_report(db, tenant_id, run, report, *, now, reconcile=True):
+async def bound_report(db, tenant_id, run, report, *, now, subledger_recheck=True):
     """Bind a recheck run's report to its approval.
 
     The scope check is cheap and runs on every write, so an interim finding never
@@ -170,7 +173,7 @@ async def bound_report(db, tenant_id, run, report, *, now, reconcile=True):
     _, p = await approval_for_run(db, tenant_id, run)
     if report_in_scope(run, p, report, now):
         if (
-            reconcile
+            subledger_recheck
             and p.get("kind") == "credit_tax_reallocation"
             and p.get("execution_transport") == "mcp_record_api"
         ):

@@ -682,7 +682,9 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
         # subledger read budget on the expensive recheck.
         request = request.model_copy(
             update={
-                "report_json": await bound_report(db, tenant_id, run, request.report_json, now=now, reconcile=final)
+                "report_json": await bound_report(
+                    db, tenant_id, run, request.report_json, now=now, subledger_recheck=final
+                )
             }
         )
     row = (

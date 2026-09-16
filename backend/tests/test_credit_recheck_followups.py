@@ -1,8 +1,9 @@
 """Follow-ups from the review of the credit-recheck fix (PR #262, 6fb2d316).
 
-1. Every recheck exit writes the posting_observed audit and rechecks the lease, including
-   transport failures the previous except-tuple missed and programming errors, which are
-   audited and then surfaced instead of being reclassified as missing evidence.
+1. Every recheck exit writes the posting_observed audit and rechecks the lease. Failures
+   of the evidence, including transport failures the previous except-tuple missed and
+   the runner's own {"complete": False} fallback shapes, degrade to not_verified. A
+   genuine defect is audited, committed, and then surfaced, never reclassified.
 2. Interim findings of a recheck run stay bound to the approval; only the expensive
    subledger recheck waits for the final write.
 3. The MCP recheck ceiling is derived from the read budget it exists to afford.
@@ -25,6 +26,8 @@ from app.services.transaction_ops.source_reader import SourceReadError
 from tests.test_accounting_recheck import approved_credit  # noqa: F401
 from tests.test_accounting_release_regressions import corrected, mcp_credit  # noqa: F401
 
+UNAVAILABLE = {"complete": False, "reason": "target_refunds_unavailable"}  # runner.py's fallback shape
+
 
 def _run(now, *, max_api_calls=200):
     return SimpleNamespace(
@@ -38,12 +41,12 @@ def _run(now, *, max_api_calls=200):
 
 
 def _patch_state(monkeypatch, run):
-    audit, get_run, lease = AsyncMock(), AsyncMock(return_value=run), Mock()
+    audit, commit, get_run, lease = AsyncMock(), AsyncMock(), AsyncMock(return_value=run), Mock()
     monkeypatch.setattr(recheck.state, "_audit", audit)
-    monkeypatch.setattr(recheck.state, "_commit", AsyncMock())
+    monkeypatch.setattr(recheck.state, "_commit", commit)
     monkeypatch.setattr(recheck.state, "get_run", get_run)
     monkeypatch.setattr(recheck.state, "_lease", lease)
-    return audit, get_run, lease
+    return audit, commit, get_run, lease
 
 
 def _posted(audit):
@@ -52,10 +55,16 @@ def _posted(audit):
 
 @pytest.mark.parametrize(
     "exc",
-    [SourceReadError("source_transport_failed"), httpx.ConnectError("connection reset"), TimeoutError()],
-    ids=["source_reader", "httpx", "timeout"],
+    [
+        SourceReadError("source_transport_failed"),
+        httpx.ConnectError("connection reset"),
+        TimeoutError(),
+        KeyError("refund_evidence"),
+        TypeError("'NoneType' object is not subscriptable"),
+    ],
+    ids=["source_reader", "httpx", "timeout", "missing_key", "wrong_shape"],
 )
-async def test_transport_failure_during_recheck_is_not_verified_with_audit_and_lease_recheck(
+async def test_evidence_failure_during_recheck_is_not_verified_with_audit_and_lease_recheck(
     mcp_credit,  # noqa: F811
     monkeypatch,
     exc,
@@ -63,7 +72,7 @@ async def test_transport_failure_during_recheck_is_not_verified_with_audit_and_l
     now = datetime.now(timezone.utc)
     p, _, report = corrected(mcp_credit, now)
     run = _run(now)
-    audit, get_run, lease = _patch_state(monkeypatch, run)
+    audit, commit, get_run, lease = _patch_state(monkeypatch, run)
     monkeypatch.setattr(credit_api_correction, "fresh", AsyncMock(side_effect=exc))
 
     result = await recheck.reconcile(AsyncMock(), p["tenant_id"], run, p, report)
@@ -77,17 +86,18 @@ async def test_transport_failure_during_recheck_is_not_verified_with_audit_and_l
     assert posted[0].kwargs["payload"]["balance"]["status"] == "not_verified"
     get_run.assert_awaited_once()
     lease.assert_called_once()
+    assert commit.await_count == 1  # the reservation; the caller commits the rest
     assert run.api_calls_used == recheck.READ_CALLS  # a failed read still consumed its reservation
 
 
-async def test_programming_error_during_recheck_is_audited_then_surfaced(mcp_credit, monkeypatch):  # noqa: F811
+async def test_defect_during_recheck_is_audited_committed_then_surfaced(mcp_credit, monkeypatch):  # noqa: F811
     now = datetime.now(timezone.utc)
     p, _, report = corrected(mcp_credit, now)
     run = _run(now)
-    audit, get_run, lease = _patch_state(monkeypatch, run)
-    monkeypatch.setattr(credit_api_correction, "fresh", AsyncMock(side_effect=KeyError("refund_evidence")))
+    audit, commit, get_run, lease = _patch_state(monkeypatch, run)
+    monkeypatch.setattr(credit_api_correction, "fresh", AsyncMock(side_effect=RuntimeError("session poisoned")))
 
-    with pytest.raises(KeyError):
+    with pytest.raises(RuntimeError):
         await recheck.reconcile(AsyncMock(), p["tenant_id"], run, p, report)
 
     posted = _posted(audit)
@@ -96,21 +106,49 @@ async def test_programming_error_during_recheck_is_audited_then_surfaced(mcp_cre
     assert payload["financial_writes"] == 0
     assert payload["balance"]["status"] == "not_verified"
     assert payload["balance"]["reason"] == "credit_recheck_internal_error"
-    assert payload["error_type"] == "KeyError"
+    assert payload["error_type"] == "RuntimeError"
     get_run.assert_awaited_once()
     lease.assert_called_once()
+    # Reservation commit, then the commit that makes the audit survive the raise.
+    assert commit.await_count == 2
+    assert audit.await_args_list[-1].args[2] == "accounting_recheck.posting_observed"
 
 
-async def test_report_without_refund_evidence_is_a_verification_failure_not_a_crash(mcp_credit):  # noqa: F811
+@pytest.mark.parametrize(
+    "change",
+    ["no_refund_evidence", "no_amounts", "target_unavailable", "source_unavailable", "support_unstamped"],
+)
+async def test_incomplete_report_is_a_verification_failure_not_a_crash(mcp_credit, change):  # noqa: F811
     now = datetime.now(timezone.utc)
     p, current, report = corrected(mcp_credit, now)
-    del report["refund_evidence"]
+    if change == "no_refund_evidence":
+        del report["refund_evidence"]
+    elif change == "no_amounts":
+        del report["balance"]["amounts"]
+    elif change == "target_unavailable":
+        report["refund_evidence"]["target"] = dict(UNAVAILABLE)
+    elif change == "source_unavailable":
+        report["refund_evidence"]["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
+    else:
+        del current[3]["observed_at"]
     with pytest.raises(ValueError):
         recheck.project(p, report, current, verified_at=now - timedelta(seconds=1), now=now)
+
+
+async def test_runner_fallback_refund_shape_reaches_not_verified_through_reconcile(mcp_credit, monkeypatch):  # noqa: F811
+    now = datetime.now(timezone.utc)
     p, current, report = corrected(mcp_credit, now)
-    del report["balance"]["amounts"]
-    with pytest.raises(ValueError):
-        recheck.project(p, report, current, verified_at=now - timedelta(seconds=1), now=now)
+    report["refund_evidence"]["target"] = dict(UNAVAILABLE)
+    run = _run(now)
+    audit, commit, _, _ = _patch_state(monkeypatch, run)
+    monkeypatch.setattr(credit_api_correction, "fresh", AsyncMock(return_value=current))
+
+    result = await recheck.reconcile(AsyncMock(), p["tenant_id"], run, p, report)
+
+    assert result["balance"]["status"] == "not_verified"
+    assert result["balance"]["reason"] == "credit_recheck_evidence_unavailable"
+    assert len(_posted(audit)) == 1
+    assert commit.await_count == 1
 
 
 async def test_interim_bound_report_annotates_scope_without_the_expensive_recheck(mcp_credit, monkeypatch):  # noqa: F811
@@ -121,18 +159,22 @@ async def test_interim_bound_report_annotates_scope_without_the_expensive_rechec
     monkeypatch.setattr(recheck, "reconcile", spy)
     run = SimpleNamespace(params_json={"verified_at": (now - timedelta(seconds=1)).isoformat()})
 
-    interim = await accounting_recheck.bound_report(AsyncMock(), p["tenant_id"], run, report, now=now, reconcile=False)
+    interim = await accounting_recheck.bound_report(
+        AsyncMock(), p["tenant_id"], run, report, now=now, subledger_recheck=False
+    )
     assert interim == report
     spy.assert_not_awaited()
 
-    final = await accounting_recheck.bound_report(AsyncMock(), p["tenant_id"], run, report, now=now, reconcile=True)
+    final = await accounting_recheck.bound_report(
+        AsyncMock(), p["tenant_id"], run, report, now=now, subledger_recheck=True
+    )
     assert final == {"reconciled": True}
     spy.assert_awaited_once()
 
     out_of_scope = deepcopy(report)
     out_of_scope["targets"][0]["record_id"] = p["invoice_id"]
     bound = await accounting_recheck.bound_report(
-        AsyncMock(), p["tenant_id"], run, out_of_scope, now=now, reconcile=False
+        AsyncMock(), p["tenant_id"], run, out_of_scope, now=now, subledger_recheck=False
     )
     assert bound["balance"]["status"] == "not_verified"
     assert bound["balance"]["reason"] == "accounting_recheck_identity_or_freshness_unverified"
@@ -183,6 +225,8 @@ async def test_interim_finding_of_a_recheck_run_is_bound_to_the_approval(
 
 def test_mcp_recheck_ceiling_is_derived_from_the_read_budget(mcp_credit):  # noqa: F811
     p, _, _ = mcp_credit
-    assert accounting_recheck.recheck_call_ceiling(p) == accounting_recheck.RECHECK_CALLS + recheck.READ_CALLS
+    mcp = accounting_recheck.recheck_call_ceiling(p)
+    assert mcp == accounting_recheck.RECHECK_CALLS + recheck.READ_CALLS + accounting_recheck.MCP_RECHECK_HEADROOM
+    assert mcp == 128  # the ceiling the previous literal allowed; not silently shrunk
     legacy = {**p, "execution_transport": None}
     assert accounting_recheck.recheck_call_ceiling(legacy) == accounting_recheck.RECHECK_CALLS

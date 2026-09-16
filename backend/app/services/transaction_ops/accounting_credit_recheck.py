@@ -51,7 +51,12 @@ def project(p, report, current, *, verified_at, now):
         # A report that never collected refunds or amounts is missing evidence, not a defect.
         raise ValueError("credit_recheck_incomplete_report")
     for value in [support, evidence, *refunds.values()]:
-        observed = datetime.fromisoformat(value["observed_at"])
+        # The runner records an unavailable read as {"complete": False, "reason": ...}
+        # with no observation time. That is missing evidence, never a defect.
+        stamp = value.get("observed_at") if isinstance(value, dict) else None
+        if not stamp:
+            raise ValueError("credit_recheck_incomplete_evidence")
+        observed = datetime.fromisoformat(stamp)
         if not verified_at <= observed <= now or now - observed > timedelta(minutes=15):
             raise ValueError("credit_recheck_stale_evidence")
     # The full fresh order and posting records must describe this same revision.
@@ -87,11 +92,24 @@ def project(p, report, current, *, verified_at, now):
     }
 
 
-# Failures of the evidence itself: a fresh read that could not complete, timed out, or did
-# not describe the approved revision. These degrade to not_verified. Anything else is a
-# defect in this code: it is audited like every other exit and then surfaced, never
+# Failures of the evidence itself: a fresh read that could not complete, timed out, did
+# not describe the approved revision, or came back in a shape this projection cannot
+# read. The lookup, type and attribute errors are the repo's established signal for the
+# last case (see commercial_credits, case_service, accounting_history): fresh() and
+# project() consume externally shaped records, so a missing key there is missing
+# evidence, not a defect. These degrade to not_verified. Anything else is a defect in
+# this code: it is audited and committed like every other exit and then surfaced, never
 # reclassified as missing evidence.
-EVIDENCE_FAILURES = (ValueError, ArithmeticError, TimeoutError, SourceReadError, httpx.HTTPError)
+EVIDENCE_FAILURES = (
+    ValueError,
+    LookupError,
+    TypeError,
+    AttributeError,
+    ArithmeticError,
+    TimeoutError,
+    SourceReadError,
+    httpx.HTTPError,
+)
 
 
 async def reconcile(db, tenant_id, run, p, report):
@@ -145,5 +163,8 @@ async def reconcile(db, tenant_id, run, p, report):
         payload["error_type"] = type(defect).__name__
     await state._audit(db, tenant_id, "accounting_recheck.posting_observed", run, payload=payload)
     if defect is not None:
+        # The audit only flushes; the caller's own commit is never reached once we
+        # raise, and the session would roll the row back. Commit it first.
+        await state._commit(db, tenant_id)
         raise defect
     return result
