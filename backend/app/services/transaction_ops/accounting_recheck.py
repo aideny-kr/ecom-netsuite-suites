@@ -31,7 +31,10 @@ def needs_subledger_recheck(proposal):
 
 
 def recheck_call_ceiling(proposal):
-    if needs_subledger_recheck(proposal):
+    # Keyed on transport, not kind: every MCP-transported recheck kept the larger
+    # ceiling before, and narrowing it to one kind would halve the budget of the
+    # others without any change in what they read.
+    if proposal.get("execution_transport") == "mcp_record_api":
         return RECHECK_CALLS + accounting_credit_recheck.READ_CALLS + MCP_RECHECK_HEADROOM
     return RECHECK_CALLS
 
@@ -175,19 +178,22 @@ async def bound_report(db, tenant_id, run, report, *, now, subledger_recheck=Tru
     sits in the findings list unannotated. The subledger recheck reserves provider
     budget and re-reads NetSuite, so the caller asks for it only on the final write.
     """
-    _, p = await approval_for_run(db, tenant_id, run)
-    if report_in_scope(run, p, report, now):
+    reason = "accounting_recheck_identity_or_freshness_unverified"
+    try:
+        _, p = await approval_for_run(db, tenant_id, run)
+    except state.StateError as exc:
+        # The approval this run was queued for no longer matches. Binding fails
+        # closed on the report; the run itself must still terminate normally, so
+        # this never raises out of a finding write.
+        p, reason = None, getattr(exc, "code", None) or str(exc)
+    if p is not None and report_in_scope(run, p, report, now):
         if subledger_recheck and needs_subledger_recheck(p):
             return await accounting_credit_recheck.reconcile(db, tenant_id, run, p, report)
         return report
     return {
         **report,
-        "balance": {
-            **(report.get("balance") or {}),
-            "status": "not_verified",
-            "reason": "accounting_recheck_identity_or_freshness_unverified",
-        },
-        "evidence_limits": {"code": "accounting_recheck_identity_or_freshness_unverified"},
+        "balance": {**(report.get("balance") or {}), "status": "not_verified", "reason": reason},
+        "evidence_limits": {"code": reason},
     }
 
 

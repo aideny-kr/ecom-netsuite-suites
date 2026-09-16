@@ -112,10 +112,8 @@ EVIDENCE_FAILURES = (
 )
 
 
-def _observed(run, p, report, reason, defect, *, balance=None):
+def _observed(run, p, balance, defect):
     """The posting_observed audit payload; every exit of reconcile() writes one."""
-    if balance is None:
-        balance = {**report["balance"], "status": "not_verified", "reason": reason}
     payload = {
         "approval_message_id": run.params_json["approval_message_id"],
         "case_id": p["case_id"],
@@ -125,6 +123,28 @@ def _observed(run, p, report, reason, defect, *, balance=None):
     if defect is not None:
         payload["error_type"] = type(defect).__name__
     return payload
+
+
+def _not_verified(report, reason):
+    return {**report["balance"], "status": "not_verified", "reason": reason}
+
+
+async def _leave(db, tenant_id, run, payload, error=None):
+    """Audit the exit, commit it, then raise. The only way out of reconcile()."""
+    await state._audit(db, tenant_id, "accounting_recheck.posting_observed", run, payload=payload)
+    if error is not None:
+        # The audit only flushes; the caller's commit is never reached once we
+        # raise, and the session would roll the row back. Commit it first.
+        await state._commit(db, tenant_id)
+        raise error
+
+
+def _evidence_reason(exc):
+    """project()'s own reasons survive to the audit; anything else is generic."""
+    text = str(exc)
+    if isinstance(exc, ValueError) and text.startswith("credit_recheck_"):
+        return text
+    return "credit_recheck_evidence_unavailable"
 
 
 async def reconcile(db, tenant_id, run, p, report):
@@ -151,12 +171,15 @@ async def reconcile(db, tenant_id, run, p, report):
                 verified_at=datetime.fromisoformat(run.params_json["verified_at"]),
                 now=datetime.now(timezone.utc),
             )
-        except EVIDENCE_FAILURES:
+        except EVIDENCE_FAILURES as exc:
             # Never reuse the approval-time snapshot or raw order balance as a
             # successful posting recheck after incomplete fresh evidence.
-            pass
+            reason = _evidence_reason(exc)
         except Exception as exc:
             defect, reason = exc, "credit_recheck_internal_error"
+            # A defect may have left the session's transaction aborted; the
+            # ownership recheck and the audit below need a usable session.
+            await db.rollback()
         # Reservation releases the database lock during provider I/O. Recheck
         # ownership before publishing evidence or changing the case verdict —
         # on every exit, including the ones that will be re-raised below.
@@ -166,21 +189,11 @@ async def reconcile(db, tenant_id, run, p, report):
         except state.StateError as lost:
             # Ownership moved during the read. This worker may not publish a verdict,
             # but the exit is still audited so a captured defect is never lost with it.
-            payload = _observed(run, p, report, "credit_recheck_lease_lost", defect)
-            await state._audit(db, tenant_id, "accounting_recheck.posting_observed", run, payload=payload)
-            await state._commit(db, tenant_id)
-            raise lost from defect
+            lost.__cause__ = defect
+            await _leave(
+                db, tenant_id, run, _observed(run, p, _not_verified(report, "credit_recheck_lease_lost"), defect), lost
+            )
     if result is None:
-        result = {
-            **report,
-            "balance": {**report["balance"], "status": "not_verified", "reason": reason},
-            "evidence_limits": {"code": reason},
-        }
-    payload = _observed(run, p, report, None, defect, balance=result["balance"])
-    await state._audit(db, tenant_id, "accounting_recheck.posting_observed", run, payload=payload)
-    if defect is not None:
-        # The audit only flushes; the caller's own commit is never reached once we
-        # raise, and the session would roll the row back. Commit it first.
-        await state._commit(db, tenant_id)
-        raise defect
+        result = {**report, "balance": _not_verified(report, reason), "evidence_limits": {"code": reason}}
+    await _leave(db, tenant_id, run, _observed(run, p, result["balance"], defect), defect)
     return result

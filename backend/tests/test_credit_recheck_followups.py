@@ -146,7 +146,7 @@ async def test_runner_fallback_refund_shape_reaches_not_verified_through_reconci
     result = await recheck.reconcile(AsyncMock(), p["tenant_id"], run, p, report)
 
     assert result["balance"]["status"] == "not_verified"
-    assert result["balance"]["reason"] == "credit_recheck_evidence_unavailable"
+    assert result["balance"]["reason"] == "credit_recheck_incomplete_evidence"  # project()'s own reason survives
     assert len(_posted(audit)) == 1
     assert commit.await_count == 1
 
@@ -270,3 +270,98 @@ async def test_lease_lost_after_a_clean_read_publishes_nothing_but_the_audit(mcp
     assert posted[0].kwargs["payload"]["balance"]["reason"] == "credit_recheck_lease_lost"
     assert "error_type" not in posted[0].kwargs["payload"]
     assert commit.await_count == 2
+
+
+async def test_interim_write_with_a_mismatched_approval_binds_closed_instead_of_raising(mcp_credit, monkeypatch):  # noqa: F811
+    now = datetime.now(timezone.utc)
+    p, _, report = corrected(mcp_credit, now)
+    monkeypatch.setattr(
+        accounting_recheck,
+        "approval_for_run",
+        AsyncMock(side_effect=state_service.StateError("accounting_recheck_approval_mismatch")),
+    )
+    spy = AsyncMock()
+    monkeypatch.setattr(recheck, "reconcile", spy)
+    run = SimpleNamespace(params_json={"verified_at": (now - timedelta(seconds=1)).isoformat()})
+
+    bound = await accounting_recheck.bound_report(
+        AsyncMock(), p["tenant_id"], run, report, now=now, subledger_recheck=False
+    )
+
+    assert bound["balance"]["status"] == "not_verified"
+    assert bound["balance"]["reason"] == "accounting_recheck_approval_mismatch"
+    assert bound["evidence_limits"] == {"code": "accounting_recheck_approval_mismatch"}
+    spy.assert_not_awaited()
+
+
+async def test_interim_finding_survives_an_approval_that_stopped_matching(
+    db,
+    approved_credit,  # noqa: F811
+    mcp_credit,  # noqa: F811
+    monkeypatch,
+):
+    """The run must terminate normally even when its approval is revoked mid-run; the finding binds closed."""
+    actor, config, case, message, _, _ = approved_credit
+    now = datetime.now(timezone.utc)
+    p, _, report = corrected(mcp_credit, now)
+    p.update(
+        tenant_id=str(actor.tenant_id),
+        config_id=str(config.id),
+        case_id=str(case.id),
+        scope=case.scope_json,
+        order_reference=case.order_reference,
+    )
+    so = deepcopy(message.structured_output)
+    so["accounting_review"] = p
+    message.structured_output = so
+    await db.flush()
+    run = await accounting_recheck.queue(db, actor.tenant_id, message, actor.id, now=now - timedelta(seconds=1))
+    await db.commit()
+    token = await state_service.claim_run(db, actor.tenant_id, run.id, now=now)
+    message.structured_output = {**message.structured_output, "status": "rejected"}  # revoked after queueing
+    await db.flush()
+    spy = AsyncMock()
+    monkeypatch.setattr(recheck, "reconcile", spy)
+    interim = deepcopy(report)
+    interim["order_reference"] = case.order_reference
+
+    await state_service.record_finding(
+        db, actor.tenant_id, run.id, case.order_reference, interim, lease_token=token, now=now, final=False
+    )
+
+    finding = await db.scalar(select(TransactionFinding).where(TransactionFinding.run_id == run.id))
+    assert finding.report_json["balance"]["status"] == "not_verified"
+    assert finding.report_json["balance"]["reason"] == "accounting_recheck_approval_mismatch"
+    spy.assert_not_awaited()
+
+
+def test_mcp_recheck_ceiling_applies_to_every_mcp_transported_kind(mcp_credit):  # noqa: F811
+    p, _, _ = mcp_credit
+    other = {**p, "kind": "sales_order_line_alignment"}
+    assert accounting_recheck.recheck_call_ceiling(other) == 128
+    assert accounting_recheck.needs_subledger_recheck(other) is False  # but only the credit re-reads the subledger
+
+
+async def test_defect_rolls_back_the_session_before_the_ownership_recheck(mcp_credit, monkeypatch):  # noqa: F811
+    now = datetime.now(timezone.utc)
+    p, _, report = corrected(mcp_credit, now)
+    run = _run(now)
+    _patch_state(monkeypatch, run)
+    monkeypatch.setattr(credit_api_correction, "fresh", AsyncMock(side_effect=RuntimeError("aborted transaction")))
+    db = AsyncMock()
+    with pytest.raises(RuntimeError):
+        await recheck.reconcile(db, p["tenant_id"], run, p, report)
+    db.rollback.assert_awaited_once()
+
+
+async def test_evidence_failure_does_not_roll_back_the_session(mcp_credit, monkeypatch):  # noqa: F811
+    now = datetime.now(timezone.utc)
+    p, _, report = corrected(mcp_credit, now)
+    run = _run(now)
+    _patch_state(monkeypatch, run)
+    monkeypatch.setattr(
+        credit_api_correction, "fresh", AsyncMock(side_effect=SourceReadError("source_transport_failed"))
+    )
+    db = AsyncMock()
+    await recheck.reconcile(db, p["tenant_id"], run, p, report)
+    db.rollback.assert_not_awaited()
