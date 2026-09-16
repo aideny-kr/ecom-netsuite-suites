@@ -41,12 +41,14 @@ def _run(now, *, max_api_calls=200):
     )
 
 
-def _patch_state(monkeypatch, run, *, read_db=None):
+def _patch_state(monkeypatch, run, *, read_db=None, real_read_session=False):
     audit, commit, get_run, lease = AsyncMock(), AsyncMock(), AsyncMock(return_value=run), Mock()
     monkeypatch.setattr(recheck.state, "_audit", audit)
     monkeypatch.setattr(recheck.state, "_commit", commit)
     monkeypatch.setattr(recheck.state, "get_run", get_run)
     monkeypatch.setattr(recheck.state, "_lease", lease)
+    if real_read_session:
+        return audit, commit, get_run, lease
 
     @asynccontextmanager
     async def read_session(db):
@@ -465,3 +467,55 @@ async def test_failed_read_on_a_real_session_still_audits_the_exit(
     ).all()
     assert len(audits) == 1
     assert audits[0].payload["balance"]["reason"] == outcome
+
+
+async def test_a_statement_cancelled_by_the_timeout_costs_one_read_connection_and_nothing_else(
+    mcp_credit,  # noqa: F811
+    monkeypatch,
+):
+    """The production shape: the caller's session is bound to an engine, the read session
+    is a second pooled connection. Cancelling a statement there invalidates that one
+    connection; the caller keeps its connection, its transaction and its rows.
+
+    The shared pytest fixture cannot host this test: on its single connection the same
+    cancellation invalidates the caller too (PendingRollbackError), which is exactly why
+    the read has its own session.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    from tests.conftest import _test_connect_args, _test_db_url
+
+    now = datetime.now(timezone.utc)
+    p, _, report = corrected(mcp_credit, now)
+    run = _run(now)
+    run.deadline_at = now + timedelta(seconds=1.5)  # reconcile's timeout is min(90, remaining)
+    audit, _, _, _ = _patch_state(monkeypatch, run, real_read_session=True)
+    sessions = {}
+
+    async def slow_read(read_db, tenant_id, proposal):
+        sessions["read"] = read_db
+        await read_db.execute(text("SELECT pg_sleep(30)"))
+        raise AssertionError("the timeout must cancel the statement")
+
+    monkeypatch.setattr(credit_api_correction, "fresh", slow_read)
+    engine = create_async_engine(_test_db_url, connect_args=_test_connect_args, pool_size=2, max_overflow=1)
+    try:
+        async with AsyncSession(bind=engine, expire_on_commit=False) as db:
+            await db.execute(text("SELECT 1"))  # the caller holds a connection and an open transaction
+            result = await recheck.reconcile(db, p["tenant_id"], run, p, report)
+            assert result["balance"] == {
+                **report["balance"],
+                "status": "not_verified",
+                "reason": "credit_recheck_evidence_unavailable",
+            }
+            assert sessions["read"] is not db
+            assert sessions["read"].bind is engine  # from the caller's own engine, never the global pool
+            assert len(_posted(audit)) == 1
+            # The caller's connection survived the cancellation and is still the only one checked out.
+            assert (await db.execute(text("SELECT 1"))).scalar() == 1
+            assert db.in_transaction()
+            assert engine.pool.checkedout() == 1
+        assert engine.pool.checkedout() == 0  # nothing leaked
+    finally:
+        await engine.dispose()

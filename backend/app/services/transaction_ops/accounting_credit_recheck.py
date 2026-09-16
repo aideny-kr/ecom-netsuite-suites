@@ -25,15 +25,16 @@ READ_SESSION_FACTORY = "accounting_authorization_session_factory"  # the dispatc
 def _read_session(db):
     """An independent session for the provider read.
 
-    A failed read (a statement cancelled by the timeout, a defect after a query) can
-    leave a session's transaction aborted. On the caller's session that would force a
-    rollback, and a rollback expires every row the caller holds, including the locked
-    run that record_finding is updating. So the read runs on its own session and
-    whatever state it leaves behind is discarded with it. The session comes from the
-    caller's own engine (never the app's global pool: Celery owns event-loop-local
-    engines, and a pool created on another loop fails with "attached to a different
-    loop"); the group dispatcher may publish a factory under the same key it already
-    uses for authorization reads.
+    A statement cancelled by the timeout is treated by SQLAlchemy as a disconnect: the
+    connection is invalidated, and a session sharing it is unrecoverable until it rolls
+    back. A defect after a query leaves the transaction aborted with the same remedy. On
+    the caller's session that rollback expires every row the caller holds, including the
+    locked run that record_finding reads next. So the read runs on its own session and
+    connection, and whatever a failed read leaves behind is discarded with it. The
+    session comes from the caller's own engine (never the app's global pool: Celery owns
+    event-loop-local engines, and a pool created on another loop fails with "attached to
+    a different loop"). A caller that already publishes a session factory under the
+    dispatcher's key gets that one instead.
     """
     info = getattr(db, "info", None)
     factory = info.get(READ_SESSION_FACTORY) if isinstance(info, dict) else None
@@ -187,11 +188,13 @@ async def reconcile(db, tenant_id, run, p, report):
         await state._commit(db, tenant_id)
         try:
             async with _read_session(db) as read_db:
-                await set_tenant_context(read_db, str(tenant_id))
-                # The timeout sits inside the session block: the cancellation is turned
-                # into TimeoutError before the session closes, so close() runs normally
-                # and the caller's session is never involved.
+                # The timeout sits inside the session block, so the cancellation becomes
+                # TimeoutError before the session closes and close() runs normally. The
+                # first statement is also the pool checkout, so it sits inside the
+                # timeout too: an exhausted pool is missing evidence, bounded like a
+                # slow provider, not an unbounded wait.
                 async with asyncio.timeout(min(90, remaining)):
+                    await set_tenant_context(read_db, str(tenant_id))
                     current = await credit_api_correction.fresh(read_db, tenant_id, p)
             result = project(
                 p,
