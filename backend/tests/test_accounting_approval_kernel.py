@@ -361,3 +361,73 @@ async def test_a_cancelled_group_child_keeps_its_claim_and_the_exact_approval_li
         "manifest_digest": manifest,
     }
     assert tool_audit.await_args_list[1].kwargs["payload"]["approval"] == requested["payload"]["approval"]
+
+
+async def test_a_legacy_execution_record_on_another_card_still_blocks_the_send(db, card):
+    """During the cutover, work sent under the old claim (accounting_execution on an earlier
+    card, no ledger row) must still be seen: the kernel path keeps the cross-card history
+    check and refuses before claiming."""
+    from app.services.transaction_ops.accounting_recovery import execution_claim
+
+    actor, session, message, p, _ = card
+    earlier = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=session.id,
+        role="assistant",
+        content="",
+        structured_output=execution_claim(
+            {**message.structured_output, "status": "approved"},
+            uuid.uuid4(),
+            actor.id,
+            {},
+            now=datetime.now(timezone.utc),
+        ),
+    )
+    db.add(earlier)
+    await db.flush()
+    dispatch = AsyncMock()
+    events, so, _ = await approve(db, card, dispatch=dispatch)
+    assert dispatch.await_count == 0
+    assert await _row(db, message) is None
+    assert any("No duplicate update was sent" in e.get("error", "") for e in events if e.get("type") == "error")
+    assert so["status"] == "pending"  # refused before the claim: the card is untouched
+
+
+async def test_a_refusal_before_any_effect_can_be_retried_as_a_lineage_row(db, card):
+    """A rejected_before_effect attempt permits one more approval of the same work: the new
+    row keeps the business identity (base_work_key) and names the attempt it retries."""
+    actor, session, message, p, _ = card
+    events, so, _ = await approve(db, card, preflight=AsyncMock(side_effect=ValueError("NetSuite amount changed")))
+    first = await _row(db, message)
+    assert first.status == "rejected_before_effect"
+    retry_card = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=session.id,
+        role="assistant",
+        content="",
+        structured_output={**message.structured_output, "status": "pending"},
+    )
+    for key in ("operation_id", "error"):
+        retry_card.structured_output.pop(key, None)
+    db.add(retry_card)
+    await db.flush()
+    events, so, stubs = await approve(db, (actor, session, retry_card, p, None))
+    second = await _row(db, retry_card)
+    assert second is not None and second.status == "verified"
+    assert second.retry_of_operation_id == first.id
+    assert second.base_work_key == first.base_work_key == first.work_key
+    assert second.work_key != first.work_key
+    assert stubs["dispatch"].await_count == 1
+    third = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=session.id,
+        role="assistant",
+        content="",
+        structured_output={**retry_card.structured_output, "status": "pending"},
+    )
+    for key in ("operation_id", "accounting_verification", "accounting_recheck"):
+        third.structured_output.pop(key, None)
+    db.add(third)
+    await db.flush()
+    events, so, _ = await approve(db, (actor, session, third, p, None), dispatch=AsyncMock())
+    assert so["status"] == "failed" and "already has an execution record" in so["error"]

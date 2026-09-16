@@ -53,8 +53,13 @@ def provider_of(so) -> str:
     return PROVIDER_NATIVE if so.get("tool_name") == NATIVE_TOOL else PROVIDER_MCP
 
 
-def intent_of(tenant_id, message, so, *, actor_id, now) -> state.ApprovedIntent:
-    """The ledger's view of an accounting card: identity, scope, provider, adapter."""
+def intent_of(tenant_id, message, so, *, actor_id, now, retry_of=None) -> state.ApprovedIntent:
+    """The ledger's view of an accounting card: identity, scope, provider, adapter.
+
+    ``retry_of`` is the rejected_before_effect row this approval retries: the intent then
+    carries a lineage work key (the business identity plus the attempt it retries) so the
+    ledger's one-attempt-per-work rule admits it and the new row inherits the base key.
+    """
     p = so.get("accounting_review") or {}
     if not p:
         raise state.StateError("accounting_review_required")
@@ -65,6 +70,12 @@ def intent_of(tenant_id, message, so, *, actor_id, now) -> state.ApprovedIntent:
     scope = p["scope"]
     account = str(scope["netsuite_account_id"]).replace("_", "-").lower()
     subsidiary = str(scope.get("subsidiary_id") or "")
+    identity = operation_identity(p)
+    work_key = (
+        state.business_digest({"base_work": retry_of.base_work_key, "retry_of_operation": str(retry_of.id)})
+        if retry_of is not None
+        else identity
+    )
     return state.ApprovedIntent(
         approval_kind=KIND,
         approval_id=message.id,
@@ -73,7 +84,9 @@ def intent_of(tenant_id, message, so, *, actor_id, now) -> state.ApprovedIntent:
         provider=provider_of(so),
         adapter=adapter_of(p),
         action=treatment.kind,
-        work_key=operation_identity(p),
+        work_key=work_key,
+        retry_of_operation_id=retry_of.id if retry_of is not None else None,
+        order_reference=str(p.get("order_reference") or "") or None,
         entity_key=state.business_digest(
             {"account": account, "subsidiary": subsidiary, "record_type": record_type, "document": document}
         ),
@@ -135,8 +148,20 @@ async def claim(db, tenant_id, message, *, actor_id, now=None):
     if message.tenant_id != tenant_id or await _session_owner(db, tenant_id, message) != actor_id:
         raise state.StateError("approver_not_session_owner", 403)
     await authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_input)
-    intent = intent_of(tenant_id, message, so, actor_id=actor_id, now=now)
+    retry_of = await _retryable_attempt(db, tenant_id, so)
+    intent = intent_of(tenant_id, message, so, actor_id=actor_id, now=now, retry_of=retry_of)
     return await state.claim_intent(db, tenant_id, intent, now=now)
+
+
+async def _retryable_attempt(db, tenant_id, so):
+    """The latest ledger attempt on this business identity when, and only when, it was
+    refused before any effect: that is the one state a lineage retry is allowed from
+    (write-kernel design, section 4). Anything else leaves the ledger's refusal to speak."""
+    p = so.get("accounting_review") or {}
+    if not p:
+        return None
+    latest = await state.latest_operation_for_base(db, tenant_id, operation_identity(p))
+    return latest if latest is not None and latest.status == "rejected_before_effect" else None
 
 
 async def authorize_dispatch(db, tenant_id, operation, claimed, now):
@@ -161,7 +186,7 @@ async def authorize_dispatch(db, tenant_id, operation, claimed, now):
         or so.get("status") != "executing"
         or so.get("operation_id") != str(operation.id)
         or evidence_digest(so) != recorded.get("evidence_digest")
-        or operation_identity(so.get("accounting_review")) != operation.work_key
+        or operation_identity(so.get("accounting_review")) != operation.base_work_key
     ):
         raise state.StateError("confirmation_changed")
     approver = UUID(str(recorded.get("approved_by")))
