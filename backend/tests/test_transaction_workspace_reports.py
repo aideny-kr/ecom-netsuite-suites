@@ -262,3 +262,22 @@ async def test_group_listing_can_page_more_than_fifty_groups(db, tenant_a):
     tail = await list_groups(db, tenant_a.id, limit=100, offset=100)
     assert len(tail["groups"]) == 1 and not tail["has_next"]
     assert len((await list_groups(db, tenant_a.id, limit=500))["groups"]) == 101
+
+
+async def test_each_selected_cohort_materializes_under_its_own_name(db, admin_user, monkeypatch):
+    """The identities CTE is named per run. An anonymous CTE takes its number from a
+    Python object id, and the ``prefix_with("MATERIALIZED")`` copy kept the freed
+    original's id, which the candidates subquery reused: CI rendered both as ``anon_8``
+    and PostgreSQL refused the review page ("table name specified more than once").
+    Two selected runs must render two differently named CTEs and no anonymous one."""
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.transaction_ops.workspace_results import selected_evidence
+
+    actor = admin_user[0]
+    first, second, _ = await fixture_rows(db, actor, monkeypatch, count=2)
+    latest, _ = await selected_evidence(db, actor.tenant_id, [first.id, second.id])
+    sql = str(select(latest).compile(dialect=postgresql.dialect()))
+    assert "WITH anon_" not in sql
+    assert f"WITH review_identities_{first.id.hex} AS MATERIALIZED" in sql
+    assert f"WITH review_identities_{second.id.hex} AS MATERIALIZED" in sql

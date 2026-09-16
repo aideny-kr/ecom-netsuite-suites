@@ -117,9 +117,13 @@ async def test_last_moment_revocation_prevents_dispatch(db, ready, revoke):
 
 async def test_expired_approval_and_wrong_provider_cannot_dispatch(db, ready):
     actor, _, proposal, claim = ready
-    with pytest.raises(state.StateError, match="stale_evidence"):
-        await reserve(db, actor.tenant_id, claim, now=proposal.valid_until)
+    # The attempt's deadline never exceeds the approval's validity, so an expired approval
+    # is a spent attempt first: the ledger settles it before the approval source is asked.
     with pytest.raises(state.StateError, match="unsupported_dispatch_provider"):
         await state.reserve_operation_dispatch(
             db, actor.tenant_id, claim, provider="celigo", payload_fingerprint="b" * 64, now=datetime.now(timezone.utc)
         )
+    with pytest.raises(state.StateError, match="operation_budget_exhausted"):
+        await reserve(db, actor.tenant_id, claim, now=proposal.valid_until)
+    row = await state._one(db, actor.tenant_id, TransactionOperation, claim.operation_id)
+    assert row.status == "rejected_before_effect"

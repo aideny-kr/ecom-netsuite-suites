@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from app.models.chat import ChatMessage
 from app.models.transaction_ops import TransactionCase, TransactionFinding, TransactionRun
 from app.models.user import User
-from app.services.transaction_ops.accounting_recheck import report_in_scope, supports
+from app.services.transaction_ops.accounting_recheck import effective_config_id, report_in_scope, supports
 from app.services.transaction_ops.accounting_recovery import evidence_digest
 from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.planner import source_fingerprint
@@ -63,7 +63,7 @@ def verified_resolution(message, run, finding, case):
             and p["scope"] == case.scope_json
             and p["case_id"] == str(case.id)
             and p["order_reference"] == case.order_reference == finding.order_reference
-            and p["config_id"] == str(run.config_id)
+            and effective_config_id(so) == str(run.config_id)
             and run.work_key == business_digest({"accounting_recheck_confirmation": str(message.id)})
             and run.origin == "recovery"
             and run.status == "finished"

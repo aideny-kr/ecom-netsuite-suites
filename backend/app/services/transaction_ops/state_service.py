@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 
@@ -87,10 +88,44 @@ class StateError(ValueError):
         self.http_status = http_status
 
 
+def lineage_work_key(base_work_key: str, retry_of_operation_id) -> str:
+    """The work key of a retry: the business identity plus the attempt it retries, so the
+    one-attempt-per-work rule admits it and the row still inherits the base key."""
+    return business_digest({"base_work": base_work_key, "retry_of_operation": str(retry_of_operation_id)})
+
+
 def permit_consumed(operation) -> bool:
     """Whether the one-use send permit was reserved on this row. A consumed permit cannot be
     told apart from a sent request, so every outcome after it is at least ``unknown``."""
     return (operation.result_json or {}).get("dispatch_reserved") is True
+
+
+@dataclass(frozen=True)
+class ApprovedIntent:
+    """What an approval source hands the ledger to claim: the approval's identity, the
+    business identity of the work (``work_key``), the collision scope (``entity_key``) and
+    the provider/adapter that will carry it. The source has already checked the approval is
+    valid; the ledger checks the work is new and the document free."""
+
+    approval_kind: str
+    approval_id: uuid.UUID
+    approved_by: uuid.UUID
+    surface: str
+    provider: str
+    adapter: str
+    action: str
+    work_key: str
+    entity_key: str
+    netsuite_account_id: str
+    subsidiary_id: str
+    record_type: str
+    target_record_id: str | None
+    evidence_digest: str
+    valid_until: datetime
+    currency: str | None = None
+    config_id: uuid.UUID | None = None
+    order_reference: str | None = None  # with config_id, the scope a read-only recovery runs under
+    retry_of_operation_id: uuid.UUID | None = None
 
 
 def _clock(now=None):
@@ -1016,26 +1051,155 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
         max_api_calls=_OPERATION_CALLS,
         api_calls_used=0,
         status="executing",
+        # The scope a read-only recovery runs under, recorded at the claim like every
+        # other source's (create_operation_recovery reads it from the row).
+        result_json={"recovery_scope": {"config_id": str(row.config_id), "order_reference": row.order_reference}},
     )
     db.add(operation)
     await db.flush()
-    intent = ClaimedOperation(
-        operation_id=operation.id,
-        proposal_id=row.id,
-        work_key=row.work_key,
-        config_id=row.config_id,
-        action=row.action,
-        currency=row.currency,
-        netsuite_account_id=row.netsuite_account_id,
-        subsidiary_id=row.subsidiary_id,
-        record_type=row.record_type,
-        target_record_id=row.target_record_id,
-        before_json=row.before_json,
-        after_json=row.after_json,
-    )
+    intent = _claimed_from_proposal(operation.id, row)
     await _audit(db, tenant_id, "operation.attempt", operation)
     await _commit(db, tenant_id)
     return intent
+
+
+async def claim_intent(db, tenant_id, intent: ApprovedIntent, *, now=None) -> ClaimedOperation:
+    """Claim approved work from any approval source before its fresh, budgeted reads.
+
+    The source (chat_confirmation.claim, or claim_approved_operation for a proposal) has
+    already established the approval is valid. This is the generic half: the tenant lock,
+    one attempt per approval, one attempt per piece of work (``work_key``), one in-flight
+    attempt per document (``entity_key``; the partial unique index is the backstop), the
+    lineage of a retry, the executing row, its audit and the commit.
+    """
+    now = _clock(now)
+    await set_tenant_context(db, str(tenant_id))
+    await db.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+    claimed = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.approval_kind == intent.approval_kind,
+                TransactionOperation.approval_id == intent.approval_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if claimed is not None:
+        raise StateError("approval_already_claimed")
+    attempted = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == intent.work_key
+            )
+        )
+    ).scalar_one_or_none()
+    if attempted is not None:
+        raise StateError("operation_already_attempted")
+    in_flight = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.entity_key == intent.entity_key,
+                TransactionOperation.status.in_(IN_FLIGHT),
+            )
+        )
+    ).scalar_one_or_none()
+    if in_flight is not None:
+        raise StateError("entity_in_flight")
+    previous = None
+    if intent.retry_of_operation_id is not None:
+        previous = await _one(db, tenant_id, TransactionOperation, intent.retry_of_operation_id)
+        if previous.status != "rejected_before_effect":
+            raise StateError("retry_requires_rejected_before_effect")
+    operation = TransactionOperation(
+        tenant_id=tenant_id,
+        proposal_id=None,
+        approval_kind=intent.approval_kind,
+        approval_id=intent.approval_id,
+        surface=intent.surface,
+        provider=intent.provider,
+        adapter=intent.adapter,
+        work_key=intent.work_key,
+        entity_key=intent.entity_key,
+        base_work_key=previous.base_work_key if previous is not None else intent.work_key,
+        retry_of_operation_id=previous.id if previous is not None else None,
+        attempted_at=now,
+        deadline_at=min(now + _OPERATION_TIME, intent.valid_until),
+        max_api_calls=_OPERATION_CALLS,
+        api_calls_used=0,
+        status="executing",
+        result_json={
+            "evidence_digest": intent.evidence_digest,
+            "approved_by": str(intent.approved_by),
+            # Recorded at the claim so a recovery pass reads under the scope the approval had,
+            # never one a later caller supplies.
+            "recovery_scope": {
+                "config_id": str(intent.config_id) if intent.config_id else None,
+                "order_reference": intent.order_reference,
+            },
+        },
+    )
+    db.add(operation)
+    await db.flush()
+    claimed = ClaimedOperation(
+        operation_id=operation.id,
+        proposal_id=None,
+        approval_kind=intent.approval_kind,
+        approval_id=intent.approval_id,
+        work_key=intent.work_key,
+        config_id=intent.config_id,
+        action=intent.action,
+        currency=intent.currency,
+        netsuite_account_id=intent.netsuite_account_id,
+        subsidiary_id=intent.subsidiary_id,
+        record_type=intent.record_type,
+        target_record_id=intent.target_record_id,
+        before_json={},
+        after_json={},
+    )
+    await _audit(
+        db,
+        tenant_id,
+        "operation.attempt",
+        operation,
+        payload={
+            "approval_kind": intent.approval_kind,
+            "approval_id": str(intent.approval_id),
+            "surface": intent.surface,
+        },
+    )
+    await _commit(db, tenant_id)
+    return claimed
+
+
+async def operation_for_approval(db, tenant_id, approval_kind, approval_id):
+    """The ledger row an approval claimed, or None."""
+    await set_tenant_context(db, str(tenant_id))
+    return (
+        await db.execute(
+            select(TransactionOperation)
+            .where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.approval_kind == approval_kind,
+                TransactionOperation.approval_id == approval_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def latest_operation_for_base(db, tenant_id, base_work_key):
+    """The most recent attempt on a business identity across its retry lineage, or None."""
+    await set_tenant_context(db, str(tenant_id))
+    return (
+        await db.execute(
+            select(TransactionOperation)
+            .where(TransactionOperation.tenant_id == tenant_id, TransactionOperation.base_work_key == base_work_key)
+            .order_by(TransactionOperation.attempted_at.desc(), TransactionOperation.id.desc())
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
 
 
 async def operation_for_work(db, tenant_id, work_key):
@@ -1077,8 +1241,9 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
     if row.status not in IN_FLIGHT:
         raise StateError("operation_terminal")
     # An unknown attempt can move only after caller-provided read-only provider
-    # reconciliation; this service never dispatches it again.
-    if row.status == "unknown" and evidence.get("reconciled") is not True:
+    # reconciliation; this service never dispatches it again. Handing it to a person
+    # (needs_review) is an escalation, not a finding, and needs no reads.
+    if row.status == "unknown" and outcome != "needs_review" and evidence.get("reconciled") is not True:
         raise StateError("reconciliation_evidence_required")
     if row.status == "committed_unverified":
         # A receipt exists, so the attempt can never be called "before effect" or
@@ -1128,13 +1293,18 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
 
 
 async def reserve_operation_dispatch(
-    db, tenant_id, claimed: ClaimedOperation, *, provider, payload_fingerprint, now=None
+    db, tenant_id, claimed: ClaimedOperation, *, provider, payload_fingerprint, now=None, authorize=None
 ):
     """Consume one durable send permit. A crash after this commit permits only reads.
 
     An adapter calls this after its final fresh provider preflight and before
     its single mutation. No job retry or reconstructed claim can reserve again.
     Provider receipts never grant approval, reset the permit, or prove success.
+
+    Every approval source authorizes the same way: ``authorize(db, tenant_id, operation,
+    claimed, now)`` raises StateError when the approval no longer holds. A transaction
+    proposal's claim brings its own (the proposal re-check); any other source must pass
+    one, or no permit is minted.
     """
     now = _clock(now)
     if not isinstance(payload_fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", payload_fingerprint):
@@ -1147,11 +1317,39 @@ async def reserve_operation_dispatch(
     ).scalar_one_or_none()
     if tenant is None or not tenant.is_active:
         raise StateError("tenant_unavailable", 403)
-    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
+    if claimed.proposal_id is not None:
+        authorize = _proposal_still_authorized
+    elif authorize is None:
+        raise StateError("approval_source_required")
     operation = await _one(db, tenant_id, TransactionOperation, claimed.operation_id, lock=True)
-    expected = ClaimedOperation(
-        operation_id=operation.id,
+    if (
+        operation.proposal_id != claimed.proposal_id
+        or operation.approval_kind != claimed.approval_kind
+        or operation.approval_id != claimed.approval_id
+        or operation.work_key != claimed.work_key
+    ):
+        raise StateError("claimed_operation_mismatch")
+    if permit_consumed(operation):
+        await _commit(db, tenant_id)
+        return False
+    if operation.status != "executing":
+        raise StateError("operation_not_executable")
+    if operation.provider != provider:
+        raise StateError("unsupported_dispatch_provider")
+    if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
+        # A spent attempt is settled here, before the approval source is asked anything.
+        await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
+        raise StateError("operation_budget_exhausted")
+    await authorize(db, tenant_id, operation, claimed, now)
+    return await _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now)
+
+
+def _claimed_from_proposal(operation_id, proposal) -> ClaimedOperation:
+    """The claim a transaction proposal produces; rebuilt at the permit to compare."""
+    return ClaimedOperation(
+        operation_id=operation_id,
         proposal_id=proposal.id,
+        approval_id=proposal.id,
         work_key=proposal.work_key,
         config_id=proposal.config_id,
         action=proposal.action,
@@ -1163,15 +1361,17 @@ async def reserve_operation_dispatch(
         before_json=proposal.before_json,
         after_json=proposal.after_json,
     )
-    if claimed != expected or operation.proposal_id != proposal.id or operation.work_key != proposal.work_key:
+
+
+async def _proposal_still_authorized(db, tenant_id, operation, claimed, now):
+    """The transaction proposal's permit-time re-check: the claim still matches the
+    proposal exactly, the proposal is approved and fresh, the config still proposes
+    actions, the feature is on, and the decider is still a permitted human."""
+    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
+    if claimed != _claimed_from_proposal(operation.id, proposal):
         raise StateError("claimed_operation_mismatch")
-    if permit_consumed(operation):
-        await _commit(db, tenant_id)
-        return False
-    if operation.status != "executing" or proposal.status != "approved":
+    if proposal.status != "approved":
         raise StateError("operation_not_executable")
-    if PROVIDERS.get(proposal.action) != provider:
-        raise StateError("unsupported_dispatch_provider")
     if now >= proposal.valid_until:
         raise StateError("stale_evidence")
     config = await get_config(db, tenant_id, proposal.config_id)
@@ -1188,6 +1388,11 @@ async def reserve_operation_dispatch(
         )
     ).scalar_one_or_none()
     await _human(db, tenant_id, actor, "recon.run")
+
+
+async def _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now):
+    """The one-use permit itself: budgeted, written to the row, audited, committed. Every
+    approval source's refusals run before this; nothing after it may refuse."""
     if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
         raise StateError("operation_budget_exhausted")
@@ -1274,9 +1479,13 @@ async def reserve_operation_budget(db, tenant_id, operation_id, *, api_calls, no
     if now >= operation.deadline_at or operation.api_calls_used + api_calls > operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
         return None
-    flags = await get_all_flags(db, tenant_id)
-    if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
-        raise StateError("feature_disabled", 403)
+    if operation.proposal_id is not None:
+        # The scheduled feature's flags gate a proposal's reads mid-flight. Any other
+        # approval source (a chat confirmation) is gated by its own policy at the claim
+        # and at the permit, not by the reconciliation product's flags.
+        flags = await get_all_flags(db, tenant_id)
+        if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
+            raise StateError("feature_disabled", 403)
     operation.api_calls_used += api_calls
     permit = OperationReadPermit(
         deadline_at=operation.deadline_at, remaining_api_calls=operation.max_api_calls - operation.api_calls_used
@@ -1309,6 +1518,10 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
     Every recheck gets its own fixed run budget. No operation spend, approval,
     deadline or dispatch reservation is reset. No schedule/model may supply a
     new read-request key without a current authenticated human actor.
+
+    A proposal's row takes its scope from the proposal; a row from another approval
+    source takes it from the ``recovery_scope`` its claim recorded, never from the
+    caller; without one there is no budgeted read.
     """
     now = _clock(now)
     manual = evaluation_key is not None
@@ -1334,8 +1547,16 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
         return existing
     if operation.status not in SETTLED or not permit_consumed(operation):
         raise StateError("operation_not_recoverable")
-    proposal = await get_proposal(db, tenant_id, operation.proposal_id)
-    config = await get_config(db, tenant_id, proposal.config_id)
+    scope = (operation.result_json or {}).get("recovery_scope") or {}
+    config_id = uuid.UUID(str(scope["config_id"])) if scope.get("config_id") else None
+    order_reference = scope.get("order_reference")
+    if (config_id is None or not order_reference) and operation.proposal_id is not None:
+        # Rows claimed before the scope was recorded at the claim: the proposal still has it.
+        proposal = await get_proposal(db, tenant_id, operation.proposal_id)
+        config_id, order_reference = proposal.config_id, proposal.order_reference
+    if config_id is None or not order_reference:
+        raise StateError("recovery_unscoped")
+    config = await get_config(db, tenant_id, config_id)
     if not config.enabled:
         raise StateError("config_disabled")
     pending = (
@@ -1364,7 +1585,7 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
         origin="recovery",
         params_json={
             "operation_id": str(operation.id),
-            "order_references": [proposal.order_reference],
+            "order_references": [order_reference],
             **({"manual_recheck": True, "evaluation_key": str(evaluation_key)} if manual else {}),
         },
         config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),

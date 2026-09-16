@@ -196,17 +196,15 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
 @pytest.mark.parametrize(
     "kind,outcome",
     [
-        (kind, outcome)
-        for kind in ("tax", "credit", "discount", "sales_order", "native_credit", "api_credit")
-        for outcome in ("stale", "verified", "unverified", "rejected")
+        ("native_credit", outcome)
+        for outcome in ("stale", "verified", "unverified", "rejected", "unknown_verified", "unknown_missing")
     ]
-    + [
-        (kind, outcome)
-        for kind in ("credit", "discount", "sales_order", "native_credit", "api_credit")
-        for outcome in ("unknown_verified", "unknown_missing", "unreadable_verified")
-    ],
+    + [("native_credit", "unreadable_verified")],
 )
 async def test_approval_preflight_execution_verification_and_actor_audit(outcome, kind):
+    """The native amendment card still runs the orchestrator's own claim and dispatcher
+    (its kernel adapter is the next G3.2 slice). The five MCP treatments run through the
+    write kernel and are pinned on the real database in test_accounting_approval_kernel.py."""
     p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID)
     verified_outcome = outcome in {"verified", "unknown_verified", "unreadable_verified"}

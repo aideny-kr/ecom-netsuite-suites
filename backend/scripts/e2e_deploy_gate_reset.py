@@ -44,10 +44,7 @@ async def reset(changeset_id: uuid.UUID) -> int:
         async with engine.connect() as conn:
             # Clear in-flight tokens.
             await conn.execute(
-                text(
-                    "DELETE FROM workspace_deploy_tokens "
-                    "WHERE changeset_id = :cs AND consumed_at IS NULL"
-                ),
+                text("DELETE FROM workspace_deploy_tokens WHERE changeset_id = :cs AND consumed_at IS NULL"),
                 {"cs": str(changeset_id)},
             )
             # Drop any queued deploy_sandbox runs that would interfere with a fresh test.
@@ -64,10 +61,7 @@ async def reset(changeset_id: uuid.UUID) -> int:
 
             # Verify deploy-eligible.
             cs_row = await conn.execute(
-                text(
-                    "SELECT status FROM workspace_changesets "
-                    "WHERE id = :cs LIMIT 1"
-                ),
+                text("SELECT status FROM workspace_changesets WHERE id = :cs LIMIT 1"),
                 {"cs": str(changeset_id)},
             )
             cs = cs_row.fetchone()
@@ -90,15 +84,10 @@ async def reset(changeset_id: uuid.UUID) -> int:
             latest: dict[str, str] = {}
             for run_type, status in gates:
                 latest.setdefault(run_type, status)
-            missing = [
-                rt
-                for rt in ("suitecloud_validate", "jest_unit_test")
-                if latest.get(rt) != "passed"
-            ]
+            missing = [rt for rt in ("suitecloud_validate", "jest_unit_test") if latest.get(rt) != "passed"]
             if missing:
                 print(
-                    f"gates not passing for {changeset_id}: "
-                    f"{ {rt: latest.get(rt, 'missing') for rt in missing} }",
+                    f"gates not passing for {changeset_id}: { {rt: latest.get(rt, 'missing') for rt in missing} }",
                     file=sys.stderr,
                 )
                 return 1

@@ -18,6 +18,7 @@ from app.models.transaction_ops import TransactionCase, TransactionFinding, Tran
 from app.models.user import User
 from app.services.audit_service import log_event
 from app.services.transaction_ops.accounting_history import _claim, verified_resolution
+from app.services.transaction_ops.accounting_recheck import effective_config_id
 from app.services.transaction_ops.resolution_plan import completed_plan, operation_identity
 from app.services.transaction_ops.treatments import treatment_or_none
 
@@ -125,7 +126,7 @@ async def _evidence(db, tenant_id, message):
         or result.get("approved_by") != claim["approved_by"]
         or result.get("case_id") != p["case_id"]
         or run.origin != "recovery"
-        or str(run.config_id) != p["config_id"]
+        or str(run.config_id) != str(effective_config_id(so) or "")
         or run.work_key != business_digest({"accounting_recheck_confirmation": str(message.id)})
         or run.params_json.get("order_references") != [p["order_reference"]]
         or run.params_json.get("verification_scope") != SCOPE

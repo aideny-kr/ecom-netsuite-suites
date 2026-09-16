@@ -7,7 +7,9 @@ from app.models.transaction_ops import TransactionRun as Run
 from app.services.transaction_ops.source_eligibility import eligible_reports
 
 
-def current_review_evidence(cohort, tenant_id, snapshot):
+def current_review_evidence(cohort, tenant_id, snapshot, *, name="review_identities"):
+    """``name`` is the materialized CTE's: it must differ from any other cohort's in the
+    same statement (the review page unions one cohort per selected run)."""
     # A configuration revision may change policy, but a different source,
     # account, entity, identity or currency cannot replace a finding.
     if not (snapshot.get("source_connection_id") or snapshot.get("source_step_id")) or not all(
@@ -22,6 +24,11 @@ def current_review_evidence(cohort, tenant_id, snapshot):
     scope.append(func.lower(func.replace(Run.config_snapshot["netsuite_account_id"].astext, "_", "-")) == account)
     # Materialize only identity and winner keys. A per-order correlated lookup
     # otherwise rescans the tenant's finding history thousands of times.
+    # The CTE is named explicitly: an anonymous alias takes its number from the
+    # Python object's id, and ``prefix_with`` returns a copy that keeps the freed
+    # original's id, which the next allocation (the candidates subquery) can reuse.
+    # CI then rendered both as ``anon_8`` and PostgreSQL refused the statement
+    # ("table name specified more than once"). A name never collides.
     identities = (
         select(
             cohort.c.id,
@@ -30,7 +37,7 @@ def current_review_evidence(cohort, tenant_id, snapshot):
             cohort.c.report_json["source"]["record_id"].astext.label("source_id"),
             cohort.c.report_json["balance"]["currency"].astext.label("currency"),
         )
-        .cte(nesting=True)
+        .cte(name, nesting=True)
         .prefix_with("MATERIALIZED")
     )
     candidates = (
@@ -104,7 +111,7 @@ async def period_evidence(db, tenant_id, run_id):
     )
     # Deduplicate narrow IDs before loading potentially large evidence blobs.
     cohort = select(cohort, f.report_json).join(f, (f.id == cohort.c.id) & (f.tenant_id == tenant_id)).subquery()
-    latest = current_review_evidence(cohort, tenant_id, root.config_snapshot)
+    latest = current_review_evidence(cohort, tenant_id, root.config_snapshot, name=f"review_identities_{root.id.hex}")
     # Filter after winner selection: never resurrect a superseded exception.
     return select(latest).where(eligible_reports(latest.c.report_json)).subquery(), span
 

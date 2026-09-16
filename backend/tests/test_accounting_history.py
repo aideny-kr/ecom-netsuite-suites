@@ -239,3 +239,32 @@ async def test_related_examples_require_compatible_current_policy_and_verified_c
     if result["examples"]:
         assert result["examples"][0]["approved_by"] == str(actor.id)
         assert result["examples"][0]["requires_new_human_approval"]
+
+
+async def test_a_verified_example_holds_for_a_card_whose_review_names_no_config(db, reconciled_credit):
+    """The invoice-tax builder never sets config_id; a kernel claim records the config it
+    resolved as the recovery scope, and every reader of the card uses that."""
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from app.services.transaction_ops import accounting_history
+    from app.services.transaction_ops.accounting_recovery import evidence_digest
+
+    actor, config, case, message, run, finding = reconciled_credit
+    assert accounting_history.verified_resolution(message, run, finding, case)
+    so = deepcopy(message.structured_output)
+    so["accounting_review"].pop("config_id")
+    so["accounting_execution"]["evidence_digest"] = evidence_digest(so)
+    so["accounting_execution"]["recovery_scope"] = {
+        "config_id": str(run.config_id),
+        "order_reference": case.order_reference,
+    }
+    m = SimpleNamespace(
+        id=message.id,
+        session_id=message.session_id,
+        tenant_id=message.tenant_id,
+        role=message.role,
+        structured_output=so,
+    )
+    assert accounting_history._claim(m) is not None
+    assert accounting_history.verified_resolution(m, run, finding, case)
