@@ -528,10 +528,11 @@ async def _execute_tool_call_once(
     # out of ns_getRecordTypeMetadata / ns_getSubsidiaries / ns_runCustomSuiteQL,
     # and blocking those would break validation, the slot form and the posting
     # invariants.
-    if not human_approved:
-        from app.services.chat.mutation_guard import classify_mutation as _classify_at_chokepoint
+    from app.services.chat.mutation_guard import classify_mutation, is_record_type_allowed
 
-        _verb = _classify_at_chokepoint(tool_name)
+    _verb = classify_mutation(tool_name)  # the NetSuite mutation verb, or None for every read
+    ext_parsed = parse_external_tool_name(tool_name)
+    if not human_approved:
         if _verb:
             logger.warning(
                 "HITL guard refused an unapproved %s via %s (tenant=%s session=%s)",
@@ -564,13 +565,9 @@ async def _execute_tool_call_once(
     # is enforced where the write leaves, for every NetSuite mutation verb, approved or
     # not. Only the connector-facing verbs carry a recordType; the internal amendment
     # tool validates its own binding in its dispatcher.
-    if parse_external_tool_name(tool_name) is not None:
-        from app.services.chat.mutation_guard import classify_mutation as _classify_verb
-        from app.services.chat.mutation_guard import is_record_type_allowed
-
-        _verb = _classify_verb(tool_name)
+    if ext_parsed is not None and _verb:
         _record_type = (tool_input or {}).get("recordType") if isinstance(tool_input, dict) else None
-        if _verb and not is_record_type_allowed(_record_type):
+        if not is_record_type_allowed(_record_type):
             logger.warning(
                 "Deny-list refused a %s on record type %r via %s (tenant=%s session=%s approved=%s)",
                 _verb,
@@ -623,8 +620,7 @@ async def _execute_tool_call_once(
         )
         return json.dumps(result, default=str)
 
-    # Check if it's an external tool
-    ext_parsed = parse_external_tool_name(tool_name)
+    # An external (connector) tool
     if ext_parsed is not None:
         connector_id, raw_tool_name = ext_parsed
         from app.services.chat.external_tool_audit import audited_external_call

@@ -28,7 +28,7 @@ class TreatmentError(ValueError, KeyError):
         return self.args[0] if self.args else ""
 
 
-def _field(proposal, key):
+def _required_field(proposal, key):
     try:
         return proposal[key]
     except (KeyError, TypeError):
@@ -141,12 +141,22 @@ def treatment_of(proposal) -> Treatment:
         raise TreatmentError(f"unsupported correction kind: {kind}") from None
 
 
-def family_of(proposal):
-    """The treatment family, or None for a proposal whose kind is not a registered treatment."""
+def treatment_or_none(proposal):
+    """The registry row, or None for a proposal whose kind is not a registered treatment.
+
+    For readers that must tolerate a foreign kind (history, links, display); anything
+    that decides a write uses treatment_of and refuses.
+    """
     try:
-        return treatment_of(proposal).family
+        return treatment_of(proposal)
     except TreatmentError:
         return None
+
+
+def family_of(proposal):
+    """The treatment family, or None for a proposal whose kind is not a registered treatment."""
+    row = treatment_or_none(proposal)
+    return row.family if row else None
 
 
 def is_mcp(proposal) -> bool:
@@ -176,11 +186,11 @@ def treatment_profile(proposal) -> dict:
     treatment = treatment_of(proposal)
     if treatment.family == "amendment":
         if is_mcp(proposal):
-            return {"connector_schema": _field(proposal, "connector_schema")}
-        return _field(proposal, "native_profile")
+            return {"connector_schema": _required_field(proposal, "connector_schema")}
+        return _required_field(proposal, "native_profile")
     if treatment.family == "commercial":
-        return _field(proposal, "profile")
-    return {"tax_item_id": _field(proposal, "tax_item").get("id")}
+        return _required_field(proposal, "profile")
+    return {"tax_item_id": _required_field(proposal, "tax_item").get("id")}
 
 
 def collision_key(proposal) -> tuple[str, str]:
@@ -188,10 +198,10 @@ def collision_key(proposal) -> tuple[str, str]:
     treatment = treatment_of(proposal)
     if treatment.lock == "invoice":
         # Fail closed: a lock keyed on the wrong document is worse than no lock.
-        return "invoice", str(_field(proposal, "invoice_id"))
+        return "invoice", str(_required_field(proposal, "invoice_id"))
     if treatment.lock == "invoice_record":
-        return "invoice", str(_field(proposal, "record_id"))
-    return _field(proposal, "record_type"), str(_field(proposal, "record_id"))
+        return "invoice", str(_required_field(proposal, "record_id"))
+    return _required_field(proposal, "record_type"), str(_required_field(proposal, "record_id"))
 
 
 def reconciliation_target_id(proposal):
@@ -207,7 +217,7 @@ def reconciliation_target_id(proposal):
     """
     try:
         declared = (proposal.get("reconciliation_target") or {}).get("record_id")
-        declared = str(declared) if declared else None
+        declared = None if declared in (None, "") else str(declared)  # ids compare as strings; 0 is a value
         rule = treatment_of(proposal).reconciliation_target
         if rule == "record":
             derived = str(proposal["record_id"])
@@ -216,7 +226,8 @@ def reconciliation_target_id(proposal):
             # invoice -> sales-order edge; neither the proposal's own derivation nor a
             # declaration can stand in for it. The edge becomes the derived answer and
             # then meets the same declared-vs-derived check as every other rule.
-            candidate = str(proposal["sales_order_id"]) if proposal.get("sales_order_id") else declared
+            order = proposal.get("sales_order_id")
+            candidate = declared if order in (None, "") else str(order)
             edge = (((proposal.get("support") or {}).get("invoice") or {}).get("createdFrom") or {}).get("id")
             if not candidate or edge is None or str(edge) != candidate:
                 return None

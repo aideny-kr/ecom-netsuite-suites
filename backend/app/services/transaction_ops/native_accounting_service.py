@@ -100,7 +100,7 @@ def validate_binding(tenant_id, tool_name, params, proposal):
         or not proposal
         or proposal.get("tenant_id") != str(tenant_id)
         or params != signed_input(proposal)
-        or proposal.get("kind") not in protocol.KINDS
+        or proposal.get("kind") not in protocol.AMENDMENT_RECORD_TYPES
     ):
         raise ValueError("native_signed_proposal_mismatch")
     protocol.validate_intent_profile(proposal, proposal["native_profile"])

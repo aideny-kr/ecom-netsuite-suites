@@ -8,7 +8,7 @@ correction is verified, never from a fabricated future native snapshot.
 import hashlib
 import json
 
-from app.services.transaction_ops.treatments import (  # noqa: F401  (KINDS re-exported)
+from app.services.transaction_ops.treatments import (
     DEPENDENT_KINDS,
     KINDS,
     treatment_of,
