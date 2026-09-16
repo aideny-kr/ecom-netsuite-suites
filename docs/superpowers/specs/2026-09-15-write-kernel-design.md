@@ -313,6 +313,12 @@ Each slice is one PR, T2 (mutates customer data, alembic, MCP mutation writes), 
    dispatcher's reservation audit and `_authorize_read` read the card's own claim (`accounting_execution`), so it keeps
    `execution_claim` / `previous_execution` until `NativeAmendmentAdapter` lands. The per-record advisory lock stays
    (the account cap is G5's); the ledger's `entity_key` is the collision scope underneath it.
+   *What the review rounds taught (four gate rounds + one reproducing review):* every reader of the card's own claim
+   (completion, history, recheck, dispatch, plan group) had to be satisfied, so a kernel card carries a **projection**
+   of its row in the legacy `accounting_execution` shape plus the `approval_claimed` audit, written at the claim;
+   `accounting_recovery.render_settled_card` is the one renderer of a card from its row once its sender is gone, and
+   every refusal to run a recovery escalates the row to `needs_review` so the document is freed. Those readers move
+   to the ledger when the native card does.
 3. **G3.3 generic writes and repair** — `GenericRecordAdapter`, `classify_write_failure`, the repair policy with
    per-class budgets and the cosmetic transform list, `semantic_payload` in the signed envelope, `#218` folded
    (externalId stamping, `duplicate:posted`), `may_enter_repair_loop` deleted. Acceptance: Prompt 1's and Prompt 5's
