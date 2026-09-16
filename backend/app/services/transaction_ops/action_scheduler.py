@@ -12,6 +12,7 @@ from app.models.transaction_ops import TransactionOperation as Operation
 from app.models.transaction_ops import TransactionProposal as Proposal
 from app.models.transaction_ops import TransactionRun as Run
 from app.services import feature_flag_service
+from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.scheduler import _BROKER_IO_TIMEOUT, _DISPATCH_TIMEOUT
 from app.workers.celery_app import celery_app
 
@@ -75,7 +76,7 @@ async def _candidates(db, tenant_id, now):
         .join(related, and_(related.id == Operation.proposal_id, related.tenant_id == tenant_id))
         .where(
             Operation.tenant_id == tenant_id,
-            Operation.status.in_(("executing", "unknown", "committed_unverified")),
+            Operation.status.in_(state.IN_FLIGHT),
             func.lower(func.replace(related.netsuite_account_id, "_", "-"))
             == func.lower(func.replace(Proposal.netsuite_account_id, "_", "-")),
             related.subsidiary_id == Proposal.subsidiary_id,
@@ -122,7 +123,7 @@ async def _candidates(db, tenant_id, now):
                     ~recovery_busy_or_done,
                     or_(
                         and_(Operation.status == "executing", Operation.deadline_at <= now),
-                        Operation.status.in_(("unknown", "committed_unverified")),
+                        Operation.status.in_(state.SETTLED),
                     ),
                 )
                 .order_by(Operation.attempted_at, Operation.id)

@@ -67,6 +67,7 @@ SETTLED = frozenset({"unknown", "committed_unverified"})  # a permit was consume
 # The states the write kernel may still write to. ``unknown`` is settled but not open: only
 # read-only reconciliation (recovery) may move it, never the attempt that produced it.
 OPEN = frozenset({"executing", "committed_unverified"})
+IN_FLIGHT = frozenset({"executing", *SETTLED})  # an attempt that blocks a new one on the same work or entity
 TERMINATION = {
     "verified": "done",
     "unknown": "stall",
@@ -836,9 +837,9 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
             await _commit(db, tenant_id)
             return existing
         if attempted is not None:
-            result = attempted.result_json or {}
             known_no_write = attempted.status in ("failed", "rejected_before_effect") and (
-                result.get("dispatch_reserved") is not True or result.get("code") == "provider_rejected_without_save"
+                not permit_consumed(attempted)
+                or (attempted.result_json or {}).get("code") == "provider_rejected_without_save"
             )
             if not known_no_write or attempt_number == 2:
                 await _commit(db, tenant_id)
@@ -934,7 +935,7 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
             .join(related, and_(related.id == TransactionOperation.proposal_id, related.tenant_id == tenant_id))
             .where(
                 TransactionOperation.tenant_id == tenant_id,
-                TransactionOperation.status.in_(("executing", *SETTLED)),
+                TransactionOperation.status.in_(IN_FLIGHT),
                 func.lower(func.replace(related.netsuite_account_id, "_", "-"))
                 == row.netsuite_account_id.replace("_", "-").lower(),
                 related.subsidiary_id == row.subsidiary_id,
@@ -1066,7 +1067,7 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
     if _LEDGER_RESULT_KEYS.intersection(evidence):
         raise StateError("reserved_operation_result_key")
     row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if row.status not in {"executing", *SETTLED}:
+    if row.status not in IN_FLIGHT:
         raise StateError("operation_terminal")
     # An unknown attempt can move only after caller-provided read-only provider
     # reconciliation; this service never dispatches it again.

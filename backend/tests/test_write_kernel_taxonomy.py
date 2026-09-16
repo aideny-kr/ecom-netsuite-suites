@@ -114,6 +114,39 @@ async def test_terminal_rows_are_frozen_by_the_database(db, ready):
     await db.rollback()
 
 
+async def test_the_migration_renames_legacy_failed_rows_under_the_legacy_check(db, ready):
+    """Run 109's downgrade and upgrade in-process, inside the test transaction, with a
+    legacy ``failed`` row present: the rename must happen while the CHECK that allows the
+    new value is in force. Gate round three: the UPDATE ran before the CHECK swap."""
+    import importlib.util
+    from pathlib import Path
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "109_write_kernel_operations.py"
+    spec = importlib.util.spec_from_file_location("migration_109", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    actor, _, _, claim = ready
+    await db.commit()  # the claim's savepoint; DDL below runs on the same connection
+
+    def run(connection, step):
+        with Operations.context(MigrationContext.configure(connection)):
+            step()
+
+    connection = await db.connection()
+    await connection.run_sync(run, migration.downgrade)
+    await db.execute(
+        text("UPDATE transaction_ops_operations SET status = 'failed' WHERE id = :id"), {"id": claim.operation_id}
+    )
+    await connection.run_sync(run, migration.upgrade)
+    status = await db.scalar(
+        text("SELECT status FROM transaction_ops_operations WHERE id = :id"), {"id": claim.operation_id}
+    )
+    assert status == "rejected_before_effect"
+
+
 # ---------------------------------------------------------------- complete_operation
 
 

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.create_verification import verify_created_outcome
 from app.services.transaction_ops.netsuite_create import prepare_create_input
 from app.services.transaction_ops.normalization import _time
@@ -228,19 +229,16 @@ class CeligoAdapter(_ScheduledAdapter):
         return verify_outcome(self.proposal, report, resolution=resolution, now=self.clock())
 
 
-# Proposal action -> adapter class. (state_service.ADAPTERS is the provider -> adapter
-# *name* the ledger records; this is the registry that constructs one.)
-ADAPTER_CLASSES = {
-    "correct_amounts": GuardRestletAdapter,
-    "sync_missing_order": GuardRestletAdapter,
-    "resolve_celigo_error": CeligoAdapter,
-}
+# Adapter name (as the ledger records it, state_service.ADAPTERS) -> the class. The
+# action -> provider -> adapter chain lives in state_service; this table only resolves
+# the name it ends in, so there is one registry, not two.
+ADAPTER_CLASSES = {cls.name: cls for cls in (GuardRestletAdapter, CeligoAdapter)}
 
 
 def build_adapter(action, **kwargs):
     """The adapter for a proposal action; the registry, not the caller, decides."""
     try:
-        cls = ADAPTER_CLASSES[action]
+        cls = ADAPTER_CLASSES[state.ADAPTERS[state.PROVIDERS[action]]]
     except KeyError:
         raise ExecutionStoppedError("unsupported_action", keep_code=True) from None
     return cls(**kwargs)

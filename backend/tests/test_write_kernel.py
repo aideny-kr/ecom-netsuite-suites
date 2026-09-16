@@ -188,6 +188,54 @@ async def test_a_second_delivery_after_a_closed_receipt_keeps_the_recorded_outco
     assert row.result_json["code"] == "verification_unproven"
 
 
+async def test_a_redelivery_can_still_verify_a_receipted_attempt(db, ready):
+    """A committed_unverified attempt the kernel closed without proof is still open to a
+    proof: a later delivery whose send is refused by the permit (the transport answers
+    'unknown' without sending) and whose readback proves the state ends verified."""
+    actor, _, _, claim = ready
+    first = await write_kernel.execute(db, actor.tenant_id, claim, FakeAdapter(proof=None))
+    assert first["status"] == "committed_unverified"
+    later = FakeAdapter(
+        reserve=False, receipt={"status": "unknown", "verified": False}, proof={"source_unchanged": True}
+    )
+    second = await write_kernel.execute(db, actor.tenant_id, claim, later)
+    row = await _row(db, claim)
+    assert second["status"] == "verified" and row.status == "verified"
+    assert row.result_json["verification"] == {"source_unchanged": True}
+    assert row.result_json["receipt"]["record_id"] == "63"  # the first delivery's receipt survives
+
+
+async def test_a_ledger_read_failure_after_an_exception_leaves_the_attempt_to_expiry_recovery(db, ready, monkeypatch):
+    """When the ledger cannot be re-read after a failure the kernel cannot record anything;
+    it raises with the adapter failure chained instead of guessing, and the row stays
+    executing for recover_expired_operation to settle."""
+    from sqlalchemy.exc import OperationalError
+
+    actor, _, _, claim = ready
+
+    async def unavailable(*args, **kwargs):
+        raise OperationalError("SELECT", {}, Exception("connection lost"))
+
+    adapter = FakeAdapter(preflight_error=RuntimeError("provider read failed"))
+    monkeypatch.setattr(write_kernel.state, "_one", unavailable)
+    with pytest.raises(OperationalError) as exc:
+        await write_kernel.execute(db, actor.tenant_id, claim, adapter)
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    monkeypatch.undo()
+    assert (await _row(db, claim)).status == "executing"
+
+
+def test_the_adapter_registry_and_the_ledger_vocabulary_agree():
+    """state_service names the provider and adapter the ledger records; write_adapters
+    constructs the class. One table must not drift from the other."""
+    from app.services.transaction_ops import write_adapters
+
+    for action, provider in state.PROVIDERS.items():
+        adapter = write_adapters.build_adapter(action, reads=None, config=None, mapping=None, proposal=None, clock=None)
+        assert adapter.provider == provider
+        assert adapter.name == state.ADAPTERS[provider]
+
+
 async def test_an_adapter_cannot_report_a_save_without_the_permit(db, ready):
     """The guard trigger refuses a receipt on a row that never consumed a permit; the kernel
     turns that refusal into needs_review instead of guessing what happened."""

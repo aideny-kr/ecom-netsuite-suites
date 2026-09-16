@@ -68,13 +68,6 @@ class WriteAdapter(Protocol):
         or None when it cannot be established (contradicted or unavailable)."""
 
 
-async def _operation(db, tenant_id, operation_id):
-    try:
-        return await state._one(db, tenant_id, TransactionOperation, operation_id)
-    except state.StateError:
-        return None
-
-
 def result_of(row) -> dict:
     return {
         "operation_id": str(row.id),
@@ -83,10 +76,11 @@ def result_of(row) -> dict:
     }
 
 
-def _closed(row) -> bool:
-    """Whether the ledger has already recorded this attempt's outcome. A terminal row is
-    closed; so is an open one that budget exhaustion or an earlier delivery completed
-    (``completed_at`` is written only by those), and its recorded reason is the truer one."""
+def _recorded(row) -> bool:
+    """Whether the ledger already holds an outcome a failure must not overwrite: a terminal
+    row, or an open one that budget exhaustion, a recovery pass or an earlier delivery
+    completed (only those write ``completed_at``). A proof may still move such a row
+    forward; an exception may not move it back or replace its recorded reason."""
     return row.status not in state.OPEN or row.completed_at is not None
 
 
@@ -128,13 +122,16 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
         async with asyncio.timeout(min(seconds, READ_TIMEOUT_SECONDS)):
             return await function(db, tenant_id, *args, **kwargs)
 
-    async def complete(outcome, code, *, row=None, **details):
-        row = row or await _operation(db, tenant_id, claimed.operation_id)
-        if _closed(row):
-            return result_of(row)
-        row = await state.complete_operation(
-            db, tenant_id, row.id, outcome=outcome, result_json={"code": code, **details}, now=clock()
-        )
+    async def complete(outcome, code, **details):
+        try:
+            row = await state.complete_operation(
+                db, tenant_id, claimed.operation_id, outcome=outcome, result_json={"code": code, **details}, now=clock()
+            )
+        except state.StateError as exc:
+            if exc.code != "operation_terminal":
+                raise
+            # A duplicate delivery of a settled claim reads the durable outcome.
+            row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
         return result_of(row)
 
     receipt = None
@@ -166,6 +163,14 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
         # An exception may follow an actual send (a permit reserved, a receipt recorded);
         # only the committed ledger row decides what the failure is. Preflight must never
         # reserve, so a changed precondition after a permit is treated as possibly sent.
-        row = await _operation(db, tenant_id, claimed.operation_id)
+        try:
+            row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
+        except Exception as ledger_exc:
+            # The ledger cannot be read, so nothing can be recorded and nothing is guessed:
+            # the row stays executing and recover_expired_operation settles it by its
+            # deadline. The adapter failure travels along as the cause.
+            raise ledger_exc from exc
+        if _recorded(row):
+            return result_of(row)
         outcome, code = _outcome_after(row, exc)
-        return await complete(outcome, code, row=row)
+        return await complete(outcome, code)
