@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="tasks.metric_catalog_reseed")
 def reseed_system_metrics_task() -> dict:
     """Celery entrypoint. Runs daily per Beat schedule. Idempotent."""
+    from app.core.config import settings
+
+    if settings.DEDICATED_RUNTIME:
+        return {"status": "skipped", "reason": "operator_managed_catalog"}
 
     async def _run():
         async with async_session_factory() as db:

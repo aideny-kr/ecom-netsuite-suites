@@ -277,3 +277,12 @@ if settings.SINGLE_COMPANY:
     celery_app.conf.beat_schedule = {
         name: entry for name, entry in celery_app.conf.beat_schedule.items() if entry["task"] not in _vendor_tasks
     }
+
+if settings.DEDICATED_RUNTIME:
+    # Shared catalogs are release artifacts. Seed with the separate operator
+    # before rollout; the runtime cannot write SYSTEM rows or global knowledge.
+    celery_app.conf.beat_schedule = {
+        name: entry
+        for name, entry in celery_app.conf.beat_schedule.items()
+        if entry["task"] not in {"tasks.metric_catalog_reseed", "tasks.oracle_skill_reseed"}
+    }

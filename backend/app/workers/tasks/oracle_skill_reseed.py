@@ -139,6 +139,10 @@ async def _run_reseed(db: "AsyncSession", root: Path | str | None = None) -> int
 @celery_app.task(name="tasks.oracle_skill_reseed")
 def reseed_oracle_skills_task() -> dict:
     """Celery entrypoint. Runs every 6 hours per Beat schedule."""
+    from app.core.config import settings
+
+    if settings.DEDICATED_RUNTIME:
+        return {"status": "skipped", "reason": "operator_managed_catalog"}
 
     async def _run():
         async with async_session_factory() as db:

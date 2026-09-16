@@ -1,0 +1,103 @@
+# Dedicated runtime, behind the separately managed TLS reverse proxy.
+# Run migrations/bootstrap/provisioning using the separate operator environment
+# before starting this file. All secret directories MUST be outside the checkout.
+name: suite-studio-dedicated
+
+x-runtime: &runtime
+  image: ${BACKEND_IMAGE:?Set reviewed backend image digest}
+  # Production image has no default entrypoint. Apply the same preflight to
+  # API, both worker queues and Beat, independent of the image's CMD.
+  entrypoint: [/app/entrypoint.sh]
+  restart: unless-stopped
+  environment:
+    SINGLE_COMPANY: "true"
+    DEDICATED_RUNTIME: "true"
+    APP_ENV: production
+    APP_DEBUG: "false"
+    DATABASE_URL_DIRECT: ""
+    DATABASE_URL_DIRECT_SYNC: ""
+    REDIS_URL: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/1
+    CELERY_RESULT_BACKEND: redis://redis:6379/2
+    CORS_ORIGINS: ${PUBLIC_ORIGIN:?Set exact HTTPS company origin}
+    FRONTEND_URL: ${PUBLIC_ORIGIN}
+    NETSUITE_OAUTH_REDIRECT_URI: ${NETSUITE_OAUTH_REDIRECT_URI:?Set verified HTTPS callback}
+    WEB_CONCURRENCY: "1"
+    EMAIL_PROVIDER: resend
+  volumes:
+    - ${RUNTIME_SECRETS_DIR:?Set private runtime secrets directory}:/run/secrets:ro
+    - workspace:/tmp/workspace_storage
+  networks: [data, outbound]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?Set reviewed pgvector image digest}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: suite_studio
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - database:/var/lib/postgresql/data
+      - ${POSTGRES_PASSWORD_FILE:?Set separate operator password file}:/run/secrets/postgres_password:ro
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres -d suite_studio]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: ${REDIS_IMAGE:?Set reviewed Redis image digest}
+    restart: unless-stopped
+    networks: [data]
+    volumes: [redis:/data]
+    command: [redis-server, --appendonly, "yes"]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  backend:
+    <<: *runtime
+    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000", --workers, "1"]
+    ports: ["127.0.0.1:${BACKEND_PORT:-18000}:8000"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  worker:
+    <<: *runtime
+    command: [celery, -A, app.workers.celery_app, worker, --loglevel=info, --concurrency=2, -Q, "default,sync,recon,export"]
+  worker-collectors:
+    <<: *runtime
+    command: [celery, -A, app.workers.celery_app, worker, --loglevel=info, --concurrency=1, -Q, recon-control]
+  beat:
+    <<: *runtime
+    command: [celery, -A, app.workers.celery_app, beat, --loglevel=info, --schedule=/tmp/celerybeat-schedule]
+  frontend:
+    image: ${FRONTEND_IMAGE:?Set reviewed frontend image digest}
+    restart: unless-stopped
+    networks: [outbound]
+    ports: ["127.0.0.1:${FRONTEND_PORT:-13002}:3000"]
+    depends_on:
+      backend: {condition: service_healthy}
+
+networks:
+  data: {internal: true}
+  outbound: {}
+volumes:
+  database:
+    external: true
+    name: ${DATABASE_VOLUME:?Set verified dedicated database volume}
+  workspace:
+    external: true
+    name: ${WORKSPACE_VOLUME:?Set verified dedicated workspace volume}
+  redis: {}

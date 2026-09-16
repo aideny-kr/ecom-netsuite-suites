@@ -21,12 +21,20 @@ from app.services.company_bootstrap import (
 
 
 async def run(command: str, request: RegisterRequest | None = None, adoption: dict | None = None) -> None:
+    if command == "check-runtime":
+        from app.services.runtime_security.checks import validate_runtime_configuration
+
+        validate_runtime_configuration()
     if command == "check-runtime" and not settings.SINGLE_COMPANY:
         return
     if not settings.SINGLE_COMPANY:
         raise ValueError("This command requires SINGLE_COMPANY=true")
     async with worker_async_session() as db:
         if command in {"check", "check-runtime"}:
+            if settings.DEDICATED_RUNTIME:
+                from app.services.runtime_security.checks import validate_runtime_database
+
+                await validate_runtime_database(db)
             await validate_company_database(db)
             print("Company database ready.")
         elif command == "adopt-existing":

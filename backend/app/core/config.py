@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     # Dedicated customer installs opt in; existing hosted deployments keep their
     # current registration and billing behavior until explicitly migrated.
     SINGLE_COMPANY: bool = False
+    # Dedicated production profile: database-enforced company binding and
+    # operator credentials kept out of API/worker/Beat containers.
+    DEDICATED_RUNTIME: bool = False
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ecom_netsuite"
     DATABASE_URL_SYNC: str = "postgresql://postgres:postgres@localhost:5432/ecom_netsuite"
@@ -33,6 +36,10 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY_VERSION: int = 1
 
     CORS_ORIGINS: str = "http://localhost:3000"
+    FRONTEND_URL: str = "http://localhost:3000"
+    EMAIL_PROVIDER: str = "console"
+    EMAIL_API_KEY: str = ""
+    EMAIL_FROM_ADDRESS: str = "SuiteStudio <noreply@suitestudio.ai>"
 
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
@@ -224,7 +231,11 @@ class Settings(BaseSettings):
     QUERY_IMPROVEMENT_MAX_EXPERIMENTS: int = 60
     QUERY_IMPROVEMENT_TENANT_ID: str = ""
 
-    model_config = {"env_file": str(_env_file), "extra": "ignore"}
+    model_config = {
+        "env_file": str(_env_file),
+        "extra": "ignore",
+        "secrets_dir": "/run/secrets" if Path("/run/secrets").is_dir() else None,
+    }
 
     @property
     def cors_origins_list(self) -> list[str]:

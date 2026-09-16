@@ -129,11 +129,16 @@ def _wire_auto_validate_orchestrator() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _validate_production_secrets()
+    from app.services.runtime_security.checks import validate_runtime_configuration, validate_runtime_database
+
+    validate_runtime_configuration()
     if settings.SINGLE_COMPANY:
         from app.core.database import async_session_factory
         from app.services.company_bootstrap import validate_company_database
 
         async with async_session_factory() as db:
+            if settings.DEDICATED_RUNTIME:
+                await validate_runtime_database(db)
             await validate_company_database(db)
     _init_sentry()
     setup_logging()

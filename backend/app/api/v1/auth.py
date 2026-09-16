@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -220,10 +220,14 @@ async def login(
     try:
         user, tokens = await auth_service.authenticate(db, request.email, request.password)
     except ValueError as e:
-        # F8: Audit failed login attempts (use zero UUID as sentinel for unknown tenant)
+        # Dedicated runtime cannot write SYSTEM rows. Attribute failed logins to
+        # the operator-installed company, never to a submitted email/token claim.
+        audit_tenant = uuid.UUID(int=0)
+        if settings.DEDICATED_RUNTIME:
+            audit_tenant = (await db.execute(text("SELECT company_id FROM suite_runtime_meta.binding"))).scalar_one()
         await audit_service.log_event(
             db=db,
-            tenant_id=uuid.UUID(int=0),
+            tenant_id=audit_tenant,
             category="auth",
             action="user.login_failed",
             status="denied",
