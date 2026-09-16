@@ -155,15 +155,13 @@ class GuardRestletAdapter(_ScheduledAdapter):
         guard = creation = None
         if claimed.action == "correct_amounts":
             guard = await read(self.reads.max_guard_calls, self.reads.guard, self.config, claimed.target_record_id)
-        elif claimed.action == "sync_missing_order":
+        else:  # sync_missing_order: the registry admits no third action for this adapter
             if report["comparison"]["recommended_action"] != "propose_missing_sync":
                 raise PreconditionChangedError("approved_evidence_changed")
             creation = self._creation(source)
             guard = await read(
                 self.reads.max_guard_calls, self.reads.create_preview, self.config, creation.payload_json
             )
-        else:
-            raise ExecutionStoppedError("unsupported_action", keep_code=True)
         self._same_plan(claimed, report, targets, guard=guard, creation=creation)
         return {"guard": guard, "creation": creation}
 
@@ -230,7 +228,9 @@ class CeligoAdapter(_ScheduledAdapter):
         return verify_outcome(self.proposal, report, resolution=resolution, now=self.clock())
 
 
-ADAPTERS = {
+# Proposal action -> adapter class. (state_service.ADAPTERS is the provider -> adapter
+# *name* the ledger records; this is the registry that constructs one.)
+ADAPTER_CLASSES = {
     "correct_amounts": GuardRestletAdapter,
     "sync_missing_order": GuardRestletAdapter,
     "resolve_celigo_error": CeligoAdapter,
@@ -240,7 +240,7 @@ ADAPTERS = {
 def build_adapter(action, **kwargs):
     """The adapter for a proposal action; the registry, not the caller, decides."""
     try:
-        cls = ADAPTERS[action]
+        cls = ADAPTER_CLASSES[action]
     except KeyError:
         raise ExecutionStoppedError("unsupported_action", keep_code=True) from None
     return cls(**kwargs)

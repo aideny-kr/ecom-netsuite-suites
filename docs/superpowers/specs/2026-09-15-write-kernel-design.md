@@ -280,6 +280,12 @@ revision; `feedback_orphan_alembic_migrations`):
 - The in-flight partial unique index on `entity_key` covers `('executing','unknown','committed_unverified')`.
 - `downgrade` restores the four-value CHECK and maps the two new statuses back to `failed` / `unknown`; the
   `TransactionProposalSource` never depends on the new columns, so a downgraded scheduled path keeps working.
+- The guard trigger carries the receipt rule: a `committed_unverified` row can never become `rejected_before_effect`
+  or `unknown`, and becomes `verified` only with a `verification` object in `result_json`. The service's checks are
+  the readable copy; the trigger is the one no writer can route around.
+- Two compatibility measures are temporary and one follow-up migration removes both after G3.4 lands: `failed` stays
+  in the status CHECK, and a BEFORE INSERT defaults trigger fills `approval_id` / `base_work_key` for writers that
+  predate the columns (a rolling deploy inserts from the old image while the new schema is live).
 
 No change to `chat_messages`; the card keeps `structured_output` and gains `operation_id`. `#218`'s migration 097
 (`write_side_effects`) is not applied; the PR is closed with a comment pointing here once G3.3 merges.

@@ -51,9 +51,6 @@ class ExecutionStoppedError(ValueError):
         self.keep_code = keep_code
 
 
-OPEN = ("executing", "committed_unverified")  # the only states the kernel may still write to
-
-
 class WriteAdapter(Protocol):
     name: str
     provider: str
@@ -86,6 +83,32 @@ def result_of(row) -> dict:
     }
 
 
+def _closed(row) -> bool:
+    """Whether the ledger has already recorded this attempt's outcome. A terminal row is
+    closed; so is an open one that budget exhaustion or an earlier delivery completed
+    (``completed_at`` is written only by those), and its recorded reason is the truer one."""
+    return row.status not in state.OPEN or row.completed_at is not None
+
+
+def _outcome_after(row, exc) -> tuple[str, str]:
+    """The outcome and code for an attempt an exception ended, decided by the ledger row.
+
+    After a receipt the attempt stays ``committed_unverified`` whatever the readback found;
+    after a consumed permit it is ``unknown``; before either it is ``rejected_before_effect``.
+    A documented stop (``ExecutionStoppedError(keep_code=True)``) and a changed precondition
+    keep their code; any other exception is recorded under a generic code so an internal
+    message never becomes ledger evidence.
+    """
+    sent = row.status == "committed_unverified" or state.permit_consumed(row)
+    if isinstance(exc, PreconditionChangedError) or (isinstance(exc, ExecutionStoppedError) and exc.keep_code):
+        code = exc.code
+    else:
+        code = "verification_unavailable" if sent else "evidence_revalidation_failed"
+    if row.status == "committed_unverified":
+        return "committed_unverified", code
+    return ("unknown" if sent else "rejected_before_effect"), code
+
+
 async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) -> dict:
     """Run a claimed operation through its adapter and record the outcome.
 
@@ -107,7 +130,7 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
 
     async def complete(outcome, code, *, row=None, **details):
         row = row or await _operation(db, tenant_id, claimed.operation_id)
-        if row.status not in OPEN:
+        if _closed(row):
             return result_of(row)
         row = await state.complete_operation(
             db, tenant_id, row.id, outcome=outcome, result_json={"code": code, **details}, now=clock()
@@ -139,28 +162,10 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
         return await complete(
             "committed_unverified" if receipt["status"] == "accepted" else "unknown", "verification_unproven"
         )
-    except PreconditionChangedError as exc:
-        row = await _operation(db, tenant_id, claimed.operation_id)
-        if row.status not in OPEN:
-            return result_of(row)
-        if (row.result_json or {}).get("dispatch_reserved") is True:
-            # Preflight must never reserve; if an adapter did, the send may have happened.
-            return await complete("unknown", exc.code, row=row)
-        return await complete("rejected_before_effect", exc.code, row=row)
     except Exception as exc:
-        # A transport exception may follow an actual send; only the committed ledger
-        # decides whether the failure is known. Never expose raw exceptions.
+        # An exception may follow an actual send (a permit reserved, a receipt recorded);
+        # only the committed ledger row decides what the failure is. Preflight must never
+        # reserve, so a changed precondition after a permit is treated as possibly sent.
         row = await _operation(db, tenant_id, claimed.operation_id)
-        if row.status not in OPEN:
-            return result_of(row)
-        if row.status == "committed_unverified":
-            if (row.result_json or {}).get("termination_reason") == "budget":
-                # The read budget ran out during the readback; the ledger already says so
-                # (state_service._exhaust_operation) and that reason is the truer one.
-                return result_of(row)
-            return await complete("committed_unverified", "verification_unavailable", row=row)
-        sent = (row.result_json or {}).get("dispatch_reserved") is True
-        code = "verification_unavailable" if sent else "evidence_revalidation_failed"
-        if isinstance(exc, ExecutionStoppedError) and exc.keep_code:
-            code = exc.code
-        return await complete("unknown" if sent else "rejected_before_effect", code, row=row)
+        outcome, code = _outcome_after(row, exc)
+        return await complete(outcome, code, row=row)
