@@ -83,8 +83,36 @@ def intent_of(tenant_id, message, so, *, actor_id, now) -> state.ApprovedIntent:
         target_record_id=str(p["record_id"]) if p.get("record_id") is not None else None,
         evidence_digest=evidence_digest(so),
         valid_until=now + state._OPERATION_TIME,
-        config_id=UUID(str(p["config_id"])) if p.get("config_id") else None,
+        config_id=_uuid_or_none(p.get("config_id")),
     )
+
+
+def _uuid_or_none(value):
+    """A config id is informational on a chat claim; a card without one (or with a
+    non-UUID one from an older builder) still claims."""
+    try:
+        return UUID(str(value)) if value else None
+    except ValueError:
+        return None
+
+
+CLAIM_REFUSALS = {
+    "approval_already_claimed": "This confirmation already has an execution record. No duplicate update was sent.",
+    "operation_already_attempted": "This correction already has an execution record. No duplicate update was sent. "
+    "Review the recorded verification or reconciliation result before taking another action.",
+    "entity_in_flight": "Another approved correction is checking this document. No additional update was sent.",
+    "confirmation_token_invalid": "Confirmation token is invalid or tampered.",
+    "confirmation_not_executing": "This confirmation is already being processed by another request.",
+    "approver_not_session_owner": "Only the session owner can send this correction. No update was sent.",
+    "retry_requires_rejected_before_effect": "Only a correction that was refused before any effect can be retried.",
+}
+
+
+def refusal_text(exc) -> str:
+    """The sentence a person sees for a claim refusal: a ledger code's text, or the
+    authorization's own message (it is written for people)."""
+    code = getattr(exc, "code", None)
+    return CLAIM_REFUSALS.get(code, str(exc))
 
 
 async def _session_owner(db, tenant_id, message):

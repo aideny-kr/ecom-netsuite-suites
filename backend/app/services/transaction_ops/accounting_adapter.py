@@ -74,7 +74,8 @@ class AccountingCardAdapter:
     approval_context: dict | None = None
     provider: str = chat_confirmation.PROVIDER_MCP
     refusal: str | None = None
-    receipt: dict | None = None
+    receipt: dict | None = None  # what the provider answered, as parsed
+    sent: str | None = None  # how send classified it: accepted | failed | unknown
     verification: dict | None = None
 
     @property
@@ -106,7 +107,7 @@ class AccountingCardAdapter:
             self.refusal = REFUSALS.get(exc.code, "The approval no longer holds. No update was sent.")
             raise PreconditionChangedError(exc.code) from exc
         if not granted:
-            return {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
+            return self._sent({"status": "unknown", "code": "dispatch_already_reserved", "verified": False})
         raw = await self.dispatch(
             human_approved=True,
             approval_context=self.approval_context,
@@ -122,16 +123,20 @@ class AccountingCardAdapter:
             result = json.loads(raw)
         except (TypeError, ValueError):
             self.receipt = {"unreadable": True}
-            return {"status": "unknown", "code": "receipt_unreadable", "verified": False}
+            return self._sent({"status": "unknown", "code": "receipt_unreadable", "verified": False})
         self.receipt = result if isinstance(result, dict) else {"value": result}
         outcome = classify_write_outcome(result)
         if outcome == "indeterminate":
-            return {"status": "unknown", "code": "transport_indeterminate", "verified": False}
+            return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
         if outcome == "failed":
             self.refusal = _extract_error_message(result) or "NetSuite reported the write failed."
-            return {"status": "failed", "code": "provider_rejected", "verified": False}
+            return self._sent({"status": "failed", "code": "provider_rejected", "verified": False})
         ids = {key: str(result[key]) for key in _RECEIPT_IDS if result.get(key)}
-        return {"status": "accepted", "verified": False, **ids}
+        return self._sent({"status": "accepted", "verified": False, **ids})
+
+    def _sent(self, receipt: dict) -> dict:
+        self.sent = receipt["status"]
+        return receipt
 
     async def verify(self, db, tenant_id, claimed, preflight, *, read):
         verification = await read(VERIFY_CALLS, self.readback, self.proposal, receipt=self.receipt)
