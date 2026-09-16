@@ -1044,6 +1044,9 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
         max_api_calls=_OPERATION_CALLS,
         api_calls_used=0,
         status="executing",
+        # The scope a read-only recovery runs under, recorded at the claim like every
+        # other source's (create_operation_recovery reads it from the row).
+        result_json={"recovery_scope": {"config_id": str(row.config_id), "order_reference": row.order_reference}},
     )
     db.add(operation)
     await db.flush()
@@ -1231,8 +1234,9 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
     if row.status not in IN_FLIGHT:
         raise StateError("operation_terminal")
     # An unknown attempt can move only after caller-provided read-only provider
-    # reconciliation; this service never dispatches it again.
-    if row.status == "unknown" and evidence.get("reconciled") is not True:
+    # reconciliation; this service never dispatches it again. Handing it to a person
+    # (needs_review) is an escalation, not a finding, and needs no reads.
+    if row.status == "unknown" and outcome != "needs_review" and evidence.get("reconciled") is not True:
         raise StateError("reconciliation_evidence_required")
     if row.status == "committed_unverified":
         # A receipt exists, so the attempt can never be called "before effect" or
@@ -1513,15 +1517,15 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
         return existing
     if operation.status not in SETTLED or not permit_consumed(operation):
         raise StateError("operation_not_recoverable")
-    if operation.proposal_id is not None:
+    scope = (operation.result_json or {}).get("recovery_scope") or {}
+    config_id = uuid.UUID(str(scope["config_id"])) if scope.get("config_id") else None
+    order_reference = scope.get("order_reference")
+    if (config_id is None or not order_reference) and operation.proposal_id is not None:
+        # Rows claimed before the scope was recorded at the claim: the proposal still has it.
         proposal = await get_proposal(db, tenant_id, operation.proposal_id)
         config_id, order_reference = proposal.config_id, proposal.order_reference
-    else:
-        scope = (operation.result_json or {}).get("recovery_scope") or {}
-        config_id = uuid.UUID(str(scope["config_id"])) if scope.get("config_id") else None
-        order_reference = scope.get("order_reference")
-        if config_id is None or not order_reference:
-            raise StateError("recovery_unscoped")
+    if config_id is None or not order_reference:
+        raise StateError("recovery_unscoped")
     config = await get_config(db, tenant_id, config_id)
     if not config.enabled:
         raise StateError("config_disabled")

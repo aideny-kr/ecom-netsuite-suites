@@ -166,3 +166,19 @@ def test_the_ledger_copy_of_a_readback_has_no_floats():
         "n": 1,
         "s": "x",
     }
+
+
+@pytest.mark.parametrize("proved", [True, False])
+async def test_a_rejection_that_names_a_saved_record_is_decided_by_the_readback(db, claimed, proved):
+    """An error message beside a record id is not proof of no effect; the readback decides."""
+    _, message, _ = claimed
+    adapter = build(
+        message,
+        dispatch=AsyncMock(return_value=json.dumps({"error": "warning: partial", "id": "30"})),
+        readback=AsyncMock(
+            return_value={"status": "verified"} if proved else {"status": "needs_review", "reason": "x"}
+        ),
+    )
+    result, row = await _run(db, claimed, adapter)
+    assert result["status"] == ("verified" if proved else "unknown")
+    assert adapter.sent == "unknown" and adapter.readback.await_count == 1

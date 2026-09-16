@@ -6,6 +6,7 @@ deadline the recovery scan finds it, settles it, reads the provider once under i
 budget, and only a proof moves it to verified. The card is rendered from the row.
 """
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -159,9 +160,6 @@ async def test_lock_contention_reads_nothing_and_consumes_no_pass(db, interrupte
     assert await mod.candidates(db, tenant_id, later, limit=10) == [message_id]
 
 
-from contextlib import asynccontextmanager  # noqa: E402
-
-
 @asynccontextmanager
 async def _no_lock(*args, **kwargs):
     yield
@@ -256,6 +254,127 @@ async def test_the_scheduler_reaches_a_tenant_without_the_reconciliation_flags(d
     publish = AsyncMock()
     monkeypatch.setattr(action_scheduler, "_dispatch", publish)
     later = (await _row(db, claimed)).deadline_at + timedelta(seconds=1)
+    stats = await action_scheduler.collect_due_actions(db, later)
+    assert stats["credit_recoveries"] == 1
+    assert publish.call_args.args[:3] == (tenant_id, "credit_recover", message_id)
+
+
+@pytest.fixture
+async def config_less(db, approved_credit, authorized):  # noqa: F811
+    """A card whose accounting review names its case but not its config (the invoice-tax
+    builder never sets one), claimed by the kernel and interrupted after the permit."""
+    actor, config, case, verified_message, _, _ = approved_credit
+    p = dict(verified_message.structured_output["accounting_review"])
+    p.pop("config_id", None)
+    name, params = inputs(p)
+    card = build_confirmation_payload(
+        mutation_type="create",
+        record_type=p["record_type"],
+        tool_name=name,
+        tool_input=params,
+        session_id=str(verified_message.session_id),
+        current_record=p["before"],
+    )
+    card.accounting_review = p
+    message = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=verified_message.session_id,
+        role="assistant",
+        content="",
+        structured_output={**card.model_dump(mode="json"), "status": "executing"},
+    )
+    db.add(message)
+    await db.flush()
+    claimed = await chat_confirmation.claim(db, actor.tenant_id, message, actor_id=actor.id)
+    message.structured_output = {**message.structured_output, "operation_id": str(claimed.operation_id)}
+    await db.flush()
+    assert await state.reserve_operation_dispatch(
+        db,
+        actor.tenant_id,
+        claimed,
+        provider=chat_confirmation.PROVIDER_MCP,
+        payload_fingerprint="a" * 64,
+        authorize=chat_confirmation.authorize_dispatch,
+    )
+    return actor.tenant_id, message.id, claimed, config, case
+
+
+async def test_a_card_without_a_config_takes_its_recovery_scope_from_its_case(db, config_less, readback):
+    tenant_id, message_id, claimed, config, case = config_less
+    row = await _row(db, claimed)
+    assert row.result_json["recovery_scope"] == {"config_id": str(config.id), "order_reference": case.order_reference}
+    later = row.deadline_at + timedelta(seconds=1)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        assert (await mod.recover(db, tenant_id, message_id, now=later))["termination_reason"] == "done"
+    assert (await _row(db, claimed)).status == "verified"
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    assert message.structured_output["accounting_recheck"]["status"] == "queued"  # the recheck runs under that config
+
+
+async def test_a_settled_row_with_no_scope_to_read_under_is_handed_to_a_person(db, interrupted, readback, monkeypatch):
+    """No config means no budgeted read: the row is escalated (needs_review, code
+    recovery_unscoped) instead of raising forever and blocking its document."""
+    tenant_id, actor_id, message_id, claimed = interrupted
+    row = await _row(db, claimed)
+    row.result_json = {**row.result_json, "recovery_scope": {"config_id": None, "order_reference": None}}
+    await db.flush()
+    later = row.deadline_at + timedelta(seconds=1)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        result = await mod.recover(db, tenant_id, message_id, now=later)
+    assert result["termination_reason"] == "blocked"
+    readback.assert_not_awaited()
+    row = await _row(db, claimed)
+    assert row.status == "needs_review" and row.result_json["code"] == "recovery_unscoped"
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    assert message.structured_output["status"] == "indeterminate"
+    assert message.structured_output["accounting_verification"]["reason"] == "recovery_unscoped"
+    assert await mod.candidates(db, tenant_id, later, limit=10) == []
+
+
+async def test_a_recovered_group_child_refreshes_its_parent(db, interrupted, readback):
+    tenant_id, actor_id, message_id, claimed = interrupted
+    child = await db.get(ChatMessage, message_id)
+    parent = ChatMessage(
+        tenant_id=tenant_id,
+        session_id=child.session_id,
+        role="assistant",
+        content="interrupted",
+        structured_output={
+            "status": "executing",
+            "accounting_group": {"members": [{"confirmation_id": str(child.id), "card": {"status": "executing"}}]},
+        },
+    )
+    db.add(parent)
+    await db.flush()
+    row = await _row(db, claimed)
+    context = {"confirmation_id": str(child.id), "group_approval_id": str(parent.id), "manifest_digest": "m" * 64}
+    child.structured_output = {
+        **child.structured_output,
+        "accounting_group_child": True,
+        "accounting_execution": chat_confirmation.execution_projection(child.id, row, context),
+    }
+    await db.flush()
+    later = row.deadline_at + timedelta(seconds=1)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        assert (await mod.recover(db, tenant_id, message_id, now=later))["termination_reason"] == "done"
+    await db.refresh(child)
+    assert child.structured_output["accounting_execution"]["approval_context"] == context  # the link survives
+    await db.refresh(parent)
+    assert parent.structured_output["status"] == "approved"
+    assert parent.structured_output["accounting_group"]["members"][0]["card"]["status"] == "approved"
+
+
+async def test_the_scheduler_reaches_a_tenant_whose_only_stuck_work_is_an_orphan(db, orphan, monkeypatch):
+    from app.services import feature_flag_service
+    from app.services.transaction_ops import action_scheduler
+
+    tenant_id, _, message_id = orphan
+    monkeypatch.setattr(feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[]))
+    publish = AsyncMock()
+    monkeypatch.setattr(action_scheduler, "_dispatch", publish)
+    later = datetime.now(timezone.utc) + mod.ORPHAN_GRACE + timedelta(seconds=1)
     stats = await action_scheduler.collect_due_actions(db, later)
     assert stats["credit_recoveries"] == 1
     assert publish.call_args.args[:3] == (tenant_id, "credit_recover", message_id)

@@ -2418,10 +2418,9 @@ async def run_chat_turn(
                 # reservation until its adapter lands (write-kernel design, G3.2).
                 from app.services.transaction_ops import chat_confirmation as _chat_confirmation
 
-                _via_kernel = bool(_so.get("accounting_review")) and (
-                    _chat_confirmation.provider_of(_so) == _chat_confirmation.PROVIDER_MCP
-                )
-                if _so.get("accounting_review"):
+                _accounting = bool(_so.get("accounting_review"))
+                _via_kernel = _accounting and _chat_confirmation.provider_of(_so) == _chat_confirmation.PROVIDER_MCP
+                if _accounting:
                     # The ledger's work-key uniqueness only sees attempts the ledger recorded; work
                     # sent under the card's own claim (before the kernel path, or by the native
                     # card) lives on earlier cards, so that history is still consulted here.
@@ -2792,7 +2791,7 @@ async def run_chat_turn(
                         status="success" if _verification["status"] == "verified" else "error",
                     )
                     if _verification["status"] == "verified":
-                        if _credit_recovery:
+                        if _credit_recovery and not _via_kernel:  # the kernel path rendered this already, with its link
                             _exec_succeeded = True
                             _exec_error = None
                             _confirm_content = "The approved accounting change was verified using fresh NetSuite reads."
@@ -3010,7 +3009,14 @@ async def run_chat_turn(
 
                     try:
                         _recheck_run = await queue_accounting_recheck(
-                            db, tenant_id, _confirm_msg, user_id, now=datetime.now(timezone.utc)
+                            db,
+                            tenant_id,
+                            _confirm_msg,
+                            user_id,
+                            now=datetime.now(timezone.utc),
+                            config_id=(((_kernel_row.result_json or {}).get("recovery_scope") or {}).get("config_id"))
+                            if _via_kernel
+                            else None,
                         )
                         _recheck = {"status": "queued", "run_id": str(_recheck_run.id)}
                         _confirm_content += (

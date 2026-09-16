@@ -162,7 +162,7 @@ async def collect_due_actions(db, now):
 
             # A kernel-claimed accounting card is gated by policy, not by the scheduled
             # feature's flags; its tenant is reached by the rows it holds.
-            tenants = sorted({*tenants, *await tenants_with_open_cards(db)}, key=str)
+            tenants = sorted({*tenants, *await tenants_with_open_cards(db, now)}, key=str)
             if tenants:
                 offset = int(now.timestamp()) // 60 % len(tenants)
                 tenants = tenants[offset:] + tenants[:offset]

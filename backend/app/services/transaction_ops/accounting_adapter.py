@@ -139,10 +139,14 @@ class AccountingCardAdapter:
         outcome = classify_write_outcome(result)
         if outcome == "indeterminate":
             return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
+        ids = {key: str(result[key]) for key in _RECEIPT_IDS if result.get(key) is not None}
         if outcome == "failed":
             self.refusal = _extract_error_message(result) or "NetSuite reported the write failed."
+            if ids:
+                # An error beside a record identity is not proof of no effect: only the
+                # readback may say whether the record was saved.
+                return self._sent({"status": "unknown", "code": "provider_rejected_with_identity", "verified": False})
             return self._sent({"status": "failed", "code": "provider_rejected", "verified": False})
-        ids = {key: str(result[key]) for key in _RECEIPT_IDS if result.get(key) is not None}
         return self._sent({"status": "accepted", "verified": False, **ids})
 
     def _sent(self, receipt: dict) -> dict:

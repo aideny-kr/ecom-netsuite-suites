@@ -14,7 +14,7 @@ from sqlalchemy import Integer, String, and_, cast, exists, or_, select
 
 from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
-from app.models.chat import ChatMessage, ChatSession
+from app.models.chat import ChatMessage
 from app.models.transaction_ops import TransactionOperation, TransactionRun
 from app.services.audit_service import log_event
 from app.services.transaction_ops.treatments import VERIFIED_KINDS
@@ -207,12 +207,11 @@ async def _message(db, tenant_id, message_id):
 async def _authorize_read(db, tenant_id, message, claim):
     from app.mcp.tools.transaction_ops_tools import _authorize
     from app.services.chat.write_confirmation_service import validate_and_extract_confirmation
+    from app.services.transaction_ops.chat_confirmation import session_owner as _owner
 
     so = message.structured_output
     actor = UUID(claim["approved_by"])
-    session_owner = await db.scalar(
-        select(ChatSession.user_id).where(ChatSession.id == message.session_id, ChatSession.tenant_id == tenant_id)
-    )
+    session_owner = await _owner(db, tenant_id, message)
     audit = await db.scalar(
         select(AuditEvent.id).where(
             AuditEvent.tenant_id == tenant_id,
@@ -315,12 +314,14 @@ async def _locked_message(db, tenant_id, message_id):
     )
 
 
-async def tenants_with_open_cards(db):
-    """Tenants holding a kernel-claimed card that is not terminal; the scan reaches them
-    whether or not the scheduled feature's flags are on."""
+async def tenants_with_open_cards(db, now):
+    """Tenants holding a kernel-claimed card that is not terminal, or a card that never
+    reached a claim (an orphan past its grace); the scan reaches them whether or not the
+    scheduled feature's flags are on."""
     from app.services.transaction_ops import state_service as state
 
-    return list(
+    so = ChatMessage.structured_output
+    claimed = list(
         (
             await db.scalars(
                 select(TransactionOperation.tenant_id)
@@ -332,6 +333,22 @@ async def tenants_with_open_cards(db):
             )
         ).all()
     )
+    orphaned = list(
+        (
+            await db.scalars(
+                select(ChatMessage.tenant_id)
+                .where(
+                    so["accounting_review"].astext.isnot(None),
+                    so["status"].astext == "executing",
+                    so["operation_id"].astext.is_(None),
+                    so["accounting_execution"].astext.is_(None),
+                    ChatMessage.updated_at <= now - ORPHAN_GRACE,
+                )
+                .distinct()
+            )
+        ).all()
+    )
+    return claimed + [t for t in orphaned if t not in claimed]
 
 
 async def _release_orphan(db, tenant_id, message_id, now):
@@ -537,6 +554,15 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
             except state.StateError as exc:
                 if exc.code == "operation_not_recoverable":
                     return {"termination_reason": "done", "financial_writes": 0}
+                if exc.code == "recovery_unscoped":
+                    # Nothing to read under: a person decides, and the document is freed.
+                    operation = await state.complete_operation(
+                        db, tenant_id, operation.id, outcome="needs_review", result_json={"code": "recovery_unscoped"}
+                    )
+                    await _render_terminal(
+                        db, tenant_id, await _message(db, tenant_id, operation.approval_id), operation
+                    )
+                    return {"termination_reason": "blocked", "financial_writes": 0}
                 raise
             if run.status == "finished":
                 return {"termination_reason": "done", "financial_writes": 0}
@@ -571,9 +597,10 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
             message = await _message(db, tenant_id, operation.approval_id)
             from app.services.transaction_ops.chat_confirmation import execution_projection
 
+            context = ((message.structured_output or {}).get("accounting_execution") or {}).get("approval_context")
             so = {
                 **(message.structured_output or {}),
-                "accounting_execution": execution_projection(message.id, operation),
+                "accounting_execution": execution_projection(message.id, operation, context),
                 "status": "approved" if verified else "indeterminate",
                 "accounting_verification": {
                     **verification,
@@ -587,7 +614,10 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
             recheck = None
             if verified:
                 try:
-                    recheck_run = await accounting_recheck.queue(db, tenant_id, message, UUID(str(approver)), now=now)
+                    scope = (operation.result_json or {}).get("recovery_scope") or {}
+                    recheck_run = await accounting_recheck.queue(
+                        db, tenant_id, message, UUID(str(approver)), now=now, config_id=scope.get("config_id")
+                    )
                     recheck = {"status": "queued", "run_id": str(recheck_run.id)}
                 except Exception as exc:
                     recheck = {"status": "not_queued", "reason": type(exc).__name__}
@@ -617,6 +647,9 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
                     "accounting_recheck": recheck,
                 },
             )
+            parent_id = (context or {}).get("group_approval_id")
+            if parent_id:
+                await refresh_group(db, tenant_id, message.session_id, parent_id)
             await db.commit()
             return {"termination_reason": reason, "financial_writes": 0}
     except ValueError:
@@ -631,10 +664,11 @@ async def _render_terminal(db, tenant_id, message, operation):
     from app.services.transaction_ops.chat_confirmation import execution_projection
 
     result = operation.result_json or {}
+    context = ((message.structured_output or {}).get("accounting_execution") or {}).get("approval_context")
     so = {
         **(message.structured_output or {}),
         "operation_id": str(operation.id),
-        "accounting_execution": execution_projection(message.id, operation),
+        "accounting_execution": execution_projection(message.id, operation, context),
     }
     if operation.status == "rejected_before_effect":
         reason = "The approval was interrupted before any send; nothing was sent."
@@ -667,4 +701,7 @@ async def _render_terminal(db, tenant_id, message, operation):
             "financial_writes": 0,
         },
     )
+    parent_id = (context or {}).get("group_approval_id")
+    if parent_id:
+        await refresh_group(db, tenant_id, message.session_id, parent_id)
     await db.commit()
