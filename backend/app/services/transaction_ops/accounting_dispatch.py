@@ -304,10 +304,11 @@ async def _drain(db, tenant_id, parent_id, factory):
             if before not in {"queued", "dispatching"}:
                 await child_db.rollback()
                 return
-            if before == "queued" and not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+            if before == "queued" and auth["action"] == "approve" and not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
                 # Operator kill switch: never reserve or invoke this member. It stays
                 # queued and untouched, and resumes when dispatch is re-enabled. A
                 # member already dispatching is only inspected below, never resent.
+                # A rejection sends nothing, so it drains regardless of the switch.
                 halted.append(identifier)
                 await child_db.rollback()
                 return

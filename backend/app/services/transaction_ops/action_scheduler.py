@@ -17,13 +17,14 @@ from app.models.transaction_ops import TransactionRun as Run
 from app.services import feature_flag_service
 from app.services.audit_service import log_event
 from app.services.transaction_ops.scheduler import _BROKER_IO_TIMEOUT, _DISPATCH_TIMEOUT
+from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
 _LIMIT = 200
 # Audit rows that belong to no tenant use the same sentinel as InstrumentedTask.
-SYSTEM_TENANT_ID = uuid.UUID(int=0)
+SYSTEM_TENANT_ID = uuid.UUID(InstrumentedTask.SYSTEM_TENANT_ID)
 _TASKS = {
     "execute": "tasks.transaction_ops_execute",
     "recover": "tasks.transaction_ops_recover",
@@ -159,24 +160,15 @@ async def collect_due_actions(db, now):
         "truncated": False,
         "termination_reason": "done",
     }
-    if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
-        # Operator kill switch: publish nothing. Approved work stays approved and is
-        # picked up by the first sweep after the switch is re-enabled. One audit row
-        # per sweep is the durable trace that the halt, not an empty queue, is why
-        # nothing moved.
-        stats["dispatch_disabled"] = True
-        stats["termination_reason"] = "blocked"
+    disabled = not settings.TRANSACTION_OPS_DISPATCH_ENABLED
+    stats["dispatch_disabled"] = disabled
+    stats["withheld"] = 0
+    if disabled:
+        # Operator kill switch: sends are withheld, everything read-only still runs.
+        # Approved proposals stay approved and are picked up by the first sweep after
+        # the switch is re-enabled. Recovery and completion publish as usual; group
+        # dispatch publishes so the drain can process rejections and halt approvals.
         logger.warning("transaction_ops.dispatch.disabled", extra={"setting": "TRANSACTION_OPS_DISPATCH_ENABLED"})
-        await log_event(
-            db,
-            SYSTEM_TENANT_ID,
-            "transaction_ops",
-            "transaction_ops.dispatch.disabled",
-            actor_type="system",
-            payload={"setting": "TRANSACTION_OPS_DISPATCH_ENABLED", "financial_writes": 0},
-        )
-        await db.commit()
-        return stats
     try:
         async with asyncio.timeout(40):
             tenants = await feature_flag_service.list_tenants_with_flags(db, ("celigo", "reconciliation"))
@@ -204,6 +196,9 @@ async def collect_due_actions(db, now):
                         ("execute", executions, "executions"),
                     ):
                         stats["truncated"] |= len(candidates) > _LIMIT
+                        if disabled and kind == "execute":
+                            stats["withheld"] += len(candidates[:_LIMIT])
+                            continue
                         for identifier in candidates[:_LIMIT]:
                             stats[counter] += 1
                             await _dispatch(tenant_id, kind, identifier, stats)
@@ -213,8 +208,28 @@ async def collect_due_actions(db, now):
     except TimeoutError:
         await db.rollback()
         stats["truncated"] = True
+    if disabled and stats["withheld"]:
+        # One durable trace per sweep that withheld approved work: the halt, not an
+        # empty queue, is why nothing moved. Written under the system sentinel with
+        # its tenant context set, the way every other sentinel write in this repo is.
+        await set_tenant_context(db, str(SYSTEM_TENANT_ID))
+        await log_event(
+            db,
+            SYSTEM_TENANT_ID,
+            "transaction_ops",
+            "transaction_ops.dispatch.disabled",
+            actor_type="system",
+            payload={
+                "setting": "TRANSACTION_OPS_DISPATCH_ENABLED",
+                "withheld": stats["withheld"],
+                "financial_writes": 0,
+            },
+        )
+        await db.commit()
     if stats["truncated"]:
         stats["termination_reason"] = "budget"
     elif stats["dispatch_failed"] or stats["tenant_failed"]:
         stats["termination_reason"] = "error"
+    elif stats["withheld"]:
+        stats["termination_reason"] = "blocked"
     return stats

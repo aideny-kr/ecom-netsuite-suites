@@ -46,7 +46,15 @@ ROW_LIMIT = 50  # ids carried per category in the audit row; counts stay exact
 TENANT_LIMIT = 500  # tenants per run; more than this ends the run with reason "budget"
 STALE_GRACE = timedelta(minutes=10)
 SETTLEMENT_NEEDS_HUMAN = ("unverified", "not_verified", "difference")
-CATEGORIES = ("operations", "rechecks", "cards", "connections", "jobs")
+# One source of truth for the category names: the labels. collect() asserts against it.
+_LABELS = {
+    "operations": "Transaction operations ended unknown or failed",
+    "rechecks": "Recovery runs whose settlement needs review",
+    "cards": "Write confirmations left indeterminate or stuck executing",
+    "connections": "Connections in error",
+    "jobs": "Jobs that failed",
+}
+CATEGORIES = tuple(_LABELS)
 
 
 def _stale_after() -> timedelta:
@@ -63,10 +71,16 @@ async def previous_digest_at(db, tenant_id: UUID) -> datetime | None:
 
 
 async def _category(db, stmt, order_by):
-    """Exact count plus a bounded id sample for one category."""
+    """Exact count plus a bounded id sample for one category.
+
+    Most categories are empty on most nights, so the sample is read first and the
+    separate count runs only when the sample overflowed the row limit.
+    """
+    ids = [str(value) for value in await db.scalars(stmt.order_by(order_by).limit(ROW_LIMIT + 1))]
+    if len(ids) <= ROW_LIMIT:
+        return len(ids), ids
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
-    ids = list(await db.scalars(stmt.order_by(order_by).limit(ROW_LIMIT)))
-    return int(total or 0), [str(value) for value in ids]
+    return int(total or 0), ids[:ROW_LIMIT]
 
 
 async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dict:
@@ -118,6 +132,7 @@ async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dic
             func.coalesce(Job.completed_at, Job.updated_at).desc(),
         ),
     }
+    assert tuple(queries) == CATEGORIES, "digest categories drifted from their labels"
     counts, ids, truncated = {}, {}, {}
     for name, (stmt, order_by) in queries.items():
         counts[name], ids[name] = await _category(db, stmt, order_by)
@@ -139,15 +154,6 @@ async def admin_emails(db, tenant_id: UUID) -> list[str]:
         .order_by(User.email)
     )
     return list(dict.fromkeys(rows))
-
-
-_LABELS = {
-    "operations": "Transaction operations ended unknown or failed",
-    "rechecks": "Recovery runs whose settlement needs review",
-    "cards": "Write confirmations left indeterminate or stuck executing",
-    "connections": "Connections in error",
-    "jobs": "Jobs that failed",
-}
 
 
 def render(tenant_name: str, digest: dict, *, since: datetime, until: datetime) -> tuple[str, str, str]:
@@ -216,6 +222,7 @@ async def run_ops_digest(
             digest = await collect(db, tenant_id, now=now, since=since)
             recipients = await admin_emails(db, tenant_id)
             total = sum(digest["counts"].values())
+            failed_recipients = []
             if not total:
                 delivery = "nothing_to_report"
             elif not settings.OPS_DIGEST_EMAIL_ENABLED:
@@ -224,16 +231,19 @@ async def run_ops_digest(
                 delivery = "no_recipient"
             else:
                 subject, text_body, html_body = render(tenant.name, digest, since=since, until=now)
-                delivery = "sent"
                 for to_email in recipients:
                     try:
                         await send(to_email=to_email, subject=subject, text_body=text_body, html_body=html_body)
                     except Exception:
                         logger.exception("ops_digest.send_failed", extra={"tenant_id": str(tenant_id)})
-                        delivery = "failed"
-                if delivery == "sent":
+                        failed_recipients.append(to_email)
+                if not failed_recipients:
+                    delivery = "sent"
                     stats["sent"] += 1
-            await set_tenant_context(db, str(tenant_id))
+                elif len(failed_recipients) < len(recipients):
+                    delivery = "partial"
+                else:
+                    delivery = "failed"
             await audit_service.log_event(
                 db,
                 tenant_id,
@@ -247,10 +257,11 @@ async def run_ops_digest(
                     "until": now.isoformat(),
                     **digest,
                     "recipients": recipients,
+                    "failed_recipients": failed_recipients,
                     "delivery": delivery,
                     "financial_writes": 0,
                 },
-                status="success" if delivery != "failed" else "error",
+                status="error" if failed_recipients else "success",
             )
             await db.commit()
             stats["tenants"] += 1

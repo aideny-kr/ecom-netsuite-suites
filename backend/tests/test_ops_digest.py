@@ -17,7 +17,7 @@ from app.workers.base_task import InstrumentedTask
 from app.workers.tasks import ops_digest as task_module
 from tests import test_transaction_ops_executor as execution_fixtures
 from tests import test_transaction_ops_recovery as recovery_fixtures
-from tests.conftest import create_test_tenant
+from tests.conftest import create_test_tenant, create_test_user
 from tests.test_transaction_ops_executor import operation
 
 execution_case = execution_fixtures.execution_case
@@ -147,3 +147,23 @@ def test_daily_task_is_registered_instrumented_and_scheduled():
     assert task.time_limit <= 600
     entries = [entry for entry in app.conf.beat_schedule.values() if entry["task"] == "tasks.ops_digest"]
     assert len(entries) == 1
+
+
+async def test_partial_send_failure_names_the_failed_recipient_and_keeps_the_row(db):
+    tenant = await create_test_tenant(db, name="Two Admins Corp")
+    good, _ = await create_test_user(db, tenant, email="good@example.com", role_name="admin")
+    bad, _ = await create_test_user(db, tenant, email="bad@example.com", role_name="admin")
+    now = datetime.now(timezone.utc)
+    await _seed_incidents(db, tenant.id, now)
+
+    async def sender(*, to_email, **_):
+        if to_email == bad.email:
+            raise RuntimeError("provider rejected")
+
+    await ops_digest.run_ops_digest(db, now=now, sender=sender, tenant_ids=[tenant.id])
+
+    row = (await _digest_rows(db, tenant.id))[0]
+    assert row.payload["delivery"] == "partial"
+    assert row.payload["recipients"] == [bad.email, good.email]
+    assert row.payload["failed_recipients"] == [bad.email]
+    assert row.status == "error"

@@ -20,6 +20,7 @@ from app.services.transaction_ops import accounting_group as group
 from app.services.transaction_ops import action_scheduler
 from app.workers.base_task import InstrumentedTask
 from tests import test_transaction_ops_executor as execution_fixtures
+from tests import test_transaction_ops_recovery as recovery_fixtures
 from tests.test_accounting_dispatch import seeded_group, simulated_executor
 from tests.test_transaction_ops_executor import execute, operation
 from tests.test_write_confirm_orchestrator import (
@@ -32,6 +33,7 @@ from tests.test_write_confirm_orchestrator import (
 )
 
 execution_case = execution_fixtures.execution_case
+unknown_case = recovery_fixtures.unknown_case
 
 
 @pytest.fixture
@@ -64,7 +66,7 @@ async def test_kernel_refuses_the_send_permit_and_fails_the_operation_blocked(db
     assert execution_case.case.dispatch.await_count == 1
 
 
-async def test_collector_publishes_nothing_and_audits_once_per_sweep(
+async def test_collector_withholds_sends_audits_once_and_keeps_approved_work(
     db, execution_case, dispatch_disabled, monkeypatch
 ):
     publish = AsyncMock()
@@ -74,18 +76,36 @@ async def test_collector_publishes_nothing_and_audits_once_per_sweep(
     stats = await action_scheduler.collect_due_actions(db, now)
 
     publish.assert_not_awaited()
-    assert stats["termination_reason"] == "blocked"
     assert stats["dispatch_disabled"] is True
-    assert stats["executions"] == 0
+    assert stats["withheld"] == 1 and stats["executions"] == 0
+    assert stats["termination_reason"] == "blocked"
     audits = await _audits(db, uuid.UUID(InstrumentedTask.SYSTEM_TENANT_ID), "transaction_ops.dispatch.disabled")
     assert len(audits) == 1
-    assert audits[0].payload == {"setting": "TRANSACTION_OPS_DISPATCH_ENABLED", "financial_writes": 0}
+    assert audits[0].payload == {"setting": "TRANSACTION_OPS_DISPATCH_ENABLED", "withheld": 1, "financial_writes": 0}
 
     # Re-enabling resumes: the approved work was never consumed by the switch.
     monkeypatch.setattr(settings, "TRANSACTION_OPS_DISPATCH_ENABLED", True)
     stats = await action_scheduler.collect_due_actions(db, now)
     assert stats["executions"] == 1 and stats["termination_reason"] == "done"
     publish.assert_awaited_once()
+
+
+async def test_collector_still_publishes_read_only_recovery_while_dispatch_is_disabled(
+    db, unknown_case, dispatch_disabled, monkeypatch
+):
+    row = await operation(db, unknown_case)
+    assert row.status == "unknown"
+    publish = AsyncMock()
+    monkeypatch.setattr(action_scheduler, "_dispatch", publish)
+
+    stats = await action_scheduler.collect_due_actions(db, datetime.now(timezone.utc))
+
+    assert stats["recoveries"] == 1 and stats["executions"] == 0 and stats["withheld"] == 0
+    publish.assert_awaited_once()
+    assert publish.call_args.args[:3] == (unknown_case.actor.tenant_id, "recover", row.id)
+    assert stats["dispatch_disabled"] is True and stats["termination_reason"] == "done"
+    # Nothing was withheld, so nothing needs an audited reason.
+    assert await _audits(db, uuid.UUID(InstrumentedTask.SYSTEM_TENANT_ID), "transaction_ops.dispatch.disabled") == []
 
 
 async def test_chat_approval_is_refused_before_the_dispatcher_and_ends_terminal(dispatch_disabled):
@@ -178,3 +198,25 @@ async def test_group_drain_halts_at_the_next_child_and_resumes_when_re_enabled(m
             work = (await dispatch.message(db, tenant, parent)).structured_output["accounting_group_dispatch"]
             assert work["members"][second]["status"] == "verified"
             assert work["status"] == "finished"
+
+
+async def test_group_rejection_drains_while_dispatch_is_disabled(monkeypatch, dispatch_disabled):
+    """A reject sends nothing, so the switch must not freeze an operator's cancellation."""
+    async with seeded_group(2, action="reject") as (factory, tenant, parent, so):
+        calls = []
+        monkeypatch.setattr(dispatch, "invoke_child", simulated_executor(calls))
+        async with factory() as db:
+            result = await dispatch.run_slice(db, tenant, parent)
+        assert result["status"] == "finished"
+        assert sorted(calls) == sorted(m["confirmation_id"] for m in so["accounting_group"]["members"])
+        async with factory() as db:
+            work = (await dispatch.message(db, tenant, parent)).structured_output["accounting_group_dispatch"]
+            assert {m["status"] for m in work["members"].values()} == {"rejected"}
+            audits = list(
+                await db.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.tenant_id == tenant, AuditEvent.action == "accounting_group.dispatch.disabled"
+                    )
+                )
+            )
+            assert audits == []

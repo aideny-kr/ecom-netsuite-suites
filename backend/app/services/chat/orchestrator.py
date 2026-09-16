@@ -2420,7 +2420,10 @@ async def run_chat_turn(
 
                 if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
                     # Operator kill switch, checked after the single-use claim and
-                    # before anything can leave the system. The approval is consumed,
+                    # before anything can leave the system. It covers EVERY
+                    # human-approved chat write, accounting-tagged or not, by
+                    # design: a switch that left manual ERP writes open would not
+                    # be a kill switch. The approval is consumed,
                     # not restored: a halted send needs a fresh human decision once
                     # dispatch is re-enabled. Terminal, and never a repair re-entry:
                     # nothing was rejected by NetSuite, so there is nothing to repair.
