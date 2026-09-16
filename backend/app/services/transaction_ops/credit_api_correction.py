@@ -90,6 +90,9 @@ async def prepare(db, tenant_id, intent, evidence, restriction):
     proposal["wire_record_json"] = json.dumps(typed_fields(raw, proposal["proposed_fields"]), allow_nan=False)
     proposal.update(
         execution_transport="mcp_record_api",
+        # The recheck must describe the sales order this credit's invoice was created
+        # from; declare it instead of letting every reader re-derive it from createdFrom.
+        reconciliation_target={"record_type": "salesorder", "record_id": str(proposal["sales_order_id"])},
         connector_schema=schema_contract(raw, proposal["proposed_fields"]),
         protected_sales_order=deepcopy(evidence["sections"]["sales_order"]),
         required_transport="connected_mcp_record_update",

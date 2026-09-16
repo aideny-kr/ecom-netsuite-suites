@@ -16,6 +16,7 @@ from app.services.transaction_ops import accounting_credit_recheck
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.settlement import SCOPE
+from app.services.transaction_ops.treatments import is_mcp, reconciliation_target_id, supports, treatment_of
 
 # Provider-call ceiling of one recheck run. The MCP existing-credit recheck adds the
 # subledger read budget it reserves in accounting_credit_recheck plus a small headroom,
@@ -23,40 +24,20 @@ from app.services.transaction_ops.settlement import SCOPE
 # to afford it. 64 + 56 + 8 preserves the 128 the previous literal allowed.
 RECHECK_CALLS = 64
 MCP_RECHECK_HEADROOM = 8
-MCP_TRANSPORT = "mcp_record_api"  # the treatment registry (PR #264) owns this once it lands
 
 
 def needs_subledger_recheck(proposal):
     """The one recheck that re-reads the subledger: an existing-credit correction sent over MCP."""
-    return proposal.get("kind") == "credit_tax_reallocation" and proposal.get("execution_transport") == MCP_TRANSPORT
+    return proposal.get("kind") == "credit_tax_reallocation" and is_mcp(proposal)
 
 
 def recheck_call_ceiling(proposal):
     # Keyed on transport, not kind: every MCP-transported recheck kept the larger
     # ceiling before, and narrowing it to one kind would halve the budget of the
     # others without any change in what they read.
-    if proposal.get("execution_transport") == MCP_TRANSPORT:
+    if is_mcp(proposal):
         return RECHECK_CALLS + accounting_credit_recheck.READ_CALLS + MCP_RECHECK_HEADROOM
     return RECHECK_CALLS
-
-
-def supports(proposal):
-    """Only the implemented invoice corrections have native verification contracts."""
-    return bool(proposal) and (
-        proposal.get("kind")
-        in {
-            "sales_adjustment_credit",
-            "invoice_sales_adjustment",
-            "sales_order_source_alignment",
-            "credit_tax_reallocation",
-            "sales_order_line_alignment",
-        }
-        or (
-            proposal.get("kind") in {None, "invoice_tax"}
-            and proposal.get("record_type") == "invoice"
-            and set(proposal.get("proposed_fields") or {}) == {"taxRate"}
-        )
-    )
 
 
 async def queue(db, tenant_id, message, actor_id, *, now):
@@ -142,27 +123,19 @@ def report_in_scope(run, p, report, now):
     try:
         targets = report["targets"]
         verified_at = datetime.fromisoformat(run.params_json["verified_at"])
-        if p.get("kind") in {"sales_order_source_alignment", "sales_order_line_alignment"}:
-            target_id = p["record_id"]
-        elif p.get("kind") == "credit_tax_reallocation":
-            # A credit can be created from an invoice (or have no createdFrom).
-            # Bind to the independently collected invoice -> sales-order edge.
-            target_id = p["sales_order_id"]
-            if not target_id or str(target_id) != str(p["support"]["invoice"]["createdFrom"]["id"]):
-                return False
-        else:
-            target_id = p["before"]["createdFrom"]["id"]
+        # A declared reconciliation target wins; otherwise the treatment's rule. A
+        # credit can be created from an invoice, so it binds through the collected
+        # invoice -> sales-order edge and refuses when that edge disagrees.
+        target_id = reconciliation_target_id(p)
+        if target_id is None:
+            return False
+        treatment = treatment_of(p)
         return (
             len(targets) == 1
             and str(targets[0]["record_id"]) == str(target_id)
             and str(report["source"]["record_id"]) == str(p["source"]["id"])
             and report["balance"]["currency"]
-            == (
-                p["profile"]["currency"]
-                if p.get("kind")
-                in {"sales_adjustment_credit", "invoice_sales_adjustment", "sales_order_source_alignment"}
-                else p["source"]["currency"]
-            )
+            == (p["profile"]["currency"] if treatment.family == "commercial" else p["source"]["currency"])
             and all(
                 verified_at <= datetime.fromisoformat(value["observed_at"]) <= now
                 for value in (report["source"], targets[0])

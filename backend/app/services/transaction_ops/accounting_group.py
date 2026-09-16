@@ -22,6 +22,7 @@ from app.services.chat.write_confirmation_service import (
     mint_confirmation_token,
     validate_and_extract_confirmation,
 )
+from app.services.transaction_ops.treatments import collision_key
 
 CONCURRENCY = 3
 
@@ -92,10 +93,7 @@ def build_group_card(members, selection, session_id):
         (
             m["card"]["accounting_review"]["scope"]["netsuite_account_id"],
             m["card"]["accounting_review"].get("lock_record_type", m["card"]["record_type"]),
-            m["card"]["accounting_review"]["invoice_id"]
-            if m["card"]["accounting_review"].get("kind")
-            in {"sales_order_source_alignment", "credit_tax_reallocation", "sales_order_line_alignment"}
-            else m["card"]["accounting_review"]["record_id"],
+            collision_key(m["card"]["accounting_review"])[1],
         )
         for m in eligible
     ]
@@ -396,15 +394,10 @@ def validate_manifest(so, session_id):
             or p.get("case_id") != member["case_id"]
         ):
             raise ValueError("A group member is not an exact supported pending correction.")
+        # collision_key refuses with TreatmentError (a ValueError) when the member has no
+        # lock document; build_group_card gets the same refusal from the same call.
         targets.append(
-            (
-                p["scope"]["netsuite_account_id"],
-                p.get("lock_record_type", card["record_type"]),
-                p.get("invoice_id", p["record_id"])
-                if p.get("kind")
-                in {"sales_order_source_alignment", "credit_tax_reallocation", "sales_order_line_alignment"}
-                else p["record_id"],
-            )
+            (p["scope"]["netsuite_account_id"], p.get("lock_record_type", card["record_type"]), collision_key(p)[1])
         )
     if len(set(targets)) != len(targets):
         raise ValueError("Overlapping document corrections cannot be approved together.")
@@ -426,14 +419,7 @@ async def accounting_write_slot(proposal, *, lock_engine=None):
 
     async with (lock_engine if lock_engine is not None else engine).connect() as connection:
         try:
-            record_type = "invoice" if proposal.get("kind") == "sales_adjustment_credit" else proposal["record_type"]
-            record_id = proposal["record_id"]
-            if proposal.get("kind") in {
-                "sales_order_source_alignment",
-                "credit_tax_reallocation",
-                "sales_order_line_alignment",
-            }:
-                record_type, record_id = "invoice", proposal["invoice_id"]
+            record_type, record_id = collision_key(proposal)
             record = key(f"accounting-write:{account}:{record_type}:{record_id}")
             if not await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": record}):
                 raise ValueError("Another approved correction is checking this invoice. No additional update was sent.")

@@ -236,7 +236,7 @@ async def test_candidate_never_issues_approval_from_missing_or_changed_native_au
         "financial_writes": 0,
         "execution_authorized": False,
         "suitetax": False,
-        "treatments": list(protocol.KINDS),
+        "treatments": list(protocol.AMENDMENT_RECORD_TYPES),
         "apply_enabled": True,
     }
     response = deepcopy(p["native_preview"])

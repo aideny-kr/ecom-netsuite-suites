@@ -22,6 +22,7 @@ from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_categories import categorize, is_celigo_source
 from app.services.drive_rag.retriever import retrieve_drive_chunks
 from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
+from app.services.transaction_ops.treatments import DEPENDENT_KINDS, VERIFIED_KINDS, family_of
 
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
@@ -2546,10 +2547,7 @@ async def run_chat_turn(
                             from app.services.mcp_connector_service import get_mcp_connector as _get_conn
 
                             _native_review = _so.get("accounting_review") or {}
-                            _native_amendment = _native_review.get("kind") in {
-                                "credit_tax_reallocation",
-                                "sales_order_line_alignment",
-                            }
+                            _native_amendment = family_of(_native_review) == "amendment"
                             _new_id = (
                                 _exec_result.get("recordId")
                                 or _exec_result.get("id")
@@ -2610,23 +2608,15 @@ async def run_chat_turn(
                         "now risks creating it twice."
                     )
 
-                _credit_recovery = _write_outcome == "indeterminate" and (_so.get("accounting_review") or {}).get(
-                    "kind"
-                ) in {
-                    "sales_adjustment_credit",
-                    "invoice_sales_adjustment",
-                    "sales_order_source_alignment",
-                    "credit_tax_reallocation",
-                    "sales_order_line_alignment",
-                }
+                _credit_recovery = (
+                    _write_outcome == "indeterminate"
+                    and (_so.get("accounting_review") or {}).get("kind") in VERIFIED_KINDS
+                )
                 if _so.get("accounting_execution") and isinstance(_exec_result, dict):
                     # Retain a returned native identity even when verification
                     # fails, so later recovery cannot ignore a conflicting receipt.
                     _receipt_keys = ("recordId", "id", "internalId")
-                    if (_so.get("accounting_review") or {}).get("kind") in {
-                        "credit_tax_reallocation",
-                        "sales_order_line_alignment",
-                    }:
+                    if family_of(_so.get("accounting_review")) == "amendment":
                         _receipt_keys += ("record_id", "record_type", "work_key", "reservation_audit_id")
                     _receipt_ids = {k: _exec_result[k] for k in _receipt_keys if _exec_result.get(k)}
                     _so = {
@@ -2637,13 +2627,7 @@ async def run_chat_turn(
                     from app.services.transaction_ops.tax_correction import verify_after
 
                     try:
-                        if _so["accounting_review"].get("kind") in {
-                            "sales_adjustment_credit",
-                            "invoice_sales_adjustment",
-                            "sales_order_source_alignment",
-                            "credit_tax_reallocation",
-                            "sales_order_line_alignment",
-                        }:
+                        if _so["accounting_review"].get("kind") in VERIFIED_KINDS:
                             async with asyncio.timeout(90):
                                 _verification = await verify_after(
                                     db, tenant_id, _so["accounting_review"], receipt=_exec_result
@@ -2683,11 +2667,7 @@ async def run_chat_turn(
                             _exec_succeeded = True
                             _exec_error = None
                             _confirm_content = "The approved accounting change was verified using fresh NetSuite reads."
-                        if (
-                            _so["accounting_review"].get("kind")
-                            in {"credit_tax_reallocation", "sales_order_line_alignment"}
-                            and not _updated_so_record_url
-                        ):
+                        if family_of(_so["accounting_review"]) == "amendment" and not _updated_so_record_url:
                             from app.services.chat.netsuite_record_url import build_record_url
 
                             _native_p = _so["accounting_review"]
@@ -2712,8 +2692,7 @@ async def run_chat_turn(
                             if _so["accounting_review"].get("kind") == "credit_tax_reallocation"
                             else "\n\nSales-order amendment independently re-read and verified; "
                             "the linked invoice, GL, billing and fulfillment evidence remain unchanged."
-                            if _so["accounting_review"].get("kind")
-                            in {"sales_order_source_alignment", "sales_order_line_alignment"}
+                            if _so["accounting_review"].get("kind") in DEPENDENT_KINDS
                             else "\n\nInvoice total, tax and GL were independently re-read and verified. "
                             "Sales-order reconciliation and deposit/cash settlement remain separate checks; no additional money was moved."
                         )
