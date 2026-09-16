@@ -252,3 +252,137 @@ async def test_group_rejection_drains_while_dispatch_is_disabled(monkeypatch, di
                 )
             )
             assert audits == []
+
+
+async def test_a_halted_accounting_card_is_a_zero_write_precondition_failure(dispatch_disabled):
+    """An accounting correction halted by the switch must be released for a fresh approval once
+    dispatch is back. previous_execution releases a failed card only when it carries the
+    accounting_correction.precondition_failed audit with zero writes, so the approve branch
+    must write that audit for accounting cards, not only write.dispatch_disabled."""
+    from datetime import datetime, timezone
+
+    from app.services.chat.orchestrator import run_chat_turn
+    from tests.test_accounting_approval_flow import kind_proposal
+
+    session_id = uuid.uuid4()
+    tool_name = _ext("ns_updateRecord")
+    p = kind_proposal("api_credit")
+    p["tenant_id"] = str(_TENANT_ID)
+    tool_input = {"recordType": "creditMemo", "recordId": p["record_id"], "data": p.get("wire_record_json", "{}")}
+    confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+    confirm_msg.structured_output = {**confirm_msg.structured_output, "mutation_type": "update", "accounting_review": p}
+    db = _make_db(confirm_msg)
+    # The accounting approve path re-enters run_chat_turn under the per-invoice write slot
+    # (a real advisory lock on the app engine); mark the slot as already held so the test
+    # exercises the branch under it, not the lock.
+    db.info = {"accounting_write_lock": str(confirm_msg.id)}
+    session = _make_session(session_id=str(session_id))
+    execute_tool = AsyncMock()
+    log_event = AsyncMock(return_value=None)
+    with (
+        patch("app.services.chat.orchestrator.execute_tool_call", execute_tool),
+        patch("app.services.chat.orchestrator.log_event", log_event),
+        patch("app.services.transaction_ops.accounting_group.authorize_accounting_write", AsyncMock()),
+        patch("app.services.transaction_ops.resolution_plan.previous_execution", AsyncMock(return_value=None)),
+    ):
+        events = [
+            event
+            async for event in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="approve",
+                user_id=_USER_ID,
+                tenant_id=_TENANT_ID,
+                write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+            )
+        ]
+
+    execute_tool.assert_not_awaited()
+    assert [e for e in events if e.get("type") == "error" and e.get("code") == "dispatch_disabled"]
+    so = confirm_msg.structured_output
+    assert so["status"] == "failed" and so["accounting_execution"]["approved_by"] == str(_USER_ID)
+    # The CAS claim audit is logged positionally; the branch audits by keyword.
+    by_action = {
+        (c.kwargs.get("action") or (c.args[3] if len(c.args) > 3 else None)): (c.kwargs or {"positional": c.args})
+        for c in log_event.call_args_list
+    }
+    assert "write.dispatch_disabled" in by_action
+    released = by_action.get("accounting_correction.precondition_failed")
+    assert released is not None, sorted(by_action)
+    assert released["payload"]["approved_by"] == str(_USER_ID)
+    assert released["payload"]["financial_writes"] == 0
+    assert released["payload"]["reason"] == "dispatch_disabled"
+    assert released["resource_id"] == str(confirm_msg.id)
+    assert datetime.now(timezone.utc)  # keep the import honest
+
+
+@pytest.mark.parametrize("released_by_precondition_audit", [False, True])
+async def test_previous_execution_releases_a_halted_card_only_through_the_precondition_audit(
+    db, admin_user, released_by_precondition_audit
+):
+    """The contract the test above depends on: without the zero-write precondition audit, a
+    halted card blocks every later card for the same correction as a prior execution."""
+    from datetime import datetime, timezone
+
+    from app.models.chat import ChatMessage, ChatSession
+    from app.services.audit_service import log_event
+    from app.services.transaction_ops.accounting_recovery import execution_claim
+    from app.services.transaction_ops.resolution_plan import previous_execution
+    from tests.test_accounting_approval_flow import kind_proposal
+
+    actor = admin_user[0]
+    p = kind_proposal("api_credit")
+    p["tenant_id"] = str(actor.tenant_id)
+    session = ChatSession(tenant_id=actor.tenant_id, user_id=actor.id)
+    db.add(session)
+    await db.flush()
+    halted_id = uuid.uuid4()
+    so = execution_claim(
+        {"accounting_review": p, "mutation_type": "update", "tool_name": "mcp", "tool_input": {}},
+        halted_id,
+        actor.id,
+        {},
+        now=datetime.now(timezone.utc),
+    )
+    so.update(
+        status="failed",
+        error="Sending to connected systems is disabled by the operator.",
+        repair_exit_reason="dispatch_disabled",
+    )
+    db.add(
+        ChatMessage(
+            id=halted_id,
+            tenant_id=actor.tenant_id,
+            session_id=session.id,
+            role="assistant",
+            content="",
+            structured_output=so,
+        )
+    )
+    await db.flush()
+    await log_event(
+        db=db,
+        tenant_id=actor.tenant_id,
+        actor_id=actor.id,
+        category="write",
+        action="write.dispatch_disabled",
+        resource_type="chat_message",
+        resource_id=str(halted_id),
+        payload={"setting": "TRANSACTION_OPS_DISPATCH_ENABLED", "financial_writes": 0},
+        status="error",
+    )
+    if released_by_precondition_audit:
+        await log_event(
+            db=db,
+            tenant_id=actor.tenant_id,
+            actor_id=actor.id,
+            category="transaction_ops",
+            action="accounting_correction.precondition_failed",
+            resource_type="chat_message",
+            resource_id=str(halted_id),
+            payload={"approved_by": str(actor.id), "financial_writes": 0, "reason": "dispatch_disabled"},
+            status="error",
+        )
+    await db.flush()
+    prior = await previous_execution(db, actor.tenant_id, uuid.uuid4(), p)
+    assert (prior is None) is released_by_precondition_audit, prior

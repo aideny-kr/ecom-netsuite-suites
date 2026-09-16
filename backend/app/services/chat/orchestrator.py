@@ -2446,6 +2446,24 @@ async def run_chat_turn(
                         payload={"setting": "TRANSACTION_OPS_DISPATCH_ENABLED", "financial_writes": 0},
                         status="error",
                     )
+                    if _so.get("accounting_review"):
+                        # For an accounting correction the halt is a zero-write precondition
+                        # failure, and must be recorded as one: previous_execution releases a
+                        # failed card for a fresh approval only through this audit. Without
+                        # it the halted card would count as a prior execution and the same
+                        # correction could never be re-approved once dispatch is back.
+                        await log_event(
+                            db=db,
+                            tenant_id=tenant_id,
+                            actor_id=user_id,
+                            category="transaction_ops",
+                            action="accounting_correction.precondition_failed",
+                            resource_type="chat_message",
+                            resource_id=str(_confirm_msg.id),
+                            correlation_id=correlation_id,
+                            payload={"approved_by": str(user_id), "financial_writes": 0, "reason": "dispatch_disabled"},
+                            status="error",
+                        )
                     await db.commit()
                     yield {
                         "type": "error",
