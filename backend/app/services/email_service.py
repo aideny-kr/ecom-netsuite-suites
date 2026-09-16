@@ -1,16 +1,16 @@
 """Email service — console (dev), Resend (production)."""
 
-import os
-
 import httpx
 import structlog
 
+from app.core.config import settings
+
 logger = structlog.get_logger()
 
-EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "console")
-EMAIL_API_KEY = os.environ.get("EMAIL_API_KEY", "")
-EMAIL_FROM_ADDRESS = os.environ.get("EMAIL_FROM_ADDRESS", "SuiteStudio <noreply@suitestudio.ai>")
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+EMAIL_PROVIDER = settings.EMAIL_PROVIDER
+EMAIL_API_KEY = settings.EMAIL_API_KEY
+EMAIL_FROM_ADDRESS = settings.EMAIL_FROM_ADDRESS
+FRONTEND_URL = settings.FRONTEND_URL
 
 
 def _build_invite_html(
