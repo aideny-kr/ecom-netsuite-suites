@@ -69,6 +69,10 @@ DEFAULTS_TRIGGER = (
 
 
 RECEIPT_RULE = """
+            IF NEW.status = 'committed_unverified'
+                AND NEW.result_json->'dispatch_reserved' IS DISTINCT FROM 'true'::jsonb THEN
+                RAISE EXCEPTION 'receipt requires a permit';
+            END IF;
             IF OLD.status = 'committed_unverified' AND (
                 NEW.status IN ('rejected_before_effect', 'unknown', 'failed')
                 OR (NEW.status = 'verified' AND jsonb_typeof(NEW.result_json->'verification') IS DISTINCT FROM 'object')
@@ -181,10 +185,7 @@ def upgrade():
     op.execute(DEFAULTS_TRIGGER)
 
 
-LEGACY_OPEN = (
-    "(status IN ('executing','unknown','committed_unverified') "
-    "OR (status = 'needs_review' AND result_json->'dispatch_reserved' = 'true'::jsonb))"
-)
+LEGACY_OPEN = "status IN ('executing','unknown','committed_unverified','needs_review')"
 
 
 def _refuse_lossy_downgrade():
@@ -206,8 +207,8 @@ def _refuse_lossy_downgrade():
     ).scalar()
     if crowded:
         raise RuntimeError(
-            f"downgrade refused: {crowded} document(s) carry two open attempts (a needs_review row whose permit "
-            "was consumed beside an in-flight one); the legacy index admits one, and neither may be forgotten"
+            f"downgrade refused: {crowded} document(s) carry two open attempts (a needs_review row beside an "
+            "in-flight one); the legacy index admits one, and neither may be forgotten"
         )
 
 
@@ -216,14 +217,15 @@ def downgrade():
     op.execute(f"DROP TRIGGER IF EXISTS transaction_ops_operation_defaults ON {TABLE}")
     op.execute("DROP FUNCTION IF EXISTS transaction_ops_operation_defaults()")
     op.execute(f"DROP TRIGGER transaction_ops_immutable ON {TABLE}")
-    # Fold the wider taxonomy back into the four legacy values without ever making a
-    # sent-but-unproven attempt look final: a consumed permit becomes unknown (blocks a
-    # resend); needs_review without one, and rejected_before_effect, become failed.
+    # Fold the wider taxonomy back into the four legacy values without ever making an
+    # attempt that may have had an effect look retryable: a receipt, and anything a person
+    # must decide (needs_review includes an adapter-reported save the ledger could not tie
+    # to a permit), become unknown, which blocks a resend; only rejected_before_effect,
+    # refused before any effect, becomes failed.
     op.execute(
         f"UPDATE {TABLE} SET status = CASE "
-        "WHEN status = 'committed_unverified' THEN 'unknown' "
-        "WHEN status = 'needs_review' AND result_json->'dispatch_reserved' = 'true'::jsonb THEN 'unknown' "
-        "WHEN status IN ('needs_review', 'rejected_before_effect') THEN 'failed' "
+        "WHEN status IN ('committed_unverified', 'needs_review') THEN 'unknown' "
+        "WHEN status = 'rejected_before_effect' THEN 'failed' "
         "ELSE status END"
     )
     op.drop_index("uq_tx_operation_unsettled_entity", table_name=TABLE)

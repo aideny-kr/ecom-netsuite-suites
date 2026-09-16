@@ -17,6 +17,7 @@ from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops import write_kernel
 from app.services.transaction_ops.write_kernel import ExecutionStoppedError, PreconditionChangedError
 from tests import test_transaction_ops_dispatch as dispatch_fixtures
+from tests.test_transaction_ops_dispatch import reserve
 
 ready = dispatch_fixtures.ready
 FINGERPRINT = "d" * 64
@@ -205,6 +206,51 @@ async def test_a_redelivery_can_still_verify_a_receipted_attempt(db, ready):
     assert row.result_json["receipt"]["record_id"] == "63"  # the first delivery's receipt survives
 
 
+# The real transport's answer when the permit is already spent (netsuite_transport): it
+# RETURNS this receipt, it does not raise.
+PERMIT_REFUSED = {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
+
+
+async def test_a_redelivery_on_a_closed_receipt_without_proof_reads_the_recorded_outcome(db, ready):
+    """The transport refuses a spent permit with an unknown receipt; this delivery decides
+    'unknown' against a row that already holds a receipt. The ledger knows better: the
+    kernel reads the recorded outcome instead of raising or degrading it."""
+    actor, _, _, claim = ready
+    first = await write_kernel.execute(db, actor.tenant_id, claim, FakeAdapter(proof=None))
+    assert first["status"] == "committed_unverified"
+    second = await write_kernel.execute(db, actor.tenant_id, claim, FakeAdapter(reserve=False, receipt=PERMIT_REFUSED))
+    row = await _row(db, claim)
+    assert second["status"] == "committed_unverified" and row.result_json["code"] == "verification_unproven"
+
+
+async def test_a_redelivery_after_a_crashed_sender_leaves_the_receipt_to_recovery(db, ready):
+    """The sender died after recording the receipt (no completed_at). A later delivery
+    without proof cannot improve on the receipt; it reads it and leaves the readback to
+    the recovery scan, which is due once the attempt's deadline passes."""
+    actor, _, _, claim = ready
+    assert await reserve(db, actor.tenant_id, claim)
+    await state.record_receipt(
+        db, actor.tenant_id, claim.operation_id, {"status": "accepted", "record_id": "63", "verified": False}
+    )
+    second = await write_kernel.execute(db, actor.tenant_id, claim, FakeAdapter(reserve=False, receipt=PERMIT_REFUSED))
+    row = await _row(db, claim)
+    assert second["status"] == "committed_unverified" and row.status == "committed_unverified"
+    assert row.result_json["receipt"]["record_id"] == "63" and "code" not in row.result_json
+
+
+async def test_a_redelivery_never_moves_an_unknown_row_even_with_proof(db, ready):
+    """unknown is settled, not open: only a recovery pass (its own run, budget and audit)
+    may reconcile it. A re-delivered claim reads it, whatever its readback found."""
+    actor, _, _, claim = ready
+    first = await write_kernel.execute(
+        db, actor.tenant_id, claim, FakeAdapter(receipt={"status": "unknown", "verified": False}, proof=None)
+    )
+    assert first["status"] == "unknown"
+    later = FakeAdapter(reserve=False, receipt=PERMIT_REFUSED, proof={"source_unchanged": True})
+    assert (await write_kernel.execute(db, actor.tenant_id, claim, later))["status"] == "unknown"
+    assert (await _row(db, claim)).status == "unknown"
+
+
 async def test_a_ledger_read_failure_after_an_exception_leaves_the_attempt_to_expiry_recovery(db, ready, monkeypatch):
     """When the ledger cannot be re-read after a failure the kernel cannot record anything;
     it raises with the adapter failure chained instead of guessing, and the row stays
@@ -262,8 +308,9 @@ def test_the_adapter_registry_and_the_ledger_vocabulary_agree():
 
 
 async def test_an_adapter_cannot_report_a_save_without_the_permit(db, ready):
-    """The guard trigger refuses a receipt on a row that never consumed a permit; the kernel
-    turns that refusal into needs_review instead of guessing what happened."""
+    """record_receipt (and, for any other writer, the guard trigger) refuses a receipt on a
+    row that never consumed a permit; the kernel turns that refusal into needs_review
+    instead of guessing what happened."""
     adapter = FakeAdapter(reserve=False, proof={"source_unchanged": True})
     result, row = await _run(db, ready, adapter)
     assert result["status"] == "needs_review" and result["termination_reason"] == "blocked"
