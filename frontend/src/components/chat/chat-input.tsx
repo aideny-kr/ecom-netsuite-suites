@@ -30,13 +30,14 @@ interface ChatInputProps {
   // "Use in chat" sets this via the `compose` query param). Distinct from the
   // chat page's auto-send `prefill` param — this only seeds the textarea.
   initialMessage?: string | null;
+  reservedChars?: number;
 }
 
 interface ChatHealth {
   max_input_chars?: number;
 }
 
-export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, variant, initialMessage }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, variant, initialMessage, reservedChars = 0 }: ChatInputProps) {
   const isTerminal = variant === "terminal";
   const [value, setValue] = useState("");
   const [attachedFile, setAttachedFile] = useState<{ id: string; name: string } | null>(null);
@@ -60,10 +61,10 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
     staleTime: 5 * 60 * 1000,
   });
 
-  const maxInputChars =
+  const maxInputChars = Math.max(0, (
     typeof chatHealth?.max_input_chars === "number" && chatHealth.max_input_chars > 0
       ? chatHealth.max_input_chars
-      : DEFAULT_CHAT_INPUT_MAX_CHARS;
+      : DEFAULT_CHAT_INPUT_MAX_CHARS) - Math.max(0, reservedChars));
   const warningThreshold = Math.floor(maxInputChars * CHAT_INPUT_WARNING_RATIO);
   const isNearLimit = value.length >= warningThreshold && value.length < maxInputChars;
   const isAtLimit = value.length >= maxInputChars;

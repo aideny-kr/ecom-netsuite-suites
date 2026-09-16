@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useMemo } from "react";
+import { useWebMcpTools } from "@/hooks/use-webmcp-tools";
+import { createTableTools } from "@/lib/webmcp-table";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { type SortingState } from "@tanstack/react-table";
 import { useTableData } from "@/hooks/use-table-data";
@@ -40,7 +42,7 @@ function TableContent({ tableName, payoutId }: { tableName: string; payoutId: st
   const sortOrder = sorting[0]?.desc ? "desc" : "asc";
   const filters: Record<string, string> = payoutId ? { payout_id: payoutId } : {};
 
-  const { data, isLoading, error, refetch } = useTableData({
+  const { data, isLoading, isFetching, isPlaceholderData, isError, error, refetch } = useTableData({
     tableName,
     page,
     pageSize,
@@ -53,6 +55,19 @@ function TableContent({ tableName, payoutId }: { tableName: string; payoutId: st
   const tableMeta = CANONICAL_TABLES.find((t) => t.name === tableName);
 
   const columns = useMemo(() => transactionColumns(tableName), [tableName]);
+
+  useWebMcpTools(`table:${tableName}`, createTableTools(() => ({
+    name: tableName, page, pageSize, search, sortBy, sortOrder,
+    ready: !!data && !isFetching && !isPlaceholderData && !isError,
+    hasError: isError, pages: data?.pages || 1, total: data?.total || 0,
+    columns: columns.flatMap((column) => column.id ? [column.id] : []), rows: data?.items || [],
+    apply: (query) => {
+      setSearch(query.search); setPage(query.page); setPageSize(query.pageSize);
+      setSorting(query.sortBy ? [{ id: query.sortBy, desc: query.sortOrder === "desc" }] : []);
+      setSelectedRow(null);
+    },
+    selectRow: setSelectedRow,
+  })));
 
   return (
     <div className="space-y-6 animate-fade-in">

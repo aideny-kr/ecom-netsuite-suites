@@ -3,13 +3,13 @@
 import pytest
 import redis
 
-from app.services.chat.run_manager import RunManager, get_run_manager
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+from app.core.config import settings
+from app.services.chat.run_manager import RunManager, get_run_manager
 
-REDIS_URL = "redis://localhost:6379/0"
+REDIS_URL = settings.REDIS_URL
 
 
 def _redis_available() -> bool:
@@ -116,12 +116,12 @@ class TestCancel:
         assert not mgr.is_cancelled("test-run-c1")
         mgr.request_cancel("test-run-c1")
         assert mgr.is_cancelled("test-run-c1")
-        assert mgr.get_status("test-run-c1") == "cancelled"
+        assert mgr.get_status("test-run-c1") == "cancelling"
 
     def test_cancel_nonexistent(self, mgr: RunManager):
         # Should not raise
-        mgr.request_cancel("test-run-no-exist")
-        assert mgr.is_cancelled("test-run-no-exist")
+        assert mgr.request_cancel("test-run-no-exist") is False
+        assert not mgr.is_cancelled("test-run-no-exist")
 
 
 # ---------------------------------------------------------------------------

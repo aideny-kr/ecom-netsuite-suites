@@ -16,6 +16,8 @@ import { ChatWelcome } from "@/components/chat/chat-welcome";
 import { ChatInput } from "@/components/chat/chat-input";
 import { useWorkspaces } from "@/hooks/use-workspace";
 import { useAgents } from "@/hooks/use-agents";
+import { useWebMcpState, useWebMcpTools } from "@/hooks/use-webmcp-tools";
+import { createChatTools, type ChatSubmissionReceipt, type WebMcpChatState } from "@/lib/webmcp-chat";
 import { AlertCircle, X, PanelLeftOpen } from "lucide-react";
 
 export default function ChatPage() {
@@ -69,16 +71,26 @@ export default function ChatPage() {
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRunRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const pendingSubmissionRef = useRef<symbol | null>(null);
+  const streamVersionRef = useRef(0);
+
+  useEffect(() => () => {
+    streamVersionRef.current++;
+    pendingSubmissionRef.current = null;
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, []);
+
+  const cancelActiveRun = useCallback(async (expectedRunId?: string) => {
+    const runId = activeRunRef.current;
+    if (!runId || (expectedRunId && expectedRunId !== runId)) throw new Error("No matching active run.");
+    return apiClient.post(`/api/v1/chat/runs/${runId}/cancel`, {});
+  }, []);
 
   const handleStop = useCallback(async () => {
-    const runId = activeRunRef.current;
-    if (!runId) return;
-    try {
-      await apiClient.post(`/api/v1/chat/runs/${runId}/cancel`, {});
-    } catch {
-      // Ignore cancel errors
-    }
-  }, []);
+    try { await cancelActiveRun(); }
+    catch { setError("Could not stop the response. Check run status and retry."); }
+  }, [cancelActiveRun]);
 
   const appendTextBlock = useCallback((toFlush: string) => {
     setStreamBlocks(prev => {
@@ -227,6 +239,8 @@ export default function ChatPage() {
   // to a session with an active run). Extracted to avoid duplicating handlers.
   const connectToRunStream = useCallback(
     async (runId: string, sessionId: string) => {
+      const streamVersion = ++streamVersionRef.current;
+      pendingSubmissionRef.current = null;
       const controller = new AbortController();
       abortRef.current = controller;
       activeRunRef.current = runId;
@@ -377,6 +391,7 @@ export default function ChatPage() {
           },
         });
       } catch (err: unknown) {
+        if (streamVersion !== streamVersionRef.current) return;
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (err instanceof Error && err.message.includes("aborted")) return;
         const message = err instanceof Error ? err.message : "Failed to stream response.";
@@ -384,6 +399,7 @@ export default function ChatPage() {
           setError(message);
         }
       } finally {
+        if (streamVersion !== streamVersionRef.current) return;
         activeRunRef.current = null;
         if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
         if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
@@ -404,6 +420,7 @@ export default function ChatPage() {
           await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
           await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
         } catch { /* non-critical */ }
+        if (streamVersion !== streamVersionRef.current) return;
         isStreamingRef.current = false;
         setIsStreaming(false);
         setPendingMessage(null);
@@ -424,7 +441,7 @@ export default function ChatPage() {
   // Prevents "looks dead" when navigating away and back mid-run.
   useEffect(() => {
     if (!sessionDetail?.active_run_id) return;
-    if (sessionDetail.status !== "running") return;
+    if (sessionDetail.status !== "running" && sessionDetail.status !== "cancelling") return;
     if (isStreamingRef.current) return; // Already consuming (we started this run)
 
     const runId = sessionDetail.active_run_id;
@@ -447,6 +464,8 @@ export default function ChatPage() {
       content: string,
       fileId?: string,
       opts: {
+        request_id?: string;
+        assert_current?: () => void;
         write_confirm?: {
           action: "approve" | "reject";
           confirmation_id: string;
@@ -457,8 +476,21 @@ export default function ChatPage() {
         };
       } = {},
     ) => {
-      if (isStreamingRef.current || createSession.isPending) return;
+      if (opts.request_id && !activeSessionId) throw new Error("Create and select a session first.");
+      if (isStreamingRef.current || createSession.isPending) {
+        // A lost-response retry must reach the durable admission ledger even while
+        // SSE is running. The server rejects a different request without mutation.
+        if (opts.request_id && activeSessionId) {
+          return apiClient.post<ChatSubmissionReceipt>(`/api/v1/chat/sessions/${activeSessionId}/messages`, {
+            content, request_id: opts.request_id, agent_id: pinnedAgentId || undefined,
+            file_id: fileId || undefined,
+          });
+        }
+        return;
+      }
       setError(null);
+      const submission = Symbol("chat submission");
+      pendingSubmissionRef.current = submission;
       setPendingMessage(content);
       isStreamingRef.current = true;
       setIsStreaming(true);
@@ -487,24 +519,42 @@ export default function ChatPage() {
         // Step 1: Submit message → get run_id
         const msgBody: Record<string, unknown> = {
           content,
+          request_id: opts.request_id,
           agent_id: pinnedAgentId || undefined,
           file_id: fileId || undefined,
         };
         if (opts.write_confirm) msgBody.write_confirm = opts.write_confirm;
-        const { run_id } = await apiClient.post<{ run_id: string }>(
+        const receipt = await apiClient.post<ChatSubmissionReceipt>(
           `/api/v1/chat/sessions/${sessionId}/messages`,
           msgBody,
         );
+        opts.assert_current?.();
 
         // Message is now saved in DB — refetch so the persisted message appears,
         // then clear the optimistic pending copy. Clearing AFTER refetch prevents
         // the brief gap where neither the pending nor persisted message renders.
         await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        opts.assert_current?.();
         setPendingMessage(null);
 
         // Step 2: Connect to SSE stream for this run (shared with reconnection)
-        await connectToRunStream(run_id, sessionId);
+        const stream = connectToRunStream(receipt.run_id, sessionId);
+        if (!opts.request_id) await stream;
+        // connectToRunStream handles its own errors and updates the same UI.
+        return receipt;
       } catch (err: unknown) {
+        // A route/identity/selection change owns its new UI state. A late agent
+        // receipt must not connect another stream or reset that conversation.
+        try { opts.assert_current?.(); }
+        catch (stale) {
+          if (pendingSubmissionRef.current === submission) {
+            pendingSubmissionRef.current = null;
+            isStreamingRef.current = false;
+            setIsStreaming(false);
+            setPendingMessage(null);
+          }
+          throw stale;
+        }
         // AbortController.abort() throws — this is expected on session switch, not an error
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (err instanceof Error && err.message.includes("aborted")) return;
@@ -529,6 +579,7 @@ export default function ChatPage() {
         } else {
           setError(message);
         }
+        if (opts.request_id) throw err;
       }
     },
     [activeSessionId, createSession, flushBuffer, queryClient, pinnedAgentId],
@@ -613,6 +664,11 @@ export default function ChatPage() {
   );
 
   const clearStreamingState = useCallback(() => {
+    pendingSubmissionRef.current = null;
+    streamVersionRef.current++;
+    bufferRef.current = [];
+    if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
     // Abort any in-flight SSE connection so old handlers stop firing
     if (abortRef.current) {
       abortRef.current.abort();
@@ -678,6 +734,18 @@ export default function ChatPage() {
     },
     [router, workspaces],
   );
+
+  const getWebMcpChatState = useWebMcpState<WebMcpChatState>({
+    sessionId: activeSessionId, sessions, detail: sessionDetail,
+    busy: isStreamingRef.current || createSession.isPending,
+    loading: !!activeSessionId && sessionDetail?.id !== activeSessionId,
+    hasError: !!error, activeRunId: activeRunRef.current,
+    create: () => createSession.mutateAsync(pinnedAgentId ? { agent_id: pinnedAgentId } : undefined),
+    select: handleSelectSession,
+    send: (content, requestId, assertCurrent) => handleSend(content, undefined, { request_id: requestId, assert_current: assertCurrent }),
+    cancel: cancelActiveRun,
+  });
+  useWebMcpTools("chat", createChatTools(getWebMcpChatState));
 
   return (
     <div className="relative flex h-full min-h-0 w-full min-w-0 flex-col gap-5 p-4 md:p-7">

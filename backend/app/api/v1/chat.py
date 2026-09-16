@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -18,7 +19,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_feature, require_permission
 from app.core.rate_limit import check_chat_burst_limit
-from app.models.chat import ChatMessage, ChatSession
+from app.models.chat import ChatMessage, ChatSession, ChatSubmission
 from app.models.task_file import TaskFile
 from app.models.user import User
 from app.services import audit_service
@@ -44,6 +45,9 @@ class UpdateSessionRequest(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
+    request_id: uuid.UUID | None = Field(
+        default=None, description="Retry key scoped to this session. Reuse with identical input."
+    )
     content: str = Field(..., max_length=settings.CHAT_MAX_INPUT_CHARS)
     agent_id: str | None = Field(default=None, description="Pin to a specific agent (skip routing)")
     file_id: str | None = Field(default=None, description="Uploaded task file ID attached to this message")
@@ -306,16 +310,61 @@ async def send_message(
             ),
         )
 
+    # Serialize admission for a session across all clients and processes. The lock
+    # stays held through receipt + message commit and Redis run reservation.
     result = await db.execute(
-        select(ChatSession).where(
+        select(ChatSession)
+        .where(
             ChatSession.id == session_id,
             ChatSession.tenant_id == user.tenant_id,
             ChatSession.user_id == user.id,
         )
+        .with_for_update()
     )
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    request_hash = None
+    if body.request_id:
+        if body.write_confirm or body.plan_mode_choice:
+            raise HTTPException(422, "request_id is supported only for ordinary messages")
+        request_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    **body.model_dump(mode="json", exclude={"request_id"}),
+                    "wizard_step": wizard_step,
+                    "timezone": x_timezone,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        receipt = await db.scalar(
+            select(ChatSubmission).where(
+                ChatSubmission.session_id == session_id,
+                ChatSubmission.tenant_id == user.tenant_id,
+                ChatSubmission.request_id == body.request_id,
+            )
+        )
+        if receipt:
+            if receipt.request_hash != request_hash:
+                raise HTTPException(409, "request_id was already used with different input")
+            return {
+                "run_id": str(receipt.run_id),
+                "session_id": str(session_id),
+                "request_id": str(body.request_id),
+                "replayed": True,
+            }
+
+    rm = get_run_manager()
+    if body.request_id and not rm.available:
+        # Never fall back to a non-idempotent inline request for retry-aware clients.
+        raise HTTPException(503, "Background chat is unavailable. Retry with the same request_id.")
+    if rm.available:
+        existing_run = rm.get_active_run(str(session_id))
+        if existing_run and rm.get_status(existing_run) in {"running", "cancelling"}:
+            raise HTTPException(409, "A response is already in progress for this session.")
 
     attached_file_id = await _validate_task_file_access(db, user.tenant_id, body.file_id)
 
@@ -361,13 +410,9 @@ async def send_message(
         db.add(user_msg)
         await db.flush()
 
-    # Commit user message BEFORE spawning background task (it uses its own DB session)
-    await db.commit()
-
-    rm = get_run_manager()
-
     if not rm.available:
-        # Redis unavailable — fall back to inline SSE streaming
+        await db.commit()
+        # Existing clients retain the inline SSE fallback.
         return await _send_message_inline_sse(
             db=db,
             session=session,
@@ -378,19 +423,35 @@ async def send_message(
             x_timezone=x_timezone,
         )
 
-    # Check for concurrent run
-    existing_run = rm.get_active_run(str(session_id))
-    if existing_run:
-        existing_status = rm.get_status(existing_run)
-        if existing_status == "running":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="A run is already active for this session.",
-            )
-
-    # Create run and spawn background task
     run_id = str(uuid.uuid4())
+    if body.request_id:
+        db.add(
+            ChatSubmission(
+                session_id=session_id,
+                tenant_id=user.tenant_id,
+                request_id=body.request_id,
+                request_hash=request_hash,
+                run_id=uuid.UUID(run_id),
+            )
+        )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="chat",
+        action="chat.message.submit",
+        actor_id=user.id,
+        resource_type="chat_run",
+        resource_id=run_id,
+    )
     rm.create_run(run_id, str(session_id))
+    try:
+        # Receipt and user message become durable together. A retry never starts
+        # another model call, even after Redis expiry or a lost HTTP response.
+        await db.commit()
+    except Exception:
+        rm.set_status(run_id, "failed")
+        rm.clear_active_run(str(session_id), run_id)
+        raise
 
     # When write_confirm or plan_mode_choice is set, body.content is a
     # control payload (e.g. "Picked option A") not a real user query —
@@ -418,7 +479,12 @@ async def send_message(
         )
     )
 
-    return {"run_id": run_id, "session_id": str(session_id)}
+    return {
+        "run_id": run_id,
+        "session_id": str(session_id),
+        "request_id": str(body.request_id) if body.request_id else None,
+        "replayed": False,
+    }
 
 
 # 10 minutes total for any chat turn — deliberately generous so end-to-end work
@@ -447,10 +513,11 @@ async def _run_chat_pipeline(
     write_confirm: dict | None = None,
     attached_file_id: str | None = None,
     plan_mode_choice: dict | None = None,
-) -> None:
+) -> str:
     """Inner pipeline coroutine — wrapped by asyncio.wait_for in _run_chat_background."""
     from app.core.database import async_session_factory
 
+    outcome = "complete"
     async with async_session_factory() as db:
         # Re-load session in this DB context so title/updated_at changes persist
         result = await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))
@@ -472,6 +539,17 @@ async def _run_chat_pipeline(
             plan_mode_choice=plan_mode_choice,
         ):
             rm.write_event(run_id, chunk)
+            if chunk.get("type") == "error":
+                outcome = "failed"
+            elif outcome != "failed":
+                message = chunk.get("message")
+                structured = message.get("structured_output") if isinstance(message, dict) else None
+                structured = structured if isinstance(structured, dict) else {}
+                if structured.get("type") == "write_confirmation":
+                    outcome = "awaiting_confirmation"
+                elif chunk.get("type") == "clarification_required":
+                    outcome = "awaiting_clarification"
+    return outcome
 
 
 async def _run_chat_background(
@@ -492,7 +570,7 @@ async def _run_chat_background(
     """Run the chat pipeline in background, writing events to Redis."""
     rm = get_run_manager()
     try:
-        await asyncio.wait_for(
+        outcome = await asyncio.wait_for(
             _run_chat_pipeline(
                 rm=rm,
                 run_id=run_id,
@@ -510,7 +588,10 @@ async def _run_chat_background(
             ),
             timeout=_BACKGROUND_TASK_TIMEOUT,
         )
-        rm.set_status(run_id, "complete")
+        if rm.is_cancelled(run_id):
+            outcome = "cancelled"
+        rm.set_outcome(run_id, outcome or "complete")
+        rm.set_status(run_id, outcome if outcome in {"failed", "cancelled"} else "complete")
     except asyncio.TimeoutError:
         logger.error(
             "Background chat run timed out after %ds: %s",
@@ -524,13 +605,15 @@ async def _run_chat_background(
                 "error": "The response took too long. Please try again with a simpler question.",
             },
         )
+        rm.set_outcome(run_id, "failed")
         rm.set_status(run_id, "failed")
     except Exception as exc:
         logger.exception("Background chat run failed: %s", exc)
         rm.write_event(run_id, {"type": "error", "error": "Chat service temporarily unavailable."})
+        rm.set_outcome(run_id, "failed")
         rm.set_status(run_id, "failed")
     finally:
-        rm.clear_active_run(session_id)
+        rm.clear_active_run(session_id, run_id)
 
 
 async def _send_message_inline_sse(
@@ -810,4 +893,6 @@ async def chat_health():
         "voyage_configured": bool(settings.VOYAGE_API_KEY),
         "model": settings.ANTHROPIC_MODEL,
         "max_input_chars": settings.CHAT_MAX_INPUT_CHARS,
+        "request_id_supported": True,
+        "owned_run_status_supported": True,
     }

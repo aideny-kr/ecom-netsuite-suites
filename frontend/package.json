@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:webmcp": "playwright test --config=playwright.webmcp.config.ts",
+    "test:webmcp:unit": "vitest run src/lib/__tests__/webmcp.test.ts src/lib/__tests__/webmcp-actions.test.ts src/hooks/__tests__/use-webmcp-tools.test.tsx src/lib/__tests__/api-client.test.ts src/providers/__tests__/auth-provider.test.tsx src/hooks/__tests__/use-workspace-chat.test.tsx src/lib/__tests__/workspace-chat-context.test.ts src/components/chat/__tests__/chat-input-compose.test.tsx"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

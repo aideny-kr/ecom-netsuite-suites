@@ -13,6 +13,7 @@ import { AlertTriangle, Plug, X, Menu, ChevronRight } from "lucide-react";
 import { NAV_ITEMS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { ConnectionAlertBanner } from "@/components/connection-alert-banner";
+import { SuiteStudioWebMcp } from "@/components/suite-studio-webmcp";
 
 export default function DashboardLayout({
   children,
@@ -147,6 +148,7 @@ export default function DashboardLayout({
 
   return (
     <div className="orbital-shell flex h-screen overflow-hidden">
+      <SuiteStudioWebMcp />
       <a href="#main-content" className="sr-only z-50 rounded-md bg-primary p-3 text-primary-foreground focus:not-sr-only focus:fixed focus:left-3 focus:top-3">Skip to content</a>
       {showOnboarding && (
         <OnboardingWizard onComplete={handleOnboardingComplete} />

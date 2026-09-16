@@ -1,11 +1,14 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
 import type { StreamBlock } from "@/lib/chat-stream";
 import type { ChatMessage, ChatSession, ChatSessionDetail } from "@/lib/types";
+import type { ChatSubmissionReceipt } from "@/lib/webmcp-chat";
+
+export interface WorkspaceSendOptions { request_id?: string; assert_current?: () => void }
 
 export function useWorkspaceChat(workspaceId: string | null) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -22,6 +25,39 @@ export function useWorkspaceChat(workspaceId: string | null) {
   const bufferRef = useRef<string[]>([]);
   const rafRef = useRef<number | null>(null);
 
+  const scopeRef = useRef(workspaceId);
+  const mountedRef = useRef(true);
+  const selectionVersion = useRef(0);
+  const streamVersion = useRef(0);
+  const pendingSubmission = useRef<symbol | null>(null);
+
+  const invalidate = useCallback(() => {
+    selectionVersion.current++;
+    streamVersion.current++;
+    pendingSubmission.current = null;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    activeRunRef.current = null;
+    bufferRef.current = [];
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+  }, []);
+  const clearLocal = useCallback(() => {
+    invalidate();
+    isStreamingRef.current = false;
+    setIsStreaming(false);
+    setPendingMessage(null);
+    setStreamBlocks([]);
+    setStreamingMessage(null);
+    setError(null);
+  }, [invalidate]);
+  useLayoutEffect(() => {
+    scopeRef.current = workspaceId;
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; invalidate(); };
+  }, [workspaceId, invalidate]);
+  useEffect(() => { clearLocal(); setActiveSessionId(null); }, [workspaceId, clearLocal]);
+
   const flushBuffer = useCallback(() => {
     if (bufferRef.current.length === 0) return;
     const text = bufferRef.current.join("");
@@ -37,7 +73,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
   }, []);
 
   // Show only sessions for this workspace
-  const { data: sessions = [] } = useQuery<ChatSession[]>({
+  const { data: sessions = [], isLoading: isLoadingSessions } = useQuery<ChatSession[]>({
     queryKey: ["chat-sessions", "workspace", workspaceId],
     queryFn: () =>
       apiClient.get<ChatSession[]>(`/api/v1/chat/sessions?workspace_id=${workspaceId}`),
@@ -56,15 +92,26 @@ export function useWorkspaceChat(workspaceId: string | null) {
 
   // Create workspace-scoped sessions so orchestrator injects workspace context
   const createSession = useMutation({
-    mutationFn: () =>
+    mutationFn: (scope: string) =>
       apiClient.post<ChatSession>("/api/v1/chat/sessions", {
-        workspace_id: workspaceId,
+        workspace_id: scope,
       }),
-    onSuccess: (session) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
-      setActiveSessionId(session.id);
     },
   });
+
+  const createConversation = useCallback(async () => {
+    const scope = scopeRef.current;
+    const version = selectionVersion.current;
+    if (!scope || !mountedRef.current) throw new Error("Select a workspace first.");
+    const session = await createSession.mutateAsync(scope);
+    if (!mountedRef.current || scopeRef.current !== scope || selectionVersion.current !== version) {
+      throw new Error("Workspace or conversation changed. Read current state before continuing.");
+    }
+    setActiveSessionId(session.id);
+    return session;
+  }, [createSession]);
 
   // ── Shared stream consumption ─────────────────────────────────────────
   // Background chat (PR #23) splits the request into two hops: POST
@@ -76,6 +123,8 @@ export function useWorkspaceChat(workspaceId: string | null) {
   // Mirrors connectToRunStream in app/(dashboard)/chat/page.tsx.
   const connectToRunStream = useCallback(
     async (runId: string, sessionId: string) => {
+      const version = ++streamVersion.current;
+      pendingSubmission.current = null;
       const controller = new AbortController();
       abortRef.current = controller;
       activeRunRef.current = runId;
@@ -89,21 +138,25 @@ export function useWorkspaceChat(workspaceId: string | null) {
           `/api/v1/chat/runs/${runId}/stream?last_id=0`,
           controller.signal,
         );
+        if (streamVersion.current !== version) return;
         await consumeChatStream(res, {
           onText: (chunk) => {
+            if (streamVersion.current !== version) return;
             bufferRef.current.push(chunk);
             if (rafRef.current === null) {
               rafRef.current = requestAnimationFrame(flushBuffer);
             }
           },
           onToolStatus: () => {},
-          onError: (streamError) => setError(streamError),
+          onError: (streamError) => { if (streamVersion.current === version) setError(streamError); },
           onMessage: (message) => {
+            if (streamVersion.current !== version) return;
             setStreamingMessage(message);
             setStreamBlocks([]);
           },
         });
       } catch (err: unknown) {
+        if (streamVersion.current !== version) return;
         // AbortController.abort() throws — expected on session switch/unmount
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (err instanceof Error && err.message.includes("aborted")) return;
@@ -111,6 +164,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
           err instanceof Error ? err.message : "Failed to load chat stream.";
         setError(message);
       } finally {
+        if (streamVersion.current !== version) return;
         // Flush any remaining buffered text and cancel pending RAF
         if (rafRef.current !== null) {
           cancelAnimationFrame(rafRef.current);
@@ -139,6 +193,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
         } catch {
           // Refetch failure is non-critical
         }
+        if (streamVersion.current !== version) return;
         isStreamingRef.current = false;
         activeRunRef.current = null;
         abortRef.current = null;
@@ -158,7 +213,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
   // chat page (app/(dashboard)/chat/page.tsx).
   useEffect(() => {
     if (!sessionDetail?.active_run_id) return;
-    if (sessionDetail.status !== "running") return;
+    if (sessionDetail.status !== "running" && sessionDetail.status !== "cancelling") return;
     if (isStreamingRef.current) return;
 
     const runId = sessionDetail.active_run_id;
@@ -167,91 +222,88 @@ export function useWorkspaceChat(workspaceId: string | null) {
 
     connectToRunStream(runId, sessionId);
 
-    return () => {
-      if (abortRef.current) {
-        abortRef.current.abort();
-        abortRef.current = null;
-      }
-    };
+    // Selection/unmount owns cancellation. Query status refreshes must not
+    // abort a newer stream through the shared controller ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionDetail?.active_run_id, sessionDetail?.status, activeSessionId]);
 
   const handleSend = useCallback(
-    async (content: string) => {
-      if (isStreamingRef.current || createSession.isPending) return;
+    async (content: string, fileId?: string, opts: WorkspaceSendOptions = {}): Promise<ChatSubmissionReceipt | undefined> => {
+      const scope = scopeRef.current;
+      if (!scope || !mountedRef.current) throw new Error("Select a workspace first.");
+      opts.assert_current?.();
+      if (opts.request_id && !activeSessionId) throw new Error("Create and select a conversation first.");
+      const body = { content, file_id: fileId, request_id: opts.request_id };
+      if (isStreamingRef.current || createSession.isPending) {
+        if (opts.request_id && activeSessionId) {
+          return apiClient.post<ChatSubmissionReceipt>(`/api/v1/chat/sessions/${activeSessionId}/messages`, body);
+        }
+        return;
+      }
+      const submission = Symbol("workspace submission");
+      pendingSubmission.current = submission;
+      const assertCurrent = () => {
+        opts.assert_current?.();
+        if (!mountedRef.current || scopeRef.current !== scope || pendingSubmission.current !== submission) {
+          throw new Error("Workspace or conversation changed. Retry with the same request_id in its original conversation.");
+        }
+      };
       setError(null);
       setPendingMessage(content);
-      // Mark busy immediately so the typing indicator paints without a gap
-      // between createSession resolving and connectToRunStream taking over.
-      // Without this, isSending flickers false while POST /messages is in
-      // flight (~hundreds of ms), so the UI looks frozen and the user
-      // assumes the chat broke.
       isStreamingRef.current = true;
       setIsStreaming(true);
-
-      let sessionId = activeSessionId;
-      if (!sessionId) {
-        try {
-          const session = await createSession.mutateAsync();
-          sessionId = session.id;
-        } catch {
-          setPendingMessage(null);
+      try {
+        const sessionId = activeSessionId || (await createConversation()).id;
+        assertCurrent();
+        const receipt = await apiClient.post<ChatSubmissionReceipt>(`/api/v1/chat/sessions/${sessionId}/messages`, body);
+        assertCurrent();
+        await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        assertCurrent();
+        setPendingMessage(null);
+        const stream = connectToRunStream(receipt.run_id, sessionId);
+        if (!opts.request_id) await stream;
+        return receipt;
+      } catch (err) {
+        // Only the still-owning submission may change this conversation's UI.
+        if (pendingSubmission.current === submission && mountedRef.current) {
+          pendingSubmission.current = null;
           isStreamingRef.current = false;
           setIsStreaming(false);
-          setError("Failed to create chat session.");
-          return;
+          setError(err instanceof Error ? err.message : "Failed to send message.");
         }
-      }
-
-      try {
-        // Step 1: POST /messages — returns {run_id, session_id}
-        const { run_id } = await apiClient.post<{ run_id: string; session_id: string }>(
-          `/api/v1/chat/sessions/${sessionId}/messages`,
-          { content },
-        );
-
-        // Refetch so the persisted user message lands before we clear the
-        // pending optimistic copy. Otherwise there's a flicker where neither
-        // the optimistic nor the persisted message renders.
-        await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
-        setPendingMessage(null);
-
-        // Step 2: connect to the SSE stream for this run
-        await connectToRunStream(run_id, sessionId);
-      } catch (err: unknown) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        if (err instanceof Error && err.message.includes("aborted")) return;
-        const message =
-          err instanceof Error
-            ? err.message
-            : "Failed to send message. Please try again.";
-        setError(message);
-        setPendingMessage(null);
-        // Clear busy state on early failure (POST or invalidate threw before
-        // connectToRunStream took over — connectToRunStream's own finally
-        // would otherwise never run).
-        isStreamingRef.current = false;
-        setIsStreaming(false);
+        if (opts.request_id) throw err;
       }
     },
-    [activeSessionId, createSession, connectToRunStream, queryClient],
+    [activeSessionId, createSession.isPending, createConversation, connectToRunStream, queryClient],
   );
 
-  const handleNewChat = useCallback(() => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
-    setActiveSessionId(null);
-    setError(null);
+  const selectSession = useCallback((id: string | null) => {
+    if (id === activeSessionId) return;
+    clearLocal();
+    setActiveSessionId(id);
+  }, [activeSessionId, clearLocal]);
+  const handleNewChat = useCallback(() => { clearLocal(); setActiveSessionId(null); }, [clearLocal]);
+  const cancelActiveRun = useCallback(async (expectedId?: string) => {
+    const runId = activeRunRef.current;
+    if (!runId || (expectedId && expectedId !== runId)) throw new Error("No matching active workspace run.");
+    return apiClient.post(`/api/v1/chat/runs/${runId}/cancel`, {});
   }, []);
+  const handleStop = useCallback(async () => {
+    try { await cancelActiveRun(); }
+    catch { setError("Could not stop the response. Check run status and retry."); }
+  }, [cancelActiveRun]);
 
   return {
     sessions,
     activeSessionId,
-    setActiveSessionId,
+    setActiveSessionId: selectSession,
     sessionDetail,
     isLoadingDetail,
+    isLoadingSessions,
+    createConversation,
+    cancelActiveRun,
+    handleStop,
+    activeRunId: activeRunRef.current,
     pendingMessage,
     error,
     setError,

@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 # TTLs in seconds
 _RUN_TTL = 1800  # 30 minutes
-_CANCEL_TTL = 300  # 5 minutes
 
 
 class RunManager:
@@ -51,8 +50,20 @@ class RunManager:
         pipe = r.pipeline()
         pipe.set(f"chat:run:{run_id}:status", "running", ex=_RUN_TTL)
         pipe.set(f"chat:run:{run_id}:started_at", str(time.time()), ex=_RUN_TTL)
+        pipe.set(f"chat:run:{run_id}:session", session_id, ex=_RUN_TTL)
         pipe.set(f"chat:session:{session_id}:run", run_id, ex=_RUN_TTL)
         pipe.execute()
+
+    def get_session(self, run_id: str) -> str | None:
+        """Owning session, retained after the active-run pointer is cleared."""
+        return self._redis.get(f"chat:run:{run_id}:session") if self._redis is not None else None
+
+    def set_outcome(self, run_id: str, outcome: str) -> None:
+        if self._redis is not None:
+            self._redis.set(f"chat:run:{run_id}:outcome", outcome, ex=_RUN_TTL)
+
+    def get_outcome(self, run_id: str) -> str | None:
+        return self._redis.get(f"chat:run:{run_id}:outcome") if self._redis is not None else None
 
     def get_started_at(self, run_id: str) -> float | None:
         """Get the start timestamp of a run (Unix epoch)."""
@@ -88,12 +99,21 @@ class RunManager:
             return None
         return r.get(f"chat:session:{session_id}:run")
 
-    def clear_active_run(self, session_id: str) -> None:
+    def clear_active_run(self, session_id: str, expected_run_id: str | None = None) -> None:
         """Remove the session->run mapping."""
         r = self._redis
         if r is None:
             return
-        r.delete(f"chat:session:{session_id}:run")
+        key = f"chat:session:{session_id}:run"
+        if expected_run_id is None:
+            r.delete(key)
+        else:
+            r.eval(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0",
+                1,
+                key,
+                expected_run_id,
+            )
 
     # ------------------------------------------------------------------
     # Event stream
@@ -127,7 +147,7 @@ class RunManager:
         key = f"chat:run:{run_id}:events"
         try:
             # Use XRANGE for non-blocking, XREAD for blocking
-            if block_ms is not None:
+            if block_ms is not None and block_ms > 0:
                 raw = r.xread({key: last_id}, count=count, block=block_ms)
                 if not raw:
                     return []
@@ -158,15 +178,29 @@ class RunManager:
     # Cancellation
     # ------------------------------------------------------------------
 
-    def request_cancel(self, run_id: str) -> None:
+    def request_cancel(self, run_id: str) -> bool:
         """Request cancellation of a run."""
         r = self._redis
         if r is None:
-            return
-        pipe = r.pipeline()
-        pipe.set(f"chat:run:{run_id}:cancel", "1", ex=_CANCEL_TTL)
-        pipe.set(f"chat:run:{run_id}:status", "cancelled", ex=_RUN_TTL)
-        pipe.execute()
+            return False
+        # Compare and set atomically: cancellation must not overwrite a completed
+        # run or release the session while its worker is still executing.
+        return bool(
+            r.eval(
+                """
+            local state = redis.call('GET', KEYS[1])
+            if state == 'cancelling' then return 1 end
+            if state ~= 'running' then return 0 end
+            redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
+            redis.call('SET', KEYS[1], 'cancelling', 'EX', ARGV[1])
+            return 1
+            """,
+                2,
+                f"chat:run:{run_id}:status",
+                f"chat:run:{run_id}:cancel",
+                _RUN_TTL,
+            )
+        )
 
     def is_cancelled(self, run_id: str) -> bool:
         """Check if a run has been cancelled."""
