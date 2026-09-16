@@ -207,11 +207,53 @@ async def test_tenants_are_served_longest_waiting_first_so_the_cap_rotates(db):
         db, now=datetime.now(timezone.utc), sender=AsyncMock(), tenant_ids=[served_before.id]
     )
 
-    order = [t.id for (t,) in [(x,) for x in (await ops_digest.tenants_due(db))[0]]]
+    tenants, _, last = await ops_digest.tenants_due(db)
+    order = [t.id for t in tenants]
     assert order.index(never_served.id) < order.index(served_before.id)
+    assert served_before.id in last and never_served.id not in last
 
     await ops_digest.run_ops_digest(
         db, now=datetime.now(timezone.utc), sender=AsyncMock(), tenant_ids=[never_served.id]
     )
-    order = [t.id for t in (await ops_digest.tenants_due(db))[0]]
-    assert order.index(served_before.id) < order.index(never_served.id)  # the older digest now waits longer
+    _, _, last = await ops_digest.tenants_due(db)
+    assert never_served.id in last  # served once, it leaves the never-delivered front of the queue
+    # Within one test transaction every audit row shares the transaction's now(), so the
+    # relative order of two delivered tenants is not observable here; the key is covered above.
+
+
+async def test_an_undelivered_digest_does_not_move_the_window(db, unknown_case):
+    """A failed send keeps the incident in the next digest; a delivered one (or email
+    deliberately off) advances the window as before."""
+    tenant_id = unknown_case.actor.tenant_id
+    await operation(db, unknown_case)
+    first = datetime.now(timezone.utc)
+    broken = AsyncMock(side_effect=RuntimeError("smtp down"))
+    await ops_digest.run_ops_digest(db, now=first, sender=broken, tenant_ids=[tenant_id])
+    rows = await _digest_rows(db, tenant_id)
+    assert rows[-1].payload["delivery"] == "failed" and rows[-1].payload["counts"]["operations"] == 1
+
+    working = AsyncMock()
+    await ops_digest.run_ops_digest(db, now=first + timedelta(hours=1), sender=working, tenant_ids=[tenant_id])
+    rows = await _digest_rows(db, tenant_id)
+    assert rows[-1].payload["delivery"] == "sent"
+    assert rows[-1].payload["counts"]["operations"] == 1  # still reported: nobody had seen it
+    assert rows[-1].payload["since"] == (first + timedelta(hours=1) - ops_digest.WINDOW).isoformat()
+
+    await ops_digest.run_ops_digest(db, now=first + timedelta(hours=2), sender=working, tenant_ids=[tenant_id])
+    rows = await _digest_rows(db, tenant_id)
+    # Delivered once, so the window now starts at that delivered row. The incident's
+    # updated_at equals the row's timestamp inside this one test transaction, so the
+    # count cannot prove exclusion here; the boundary is what the fix changes.
+    assert rows[-1].payload["since"] == rows[-2].timestamp.isoformat()
+
+
+async def test_email_disabled_still_counts_as_delivered(db, unknown_case, monkeypatch):
+    monkeypatch.setattr(settings, "OPS_DIGEST_EMAIL_ENABLED", False)
+    tenant_id = unknown_case.actor.tenant_id
+    await operation(db, unknown_case)
+    first = datetime.now(timezone.utc)
+    await ops_digest.run_ops_digest(db, now=first, sender=AsyncMock(), tenant_ids=[tenant_id])
+    await ops_digest.run_ops_digest(db, now=first + timedelta(hours=1), sender=AsyncMock(), tenant_ids=[tenant_id])
+    rows = await _digest_rows(db, tenant_id)
+    assert rows[-2].payload["delivery"] == "disabled"
+    assert rows[-1].payload["since"] == rows[-2].timestamp.isoformat()  # the audit row was the digest; the window moved

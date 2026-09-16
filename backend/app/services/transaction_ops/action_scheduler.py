@@ -163,6 +163,7 @@ async def collect_due_actions(db, now):
     disabled = not settings.TRANSACTION_OPS_DISPATCH_ENABLED
     stats["dispatch_disabled"] = disabled
     stats["withheld"] = 0
+    stats["executions_due"] = 0
     if disabled:
         # Operator kill switch: sends are withheld, everything read-only still runs.
         # Approved proposals stay approved and are picked up by the first sweep after
@@ -196,6 +197,10 @@ async def collect_due_actions(db, now):
                         ("execute", executions, "executions"),
                     ):
                         stats["truncated"] |= len(candidates) > _LIMIT
+                        if kind == "execute":
+                            # Due whether or not they are sent, so a reader can tell
+                            # "nothing was due" from "everything was withheld".
+                            stats["executions_due"] += len(candidates[:_LIMIT])
                         if disabled and kind == "execute":
                             stats["withheld"] += len(candidates[:_LIMIT])
                             continue

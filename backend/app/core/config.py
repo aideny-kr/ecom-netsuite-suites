@@ -225,8 +225,10 @@ class Settings(BaseSettings):
     # audited `dispatch_disabled` reason. Enforced at four points on purpose: each
     # has different resume semantics (an in-flight operation ends failed/blocked,
     # a queued group member stays queued, an approved proposal stays approved, a
-    # chat card whose approve arrives while off ends failed). Default on; set it
-    # to false in the environment to halt mid-run.
+    # chat card whose approve arrives while off ends failed). Default on. Settings
+    # are read once when a process starts, so flipping it means setting it in the
+    # environment and restarting the backend, worker and beat containers (a redeploy
+    # does that); a running process never re-reads it.
     TRANSACTION_OPS_DISPATCH_ENABLED: bool = True
     # The daily ops digest always writes its per-tenant audit row; this only
     # controls whether the same digest is also emailed to the tenant's admins.

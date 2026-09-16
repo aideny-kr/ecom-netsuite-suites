@@ -68,10 +68,21 @@ def _stale_after() -> timedelta:
     return timedelta(seconds=_tool_timeout_seconds("ns_createRecord")) + STALE_GRACE
 
 
-async def previous_digest_at(db, tenant_id: UUID) -> datetime | None:
-    return await db.scalar(
-        select(func.max(AuditEvent.timestamp)).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == ACTION)
+# A digest counts as delivered when a person could have read it: sent, or nothing to
+# report, or email deliberately off (the audit row is then the digest). A row whose
+# email failed or had no recipient does not move the window, so the incidents it
+# carried are reported again next time instead of ageing out unseen.
+DELIVERED = ("sent", "nothing_to_report", "disabled")
+
+
+async def last_delivered_at(db) -> dict[UUID, datetime]:
+    """Per tenant, when the last digest that reached (or could reach) a person was written."""
+    rows = await db.execute(
+        select(AuditEvent.tenant_id, func.max(AuditEvent.timestamp))
+        .where(AuditEvent.action == ACTION, AuditEvent.payload["delivery"].astext.in_(DELIVERED))
+        .group_by(AuditEvent.tenant_id)
     )
+    return dict(rows.all())
 
 
 async def _category(db, stmt, order_by):
@@ -154,28 +165,21 @@ def _epoch(value: datetime | None) -> float:
     return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).timestamp()
 
 
-async def tenants_due(db, *, tenant_ids: list[UUID] | None = None) -> tuple[list[Tenant], bool]:
-    """Active tenants in the order this run should serve them, and whether the cap cut it.
+async def tenants_due(db, *, tenant_ids: list[UUID] | None = None) -> tuple[list[Tenant], bool, dict]:
+    """Active tenants in the order this run should serve them, whether the cap cut it,
+    and each tenant's last delivered digest time (the start of its next window).
 
-    Tenants that have never had a digest come first, then the longest-waiting. A fixed
-    cap over a fixed order would leave the same tenants beyond it every single run.
-    With explicit ``tenant_ids`` the caller's order is kept and the cap does not apply.
+    Tenants that have never had a delivered digest come first, then the longest-waiting.
+    A fixed cap over a fixed order would leave the same tenants beyond it every single
+    run. With explicit ``tenant_ids`` the caller's order is kept and the cap does not apply.
     """
+    last = await last_delivered_at(db)
     if tenant_ids is not None:
         rows = {t.id: t for t in await db.scalars(select(Tenant).where(Tenant.id.in_(tenant_ids)))}
-        return [rows[i] for i in tenant_ids if i in rows], False
+        return [rows[i] for i in tenant_ids if i in rows], False, last
     tenants = list(await db.scalars(select(Tenant).where(Tenant.is_active.is_(True))))
-    last = dict(
-        (
-            await db.execute(
-                select(AuditEvent.tenant_id, func.max(AuditEvent.timestamp))
-                .where(AuditEvent.action == ACTION)
-                .group_by(AuditEvent.tenant_id)
-            )
-        ).all()
-    )
     tenants.sort(key=lambda t: (last.get(t.id) is not None, _epoch(last.get(t.id)), str(t.id)))
-    return tenants[:TENANT_LIMIT], len(tenants) > TENANT_LIMIT
+    return tenants[:TENANT_LIMIT], len(tenants) > TENANT_LIMIT, last
 
 
 async def admin_emails(db, tenant_id: UUID) -> list[str]:
@@ -241,13 +245,13 @@ async def run_ops_digest(
     send = sender or email_service.send_ops_digest_email
     stats = {"tenants": 0, "sent": 0, "tenant_failed": 0, "truncated": False, "termination_reason": "done"}
 
-    tenants, stats["truncated"] = await tenants_due(db, tenant_ids=tenant_ids)
+    tenants, stats["truncated"], last = await tenants_due(db, tenant_ids=tenant_ids)
 
     for tenant in tenants:
         tenant_id = tenant.id
         try:
             await set_tenant_context(db, str(tenant_id))
-            since = (await previous_digest_at(db, tenant_id)) or (now - window)
+            since = last.get(tenant_id) or (now - window)
             digest = await collect(db, tenant_id, now=now, since=since)
             total = sum(digest["counts"].values())
             # Recipients are only looked up when there is something to send them.
