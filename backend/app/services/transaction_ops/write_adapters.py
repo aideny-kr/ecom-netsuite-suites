@@ -118,7 +118,7 @@ class _ScheduledAdapter:
             ),
         )
         if len(source.get("orders") or []) == 1 and payment_failed(source["orders"][0]):
-            raise ExecutionStoppedError(FAILED_PAYMENT)
+            raise ExecutionStoppedError(FAILED_PAYMENT, keep_code=True)
         targets = await read(
             10,
             self.reads.target,
@@ -163,7 +163,7 @@ class GuardRestletAdapter(_ScheduledAdapter):
                 self.reads.max_guard_calls, self.reads.create_preview, self.config, creation.payload_json
             )
         else:
-            raise ExecutionStoppedError("unsupported_action")
+            raise ExecutionStoppedError("unsupported_action", keep_code=True)
         self._same_plan(claimed, report, targets, guard=guard, creation=creation)
         return {"guard": guard, "creation": creation}
 
@@ -242,5 +242,5 @@ def build_adapter(action, **kwargs):
     try:
         cls = ADAPTERS[action]
     except KeyError:
-        raise ExecutionStoppedError("unsupported_action") from None
+        raise ExecutionStoppedError("unsupported_action", keep_code=True) from None
     return cls(**kwargs)

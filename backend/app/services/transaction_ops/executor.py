@@ -53,24 +53,6 @@ def _reads() -> Reads:
     )
 
 
-async def _operation(db, tenant_id, proposal, *, operation_id=None):
-    if operation_id is not None:
-        return await write_kernel._operation(db, tenant_id, operation_id)
-    from sqlalchemy import select
-
-    from app.core.database import set_tenant_context
-    from app.models.transaction_ops import TransactionOperation
-
-    await set_tenant_context(db, str(tenant_id))
-    query = select(TransactionOperation).where(
-        TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == proposal.work_key
-    )
-    return (await db.execute(query.execution_options(populate_existing=True))).scalar_one_or_none()
-
-
-_result = write_kernel.result_of
-
-
 async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
     clock = _clock or (lambda: datetime.now(timezone.utc))
     proposal = await state.get_proposal(db, tenant_id, proposal_id)
@@ -80,8 +62,10 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
         )
     except state.StateError as exc:
         if exc.code == "operation_already_attempted":
-            previous = await _operation(db, tenant_id, proposal)
-            return _result(previous) if previous else {"status": "stalled", "termination_reason": "stall"}
+            previous = await state.operation_for_work(db, tenant_id, proposal.work_key)
+            return (
+                write_kernel.result_of(previous) if previous else {"status": "stalled", "termination_reason": "stall"}
+            )
         if exc.code == "proposal_not_approved":
             return {"status": proposal.status, "termination_reason": "stall"}
         raise
@@ -102,5 +86,5 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
             outcome="rejected_before_effect",
             result_json={"code": "unsupported_action"},
         )
-        return _result(row)
+        return write_kernel.result_of(row)
     return await write_kernel.execute(db, tenant_id, claimed, adapter, clock=clock)

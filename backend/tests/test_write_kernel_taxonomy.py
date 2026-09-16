@@ -336,3 +336,63 @@ async def test_the_retry_of_a_rejected_operation_keeps_the_lineage(db, execution
     assert second.work_key != first.work_key
     assert uuid.UUID(str(second.approval_id)) == retry.id
     assert second.attempted_at - first.attempted_at >= timedelta(0)
+
+
+async def test_a_receipt_can_never_be_called_before_effect_or_unknown_again(db, ready):
+    actor, _, _, claim = ready
+    assert await reserve(db, actor.tenant_id, claim)
+    await state.complete_operation(
+        db, actor.tenant_id, claim.operation_id, outcome="committed_unverified", result_json={"code": "x"}
+    )
+    for outcome in ("rejected_before_effect", "unknown"):
+        with pytest.raises(state.StateError, match="receipt_recorded"):
+            await state.complete_operation(
+                db, actor.tenant_id, claim.operation_id, outcome=outcome, result_json={"code": "y", "reconciled": True}
+            )
+
+
+async def test_a_receipt_becomes_verified_only_with_a_readback_proof(db, ready):
+    actor, _, _, claim = ready
+    assert await reserve(db, actor.tenant_id, claim)
+    await state.complete_operation(
+        db, actor.tenant_id, claim.operation_id, outcome="committed_unverified", result_json={"code": "x"}
+    )
+    with pytest.raises(state.StateError, match="verification_evidence_required"):
+        await state.complete_operation(
+            db, actor.tenant_id, claim.operation_id, outcome="verified", result_json={"code": "no proof"}
+        )
+    row = await state.complete_operation(
+        db,
+        actor.tenant_id,
+        claim.operation_id,
+        outcome="verified",
+        result_json={"code": "independently_verified", "verification": {"source_unchanged": True}},
+    )
+    assert row.status == "verified"
+
+
+async def test_a_committed_unverified_attempt_blocks_a_new_claim_on_the_same_order(db, ready):
+    """The in-flight guard at claim time counts a receipted-but-unproven attempt as in flight,
+    like the partial unique index, settlement and the scheduler already do."""
+    from app.schemas.transaction_runs import ProposalDecision
+    from tests.test_transaction_ops_state_db import new_proposal
+
+    actor, _, proposal, claim = ready
+    assert await reserve(db, actor.tenant_id, claim)
+    await state.complete_operation(
+        db, actor.tenant_id, claim.operation_id, outcome="committed_unverified", result_json={"code": "x"}
+    )
+    run = await state.get_run(db, actor.tenant_id, proposal.run_id)
+    other = await new_proposal(db, actor, run, currency="EUR")  # a different piece of work, the same order
+    assert other.id != proposal.id and other.work_key != proposal.work_key
+    await state.decide_proposal(
+        db,
+        actor.tenant_id,
+        other.id,
+        ProposalDecision(decision="approve", evidence_fingerprint=other.evidence_fingerprint),
+        actor=actor,
+    )
+    with pytest.raises(state.StateError, match="operation_already_attempted"):
+        await state.claim_approved_operation(
+            db, actor.tenant_id, other.id, expected_evidence_fingerprint=other.evidence_fingerprint
+        )

@@ -89,11 +89,19 @@ async def test_changed_evidence_in_preflight_ends_rejected_before_effect_and_nev
 
 
 async def test_a_documented_stop_in_preflight_keeps_its_code(db, ready):
-    adapter = FakeAdapter(preflight_error=ExecutionStoppedError("source_payment_failed"))
+    adapter = FakeAdapter(preflight_error=ExecutionStoppedError("source_payment_failed", keep_code=True))
     result, row = await _run(db, ready, adapter)
     assert result["status"] == "rejected_before_effect"
     assert row.result_json["code"] == "source_payment_failed"
     assert adapter.sends == 0
+
+
+async def test_an_undocumented_stop_never_becomes_ledger_evidence(db, ready):
+    adapter = FakeAdapter(preflight_error=ExecutionStoppedError("private token in a message"))
+    result, row = await _run(db, ready, adapter)
+    assert result["status"] == "rejected_before_effect"
+    assert row.result_json["code"] == "evidence_revalidation_failed"
+    assert "private token" not in str(row.result_json)
 
 
 async def test_an_undocumented_preflight_failure_is_rejected_before_effect_with_the_generic_code(db, ready):
@@ -224,3 +232,19 @@ async def test_the_kernel_never_reopens_a_terminal_row(db, ready, status):
     assert result["status"] == status
     assert adapter.sends == 1  # the fake sends before the ledger is consulted; the permit refuses
     assert (await _row(db, claim)).status == status
+
+
+async def test_budget_exhaustion_during_the_readback_keeps_the_budget_reason(db, ready):
+    """After a receipt the row is committed_unverified; if the readback runs out of budget the
+    ledger already says 'budget' and the kernel must not overwrite it with a generic stall."""
+    actor, _, _, claim = ready
+    await state.reserve_operation_budget(db, actor.tenant_id, claim.operation_id, api_calls=94)
+
+    class Reading(FakeAdapter):
+        async def verify(self, db, tenant_id, claimed, preflight, *, read):
+            return await read(5, AsyncMock(return_value={}))  # 94 + 1 send + 5 > 96
+
+    result, row = await _run(db, ready, Reading())
+    assert result["status"] == "committed_unverified" and result["termination_reason"] == "budget"
+    assert row.result_json["code"] == "operation_budget_exhausted"
+    assert row.result_json["receipt"]["record_id"] == "63"

@@ -22,9 +22,6 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from sqlalchemy import select
-
-from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionOperation
 from app.services.transaction_ops import state_service as state
 
@@ -41,9 +38,20 @@ class PreconditionChangedError(ValueError):
 
 
 class ExecutionStoppedError(ValueError):
-    """A read found a reason to stop (the source order's payment failed, an unsupported
-    action). Ends the attempt without a send; the message is the ledger code when it is
-    a documented stop, otherwise the generic revalidation code."""
+    """A read found a reason to stop before any send.
+
+    ``keep_code`` marks a documented stop whose code is the ledger code (the source order's
+    payment failed, an unsupported action); anything else is recorded under the generic
+    revalidation code so an internal message never becomes ledger evidence.
+    """
+
+    def __init__(self, code: str, *, keep_code: bool = False):
+        super().__init__(code)
+        self.code = code
+        self.keep_code = keep_code
+
+
+OPEN = ("executing", "committed_unverified")  # the only states the kernel may still write to
 
 
 class WriteAdapter(Protocol):
@@ -64,11 +72,10 @@ class WriteAdapter(Protocol):
 
 
 async def _operation(db, tenant_id, operation_id):
-    await set_tenant_context(db, str(tenant_id))
-    query = select(TransactionOperation).where(
-        TransactionOperation.tenant_id == tenant_id, TransactionOperation.id == operation_id
-    )
-    return (await db.execute(query.execution_options(populate_existing=True))).scalar_one_or_none()
+    try:
+        return await state._one(db, tenant_id, TransactionOperation, operation_id)
+    except state.StateError:
+        return None
 
 
 def result_of(row) -> dict:
@@ -87,7 +94,6 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
     another permit, because the permit and the receipt are one-use on the row itself.
     """
     clock = clock or (lambda: datetime.now(timezone.utc))
-    stop_codes = {"source_payment_failed", "unsupported_action"}
 
     async def read(cost, function, *args, **kwargs):
         permit = await state.reserve_operation_budget(db, tenant_id, claimed.operation_id, api_calls=cost, now=clock())
@@ -99,9 +105,9 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
         async with asyncio.timeout(min(seconds, READ_TIMEOUT_SECONDS)):
             return await function(db, tenant_id, *args, **kwargs)
 
-    async def complete(outcome, code, **details):
-        row = await _operation(db, tenant_id, claimed.operation_id)
-        if row.status not in ("executing", "committed_unverified"):
+    async def complete(outcome, code, *, row=None, **details):
+        row = row or await _operation(db, tenant_id, claimed.operation_id)
+        if row.status not in OPEN:
             return result_of(row)
         row = await state.complete_operation(
             db, tenant_id, row.id, outcome=outcome, result_json={"code": code, **details}, now=clock()
@@ -135,22 +141,26 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
         )
     except PreconditionChangedError as exc:
         row = await _operation(db, tenant_id, claimed.operation_id)
-        if row.status not in ("executing", "committed_unverified"):
+        if row.status not in OPEN:
             return result_of(row)
         if (row.result_json or {}).get("dispatch_reserved") is True:
             # Preflight must never reserve; if an adapter did, the send may have happened.
-            return await complete("unknown", exc.code)
-        return await complete("rejected_before_effect", exc.code)
+            return await complete("unknown", exc.code, row=row)
+        return await complete("rejected_before_effect", exc.code, row=row)
     except Exception as exc:
         # A transport exception may follow an actual send; only the committed ledger
         # decides whether the failure is known. Never expose raw exceptions.
         row = await _operation(db, tenant_id, claimed.operation_id)
-        if row.status not in ("executing", "committed_unverified"):
+        if row.status not in OPEN:
             return result_of(row)
         if row.status == "committed_unverified":
-            return await complete("committed_unverified", "verification_unavailable")
+            if (row.result_json or {}).get("termination_reason") == "budget":
+                # The read budget ran out during the readback; the ledger already says so
+                # (state_service._exhaust_operation) and that reason is the truer one.
+                return result_of(row)
+            return await complete("committed_unverified", "verification_unavailable", row=row)
         sent = (row.result_json or {}).get("dispatch_reserved") is True
         code = "verification_unavailable" if sent else "evidence_revalidation_failed"
-        if isinstance(exc, ExecutionStoppedError) and str(exc) in stop_codes:
-            code = str(exc)
-        return await complete("unknown" if sent else "rejected_before_effect", code)
+        if isinstance(exc, ExecutionStoppedError) and exc.keep_code:
+            code = exc.code
+        return await complete("unknown" if sent else "rejected_before_effect", code, row=row)
