@@ -1,0 +1,601 @@
+"""Recording and reconciling side effects — the durable half.
+
+`write_side_effect.py` derives the key and classifies an answer. This is the
+part that must survive the process dying: the row goes in BEFORE the call, and
+resume settles it from EVIDENCE rather than by retrying blind.
+
+These tests run against a real Postgres (the drill DB), because the properties
+that matter here are database properties — a server-side default that applies
+when the caller never gets to set it, and a unique constraint that makes a
+second attempt update one row instead of appending a second.
+"""
+
+import asyncio
+import json
+import os
+import uuid
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.services.chat.write_side_effect import SideEffectStatus
+from app.services.chat.write_side_effect_repo import (
+    record_attempt,
+    settle_from_result,
+    unsettled_for_tenant,
+)
+
+DRILL_URL = os.environ.get("DRILL_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/idem_drill")
+pytestmark = pytest.mark.asyncio
+
+_TENANT = uuid.UUID("ce3dfaad-626f-4992-84e9-500c8291ca0a")
+
+
+@pytest_asyncio.fixture
+async def db():
+    engine = create_async_engine(DRILL_URL)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as s:
+        await s.execute(text("DELETE FROM write_side_effects"))
+        # The tenant FK is real; make sure the row exists in the drill DB.
+        await s.execute(
+            text(
+                "INSERT INTO tenants (id, name, slug, created_at, updated_at) "
+                "VALUES (:i,'Drill','drill',now(),now()) ON CONFLICT (id) DO NOTHING"
+            ),
+            {"i": _TENANT},
+        )
+        await s.commit()
+        yield s
+    await engine.dispose()
+
+
+async def test_attempt_is_durable_before_any_answer(db):
+    """The row must exist, as 'attempted', with nothing else set — this is what
+    a crash between send and confirm leaves behind."""
+    key = await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-abc",
+        record_type="customer",
+        mutation_type="create",
+        payload={"companyName": "Acme"},
+        correlation_id="c1",
+    )
+    await db.commit()
+    row = (
+        await db.execute(
+            text("SELECT status, netsuite_record_id FROM write_side_effects WHERE idempotency_key=:k"),
+            {"k": "ss-idem-abc"},
+        )
+    ).first()
+    assert row.status == SideEffectStatus.ATTEMPTED.value
+    assert row.netsuite_record_id is None
+    assert key == "ss-idem-abc"
+
+
+async def test_status_default_is_enforced_by_the_database(db):
+    """Not just by the model. The row is inserted precisely because the process
+    may die immediately after, so the safe state cannot depend on Python."""
+    await db.execute(
+        text(
+            "INSERT INTO write_side_effects (id, tenant_id, idempotency_key, record_type, mutation_type) "
+            "VALUES (:i,:t,'ss-idem-raw','customer','create')"
+        ),
+        {"i": uuid.uuid4(), "t": _TENANT},
+    )
+    await db.commit()
+    got = (await db.execute(text("SELECT status FROM write_side_effects WHERE idempotency_key='ss-idem-raw'"))).scalar()
+    assert got == "attempted"
+
+
+async def test_a_second_attempt_updates_one_row_not_two(db):
+    """Two attempts at the same work share a row. Appending would make the log
+    imply two writes where there was one — a log that lies about side effects
+    is worse than no log."""
+    for _ in range(2):
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key="ss-idem-dup",
+            record_type="customer",
+            mutation_type="create",
+            payload={"companyName": "Acme"},
+            correlation_id="c1",
+        )
+        await db.commit()
+    n = (await db.execute(text("SELECT count(*) FROM write_side_effects WHERE idempotency_key='ss-idem-dup'"))).scalar()
+    assert n == 1
+
+
+async def test_success_settles_to_written_with_the_record_id(db):
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-ok",
+        record_type="customer",
+        mutation_type="create",
+        payload={},
+        correlation_id="c1",
+    )
+    await db.commit()
+    await settle_from_result(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-ok",
+        raw_result=json.dumps({"success": True, "recordId": "5264548"}),
+    )
+    await db.commit()
+    row = (
+        await db.execute(
+            text("SELECT status, netsuite_record_id FROM write_side_effects WHERE idempotency_key='ss-idem-ok'")
+        )
+    ).first()
+    assert row.status == "written"
+    assert row.netsuite_record_id == "5264548"
+
+
+async def test_a_timeout_leaves_it_attempted(db):
+    """The whole point. An indeterminate answer must not collapse into either
+    outcome — it stays the state that says 'go and look'."""
+    from app.services.chat.write_outcome import INDETERMINATE_KEY
+
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-to",
+        record_type="customer",
+        mutation_type="create",
+        payload={},
+        correlation_id="c1",
+    )
+    await db.commit()
+    await settle_from_result(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-to",
+        raw_result=json.dumps({"error": "exceeded 60-second timeout limit", INDETERMINATE_KEY: True}),
+    )
+    await db.commit()
+    got = (await db.execute(text("SELECT status FROM write_side_effects WHERE idempotency_key='ss-idem-to'"))).scalar()
+    assert got == "attempted"
+
+
+async def test_duplicate_refusal_settles_to_written(db):
+    """NetSuite refusing our externalId proves the original landed. Measured
+    live: HTTP 400 'This entity already exists'."""
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-exists",
+        record_type="customer",
+        mutation_type="create",
+        # The key must be IN what we sent — that is what makes the refusal proof.
+        payload={"externalId": "ss-idem-exists"},
+        correlation_id="c1",
+    )
+    await db.commit()
+    await settle_from_result(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-exists",
+        raw_result=json.dumps(
+            {
+                "success": False,
+                "error": '{"o:errorDetails":[{"detail":"Error while accessing a resource. '
+                'This entity already exists.","o:errorCode":"USER_ERROR"}]}',
+            }
+        ),
+    )
+    await db.commit()
+    got = (
+        await db.execute(text("SELECT status FROM write_side_effects WHERE idempotency_key='ss-idem-exists'"))
+    ).scalar()
+    assert got == "written"
+
+
+async def test_unsettled_lists_exactly_what_needs_resolving(db):
+    """The resume query. 'attempted' rows are the ones a crash left behind."""
+    for key, result in (
+        ("ss-idem-w", json.dumps({"success": True, "recordId": "1"})),
+        ("ss-idem-r", json.dumps({"error": "Please enter value(s) for: Subsidiary."})),
+        ("ss-idem-a", None),
+    ):
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type="customer",
+            mutation_type="create",
+            payload={},
+            correlation_id="c1",
+        )
+        await db.commit()
+        if result:
+            await settle_from_result(db, tenant_id=_TENANT, idempotency_key=key, raw_result=result)
+            await db.commit()
+
+    pending = await unsettled_for_tenant(db, tenant_id=_TENANT)
+    assert [p.idempotency_key for p in pending] == ["ss-idem-a"]
+
+
+async def test_reconcile_refuses_when_the_key_was_never_sent(db):
+    """A key we invented locally but did NOT put in the payload cannot be found
+    in NetSuite — not because the write failed, but because we never sent it.
+
+    Concluding 'rejected, safe to retry' from that empty result is the exact
+    proxy-predicate defect this table exists to end: the query tests a stand-in
+    (a key NetSuite never saw) for the real condition (did the write land).
+    Reached whenever a card is built by a path that does not stamp — so it must
+    be structurally impossible to get wrong, not merely avoided by callers.
+    """
+    from app.services.chat.write_side_effect_repo import reconcile_by_external_id
+
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-unsent",
+        record_type="customer",
+        mutation_type="create",
+        payload={"companyName": "Acme"},  # <- no externalId: the key never left this process
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    row = (await unsettled_for_tenant(db, tenant_id=_TENANT))[0]
+    asked = []
+
+    async def fake_suiteql(q: str) -> str:
+        asked.append(q)
+        return '{"data": []}'
+
+    status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
+
+    assert status is SideEffectStatus.ATTEMPTED, "an unanswerable question must not settle the row"
+    assert asked == [], "must not even ask — an empty answer here would be meaningless"
+    assert await unsettled_for_tenant(db, tenant_id=_TENANT), "row stays on the worklist for a human"
+
+
+async def test_reconcile_still_works_when_the_key_was_sent(db):
+    """The stamped case is unaffected: the key IS in the payload, so an empty
+    result really does mean the write never landed."""
+    from app.services.chat.write_side_effect_repo import reconcile_by_external_id
+
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-sent",
+        record_type="customer",
+        mutation_type="create",
+        payload={"companyName": "Acme", "externalId": "ss-idem-sent"},
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    row = (await unsettled_for_tenant(db, tenant_id=_TENANT))[0]
+
+    async def fake_suiteql(q: str) -> str:
+        return '{"data": []}'
+
+    status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
+    assert status is SideEffectStatus.REJECTED
+
+
+async def test_reconcile_refuses_a_record_type_that_is_not_an_identifier(db):
+    """T2 gate round 1. `record_type` is interpolated into the FROM clause of a
+    raw SuiteQL string while only the key value was escaped — and record_type
+    is model/tool-supplied, not ours. A crafted value would run as SQL against
+    the customer's NetSuite account.
+
+    Fails CLOSED: an unusable record type leaves the row unsettled for a human
+    rather than guessing, because the alternative to asking safely is not
+    'ask unsafely', it is 'do not ask'.
+    """
+    from app.services.chat.write_side_effect_repo import reconcile_by_external_id
+
+    hostile = [
+        "customer WHERE 1=1 OR '1'='1",
+        "customer; DROP TABLE customer",
+        "customer--",
+        "custom er",
+        "",
+    ]
+    for i, bad in enumerate(hostile):
+        key = f"ss-idem-inj-{i}"
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type=bad,
+            mutation_type="create",
+            payload={"companyName": "Acme", "externalId": key},
+            correlation_id="c1",
+        )
+        await db.commit()
+
+    asked = []
+
+    async def fake_suiteql(q: str) -> str:
+        asked.append(q)
+        return '{"data": []}'
+
+    for row in await unsettled_for_tenant(db, tenant_id=_TENANT):
+        status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
+        assert status is SideEffectStatus.ATTEMPTED, f"{row.record_type!r} must not settle"
+
+    assert asked == [], f"must not build any query from hostile record types, got {asked}"
+
+
+async def test_reconcile_accepts_legitimate_record_types(db):
+    """The guard must not break real NetSuite type names, including the
+    custom-record and camelCase forms this repo actually uses."""
+    from app.services.chat.write_side_effect_repo import reconcile_by_external_id
+
+    good = ["customer", "salesOrder", "customrecord_ecom_config", "journalEntry"]
+    for i, name in enumerate(good):
+        key = f"ss-idem-good-{i}"
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type=name,
+            mutation_type="create",
+            payload={"companyName": "Acme", "externalId": key},
+            correlation_id="c1",
+        )
+        await db.commit()
+
+    asked = []
+
+    async def fake_suiteql(q: str) -> str:
+        asked.append(q)
+        return '{"data": [{"id": 42}]}'
+
+    rows = await unsettled_for_tenant(db, tenant_id=_TENANT)
+    assert len(rows) == len(good)
+    for row in rows:
+        status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
+        assert status is SideEffectStatus.WRITTEN, f"{row.record_type} must be queryable"
+
+    assert len(asked) == len(good)
+    for name in good:
+        assert any(name in q for q in asked), f"{name} was never queried"
+
+
+async def test_a_settled_row_is_never_re_settled(db):
+    """T2 gate round 2. settle_from_result had no guarded transition, so a late
+    or duplicate settlement could overwrite a terminal status — turning a
+    recorded 'written' (with its NetSuite record id) into something else after
+    the fact. The ledger's whole value is that a definite answer is final."""
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-final",
+        record_type="customer",
+        mutation_type="create",
+        payload={"externalId": "ss-idem-final"},
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    await settle_from_result(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-final",
+        raw_result=json.dumps({"success": True, "recordId": "5264999"}),
+    )
+    await db.commit()
+
+    # A late duplicate answer arrives — a retry, a replayed queue message.
+    await settle_from_result(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-final",
+        raw_result=json.dumps({"error": "Please enter value(s) for: Subsidiary."}),
+    )
+    await db.commit()
+
+    row = (
+        await db.execute(
+            text("SELECT status, netsuite_record_id FROM write_side_effects WHERE idempotency_key='ss-idem-final'")
+        )
+    ).first()
+    assert row.status == "written", "a terminal status must not be overwritten"
+    assert row.netsuite_record_id == "5264999"
+
+
+async def test_concurrent_identical_attempts_do_not_lose_the_log(db):
+    """T2 gate round 2. record_attempt was SELECT-then-INSERT despite a
+    docstring claiming "Upserts" — a check-then-act race against
+    UNIQUE(tenant_id, idempotency_key). Two concurrent attempts on one key both
+    saw no row, both inserted, and the loser's IntegrityError was swallowed by
+    the isolated wrapper — so its write proceeded with NO side-effect log at
+    all, silently defeating the one guarantee this module exists to provide.
+    """
+    engine_a = create_async_engine(DRILL_URL)
+    engine_b = create_async_engine(DRILL_URL)
+    maker_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    maker_b = async_sessionmaker(engine_b, expire_on_commit=False)
+
+    async def attempt(maker):
+        async with maker() as s:
+            await record_attempt(
+                s,
+                tenant_id=_TENANT,
+                idempotency_key="ss-idem-race",
+                record_type="customer",
+                mutation_type="create",
+                payload={"externalId": "ss-idem-race"},
+                correlation_id="c1",
+            )
+            await s.commit()
+
+    # Genuinely concurrent: separate engines, separate connections.
+    results = await asyncio.gather(attempt(maker_a), attempt(maker_b), return_exceptions=True)
+    await engine_a.dispose()
+    await engine_b.dispose()
+
+    assert [r for r in results if isinstance(r, Exception)] == [], f"neither attempt may raise; got {results}"
+    n = (
+        await db.execute(text("SELECT count(*) FROM write_side_effects WHERE idempotency_key='ss-idem-race'"))
+    ).scalar()
+    assert n == 1, "one row for one key — and both callers got a usable log"
+
+
+async def test_settle_is_atomic_against_a_concurrent_settle(db):
+    """T2 gate round 3. The guarded transition lived in Python — SELECT, check
+    status, mutate, let the caller commit. Two settlements racing on separate
+    connections both read 'attempted', both pass the check, and the later
+    commit wins. Since settlements now run on ISOLATED sessions, that race is
+    reachable in the ordinary path, not just in theory.
+
+    The guard belongs in the UPDATE's WHERE clause, where the database decides.
+    """
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-atomic",
+        record_type="customer",
+        mutation_type="create",
+        payload={"externalId": "ss-idem-atomic"},
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    engine_a = create_async_engine(DRILL_URL)
+    engine_b = create_async_engine(DRILL_URL)
+    maker_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    maker_b = async_sessionmaker(engine_b, expire_on_commit=False)
+
+    async def settle(maker, raw):
+        async with maker() as s:
+            out = await settle_from_result(s, tenant_id=_TENANT, idempotency_key="ss-idem-atomic", raw_result=raw)
+            await s.commit()
+            return out
+
+    # A success and a rejection arrive at the same instant.
+    await asyncio.gather(
+        settle(maker_a, json.dumps({"success": True, "recordId": "5264999"})),
+        settle(maker_b, json.dumps({"error": "Please enter value(s) for: Subsidiary."})),
+        return_exceptions=True,
+    )
+    await engine_a.dispose()
+    await engine_b.dispose()
+
+    rows = (
+        (await db.execute(text("SELECT status FROM write_side_effects WHERE idempotency_key='ss-idem-atomic'")))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    # Either outcome may win the race — what must NOT happen is a row left in
+    # 'attempted' (both refused) or one that flipped twice.
+    assert rows[0] in ("written", "rejected")
+
+
+async def test_resume_settles_from_evidence_and_reports_a_reason(db):
+    """Goal condition 4 + agent-graph #5. The recovery half must be CALLABLE,
+    bounded, and must terminate with a REASON — 'stopped' merges 'finished'
+    with 'stuck', and a human cannot route what they cannot distinguish."""
+    from app.services.chat.write_side_effect_repo import reconcile_unsettled
+
+    conn = uuid.uuid4()
+    for i, landed in enumerate([True, False]):
+        key = f"ss-idem-resume-{i}"
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type="customer",
+            mutation_type="create",
+            payload={"externalId": key},
+            connector_id=conn,
+            correlation_id="c1",
+        )
+    await db.commit()
+
+    asked = []
+
+    async def suiteql_for(connector_id, query):
+        asked.append((connector_id, query))
+        # First row landed, second did not.
+        return '{"data": [{"id": 5264999}]}' if "resume-0" in query else '{"data": []}'
+
+    report = await reconcile_unsettled(db, tenant_id=_TENANT, suiteql_for_connector=suiteql_for)
+    await db.commit()
+
+    assert report["reason"] == "done"
+    assert report["settled"] == 2
+    assert [c for c, _ in asked] == [conn, conn], "each row asked against ITS OWN connector"
+    rows = dict(
+        (
+            await db.execute(
+                text("SELECT idempotency_key, status FROM write_side_effects WHERE tenant_id=:t"),
+                {"t": _TENANT},
+            )
+        ).all()
+    )
+    assert rows["ss-idem-resume-0"] == "written"
+    assert rows["ss-idem-resume-1"] == "rejected"
+    assert await unsettled_for_tenant(db, tenant_id=_TENANT) == []
+
+
+async def test_resume_refuses_a_row_with_no_connector(db):
+    """A write is only reconcilable against the account it was SENT to. With no
+    connector recorded there is no safe account to ask, so the row stays for a
+    human instead of being asked of an arbitrary one."""
+    from app.services.chat.write_side_effect_repo import reconcile_unsettled
+
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-noconn",
+        record_type="customer",
+        mutation_type="create",
+        payload={"externalId": "ss-idem-noconn"},
+        connector_id=None,
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    async def suiteql_for(connector_id, query):  # pragma: no cover - must not run
+        raise AssertionError("must not ask any connector about an unattributed write")
+
+    report = await reconcile_unsettled(db, tenant_id=_TENANT, suiteql_for_connector=suiteql_for)
+    assert report["reason"] == "done"
+    assert report["skipped"] == 1
+    assert len(await unsettled_for_tenant(db, tenant_id=_TENANT)) == 1
+
+
+async def test_resume_stops_on_its_budget_not_on_good_intentions(db):
+    """agent-graph #4/#6: the cap is a persisted counter, not a request. Bound
+    COST (calls made), not just rows considered."""
+    from app.services.chat.write_side_effect_repo import reconcile_unsettled
+
+    conn = uuid.uuid4()
+    for i in range(5):
+        key = f"ss-idem-budget-{i}"
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type="customer",
+            mutation_type="create",
+            payload={"externalId": key},
+            connector_id=conn,
+            correlation_id="c1",
+        )
+    await db.commit()
+
+    calls = []
+
+    async def suiteql_for(connector_id, query):
+        calls.append(query)
+        return '{"data": []}'
+
+    report = await reconcile_unsettled(db, tenant_id=_TENANT, suiteql_for_connector=suiteql_for, max_calls=2)
+    assert report["reason"] == "budget"
+    assert len(calls) == 2, "the ceiling is enforced, not advisory"
+    assert len(await unsettled_for_tenant(db, tenant_id=_TENANT)) == 3
