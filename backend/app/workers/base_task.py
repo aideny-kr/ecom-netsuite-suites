@@ -48,13 +48,30 @@ class InstrumentedTask(Task):
     abstract = True
     _job_id: uuid.UUID | None = None
     _correlation_id: str | None = None
+    _job_tenant_id: str | None = None
 
     # System-wide tasks (no tenant) use this sentinel ID for job tracking
     SYSTEM_TENANT_ID = "00000000-0000-0000-0000-000000000000"
 
     def before_start(self, task_id, args, kwargs):
+        # Celery reuses task instances. An early refusal must not let failure
+        # bookkeeping mutate the previous invocation's job.
+        self._job_id = None
+        self._job_tenant_id = None
         self._correlation_id = kwargs.pop("correlation_id", None) or str(uuid.uuid4())
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
+        if settings.DEDICATED_RUNTIME:
+            # Read only operator-owned installation metadata before choosing a
+            # tenant session; every job/audit access below stays tenant-scoped.
+            with sync_engine.connect() as conn:
+                company = str(conn.execute(text("SELECT company_id FROM suite_runtime_meta.binding")).scalar_one())
+            requested = kwargs.get("tenant_id")
+            if requested and str(uuid.UUID(str(requested))) != company:
+                raise ValueError("Task company does not match the installed runtime")
+            # Sweep tasks have no tenant argument. Track them under this
+            # installation without changing their callable signature/scope.
+            tenant_id = company
+        self._job_tenant_id = tenant_id
 
         with tenant_session(tenant_id) as session:
             job = Job(
@@ -87,7 +104,7 @@ class InstrumentedTask(Task):
             session.commit()
 
     def on_success(self, retval, task_id, args, kwargs):
-        tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
+        tenant_id = self._job_tenant_id or kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
         if not self._job_id:
             return
 
@@ -114,7 +131,7 @@ class InstrumentedTask(Task):
             session.commit()
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
-        tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
+        tenant_id = self._job_tenant_id or kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
         if not self._job_id:
             return
 

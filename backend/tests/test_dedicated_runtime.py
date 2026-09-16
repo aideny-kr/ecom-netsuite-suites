@@ -296,6 +296,37 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
         with pytest.raises(ValueError, match="nonprivileged"):
             await validate_runtime_database(db)
     await op.execute(f"ALTER ROLE {RUNTIME_ROLE} NOBYPASSRLS")
+    # Real synchronous InstrumentedTask lifecycle for tenantless Beat sweeps.
+    from sqlalchemy import create_engine
+
+    from app.workers import base_task
+
+    sync_engine = create_engine(i["url"].set(drivername="postgresql"))
+    monkeypatch.setattr(base_task, "sync_engine", sync_engine)
+
+    def worker_lifecycle():
+        task = base_task.InstrumentedTask()
+        task.name = "fixture.sweep"
+        task.before_start("fixture-success", (), {})
+        job_id = task._job_id
+        task.on_success({"status": "ok"}, "fixture-success", (), {})
+        with pytest.raises(ValueError, match="company"):
+            task.before_start("fixture-rejected", (), {"tenant_id": str(outsider)})
+        assert task._job_id is None
+        task.on_failure(ValueError("rejected"), "fixture-rejected", (), {}, None)
+        task.before_start("fixture-failure", (), {})
+        task.on_failure(ValueError("synthetic failure"), "fixture-failure", (), {}, None)
+        return job_id
+
+    try:
+        job_id = await asyncio.to_thread(worker_lifecycle)
+        assert await op.fetchval("SELECT status FROM jobs WHERE id=$1", job_id) == "completed"
+        assert (
+            await op.fetchval("SELECT count(*) FROM jobs WHERE tenant_id=$1 AND job_type='fixture.sweep'", company) == 2
+        )
+        assert await op.fetchval("SELECT count(*) FROM audit_events WHERE job_id=$1", job_id) == 2
+    finally:
+        sync_engine.dispose()
     # New tables stop startup until the operator classifies/provisions them.
     await op.execute("CREATE TABLE newly_added(id uuid, tenant_id uuid)")
     async with factory() as db:
