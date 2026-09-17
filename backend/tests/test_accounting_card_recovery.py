@@ -6,6 +6,7 @@ deadline the recovery scan finds it, settles it, reads the provider once under i
 budget, and only a proof moves it to verified. The card is rendered from the row.
 """
 
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
@@ -595,3 +596,89 @@ async def test_a_row_whose_card_was_deleted_is_settled_and_not_redispatched(db, 
     row = await _row(db, claimed)
     assert row.status == "needs_review" and row.result_json["code"] == "card_missing"
     assert await mod.candidates(db, tenant_id, later + timedelta(hours=1), limit=10) == []
+
+
+@pytest.fixture
+async def native_interrupted(db, approved_credit, authorized):  # noqa: F811
+    """A native amendment card claimed by the kernel whose sender died after the permit. Its
+    proposal names the seeded config and case, so a recovery can run under them."""
+    from tests.test_accounting_approval_flow import kind_proposal, native_payload
+
+    actor, config, case, verified_message, _, _ = approved_credit
+    p = kind_proposal("native_credit")
+    p.update(
+        tenant_id=str(actor.tenant_id),
+        config_id=str(config.id),
+        case_id=str(case.id),
+        order_reference=case.order_reference,
+        scope=case.scope_json,
+    )
+    message = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=verified_message.session_id,
+        role="assistant",
+        content="",
+        structured_output={
+            **native_payload(p, str(verified_message.session_id)).model_dump(mode="json"),
+            "status": "executing",
+        },
+    )
+    db.add(message)
+    await db.flush()
+    claimed = await chat_confirmation.claim(db, actor.tenant_id, message, actor_id=actor.id)
+    message.structured_output = {**message.structured_output, "operation_id": str(claimed.operation_id)}
+    await db.flush()
+    assert await state.reserve_operation_dispatch(
+        db,
+        actor.tenant_id,
+        claimed,
+        provider=chat_confirmation.PROVIDER_NATIVE,
+        payload_fingerprint="b" * 64,
+        authorize=chat_confirmation.authorize_dispatch,
+    )
+    return actor.tenant_id, message.id, claimed, p
+
+
+async def test_a_native_row_recovered_by_read_stores_the_readback_the_way_its_adapter_does(
+    db, native_interrupted, monkeypatch
+):
+    """The recovery scan reads back without an adapter instance. The native readback carries
+    whole records (the after snapshot, the invoice and sales order it compared) that exceed
+    the ledger row's 64 KiB bound; storing it raw made every recovery pass raise and left a
+    saved, verifiable amendment stuck. The row keeps the adapter's projection instead."""
+    from app.services.transaction_ops.resolution_plan import operation_identity
+
+    tenant_id, message_id, claimed, p = native_interrupted
+    verification = {
+        "status": "verified",
+        "record_type": p["record_type"],
+        "record_id": p["record_id"],
+        "credit_memo_id": p["record_id"],
+        "invoice": {"lines": [{"n": i, "memo": "x" * 20} for i in range(2500)]},
+        "sales_order": {"lines": [{"n": i, "memo": "y" * 20} for i in range(2500)]},
+        "after": {"body": {"total": "440.00", "custbody_ecom_tx_ops_work_key": operation_identity(p)}},
+        "source_revision": "rev-9",
+        "ledger": [{"account": "AR", "debit": "0.00", "credit": "33.80"}],
+        "related_records_unchanged": True,
+        "retry_allowed": False,
+        "financial_writes": 0,
+        "scope": "native_amendment_and_related_postings",
+        "full_reconciliation_required": True,
+    }
+    assert len(json.dumps(verification)) > 65_536
+    readback = AsyncMock(return_value=verification)
+    monkeypatch.setattr("app.services.transaction_ops.native_accounting_service.verify_after", readback)
+    later = (await _row(db, claimed)).deadline_at + timedelta(seconds=1)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        result = await mod.recover(db, tenant_id, message_id, now=later)
+    assert result == {"termination_reason": "done", "financial_writes": 0}
+    readback.assert_awaited_once()
+    row = await _row(db, claimed)
+    assert row.status == "verified" and row.provider == chat_confirmation.PROVIDER_NATIVE
+    stored = row.result_json["verification"]
+    assert stored["status"] == "verified" and stored["source_revision"] == "rev-9"
+    assert not {"invoice", "sales_order", "after"} & set(stored)
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    assert message.structured_output["status"] == "approved"
+    assert message.structured_output["accounting_verification"]["after"] == verification["after"]
