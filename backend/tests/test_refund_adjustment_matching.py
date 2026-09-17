@@ -226,3 +226,66 @@ def test_standard_credit_explains_total_without_inventing_a_tax_reversal():
     assert result["status"] == "difference"
     s["orders"][0]["included_tax_total"] = "20"
     assert reconcile_order(s, t, c, refunds=r)["status"] == "matched"
+
+
+# Framework Inc books refund tax through the tax engine, which NetSuite's REST layer does
+# not surface: the item sublist carries neither grossAmt nor tax1Amt, while the ledger and
+# SuiteQL both hold the split. Numbers are production credit memo CM11657 (internal id
+# 15778068) for order R013617167: 433.80 gross, 400.00 into 40100 Sales Returns &
+# Allowances, 33.80 into 21501 US Sales Taxes.
+US_TAX_ACCOUNT = "210"
+US_NET_ACCOUNT = "783"
+US_CREDIT_TOTAL = "433.80"
+
+
+class LedgerCreditReader(CreditReader):
+    def __init__(self):
+        super().__init__()
+        self.requests[0]["reason_id"] = "6"
+        self.requests[0]["amount"] = US_CREDIT_TOTAL
+        self.record["total"] = US_CREDIT_TOTAL
+        self.record["apply"]["items"] = [{"apply": True, "doc": {"id": "3"}, "line": 0, "amount": US_CREDIT_TOTAL}]
+        self.credit.update(total=US_CREDIT_TOTAL, applied=US_CREDIT_TOTAL, taxTotal="33.80")
+        self.credit["item"]["items"] = [
+            {
+                "line": 1,
+                "item": {"id": "1603"},
+                "account": {"id": US_NET_ACCOUNT},
+                "itemType": {"id": "NonInvtPart"},
+                "amount": "400.00",
+            }
+        ]
+        self.ledger = [
+            {"account": "119", "accountingbook": "1", "debit": None, "credit": US_CREDIT_TOTAL},
+            {"account": US_TAX_ACCOUNT, "accountingbook": "1", "debit": "33.80", "credit": None},
+            {"account": US_NET_ACCOUNT, "accountingbook": "1", "debit": "400.00", "credit": None},
+        ]
+        self.ledger_complete = True
+
+    async def request(self, method, path, **kwargs):
+        if "transactionaccountingline" in kwargs.get("body", {}).get("q", ""):
+            self.calls += 1
+            rows = deepcopy(self.ledger)
+            return {
+                "items": rows,
+                "count": len(rows),
+                "totalResults": len(rows),
+                "hasMore": not self.ledger_complete,
+            }
+        return await super().request(method, path, **kwargs)
+
+
+def ledger_profile():
+    return {**reader_profile(), "tax_accounts": [US_TAX_ACCOUNT]}
+
+
+async def test_us_credit_memo_proves_its_tax_split_from_the_ledger():
+    """The REST record hides the split; the ledger holds it. Today this returns nothing."""
+    result = await collect_refunds(
+        LedgerCreditReader(), "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    assert result["amount"] == Decimal(US_CREDIT_TOTAL)
+    proof = result["tax_adjustments"][0]
+    assert proof["kind"] == "credit_memo"
+    assert proof["amount"] == US_CREDIT_TOTAL
+    assert proof["tax_amount"] == "33.80"

@@ -17,6 +17,17 @@ class RefundAdjustmentProfile(EvidenceModel):
     subsidiary_id: Id
     tax_reversal_reason_ids: tuple[Id, ...] = Field(min_length=1, max_length=20)
     tax_item_accounts: dict[Id, Id] = Field(min_length=1, max_length=20)
+    # The subsidiary's tax accounts. Tax reaches a credit memo two ways -- through the tax
+    # engine, as its own line, or as an ordinary item line posting straight into a tax
+    # account -- and only the account tells the two apart. Declared rather than derived
+    # because a tax account that has seen no recent postings is invisible in the ledger.
+    # Defaults to the accounts the tax-item map already names, so an existing profile keeps
+    # its current meaning.
+    tax_accounts: tuple[Id, ...] = Field(default=(), max_length=20)
+
+    @property
+    def taxed_accounts(self) -> frozenset[str]:
+        return frozenset(self.tax_accounts) or frozenset(self.tax_item_accounts.values())
 
     @field_validator("account_id")
     @classmethod
