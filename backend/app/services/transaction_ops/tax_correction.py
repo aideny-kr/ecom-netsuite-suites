@@ -383,11 +383,11 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
 
         return await validate_credit(db, tenant_id, tool_name, tool_input, proposal)
     if tool_name == "transaction_ops_accounting_amendment_apply":
-        from app.services.transaction_ops.native_accounting_service import validate_binding
+        from app.services.transaction_ops.native_accounting_service import validate_approved as validate_native
 
-        # Full fresh evidence runs once in the durable native send dispatcher.
-        validate_binding(tenant_id, tool_name, tool_input, proposal)
-        return
+        # The native card's whole preflight (binding, fresh evidence, the rebuilt intent,
+        # the RESTlet's capabilities and preview) runs here, before the kernel's permit.
+        return await validate_native(db, tenant_id, tool_name, tool_input, proposal)
     from urllib.parse import urlsplit
 
     from app.services.chat.tools import parse_external_tool_name

@@ -2412,19 +2412,17 @@ async def run_chat_turn(
                     except Exception as exc:
                         yield {"type": "error", "error": f"No update was sent: {exc}"}
                         return
-                # An accounting card sent through the connected MCP record API is claimed on the
-                # operation ledger and run by the write kernel below; its duplicate check and
-                # permit are the ledger's. The native amendment card keeps its own claim and
-                # reservation until its adapter lands (write-kernel design, G3.2).
+                # Every accounting card (MCP record API or the native amendment RESTlet) is
+                # claimed on the operation ledger and run by the write kernel below; its
+                # duplicate check and permit are the ledger's (write-kernel design, G3.2).
                 from app.services.transaction_ops import chat_confirmation as _chat_confirmation
 
                 _accounting = bool(_so.get("accounting_review"))
-                _via_kernel = _accounting and _chat_confirmation.provider_of(_so) == _chat_confirmation.PROVIDER_MCP
+                _via_kernel = _accounting
                 if _accounting:
                     # The ledger's work-key uniqueness only sees attempts the ledger recorded; work
-                    # sent under the card's own claim (before the kernel path, or by the native
-                    # card) lives on earlier cards, so that history is still consulted here.
-                    from app.services.transaction_ops.accounting_recovery import execution_claim
+                    # sent under a card's own claim before the kernel path existed lives on
+                    # earlier cards, so that history is still consulted here.
                     from app.services.transaction_ops.resolution_plan import previous_execution
 
                     _previous = await previous_execution(db, tenant_id, _confirm_msg.id, _so["accounting_review"])
@@ -2446,10 +2444,6 @@ async def run_chat_turn(
                             "Review the recorded verification or reconciliation result before taking another action.",
                         }
                         return
-                    if not _via_kernel:
-                        _so = execution_claim(
-                            _so, _confirm_msg.id, user_id, _approval_context, now=datetime.now(timezone.utc)
-                        )
                 _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "executing")
                 if not _claimed:
                     yield {
@@ -2542,7 +2536,10 @@ async def run_chat_turn(
                 _kernel_adapter = None
                 if _via_kernel:
                     from app.services.transaction_ops import write_kernel as _write_kernel
-                    from app.services.transaction_ops.accounting_adapter import AccountingCardAdapter
+                    from app.services.transaction_ops.accounting_adapter import (
+                        AccountingCardAdapter,
+                        NativeAmendmentAdapter,
+                    )
                     from app.services.transaction_ops.tax_correction import validate_approved as _validate_treatment
                     from app.services.transaction_ops.tax_correction import verify_after as _readback_treatment
 
@@ -2584,7 +2581,15 @@ async def run_chat_turn(
                     )
                     await db.commit()
                     await set_tenant_context(db, str(tenant_id))
-                    _kernel_adapter = AccountingCardAdapter(
+                    # The treatment dispatchers (validate_approved / verify_after) are the seams
+                    # for both cards; only the send differs: the MCP card's is the signed tool
+                    # dispatcher, the native card's is the amendment RESTlet itself.
+                    _adapter_class = (
+                        NativeAmendmentAdapter
+                        if _chat_confirmation.provider_of(_so) == _chat_confirmation.PROVIDER_NATIVE
+                        else AccountingCardAdapter
+                    )
+                    _kernel_adapter = _adapter_class(
                         name=_chat_confirmation.adapter_of(_so["accounting_review"]),
                         message=_confirm_msg,
                         tool_name=tool_name,
@@ -2808,7 +2813,7 @@ async def run_chat_turn(
                     # fails, so later recovery cannot ignore a conflicting receipt.
                     _receipt_keys = ("recordId", "id", "internalId")
                     if family_of(_so.get("accounting_review")) == "amendment":
-                        _receipt_keys += ("record_id", "record_type", "work_key", "reservation_audit_id")
+                        _receipt_keys += ("record_id", "record_type", "work_key")
                     _receipt_ids = {k: _exec_result[k] for k in _receipt_keys if _exec_result.get(k)}
                     _so = {
                         **_so,

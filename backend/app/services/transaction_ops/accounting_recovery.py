@@ -37,7 +37,11 @@ def evidence_digest(so):
 
 
 def execution_claim(so, confirmation_id, actor_id, context, *, now):
-    """Called only after human-approval gates, persisted with the winning CAS."""
+    """The card's OWN claim, the shape every accounting card carried before the ledger.
+
+    No production path writes it any more: every accounting card claims on the ledger
+    (chat_confirmation.claim) and carries a projection of its row in this shape. It stays
+    for the legacy recovery scan's tests until that scan is deleted."""
     from app.services.transaction_ops.resolution_plan import operation_identity
 
     return {
@@ -167,8 +171,8 @@ async def orphan_candidates(db, tenant_id, now, *, limit):
 
 async def candidates(db, tenant_id, now, *, limit):
     """Cards due for recovery: those the kernel claimed (the ledger says so), those that
-    never reached a claim (released), and, until the native amendment card moves onto the
-    kernel, those carrying their own claim."""
+    never reached a claim (released), and, for one release after the native amendment card
+    moved onto the kernel (2026-09-17), those still carrying their own legacy claim."""
     found = await ledger_candidates(db, tenant_id, now, limit=limit)
     for more in (
         await orphan_candidates(db, tenant_id, now, limit=limit),
