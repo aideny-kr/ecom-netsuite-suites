@@ -27,6 +27,11 @@ requires a verified encrypted copy in authorized private storage and an independ
 recoverable decryption key. Record bucket/object generation, access restrictions,
 retention and a successful download/restore. Do not infer those from a local file.
 
+Two distinct keys are involved: the company's application `ENCRYPTION_KEY` and
+its version belong inside the encrypted recovery set; the archive encryption
+passphrase stays outside that set in separate custody. Never substitute one for
+the other or store the archive passphrase inside its own bundle.
+
 ## Before the write freeze
 
 The release operator owns the backup, restore evidence and go/no-go decision; the
@@ -45,7 +50,10 @@ access. Name both people in the private deployment record. Record:
   attachment roots if database records still refer to them.
 - The retained encryption key **and version**, required provider credentials and
   separate operator/runtime authentication. A new encryption key cannot recover
-  old ciphertext. Never print secret values or include them in CLI arguments.
+  old ciphertext. Include `JWT_SECRET_KEY` with an explicit retain-or-rotate
+  decision: retaining it without the denylist can revive revoked sessions;
+  rotating it invalidates existing sessions. Never print secret values or include
+  them in CLI arguments.
 - User/role and company configuration digests, schema inventory, deterministic
   complete row hashes/counts for every table, foreign-key checks, workflow/run and
   audit history, and checksums of every available workspace/attachment file.
