@@ -749,3 +749,32 @@ async def test_a_tampered_native_card_never_reaches_the_restlet(db, native_card,
     assert row is None or (row.status == "rejected_before_effect" and not state.permit_consumed(row))
     assert so["status"] in ("failed", "pending", "executing") and so["status"] != "approved"
     assert any(e.get("type") == "error" for e in events)
+
+
+async def test_a_legacy_native_reservation_blocks_a_new_approval_even_when_its_card_is_gone(db, native_card):
+    """The retired durable dispatcher reserved a work key in an audit row rather than on a
+    card, and an audit row outlives the session a card lives in (deleting a session hard-
+    deletes its messages). Until the legacy recovery scan goes, that audit is the only
+    thing between a pre-kernel native send still in flight and a second one."""
+    from app.services.audit_service import log_event
+    from app.services.transaction_ops import resolution_plan
+
+    actor, _, message, p, _ = native_card
+    await log_event(
+        db,
+        actor.tenant_id,
+        "transaction_ops",
+        resolution_plan.LEGACY_NATIVE_RESERVATION,
+        actor_id=actor.id,
+        resource_type="chat_message",
+        resource_id=str(uuid.uuid4()),  # the card this reserved has since been deleted
+        payload={"operation_key": operation_identity(p), "approved_by": str(actor.id), "financial_writes": 0},
+    )
+    await db.commit()
+    transport = AsyncMock(return_value=_native_receipt(p))
+    events, so, stubs = await approve(db, native_card, transport=transport)
+    transport.assert_not_awaited()
+    stubs["dispatch"].assert_not_awaited()
+    assert await _row(db, message) is None  # nothing was even claimed on the ledger
+    assert so["status"] == "pending"
+    assert any("already has an execution record" in e.get("error", "") for e in events if e.get("type") == "error")

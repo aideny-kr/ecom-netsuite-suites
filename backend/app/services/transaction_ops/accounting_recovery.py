@@ -606,8 +606,7 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
             run_id = run.id  # a rollback below expires the ORM rows
             # A receipt, or the identity a non-receipt answer named: a readback that sees
             # a different record than the approval refuses instead of reconciling it away.
-            recorded = operation.result_json or {}
-            receipt = recorded.get("receipt") or recorded.get("answer")
+            receipt = state.recorded_answer(operation)
             token = await state.claim_run(db, tenant_id, run_id, now=now)
             if token is None:
                 return {"termination_reason": "busy", "financial_writes": 0}

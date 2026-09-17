@@ -286,6 +286,36 @@ async def test_rejected_before_effect_is_terminal_with_an_error_reason(db, ready
         )
 
 
+async def test_a_completion_may_record_what_the_provider_answered_but_never_rewrite_it(db, ready):
+    """A completion settles a row and may record the provider's answer in the same call —
+    migration 109's trigger expects that ("a receipt requires a permit"). What it may never
+    do is change one already recorded: whatever the delivery that sent the write saw is
+    what every later read, including a recovery scan after a crash, has to see."""
+    actor, _, _, claim = ready
+    tenant_id = actor.tenant_id  # the refusal below holds a row lock; do not touch ORM rows after it
+    assert await reserve(db, tenant_id, claim)
+    await state.record_dispatch_answer(db, tenant_id, claim.operation_id, {"record_id": "999"})
+    with pytest.raises(state.StateError) as refused:
+        await state.complete_operation(
+            db,
+            tenant_id,
+            claim.operation_id,
+            outcome="unknown",
+            result_json={"code": "verification_unproven", "answer": {"record_id": "63"}},
+        )
+    assert refused.value.code == "send_evidence_immutable"
+    # The refusal happened under the row lock and before any write, so the session is
+    # still usable: recording the same answer again is not a rewrite.
+    row = await state.complete_operation(
+        db,
+        tenant_id,
+        claim.operation_id,
+        outcome="unknown",
+        result_json={"code": "verification_unproven", "answer": {"record_id": "999"}},
+    )
+    assert state.recorded_answer(row) == {"record_id": "999"}
+
+
 async def test_committed_unverified_waits_for_verification_and_can_still_become_verified(db, ready):
     actor, _, _, claim = ready
     assert await reserve(db, actor.tenant_id, claim)
