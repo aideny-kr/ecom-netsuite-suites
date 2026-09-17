@@ -151,9 +151,24 @@ class CreditReader(CustomReader):
     def postings(self):
         if self.ledger is not None:
             return self.ledger
-        rows = [{"account": self.AR_ACCOUNT, "accountingbook": "1", "debit": None, "credit": self.credit["total"]}]
+        memo = self.credit["id"]
+        rows = [
+            {
+                "transaction": memo,
+                "account": self.AR_ACCOUNT,
+                "accountingbook": "1",
+                "debit": None,
+                "credit": self.credit["total"],
+            }
+        ]
         rows.extend(
-            {"account": line["account"]["id"], "accountingbook": "1", "debit": line["amount"], "credit": None}
+            {
+                "transaction": memo,
+                "account": line["account"]["id"],
+                "accountingbook": "1",
+                "debit": line["amount"],
+                "credit": None,
+            }
             for line in self.credit["item"]["items"]
         )
         return rows
@@ -285,9 +300,9 @@ class LedgerCreditReader(CreditReader):
             }
         ]
         self.ledger = [
-            {"account": "119", "accountingbook": "1", "debit": None, "credit": US_CREDIT_TOTAL},
-            {"account": US_TAX_ACCOUNT, "accountingbook": "1", "debit": "33.80", "credit": None},
-            {"account": US_NET_ACCOUNT, "accountingbook": "1", "debit": "400.00", "credit": None},
+            {"transaction": "3", "account": "119", "accountingbook": "1", "debit": None, "credit": US_CREDIT_TOTAL},
+            {"transaction": "3", "account": US_TAX_ACCOUNT, "accountingbook": "1", "debit": "33.80", "credit": None},
+            {"transaction": "3", "account": US_NET_ACCOUNT, "accountingbook": "1", "debit": "400.00", "credit": None},
         ]
 
 

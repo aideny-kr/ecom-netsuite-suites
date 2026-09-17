@@ -1,5 +1,6 @@
 """Account-scoped tax-credit interpretation; never infer a tax effect from cash alone."""
 
+import re
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -9,6 +10,7 @@ from app.schemas.transaction_ops import EvidenceModel, _decimal
 from app.services.transaction_ops.netsuite_reader import _account, _collection, _sublist
 
 Id = Annotated[str, Field(pattern=r"^[0-9]{1,30}$")]
+_IDENTIFIER = re.compile(r"[0-9]{1,30}")
 
 
 class RefundAdjustmentProfile(EvidenceModel):
@@ -40,8 +42,37 @@ class RefundAdjustmentProfile(EvidenceModel):
 LEDGER_ROWS = 40
 
 
-async def ledger_tax(request, credit_memo_id, subsidiary_id, profile, amount):
-    """Net a credit memo's postings by account and return the part that is tax.
+async def ledger_postings(request, memo_ids, subsidiary_id):
+    """Every posting line of every credit memo this order touches, in one query.
+
+    One query per credit memo would scale the call count with the number of refunds, and the
+    per-order ceiling is already tight enough that a busy order loses its refund evidence
+    entirely rather than reporting a budget error.
+    """
+    if not all(_IDENTIFIER.fullmatch(str(memo_id)) for memo_id in [*memo_ids, subsidiary_id]):
+        raise ValueError("credit_ledger_identifier_rejected")
+    ceiling = LEDGER_ROWS * len(memo_ids)
+    result = await request(
+        "POST",
+        "/query/v1/suiteql",
+        params={"limit": ceiling + 1},
+        body={
+            "q": "SELECT tal.transaction, tal.account, tal.accountingbook, tal.debit, tal.credit "
+            "FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction "
+            f"WHERE tal.transaction IN ({','.join(sorted(memo_ids))}) AND t.subsidiary = {subsidiary_id}"
+        },
+    )
+    rows, complete = _collection(result)
+    if not complete or len(rows) > ceiling:
+        raise ValueError("credit_ledger_incomplete")
+    grouped: dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(str(row["transaction"]), []).append(row)
+    return grouped
+
+
+def ledger_tax(rows, profile, amount):
+    """Net one credit memo's postings by account and return the part that is tax.
 
     The ledger is the only place both booking conventions are legible. Tax charged through
     the tax engine arrives as its own posting line; tax reversed by convention arrives as an
@@ -49,19 +80,8 @@ async def ledger_tax(request, credit_memo_id, subsidiary_id, profile, amount):
     though it were net sales, and on a legacy-tax nexus it omits the line tax fields
     altogether, which is why reading it cannot work for every subsidiary.
     """
-    result = await request(
-        "POST",
-        "/query/v1/suiteql",
-        params={"limit": LEDGER_ROWS + 1},
-        body={
-            "q": "SELECT tal.account, tal.accountingbook, tal.debit, tal.credit "
-            "FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction "
-            f"WHERE tal.transaction = {credit_memo_id} AND t.subsidiary = {subsidiary_id}"
-        },
-    )
-    rows, complete = _collection(result)
-    if not complete or len(rows) > LEDGER_ROWS:
-        raise ValueError("credit_ledger_incomplete")
+    if not rows:
+        raise ValueError("credit_ledger_missing")
     # One accounting book only. Netting across books double counts, and a book the scope
     # never named is not evidence about the book it did.
     books = {str(row["accountingbook"]) for row in rows if row.get("accountingbook") is not None}
@@ -93,6 +113,11 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
     profile = RefundAdjustmentProfile.model_validate(profile)
     if profile.subsidiary_id != subsidiary_id:
         raise ValueError("adjustment_profile_scope_mismatch")
+    memo_ids = {str(link["credit_memo_id"]) for link in links if link.get("credit_memo_id")}
+    try:
+        postings = await ledger_postings(request, memo_ids, subsidiary_id) if memo_ids else {}
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return []
     proofs = []
     for link in links:
         tax_reversal = link["reason_id"] in profile.tax_reversal_reason_ids
@@ -156,7 +181,7 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
             # The ledger is the authority on how much of this credit memo is tax. The record
             # header disagrees with it by design on a reversal, where the whole amount posts
             # to a tax account through an item line and taxTotal stays zero.
-            native_tax = await ledger_tax(request, link["credit_memo_id"], subsidiary_id, profile, amount)
+            native_tax = ledger_tax(postings.get(str(link["credit_memo_id"])), profile, amount)
             if tax_reversal and native_tax != amount:
                 return []
             proofs.append(
