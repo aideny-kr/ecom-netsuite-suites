@@ -62,7 +62,9 @@ class WriteAdapter(Protocol):
 
     async def send(self, db, tenant_id, claimed, preflight) -> dict:
         """Exactly one provider call, after reserving the one-use permit. Returns the
-        receipt: ``{"status": "accepted" | "failed" | "unknown", ...}``."""
+        receipt: ``{"status": "accepted" | "failed" | "unknown", ...}``. An answer that is
+        not a receipt may carry ``identity`` — what the provider named — which the kernel
+        records on the row so a later read can refuse a different record."""
 
     async def verify(self, db, tenant_id, claimed, preflight, *, read) -> dict | None:
         """Independent, budgeted readback. Returns the proof of the approved end state,
@@ -162,6 +164,11 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
                 # The adapter reported a save without consuming the permit. That is an
                 # adapter defect a person must look at; the kernel will not guess.
                 return "needs_review", "adapter_receipt_without_permit", {}
+        elif receipt.get("identity"):
+            # Not a receipt: the provider named a record without proving a save. The row
+            # keeps that identity, so a readback after a crash still sees the conflict
+            # this attempt's own readback would have seen.
+            await state.record_dispatch_answer(db, tenant_id, claimed.operation_id, receipt["identity"], now=clock())
         proof = await adapter.verify(db, tenant_id, claimed, preflight, read=read)
         if proof is not None:
             return "verified", "independently_verified", {"verification": proof}

@@ -2536,10 +2536,7 @@ async def run_chat_turn(
                 _kernel_adapter = None
                 if _via_kernel:
                     from app.services.transaction_ops import write_kernel as _write_kernel
-                    from app.services.transaction_ops.accounting_adapter import (
-                        ADAPTERS_BY_PROVIDER,
-                        AccountingCardAdapter,
-                    )
+                    from app.services.transaction_ops.accounting_adapter import ADAPTERS_BY_PROVIDER
                     from app.services.transaction_ops.tax_correction import validate_approved as _validate_treatment
                     from app.services.transaction_ops.tax_correction import verify_after as _readback_treatment
 
@@ -2595,7 +2592,7 @@ async def run_chat_turn(
                         session_id=str(session.id),
                         correlation_id=correlation_id,
                         validate=_validate_treatment,
-                        dispatch=execute_tool_call if _adapter_class is AccountingCardAdapter else None,
+                        dispatch=execute_tool_call if _adapter_class.USES_TOOL_DISPATCHER else None,
                         readback=_readback_treatment,
                         approval_context=_approval_context,
                     )

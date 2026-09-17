@@ -423,3 +423,87 @@ async def test_the_native_tool_surface_never_sends_even_when_approved():
     assert result["success"] is False and result["status"] == "not_submitted"
     assert result["financial_writes"] == 0 and result["retry_allowed"] is False
     transport.assert_not_awaited()
+
+
+async def test_an_answer_that_named_another_record_is_kept_on_the_row_for_the_next_read(db, native_claimed):
+    """An answer that proves nothing but names a record is not a receipt, and the status
+    does not move. It is still evidence: a readback after a crash must see the same
+    conflict this attempt's readback saw, instead of reconciling a different record."""
+    _, message, claim = native_claimed
+    p = message.structured_output["accounting_review"]
+    foreign = {**confirmed(p), "record_id": "999", "work_key": "0" * 64}
+    adapter = build_native(message, readback=AsyncMock(return_value={"status": "needs_review", "reason": "conflict"}))
+    with patch(TRANSPORT, AsyncMock(return_value=foreign)):
+        result, row = await _run(db, native_claimed, adapter)
+    assert result["status"] == "unknown" and state.permit_consumed(row)
+    assert "receipt" not in row.result_json
+    assert row.result_json["answer"] == {"record_id": "999", "record_type": p["record_type"], "work_key": "0" * 64}
+    answered = await db.scalar(
+        select(AuditEvent).where(
+            AuditEvent.resource_id == str(claim.operation_id),
+            AuditEvent.action == "transaction_ops.operation.answer",
+        )
+    )
+    assert answered.payload["answer"]["record_id"] == "999"
+
+
+async def test_a_large_gl_breakdown_keeps_its_shape_so_a_verified_row_can_always_be_written(db, native_claimed):
+    """A balanced GL is not bounded by row count: a record with hundreds of lines pushed a
+    legitimately verified readback past the row's own 64 KiB limit, and the completion
+    raised instead of recording verified. The row keeps the breakdown's shape and digest."""
+    _, message, _ = native_claimed
+    p = message.structured_output["accounting_review"]
+    rows = [
+        {"account": f"acct-{i}", "accountingbook": "1", "debit": "1.00", "credit": "0.00", "memo": "z" * 30}
+        for i in range(1200)
+    ]
+    verification = {
+        "status": "verified",
+        "record_type": p["record_type"],
+        "record_id": p["record_id"],
+        "ledger": {"complete": True, "rows": rows},
+        "source_revision": "rev-2",
+        "financial_writes": 0,
+    }
+    assert len(json.dumps(verification)) > 64 * 1024
+    adapter = build_native(message, readback=AsyncMock(return_value=verification))
+    with patch(TRANSPORT, AsyncMock(return_value=confirmed(p))):
+        result, row = await _run(db, native_claimed, adapter)
+    assert result["status"] == "verified" and row.status == "verified"
+    stored = row.result_json["verification"]
+    assert stored["status"] == "verified" and stored["source_revision"] == "rev-2"
+    assert stored["ledger"] == {
+        "rows": 1200,
+        "digest": accounting_adapter.digest(verification["ledger"]),
+        "omitted": "gl_exceeds_ledger_budget",
+    }
+    assert len(json.dumps(row.result_json)) < 64 * 1024
+    # The person reviewing the card still sees every line.
+    assert adapter.verification["ledger"]["rows"] == rows
+
+
+async def test_a_process_stopped_mid_send_spends_the_permit_and_never_sends_again(db, native_claimed):
+    """The retired dispatcher's crash drill, on the kernel path: a process that dies between
+    the permit and the answer leaves a spent permit and no receipt, and any later delivery
+    reads that durable state instead of applying the amendment a second time."""
+
+    class Stopped(BaseException):
+        pass
+
+    actor, message, claim = native_claimed
+    with patch(TRANSPORT, AsyncMock(side_effect=Stopped)) as killed:
+        with pytest.raises(Stopped):
+            await write_kernel.execute(db, actor.tenant_id, claim, build_native(message))
+    assert killed.await_count == 1
+    # The crash rolled the session back; every ORM row the test holds is expired, and
+    # touching one synchronously is the MissingGreenlet this repo has hit before.
+    await db.rollback()
+    for expired in (actor, message):
+        await db.refresh(expired)
+    row = await _row(db, claim)
+    assert row.status == "executing" and state.permit_consumed(row)
+    assert "receipt" not in row.result_json and "answer" not in row.result_json
+    with patch(TRANSPORT, AsyncMock()) as again:
+        result, row = await _run(db, native_claimed, build_native(message))
+    again.assert_not_awaited()
+    assert result["status"] == "verified" and row.status == "verified"
