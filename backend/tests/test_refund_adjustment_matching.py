@@ -322,6 +322,8 @@ async def test_us_credit_memo_proves_its_tax_split_from_the_ledger():
     assert proof["kind"] == "credit_memo"
     assert proof["amount"] == US_CREDIT_TOTAL
     assert proof["tax_amount"] == "33.80"
+    # The verdict carries the netting it came from, so a reviewer can re-derive it.
+    assert proof["ledger_accounts"] == {"119": "-433.80", US_NET_ACCOUNT: "400.00", US_TAX_ACCOUNT: "33.80"}
 
 
 @pytest.mark.parametrize(

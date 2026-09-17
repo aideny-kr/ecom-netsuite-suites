@@ -72,7 +72,7 @@ async def ledger_postings(request, memo_ids, subsidiary_id):
 
 
 def ledger_tax(rows, profile, amount):
-    """Net one credit memo's postings by account and return the part that is tax.
+    """Net one credit memo's postings by account; return the tax part and the netting itself.
 
     The ledger is the only place both booking conventions are legible. Tax charged through
     the tax engine arrives as its own posting line; tax reversed by convention arrives as an
@@ -106,7 +106,7 @@ def ledger_tax(rows, profile, amount):
     # so nothing here may assume those pairs cancel.
     if debited != amount or credited != -amount or not 0 <= tax <= amount:
         raise ValueError("credit_ledger_disagrees_with_refund")
-    return tax
+    return tax, {account: str(value) for account, value in sorted(nets.items()) if value}
 
 
 async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id, currency_id, reference, allocations):
@@ -181,7 +181,7 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
             # The ledger is the authority on how much of this credit memo is tax. The record
             # header disagrees with it by design on a reversal, where the whole amount posts
             # to a tax account through an item line and taxTotal stays zero.
-            native_tax = ledger_tax(postings.get(str(link["credit_memo_id"])), profile, amount)
+            native_tax, ledger = ledger_tax(postings.get(str(link["credit_memo_id"])), profile, amount)
             if tax_reversal and native_tax != amount:
                 return []
             proofs.append(
@@ -197,6 +197,10 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                     "amount": str(amount),
                     "reason_id": link["reason_id"],
                     "item_accounts": items,
+                    # Why this figure is the tax: the account-level netting it came from.
+                    # A stored verdict a reviewer cannot re-derive is an assertion, not
+                    # evidence, and the ledger read behind it is not otherwise retained.
+                    "ledger_accounts": ledger,
                     "credit_modified_at": record.get("lastModifiedDate"),
                 }
             )
