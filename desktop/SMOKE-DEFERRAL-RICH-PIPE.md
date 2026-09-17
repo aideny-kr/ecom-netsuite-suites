@@ -1,8 +1,26 @@
 # Rich-pipe live smoke — operator deferral
 
-**Status: /goal #6c slice 1 live-key gate OPERATOR-DEFERRED.**
+> ## ✅ Live STREAMING smoke PASSED 2026-06-18 (no operator key handling)
+>
+> The deferral's live-key root cause was removed by the Keychain-auth slice
+> (`feat(desktop): resolve Anthropic auth from Claude Code Keychain, not just
+> env`). Live streaming integration test #1 then ran headlessly off the
+> signed-in Claude Code **macOS Keychain** OAuth credential — no env key:
+>
+> ```
+> $ RUN_RICH_PIPE_LIVE=1 .venv/bin/python -m pytest tests/test_rich_pipe_integration.py -k live -v
+> tests/test_rich_pipe_integration.py::test_live_streaming_run_emits_data_table_with_tool_rows_then_done PASSED
+> 1 passed, 1 deselected in 8.82s
+> ```
+>
+> Proves (live): a real Hermes agent calls `sample_dataset`, the sidecar streams
+> a `data_table` event carrying the tool's exact columns/rows, then a terminal
+> `done`. **Still operator-only:** step 2, the **GUI render smoke (C3)** — a
+> visible Electron window showing the `data-frame-table` card — needs a display.
+
+**Status: /goal #6c slice 1 live-key gate — streaming PASSED; GUI render still deferred.**
 **CSP/hydration blocker: RESOLVED 2026-06-01 (post-build sha256 hashing) — see below.**
-**Date: 2026-05-31 (updated 2026-06-01).**
+**Date: 2026-05-31 (updated 2026-06-01; live streaming PASSED 2026-06-18).**
 **Branch: `spike/desktop-6c-rich-pipe-slice-1`.**
 
 This file is the closing artifact for the two live-key steps of the desktop

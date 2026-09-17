@@ -1,5 +1,42 @@
 # `obsidian-memory` live entity-write smoke test — operator deferral
 
+> ## ✅ RESOLVED — live smoke PASSED 2026-06-18 (no operator key handling)
+>
+> The deferral's root cause (a forced `ANTHROPIC_API_KEY`) was removed by the
+> Keychain-auth slice (`feat(desktop): resolve Anthropic auth from Claude Code
+> Keychain, not just env`). The live smoke then ran headlessly off the
+> signed-in Claude Code **macOS Keychain** OAuth credential — **no env key and
+> no `~/.hermes/.env`** (auth resolved from the Keychain, not from any env var
+> or file). The agent's partial-token banner is now suppressed by
+> `quiet_mode=True` (T2 review finding — it previously printed `sk-ant-o…` to
+> stderr/Electron logs):
+>
+> ```
+> $ .venv/bin/python runtime/sidecar.py \
+>     "create an entity called 'TestEntity' with observation 'first vault write 2026-06-18 keychain auth'"
+> 🔧 Tool 1: mcp_obsidian_memory_create_entities(['entities'])   # agent chose the tool autonomously
+> ✅ Tool 1 completed
+> 🤖 Assistant: Done. `TestEntity` created with that observation.
+> exit 0
+> ```
+>
+> Persisted memory note `~/SuiteStudio/default/TestEntity.md`:
+> ```markdown
+> ---
+> entityType: test
+> created: '2026-06-18'
+> updated: '2026-06-18'
+> ---
+>
+> # TestEntity
+>
+> ## Observations
+> - first vault write 2026-06-18 keychain auth
+> ```
+>
+> Proves: composed Hermes agent + `obsidian-memory` MCP autonomously writes a
+> markdown memory note to the vault. The history below is kept as the audit trail.
+
 **Status: GATE #7 OR-BRANCH SATISFIED.**
 **Date: 2026-05-26.**
 **Branch: `spike/desktop-b0-obsidian-vault`.**
