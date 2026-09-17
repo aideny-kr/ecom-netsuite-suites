@@ -31,22 +31,23 @@ def test_release_rejects_stale_or_stopped_background_services(tmp_path, workflow
         step["with"]["script"] for step in definition["jobs"][job]["steps"] if "script" in step.get("with", {})
     )
     up_commands = [shlex.split(line) for line in script.splitlines() if "compose" in line and " up " in line]
-    started = {
-        service
-        for command in up_commands
-        if "--no-deps" in command
-        for service in command[command.index("--no-deps") + 1 :]
-    }
-    # The guard's service list is READ from the workflow, never restated here: a release
-    # that starts a background service the health check does not cover is the failure this
-    # test exists to prevent, and hard-coding the list would hide exactly that.
-    loop = re.search(r"for service in ([^;]+); do", script)
-    guarded = loop.group(1).split()
-    assert set(guarded) == started, f"{started ^ set(guarded)} started or guarded, not both"
-    assert {"worker", "worker-collectors", "worker-actions", "beat"} <= started
+    started = [command[command.index("--no-deps") + 1 :] for command in up_commands if "--no-deps" in command]
+    # What the release starts and what it health-checks must be the SAME list, and the list
+    # is read from the workflow rather than restated here: a release that starts a
+    # background service the guard does not cover is the failure this test exists to
+    # prevent. The list is a variable because the VM's compose is hand-edited and may not
+    # define every service this repo knows about, and naming one it lacks aborts the deploy.
+    assert all(target in (["$BG"], ["backend"]) for target in started), started
+    assert "for service in $BG; do" in script
+    assert any("worker-collectors" in group and "beat" in group for group in re.findall(r'BG="([^"]+)"', script))
+    assert "config --services | grep -qx worker-actions" in script
+    assert 'BG="$BG worker-actions"' in script
+    if ["backend"] in started:  # a job that deploys the backend on its own still guards it
+        assert 'BG="backend $BG"' in script
+    guarded = ["backend", "worker", "worker-collectors", "worker-actions", "beat"]
     # Execute the checked-in guard, including all its retries and exit behavior.
     # The outer loop's indentation distinguishes it from the inner retry loop.
-    start = script.index(loop.group(0))
+    start = script.index("for service in $BG; do")
     guard = script[start:].split("\ndone", 1)[0] + "\ndone\n"
     # YAML has removed the script's common indentation; the outer loop closes
     # unindented, while its inner loop stays indented.
@@ -78,6 +79,7 @@ def test_release_rejects_stale_or_stopped_background_services(tmp_path, workflow
             "PROBE_FAILED": failed_service,
             "PROBE_FAILURE": failure,
             "PROBE_CALLS": str(calls),
+            "BG": " ".join(guarded),
         },
     )
     assert result.returncode == (1 if failed_service else 0), result.stdout + result.stderr

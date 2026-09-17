@@ -13,7 +13,7 @@ from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.services import feature_flag_service
 from app.services.ingestion.solidus_dispatch import refresh_due_sources as _refresh_sources
-from app.workers.celery_app import RECON_ACTIONS_QUEUE, celery_app
+from app.workers.celery_app import ACTIONS_QUEUE, celery_app
 
 _SCAN_LIMIT = 200
 _DISPATCH_TIMEOUT = 5
@@ -351,7 +351,7 @@ async def collect_due_runs(db, now: datetime) -> dict:
                     await db.commit()
                     for run_id in recover[:_SCAN_LIMIT]:
                         stats["recovered"] += 1
-                        await _dispatch(tenant_id, run_id, stats, RECON_ACTIONS_QUEUE if run_id in short else "recon")
+                        await _dispatch(tenant_id, run_id, stats, ACTIONS_QUEUE if run_id in short else "recon")
                     candidates = await _candidate_ids(db, tenant_id, now)
                     stats["truncated"] |= len(candidates) > _SCAN_LIMIT
                     await db.commit()

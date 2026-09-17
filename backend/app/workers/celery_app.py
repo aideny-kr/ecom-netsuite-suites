@@ -12,7 +12,12 @@ RECON_COLLECTOR_QUEUE = "recon-control"
 # 298 s median between a finished check and its published receipt. They get their own
 # queue and their own worker, the pattern the collectors already proved.
 RECON_ACTIONS_PRIORITY = 3
+# The queue the dedicated worker consumes; always declared so a worker can subscribe.
 RECON_ACTIONS_QUEUE = "recon-actions"
+# Where short jobs are actually PUBLISHED. The VM's compose is hand-edited and may not have
+# the worker yet, and a queue nothing consumes is work that never runs, so this defaults to
+# the bulk queue and the operator moves it once worker-actions is up.
+ACTIONS_QUEUE = settings.TRANSACTION_OPS_ACTIONS_QUEUE or "recon"
 RECON_ACTION_TASKS = (
     "tasks.transaction_ops_execute",
     "tasks.transaction_ops_recover",
@@ -119,7 +124,7 @@ celery_app.conf.update(
             },
             # The short correction jobs. Their senders pass the same queue explicitly
             # (an explicit `queue=` kwarg beats a route), so both must agree.
-            **{name: {"queue": RECON_ACTIONS_QUEUE, "priority": RECON_ACTIONS_PRIORITY} for name in RECON_ACTION_TASKS},
+            **{name: {"queue": ACTIONS_QUEUE, "priority": RECON_ACTIONS_PRIORITY} for name in RECON_ACTION_TASKS},
         },
         _default_send_task_priority,
     ),

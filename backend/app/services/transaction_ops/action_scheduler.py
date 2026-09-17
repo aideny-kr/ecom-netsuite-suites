@@ -19,7 +19,7 @@ from app.services.audit_service import log_event
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.scheduler import _BROKER_IO_TIMEOUT, _DISPATCH_TIMEOUT
 from app.workers.base_task import InstrumentedTask
-from app.workers.celery_app import RECON_ACTION_TASKS, RECON_ACTIONS_QUEUE, celery_app
+from app.workers.celery_app import ACTIONS_QUEUE, RECON_ACTION_TASKS, celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ _TASKS = {
 # Short jobs go to their own queue and worker; a group dispatch drains up to thirty
 # children per slice and stays with the long work on `recon`. The explicit kwarg below
 # beats task_routes, so this map and celery_app.RECON_ACTION_TASKS must agree.
-_QUEUES = {kind: (RECON_ACTIONS_QUEUE if _TASKS[kind] in RECON_ACTION_TASKS else "recon") for kind in _TASKS}
+_QUEUES = {kind: (ACTIONS_QUEUE if _TASKS[kind] in RECON_ACTION_TASKS else "recon") for kind in _TASKS}
 
 
 def publish_action(tenant_id, kind, identifier, *, app=celery_app):

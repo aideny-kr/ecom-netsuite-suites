@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 from app.services.transaction_ops import action_scheduler as mod
 from app.services.transaction_ops import state_service as state
 from app.workers.base_task import InstrumentedTask
+from app.workers.celery_app import ACTIONS_QUEUE
 from app.workers.tasks import transaction_ops as workers
 from tests import test_transaction_ops_dispatch as dispatch_fixtures
 from tests import test_transaction_ops_executor as execution_fixtures
@@ -59,7 +60,7 @@ def test_action_workers_are_bounded_without_broker_retries_and_have_a_minute_col
         assert isinstance(task, InstrumentedTask) and task.max_retries == 0
         # Short correction jobs have their own queue and worker; only the collector keeps
         # the control queue, and nothing here still rides the bulk `recon` queue.
-        expected_queue = "recon-control" if name == "collect_actions" else "recon-actions"
+        expected_queue = "recon-control" if name == "collect_actions" else ACTIONS_QUEUE
         assert task.queue == expected_queue and task.time_limit <= 340
     entries = [
         e
@@ -97,7 +98,7 @@ def test_the_publisher_sends_short_jobs_to_the_actions_queue_and_group_dispatch_
     from unittest.mock import MagicMock, Mock
     from uuid import uuid4
 
-    from app.workers.celery_app import RECON_ACTIONS_QUEUE, celery_app
+    from app.workers.celery_app import ACTIONS_QUEUE, celery_app
 
     app = MagicMock()
     app.send_task = Mock()
@@ -112,10 +113,10 @@ def test_the_publisher_sends_short_jobs_to_the_actions_queue_and_group_dispatch_
         mod.publish_action(uuid4(), kind, uuid4(), app=app)
         seen[kind] = app.send_task.call_args.kwargs["queue"]
     assert seen == {
-        "execute": RECON_ACTIONS_QUEUE,
-        "recover": RECON_ACTIONS_QUEUE,
-        "credit_recover": RECON_ACTIONS_QUEUE,
-        "complete": RECON_ACTIONS_QUEUE,
+        "execute": ACTIONS_QUEUE,
+        "recover": ACTIONS_QUEUE,
+        "credit_recover": ACTIONS_QUEUE,
+        "complete": ACTIONS_QUEUE,
         "group": "recon",
     }
     for kind, queue in seen.items():
