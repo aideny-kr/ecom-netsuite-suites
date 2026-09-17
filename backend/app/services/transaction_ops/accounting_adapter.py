@@ -36,6 +36,10 @@ VERIFY_CALLS = 8
 NATIVE_PREFLIGHT_CALLS = 12
 NATIVE_VERIFY_CALLS = 10
 NATIVE_APPROVAL_WINDOW = timedelta(minutes=2)  # how long the RESTlet may honour one permit
+# The ledger row is bounded (state_service._bounded_json caps it at 64 KiB). The verdict
+# keys below are scalars; the GL breakdown grows with the record, so the projection keeps
+# its shape and digest past this budget rather than its rows. The card keeps all of it.
+NATIVE_LEDGER_BUDGET = 32_768
 # The native readback returns whole records for the person (the after snapshot, the
 # invoice and sales order it compared against); the ledger keeps the verdict and the
 # ledger rows, never the record blobs (state_service._bounded_json caps a row at 64 KiB).
@@ -112,6 +116,7 @@ class AccountingCardAdapter:
     verification: dict | None = None
     preflight_calls: int = PREFLIGHT_CALLS
     verify_calls: int = VERIFY_CALLS
+    USES_TOOL_DISPATCHER = True  # the signed tool dispatcher is this adapter's send
 
     @property
     def proposal(self) -> dict:
@@ -190,18 +195,37 @@ class AccountingCardAdapter:
             self.receipt = {"unreadable": True}
             return self._sent({"status": "unknown", "code": "receipt_unreadable", "verified": False})
         self.receipt = result if isinstance(result, dict) else {"value": result}
+        ids = self._identity(result)
         outcome = classify_write_outcome(result)
         if outcome == "indeterminate":
-            return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
-        ids = {key: str(result[key]) for key in RECEIPT_IDS if result.get(key) is not None}
+            return self._sent(
+                {"status": "unknown", "code": "transport_indeterminate", "verified": False, "identity": ids}
+            )
         if outcome == "failed":
-            self.refusal = _extract_error_message(result) or "NetSuite reported the write failed."
+            self.refusal = self._refusal_text(result, "NetSuite reported the write failed.")
             if ids:
                 # An error beside a record identity is not proof of no effect: only the
                 # readback may say whether the record was saved.
-                return self._sent({"status": "unknown", "code": "provider_rejected_with_identity", "verified": False})
+                return self._sent(
+                    {
+                        "status": "unknown",
+                        "code": "provider_rejected_with_identity",
+                        "verified": False,
+                        "identity": ids,
+                    }
+                )
             return self._sent({"status": "failed", "code": "provider_rejected", "verified": False})
         return self._sent({"status": "accepted", "verified": False, **ids})
+
+    @staticmethod
+    def _identity(result) -> dict:
+        """What the provider named, if anything: kept on the row when it is not a receipt."""
+        if not isinstance(result, dict):
+            return {}
+        return {key: str(result[key]) for key in RECEIPT_IDS if result.get(key) is not None}
+
+    def _refusal_text(self, result, default: str) -> str:
+        return _extract_error_message(result) or (result.get("reason") if isinstance(result, dict) else None) or default
 
     def _sent(self, receipt: dict) -> dict:
         self.sent = receipt["status"]
@@ -242,7 +266,9 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
     provider: str = chat_confirmation.PROVIDER_NATIVE
     preflight_calls: int = NATIVE_PREFLIGHT_CALLS
     verify_calls: int = NATIVE_VERIFY_CALLS
+    USES_TOOL_DISPATCHER = False  # the RESTlet is the send; no tool dispatcher is involved
 
+    @cached_property
     def wire(self) -> dict:
         """What leaves for the RESTlet, minus the per-send approval fields: the permit's
         fingerprint and the send itself read the proposal through this one accessor."""
@@ -254,7 +280,7 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
         }
 
     def wire_fingerprint(self) -> str:
-        return digest(self.wire())
+        return digest(self.wire)
 
     @cached_property
     def work_key(self) -> str:
@@ -274,7 +300,7 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
                 p["scope"]["netsuite_account_id"],
                 "apply",
                 {
-                    **self.wire(),
+                    **self.wire,
                     "approval_audit_id": str(claimed.operation_id),
                     "approval_expires_at": (datetime.now(timezone.utc) + NATIVE_APPROVAL_WINDOW).isoformat(),
                 },
@@ -312,15 +338,33 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
                 }
             )
         if refused:
-            self.refusal = (
-                _extract_error_message(result) or result.get("reason") or "NetSuite did not apply the amendment."
-            )
+            self.refusal = self._refusal_text(result, "NetSuite did not apply the amendment.")
             return self._sent({"status": "failed", "code": "provider_rejected", "verified": False})
-        return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
+        return self._sent(
+            {
+                "status": "unknown",
+                "code": "transport_indeterminate",
+                "verified": False,
+                "identity": self._identity(result),
+            }
+        )
 
     @classmethod
     def ledger_verification(cls, verification: dict) -> dict:
-        return {key: verification[key] for key in NATIVE_LEDGER_VERIFICATION_KEYS if key in verification}
+        kept = {key: verification[key] for key in NATIVE_LEDGER_VERIFICATION_KEYS if key in verification}
+        if len(json.dumps(kept, default=str)) <= NATIVE_LEDGER_BUDGET:
+            return kept
+        # A balanced GL is not bounded by row count: a record with hundreds of lines would
+        # push a legitimately verified readback past the row's own limit and leave the
+        # amendment uncompletable. The row keeps the breakdown's shape, not its rows.
+        gl = kept.get("ledger")
+        rows = gl.get("rows") if isinstance(gl, dict) else gl
+        kept["ledger"] = {
+            "rows": len(rows or []),
+            "digest": digest(gl),
+            "omitted": "gl_exceeds_ledger_budget",
+        }
+        return kept
 
 
 # One adapter per provider the chat confirmation source records on the row; the

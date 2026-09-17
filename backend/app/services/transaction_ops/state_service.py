@@ -57,7 +57,7 @@ _EVIDENCE_AGE = timedelta(minutes=15)
 _OPERATION_CALLS = 96
 _OPERATION_TIME = timedelta(seconds=300)
 _LEDGER_RESULT_KEYS = frozenset(
-    {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason"}
+    {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason", "answer"}
 )
 # The write kernel's outcome taxonomy (docs/superpowers/specs/2026-09-15-write-kernel-design.md,
 # section 3). The repair rule is a function of the status: a retry is allowed only from
@@ -1209,6 +1209,26 @@ async def operation_for_work(db, tenant_id, work_key):
         TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == work_key
     )
     return (await db.execute(query.execution_options(populate_existing=True))).scalar_one_or_none()
+
+
+async def record_dispatch_answer(db, tenant_id, operation_id, answer, *, now=None):
+    """The provider named a record but proved no save: the row keeps that identity.
+
+    Written between the send and the readback for an answer the adapter could not call a
+    receipt (indeterminate, or an error beside a record id). It is never a receipt, so the
+    status does not move and nothing may be resent; it exists so a later read — this
+    attempt's readback or, after a crash, the recovery scan's — still refuses an answer
+    that named a different record than the approval did.
+    """
+    evidence = _bounded_json({"answer": answer})
+    row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if row.status != "executing" or not permit_consumed(row):
+        await _commit(db, tenant_id)
+        return row
+    row.result_json = {**(row.result_json or {}), **evidence}
+    await _audit(db, tenant_id, "operation.answer", row, payload={"answer": evidence["answer"]})
+    await _commit(db, tenant_id)
+    return row
 
 
 async def record_receipt(db, tenant_id, operation_id, receipt, *, now=None):
