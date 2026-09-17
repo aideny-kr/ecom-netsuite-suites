@@ -291,7 +291,8 @@ async def previous_execution(db, tenant_id, message_id, proposal):
     for attempt in range(20):
         message = await db.scalar(query.where(ChatMessage.id.not_in(released)))
         if message is None:
-            return None
+            # No card remembers this work; an audit row from the retired dispatcher may.
+            return await _legacy_native_reservation(db, tenant_id, key)
         proof = await rejected_credit_unchanged(db, tenant_id, message, proposal) if attempt < 19 else None
         if proof:
             await log_event(
@@ -314,4 +315,39 @@ async def previous_execution(db, tenant_id, message_id, proposal):
             "verification": so.get("accounting_verification"),
             "operation_key": key,
         }
-    return None
+    return await _legacy_native_reservation(db, tenant_id, key)
+
+
+# The retired durable native dispatcher reserved a work key in an audit row rather than on
+# a card, and an audit row outlives the chat session a card lives in (deleting a session
+# hard-deletes its messages). The ledger only knows attempts it recorded, so until the
+# legacy recovery scan is deleted this is the only thing between a pre-kernel native send
+# still in flight and a second one. Delete both together.
+LEGACY_NATIVE_RESERVATION = "accounting.native_dispatch.reserved"
+
+
+async def _legacy_native_reservation(db, tenant_id, key):
+    from sqlalchemy import select
+
+    from app.models.audit import AuditEvent
+
+    reserved = await db.scalar(
+        select(AuditEvent)
+        .where(
+            AuditEvent.tenant_id == tenant_id,
+            AuditEvent.action == LEGACY_NATIVE_RESERVATION,
+            AuditEvent.payload["operation_key"].astext == key,
+        )
+        .order_by(AuditEvent.timestamp.desc())
+        .limit(1)
+    )
+    if reserved is None:
+        return None
+    return {
+        "confirmation_id": reserved.resource_id,
+        "session_id": None,
+        "status": "indeterminate",
+        "verification": None,
+        "operation_key": key,
+        "legacy_native_reservation": str(reserved.id),
+    }

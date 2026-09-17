@@ -37,7 +37,11 @@ def evidence_digest(so):
 
 
 def execution_claim(so, confirmation_id, actor_id, context, *, now):
-    """Called only after human-approval gates, persisted with the winning CAS."""
+    """The card's OWN claim, the shape every accounting card carried before the ledger.
+
+    No production path writes it any more: every accounting card claims on the ledger
+    (chat_confirmation.claim) and carries a projection of its row in this shape. It stays
+    for the legacy recovery scan's tests until that scan is deleted."""
     from app.services.transaction_ops.resolution_plan import operation_identity
 
     return {
@@ -167,8 +171,8 @@ async def orphan_candidates(db, tenant_id, now, *, limit):
 
 async def candidates(db, tenant_id, now, *, limit):
     """Cards due for recovery: those the kernel claimed (the ledger says so), those that
-    never reached a claim (released), and, until the native amendment card moves onto the
-    kernel, those carrying their own claim."""
+    never reached a claim (released), and, for one release after the native amendment card
+    moved onto the kernel (2026-09-17), those still carrying their own legacy claim."""
     found = await ledger_candidates(db, tenant_id, now, limit=limit)
     for more in (
         await orphan_candidates(db, tenant_id, now, limit=limit),
@@ -547,7 +551,7 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
     verified. The card is then rendered from the row. Nothing here sends.
     """
     from app.services.transaction_ops import state_service as state
-    from app.services.transaction_ops.accounting_adapter import json_copy, ledger_safe
+    from app.services.transaction_ops.accounting_adapter import json_copy, ledger_view
     from app.services.transaction_ops.accounting_group import accounting_write_slot
     from app.services.transaction_ops.tax_correction import verify_after
 
@@ -593,7 +597,9 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
             if run.status == "finished":
                 return {"termination_reason": "done", "financial_writes": 0}
             run_id = run.id  # a rollback below expires the ORM rows
-            receipt = (operation.result_json or {}).get("receipt")
+            # A receipt, or the identity a non-receipt answer named: a readback that sees
+            # a different record than the approval refuses instead of reconciling it away.
+            receipt = state.recorded_answer(operation)
             token = await state.claim_run(db, tenant_id, run_id, now=now)
             if token is None:
                 return {"termination_reason": "busy", "financial_writes": 0}
@@ -608,7 +614,9 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
                     verification = await verify_after(db, tenant_id, p, receipt=receipt)
                 verification = json_copy(verification)
                 if verification.get("status") == "verified":
-                    proof, reason = ledger_safe(verification), "done"
+                    # The row keeps what the provider's adapter would keep (the native
+                    # readback carries whole records that would exceed the row's bound).
+                    proof, reason = ledger_view(operation.provider, verification), "done"
             except Exception as exc:
                 # Provider helpers can fail inside a database transaction; release it
                 # before recording. The committed lease and spend are never refunded.

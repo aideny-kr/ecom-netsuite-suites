@@ -2,23 +2,19 @@
 
 import json
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.chat import ChatMessage
 from app.services.chat.agents.base_agent import BaseSpecialistAgent
 from app.services.chat.agents.unified_agent import UnifiedAgent
 from app.services.chat.llm_adapter import ToolUseBlock
-from app.services.chat.orchestrator import run_chat_turn
-from app.services.chat.write_confirmation_service import build_confirmation_payload
 from app.services.chat.write_validator import ValidationResult
 from tests.test_mutation_intercept import _llm_response, _stream_replay
 from tests.test_tax_correction import proposal
-from tests.test_write_confirm_orchestrator import _TENANT_ID, _USER_ID, _make_db, _make_session
+from tests.test_write_confirm_orchestrator import _TENANT_ID, _USER_ID
 
 
 async def test_group_handoff_emits_one_real_card_without_another_model_hop():
@@ -112,6 +108,29 @@ def kind_proposal(kind):
     return p
 
 
+def native_payload(p, session_id):
+    """The native amendment card exactly as native_accounting_service.confirmation mints it
+    (the generic builder returns None for the internal tool)."""
+    from app.services.chat.tools import netsuite_environment_of
+    from app.services.chat.write_confirmation_service import WriteConfirmationPayload, mint_confirmation_token
+    from app.services.transaction_ops.native_accounting_service import TOOL, signed_input
+
+    params = signed_input(p)
+    return WriteConfirmationPayload(
+        mutation_type="update",
+        record_type=p["record_type"],
+        record_id=p["record_id"],
+        proposed_fields=p["proposed_fields"],
+        current_record=p["before"],
+        tool_name=TOOL,
+        tool_input=params,
+        confirmation_token=mint_confirmation_token(TOOL, params, [], session_id),
+        target_account=p["scope"]["netsuite_account_id"],
+        target_environment=netsuite_environment_of(p["scope"]["netsuite_account_id"]),
+        accounting_review=p,
+    )
+
+
 def inputs(p):
     if (
         p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
@@ -191,159 +210,6 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
         assert "Align sales order" in text
     else:
         assert "Sales Adjustment for unpaid invoice" in text
-
-
-@pytest.mark.parametrize(
-    "kind,outcome",
-    [
-        ("native_credit", outcome)
-        for outcome in ("stale", "verified", "unverified", "rejected", "unknown_verified", "unknown_missing")
-    ]
-    + [("native_credit", "unreadable_verified")],
-)
-async def test_approval_preflight_execution_verification_and_actor_audit(outcome, kind):
-    """The native amendment card still runs the orchestrator's own claim and dispatcher
-    (its kernel adapter is the next G3.2 slice). The five MCP treatments run through the
-    write kernel and are pinned on the real database in test_accounting_approval_kernel.py."""
-    p = kind_proposal(kind)
-    p["tenant_id"] = str(_TENANT_ID)
-    verified_outcome = outcome in {"verified", "unknown_verified", "unreadable_verified"}
-    name, params = inputs(p)
-    session_id = uuid.uuid4()
-    card = build_confirmation_payload(
-        mutation_type="create" if kind == "credit" else "update",
-        record_type=p["record_type"],
-        tool_name=name,
-        tool_input=params,
-        session_id=str(session_id),
-        current_record=p["before"],
-    )
-    if kind == "native_credit":
-        from app.services.transaction_ops.native_accounting_service import confirmation
-
-        with patch("app.services.audit_service.log_event", AsyncMock()):
-            card, _ = await confirmation(AsyncMock(), _TENANT_ID, _USER_ID, str(session_id), p, None, None)
-    card.accounting_review = p
-    message = ChatMessage(
-        id=uuid.uuid4(),
-        tenant_id=_TENANT_ID,
-        session_id=session_id,
-        role="assistant",
-        content="",
-        structured_output={**card.model_dump(), "status": "pending"},
-        created_at=datetime.now(timezone.utc),
-    )
-    db = _make_db(message)
-    db.info = {}
-    session = _make_session(session_id=str(session_id))
-    order = []
-
-    async def preflight(*args):
-        order.append("preflight")
-        if outcome == "stale":
-            raise ValueError("NetSuite amount changed")
-
-    async def execute(**kwargs):
-        order.append("write")
-        assert kwargs["human_approved"] is True
-        assert kwargs["tool_input"] == params
-        if outcome == "unreadable_verified":
-            return "unreadable receipt"
-        if outcome.startswith("unknown"):
-            return json.dumps({"outcome_indeterminate": True, "error": "timeout"})
-        if kind == "native_credit" and outcome != "rejected":
-            return json.dumps({"success": True, "record_id": p["record_id"], "record_type": p["record_type"]})
-        return json.dumps(
-            {"error": "Period locked"} if outcome == "rejected" else {"success": True, "id": p["record_id"]}
-        )
-
-    async def verify(*args, **kwargs):
-        if kind in {"credit", "discount", "sales_order"} and outcome in ("verified", "unverified"):
-            assert kwargs["receipt"]["success"] is True
-        order.append("verify")
-        return {"status": "verified" if verified_outcome else "needs_review", "cash_settlement": "not_verified"}
-
-    audit = AsyncMock()
-    recheck = AsyncMock(return_value=MagicMock(id="recheck-run"))
-
-    @asynccontextmanager
-    async def locked(_):
-        order.append("lock")
-        try:
-            yield
-        finally:
-            order.append("unlock")
-
-    with (
-        patch("app.services.transaction_ops.accounting_group.accounting_write_slot", locked),
-        patch("app.services.transaction_ops.accounting_group.authorize_accounting_write", AsyncMock()),
-        patch("app.services.transaction_ops.tax_correction.validate_approved", preflight),
-        patch("app.services.transaction_ops.tax_correction.verify_after", verify),
-        patch("app.services.transaction_ops.accounting_recheck.queue", recheck),
-        patch("app.services.chat.orchestrator.execute_tool_call", execute),
-        patch("app.services.chat.orchestrator.log_event", audit),
-        patch("app.services.mcp_connector_service.get_mcp_connector", AsyncMock(return_value=None)),
-    ):
-        events = [
-            e
-            async for e in run_chat_turn(
-                db=db,
-                session=session,
-                user_message="approve",
-                user_id=_USER_ID,
-                tenant_id=_TENANT_ID,
-                write_confirm={"action": "approve", "confirmation_id": str(message.id)},
-            )
-        ]
-    assert order[0] == "lock" and order[-1] == "unlock"
-    order = order[1:-1]
-    if outcome == "stale":
-        assert order == ["preflight"]
-        assert message.structured_output["status"] == "failed"
-        assert audit.await_args.kwargs["payload"]["financial_writes"] == 0
-    elif outcome == "rejected":
-        assert order == ["preflight", "write"]
-        assert message.structured_output["repair_exit_reason"] == "fresh_accounting_evidence_required"
-        failed = next(
-            c.kwargs
-            for c in audit.await_args_list
-            if c.kwargs.get("action") in {"record.create.failed", "record.update.failed"}
-        )
-        assert failed["status"] == "error"
-    else:
-        assert order == ["preflight", "write", "verify"]
-        so = message.structured_output
-        assert so["accounting_verification"]["status"] == ("verified" if verified_outcome else "needs_review")
-        verification = next(
-            c.kwargs
-            for c in audit.await_args_list
-            if c.kwargs.get("action") == "accounting_correction.verification.completed"
-        )
-        assert verification["payload"]["approved_by"] == str(_USER_ID)
-        assert verification["payload"]["before"] == p["before"]
-        content = " ".join(e["message"]["content"] for e in events if e.get("type") == "message")
-        assert ("independently" in content and "verified" in content) == verified_outcome
-        if kind == "native_credit":
-            if outcome in {"verified", "unverified"}:
-                assert so["accounting_execution"]["receipt"]["record_id"] == p["record_id"]
-                assert so["accounting_execution"]["receipt"]["record_type"] == p["record_type"]
-            if verified_outcome:
-                assert "123456-sb1.app.netsuite.com" in content
-                assert (
-                    so["record_url"]
-                    == f"https://123456-sb1.app.netsuite.com/app/accounting/transactions/transaction.nl?id={p['record_id']}"
-                )
-        if not verified_outcome:
-            assert "executed successfully" not in content
-        if outcome.startswith("unknown") or outcome == "unreadable_verified":
-            assert so["status"] == ("approved" if verified_outcome else "indeterminate")
-            assert so["accounting_verification"]["recovered_by_read"] is verified_outcome
-        if verified_outcome:
-            recheck.assert_awaited_once()
-            assert so["accounting_execution"]["approved_by"] == str(_USER_ID)
-            assert so["accounting_recheck"] == {"status": "queued", "run_id": "recheck-run"}
-        else:
-            recheck.assert_not_awaited()
 
 
 @pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order", "api_credit"])

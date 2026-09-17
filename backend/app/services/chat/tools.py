@@ -590,12 +590,26 @@ async def _execute_tool_call_once(
     # ── End deny-list ──
 
     if tool_name == "transaction_ops_accounting_amendment_apply":
-        from app.services.transaction_ops.native_accounting_dispatch import execute as execute_native
-
-        result = await execute_native(
-            db, tenant_id, actor_id, session_id, tool_input, approval_context, correlation_id=correlation_id
+        # The native amendment leaves only through the write kernel's NativeAmendmentAdapter,
+        # behind the ledger's one-use permit; the tool surface itself never sends. (The
+        # durable dispatcher that used to run here minted a second permit of its own.)
+        # Nothing legitimate reaches this branch, so a caller that does is worth a trace.
+        logger.warning(
+            "Refused a direct native amendment tool call (tenant=%s session=%s approved=%s); "
+            "the write kernel is the only sender",
+            tenant_id,
+            session_id,
+            human_approved,
         )
-        return json.dumps(result, default=str, allow_nan=False)
+        return json.dumps(
+            {
+                "success": False,
+                "status": "not_submitted",
+                "error": "The native accounting amendment is sent by the write kernel from its approval card.",
+                "financial_writes": 0,
+                "retry_allowed": False,
+            }
+        )
 
     if tool_name == "escalate_reasoning":
         # Control signal handled by the agent loop (it bumps thinking depth).

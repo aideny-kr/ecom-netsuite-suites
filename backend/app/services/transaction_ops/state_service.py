@@ -57,7 +57,13 @@ _EVIDENCE_AGE = timedelta(minutes=15)
 _OPERATION_CALLS = 96
 _OPERATION_TIME = timedelta(seconds=300)
 _LEDGER_RESULT_KEYS = frozenset(
-    {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason"}
+    {
+        "dispatch_reserved",
+        "provider",
+        "payload_fingerprint",
+        "dispatch_reserved_at",
+        "termination_reason",
+    }
 )
 # The write kernel's outcome taxonomy (docs/superpowers/specs/2026-09-15-write-kernel-design.md,
 # section 3). The repair rule is a function of the status: a retry is allowed only from
@@ -1211,24 +1217,71 @@ async def operation_for_work(db, tenant_id, work_key):
     return (await db.execute(query.execution_options(populate_existing=True))).scalar_one_or_none()
 
 
+# What the provider answered, written by _record_send_evidence. A completion may record
+# one in the same call that settles the row (migration 109's trigger expects exactly that:
+# "a receipt requires a permit"), but it may never CHANGE one that is already there —
+# whatever the earlier delivery saw is what every later read must see.
+SEND_EVIDENCE_KEYS = frozenset({"receipt", "answer"})
+
+
+def recorded_receipt(operation) -> dict | None:
+    """The answer that proved a save, if the row holds one."""
+    return (operation.result_json or {}).get("receipt")
+
+
+def recorded_answer(operation) -> dict | None:
+    """What the row remembers of the send: the receipt that proved a save, or the identity
+    a non-receipt answer named.
+
+    Every later read — a replayed delivery, the recovery scan — asks this one question, so
+    none of them can be taught about a receipt and forget an answer.
+    """
+    recorded = operation.result_json or {}
+    return recorded.get("receipt") or recorded.get("answer")
+
+
+async def _record_send_evidence(db, tenant_id, operation_id, key, value, *, settles):
+    """The one writer of what the provider answered: lock, refuse a row that moved on,
+    merge under its key, audit, commit. A receipt settles the row to committed_unverified;
+    an answer that proved nothing leaves the status exactly where it was."""
+    evidence = _bounded_json({key: value})
+    row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if row.status != "executing":
+        await _commit(db, tenant_id)
+        return row
+    if not permit_consumed(row):
+        if settles:
+            raise StateError("receipt_without_permit")
+        await _commit(db, tenant_id)
+        return row
+    row.result_json = {**(row.result_json or {}), **evidence}
+    if settles:
+        row.status = "committed_unverified"
+        row.result_json = {**row.result_json, "termination_reason": "stall"}
+    await _audit(db, tenant_id, f"operation.{key}", row, payload={key: evidence[key]})
+    await _commit(db, tenant_id)
+    return row
+
+
+async def record_dispatch_answer(db, tenant_id, operation_id, answer, *, now=None):
+    """The provider named a record but proved no save: the row keeps that identity.
+
+    Written between the send and the readback for an answer the adapter could not call a
+    receipt (indeterminate, or an error beside a record id). It is never a receipt, so the
+    status does not move and nothing may be resent; it exists so a later read — this
+    attempt's readback, a replayed delivery's, or the recovery scan's — still refuses an
+    answer that named a different record than the approval did.
+    """
+    return await _record_send_evidence(db, tenant_id, operation_id, "answer", answer, settles=False)
+
+
 async def record_receipt(db, tenant_id, operation_id, receipt, *, now=None):
     """The provider identified the record as saved: the attempt is committed, not yet proven.
 
     Written between the send and the independent readback, so the row says what is true
     if the process dies in between. Only reads may follow; the permit is already spent.
     """
-    evidence = _bounded_json({"receipt": receipt})
-    row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if row.status != "executing":
-        await _commit(db, tenant_id)
-        return row
-    if not permit_consumed(row):
-        raise StateError("receipt_without_permit")
-    row.status = "committed_unverified"
-    row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": "stall"}
-    await _audit(db, tenant_id, "operation.receipt", row, payload={"receipt": evidence["receipt"]})
-    await _commit(db, tenant_id)
-    return row
+    return await _record_send_evidence(db, tenant_id, operation_id, "receipt", receipt, settles=True)
 
 
 async def complete_operation(db, tenant_id, operation_id, *, outcome, result_json, now=None):
@@ -1240,6 +1293,10 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
     row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
     if row.status not in IN_FLIGHT:
         raise StateError("operation_terminal")
+    recorded = row.result_json or {}
+    if any(key in recorded and evidence[key] != recorded[key] for key in SEND_EVIDENCE_KEYS & set(evidence)):
+        # A completion may record what the provider answered; it may never rewrite it.
+        raise StateError("send_evidence_immutable")
     # An unknown attempt can move only after caller-provided read-only provider
     # reconciliation; this service never dispatches it again. Handing it to a person
     # (needs_review) is an escalation, not a finding, and needs no reads.

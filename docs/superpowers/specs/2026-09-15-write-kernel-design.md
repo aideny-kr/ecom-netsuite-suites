@@ -319,6 +319,18 @@ Each slice is one PR, T2 (mutates customer data, alembic, MCP mutation writes), 
    `accounting_recovery.render_settled_card` is the one renderer of a card from its row once its sender is gone, and
    every refusal to run a recovery escalates the row to `needs_review` so the document is freed. Those readers move
    to the ledger when the native card does.
+   *NativeAmendmentAdapter landed 2026-09-17 (`feat/g3-native-amendment-adapter`):* the native service's FULL
+   preflight (fresh evidence, rebuilt intent, the RESTlet's capabilities and preview) runs BEFORE the permit, on
+   the same `tax_correction.validate_approved` seam; the send is `native_accounting_transport._request("apply")`
+   itself behind `reserve_operation_dispatch(provider=netsuite_native)`, with the LEDGER ROW ID as the RESTlet's
+   `approval_audit_id` (NetSuite logs it in its own audit; the RESTlet only requires a UUID) and the business
+   identity as `work_key` (a lineage retry still sends the base key, because the RESTlet stamps and the readback
+   compares `custbody_ecom_tx_ops_work_key`); a receipt is only an answer that proves this work (record, work
+   key, one financial write), a clean `not_submitted` with zero writes is `rejected_before_effect`, everything
+   else is `unknown` until the readback decides; the ledger keeps the readback's verdict and ledger rows, never
+   the record blobs. The durable dispatcher (`native_accounting_dispatch`, its reservation audit = a second
+   one-use permit) is deleted and the tool surface refuses the native tool outright; `execution_claim` has no
+   production writer, and the legacy recovery scan stays one release for cards claimed before this shipped.
 3. **G3.3 generic writes and repair** — `GenericRecordAdapter`, `classify_write_failure`, the repair policy with
    per-class budgets and the cosmetic transform list, `semantic_payload` in the signed envelope, `#218` folded
    (externalId stamping, `duplicate:posted`), `may_enter_repair_loop` deleted. Acceptance: Prompt 1's and Prompt 5's

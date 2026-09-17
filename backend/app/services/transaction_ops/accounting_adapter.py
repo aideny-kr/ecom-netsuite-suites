@@ -16,6 +16,8 @@ prose, and never a JSON float (the readback copy stored on the row is stringifie
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from functools import cached_property
 from typing import Any, Callable
 
 from app.models.transaction_ops import TransactionOperation
@@ -28,8 +30,71 @@ from app.services.transaction_ops.write_kernel import ExecutionStoppedError, Pre
 
 PREFLIGHT_CALLS = 8  # what a treatment's revalidation costs the operation budget
 VERIFY_CALLS = 8
+# The native amendment's preflight is the native service's whole fan-out (case scope,
+# binding, fresh source/evidence/support, the rebuilt intent, then the RESTlet's
+# capabilities and preview reads); its readback re-reads the evidence plus one snapshot.
+NATIVE_PREFLIGHT_CALLS = 12
+NATIVE_VERIFY_CALLS = 10
+NATIVE_APPROVAL_WINDOW = timedelta(minutes=2)  # how long the RESTlet may honour one permit
+# The ledger row is bounded (state_service._bounded_json caps it at 64 KiB) and EVERY
+# treatment's readback carries whole records: an after snapshot, the linked invoice and
+# sales order, a GL breakdown with no row cap (credit_api_correction.verify_after and
+# native_accounting_service.verify_after return the same shapes). So the bound belongs to
+# the base adapter, not to one provider: a readback that does not fit is kept as its
+# members' shapes and digests, and the row says what it could not keep. The card keeps all.
+LEDGER_VERIFICATION_BUDGET = 32_768
+# What a row must always be able to say, whatever the readback carried.
+LEDGER_VERDICT_KEYS = frozenset(
+    {"status", "reason", "record_type", "record_id", "credit_memo_id", "financial_writes", "retry_allowed", "scope"}
+)
+
+
+def _size(value) -> int:
+    return len(json.dumps(value, default=str))
+
+
+def _shape(value) -> dict:
+    """A member the row cannot keep: how big it was, what it hashed to, how many rows."""
+    rows = value.get("rows") if isinstance(value, dict) else value
+    shape = {"omitted": "exceeds_ledger_budget", "digest": digest(value), "bytes": _size(value)}
+    if isinstance(rows, list):
+        shape["rows"] = len(rows)
+    return shape
+
+
+def _largest_droppable(kept: dict) -> str | None:
+    """The biggest member that is neither part of the verdict nor already a shape."""
+    members = {
+        key: _size(value)
+        for key, value in kept.items()
+        if key not in LEDGER_VERDICT_KEYS
+        and isinstance(value, (dict, list))
+        and not (isinstance(value, dict) and value.get("omitted") == "exceeds_ledger_budget")
+    }
+    return max(members, key=members.get) if members else None
+
+
+# The native readback returns whole records for the person (the after snapshot, the
+# invoice and sales order it compared against); the ledger keeps the verdict and the
+# ledger rows, never the record blobs (state_service._bounded_json caps a row at 64 KiB).
+NATIVE_LEDGER_VERIFICATION_KEYS = (
+    "status",
+    "reason",
+    "record_type",
+    "record_id",
+    "credit_memo_id",
+    "source_revision",
+    "ledger",
+    "related_records_unchanged",
+    "retry_allowed",
+    "financial_writes",
+    "scope",
+    "full_reconciliation_required",
+)
 _CODE = re.compile(r"[a-z][a-z0-9_:.]{2,79}")
-_RECEIPT_IDS = ("recordId", "id", "internalId", "record_id", "record_type", "work_key")
+# The provider answer keys that identify a saved record; the card keeps the same set
+# (orchestrator) so a card never displays a different receipt than its ledger row.
+RECEIPT_IDS = ("recordId", "id", "internalId", "record_id", "record_type", "work_key")
 REFUSALS = {
     "confirmation_changed": "The approval card changed after it was accepted. No update was sent.",
     "approval_not_authorized": "The approver is no longer permitted to send this correction. No update was sent.",
@@ -75,14 +140,17 @@ class AccountingCardAdapter:
     session_id: str
     correlation_id: str
     validate: Callable  # (db, tenant_id, tool_name, tool_input, proposal) -> None; ValueError = changed
-    dispatch: Callable  # execute_tool_call(**kwargs) -> str
     readback: Callable  # (db, tenant_id, proposal, receipt=...) -> {"status": ...}
+    dispatch: Callable | None = None  # execute_tool_call(**kwargs) -> str; the MCP card's send, unused natively
     approval_context: dict | None = None
     provider: str = chat_confirmation.PROVIDER_MCP
     refusal: str | None = None
     receipt: dict | None = None  # what the provider answered, as parsed
     sent: str | None = None  # how send classified it: accepted | failed | unknown
     verification: dict | None = None
+    preflight_calls: int = PREFLIGHT_CALLS
+    verify_calls: int = VERIFY_CALLS
+    USES_TOOL_DISPATCHER = True  # the signed tool dispatcher is this adapter's send
 
     @property
     def proposal(self) -> dict:
@@ -90,7 +158,7 @@ class AccountingCardAdapter:
 
     async def preflight(self, db, tenant_id, claimed, *, read):
         try:
-            await read(PREFLIGHT_CALLS, self.validate, self.tool_name, self.tool_input, self.proposal)
+            await read(self.preflight_calls, self.validate, self.tool_name, self.tool_input, self.proposal)
         except ExecutionStoppedError:
             raise
         except ValueError as exc:
@@ -103,27 +171,48 @@ class AccountingCardAdapter:
             raise
         return {}
 
-    async def send(self, db, tenant_id, claimed, preflight) -> dict:
+    def wire_fingerprint(self) -> str:
+        """What the permit is bound to: the signed tool input the dispatcher sends."""
+        return digest(self.tool_input)
+
+    async def permit(self, db, tenant_id, claimed) -> dict | None:
+        """The one-use permit, or the receipt an earlier delivery already recorded.
+
+        Returns None when this delivery holds the permit and may send exactly once;
+        otherwise the ledger's answer for a replayed delivery (nothing may be sent)."""
         try:
             granted = await state.reserve_operation_dispatch(
                 db,
                 tenant_id,
                 claimed,
                 provider=self.provider,
-                payload_fingerprint=digest(self.tool_input),
+                payload_fingerprint=self.wire_fingerprint(),
                 authorize=chat_confirmation.authorize_dispatch,
             )
         except state.StateError as exc:
             # Refused before the permit existed: nothing was sent, and the code says why.
             self.refusal = REFUSALS.get(exc.code, "The approval no longer holds. No update was sent.")
             raise PreconditionChangedError(exc.code) from exc
-        if not granted:
-            # An earlier delivery consumed the permit; whatever it recorded is this
-            # delivery's receipt too, so the card and the audit do not lose it.
-            row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
-            self.receipt = (row.result_json or {}).get("receipt")
-            self.sent = "accepted" if self.receipt else "unknown"
-            return {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
+        if granted:
+            return None
+        # An earlier delivery consumed the permit; whatever it recorded is this delivery's
+        # answer too — a receipt that proved a save, or the identity a non-receipt answer
+        # named — so neither the card nor this delivery's readback loses it.
+        row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
+        self.receipt = state.recorded_answer(row)
+        self.sent = "accepted" if state.recorded_receipt(row) else "unknown"
+        return {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
+
+    async def send(self, db, tenant_id, claimed, preflight) -> dict:
+        """The permit, then exactly one delivery; the delivery is the adapter's."""
+        replayed = await self.permit(db, tenant_id, claimed)
+        if replayed is not None:
+            return replayed
+        return await self.deliver(db, tenant_id, claimed)
+
+    async def deliver(self, db, tenant_id, claimed) -> dict:
+        if self.dispatch is None:
+            raise RuntimeError("dispatcher_required")
         raw = await self.dispatch(
             human_approved=True,
             approval_context=self.approval_context,
@@ -141,26 +230,200 @@ class AccountingCardAdapter:
             self.receipt = {"unreadable": True}
             return self._sent({"status": "unknown", "code": "receipt_unreadable", "verified": False})
         self.receipt = result if isinstance(result, dict) else {"value": result}
+        ids = self._identity(result)
         outcome = classify_write_outcome(result)
         if outcome == "indeterminate":
-            return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
-        ids = {key: str(result[key]) for key in _RECEIPT_IDS if result.get(key) is not None}
+            return self._sent(
+                {"status": "unknown", "code": "transport_indeterminate", "verified": False, "identity": ids}
+            )
         if outcome == "failed":
-            self.refusal = _extract_error_message(result) or "NetSuite reported the write failed."
+            self.refusal = self._refusal_text(result, "NetSuite reported the write failed.")
             if ids:
                 # An error beside a record identity is not proof of no effect: only the
                 # readback may say whether the record was saved.
-                return self._sent({"status": "unknown", "code": "provider_rejected_with_identity", "verified": False})
+                return self._sent(
+                    {
+                        "status": "unknown",
+                        "code": "provider_rejected_with_identity",
+                        "verified": False,
+                        "identity": ids,
+                    }
+                )
             return self._sent({"status": "failed", "code": "provider_rejected", "verified": False})
         return self._sent({"status": "accepted", "verified": False, **ids})
+
+    @staticmethod
+    def _identity(result) -> dict:
+        """What the provider named, if anything: kept on the row when it is not a receipt."""
+        if not isinstance(result, dict):
+            return {}
+        return {key: str(result[key]) for key in RECEIPT_IDS if result.get(key) is not None}
+
+    def _refusal_text(self, result, default: str) -> str:
+        return _extract_error_message(result) or (result.get("reason") if isinstance(result, dict) else None) or default
 
     def _sent(self, receipt: dict) -> dict:
         self.sent = receipt["status"]
         return receipt
 
     async def verify(self, db, tenant_id, claimed, preflight, *, read):
-        verification = await read(VERIFY_CALLS, self.readback, self.proposal, receipt=self.receipt)
+        verification = await read(self.verify_calls, self.readback, self.proposal, receipt=self.receipt)
         self.verification = json_copy(verification)
         if self.verification.get("status") != "verified":
             return None
-        return ledger_safe(self.verification)
+        return ledger_safe(self.ledger_verification(self.verification))
+
+    @classmethod
+    def ledger_verification(cls, verification: dict) -> dict:
+        """The part of a readback the ledger row keeps; the card keeps all of it.
+
+        A class method so the recovery scan, which reads back without an adapter instance,
+        stores the same projection (``ledger_view``). The size bound is applied here for
+        every provider: an adapter may narrow the readback first (``_kept``), and whatever
+        still does not fit is replaced by its shape, largest member first, so no provider
+        can hand the row something it cannot store.
+        """
+        kept, dropped = cls._kept(verification), []
+        while _size(kept) > LEDGER_VERIFICATION_BUDGET:
+            member = _largest_droppable(kept)
+            if member is None:
+                break
+            kept[member] = _shape(kept[member])
+            dropped.append(member)
+        omitted = sorted(set(verification) - set(kept)) + sorted(dropped)
+        if omitted:
+            # A card rendered from this row alone after a crash must not read as complete
+            # evidence: the row names what it dropped and hashes what was actually read.
+            kept["evidence_omitted"] = omitted
+            kept["readback_digest"] = digest(verification)
+        return kept
+
+    @classmethod
+    def _kept(cls, verification: dict) -> dict:
+        """What this provider would keep before the size bound applies."""
+        return dict(verification)
+
+
+@dataclass
+class NativeAmendmentAdapter(AccountingCardAdapter):
+    """The native amendment card (RESTlet ``customscript_ecom_acct_amend``) behind the kernel.
+
+    Differences from the MCP card, each one a fact of the native path: the ledger row's
+    provider is ``netsuite_native``; the native service's FULL preflight (fresh evidence,
+    the rebuilt intent, the RESTlet's capabilities and preview) runs BEFORE the permit,
+    where the retired durable dispatcher used to run it after minting a permit of its own;
+    the send is the transport's ``apply`` call itself, made once behind the ledger's permit
+    with the ledger row as the RESTlet's ``approval_audit_id`` (NetSuite logs it in its own
+    audit) and the business identity as ``work_key`` (the RESTlet stamps it on the record
+    and the readback compares it, so a lineage retry still sends the base key); and an
+    answer counts as a receipt only when it proves THIS work (record, work key, one
+    financial write), a clean ``not_submitted`` with zero writes is the RESTlet's refusal,
+    and anything else, including a lost response, is unknown until the readback decides.
+    """
+
+    provider: str = chat_confirmation.PROVIDER_NATIVE
+    preflight_calls: int = NATIVE_PREFLIGHT_CALLS
+    verify_calls: int = NATIVE_VERIFY_CALLS
+    USES_TOOL_DISPATCHER = False  # the RESTlet is the send; no tool dispatcher is involved
+
+    @cached_property
+    def wire(self) -> dict:
+        """What leaves for the RESTlet, minus the per-send approval fields: the permit's
+        fingerprint and the send itself read the proposal through this one accessor."""
+        p = self.proposal
+        return {
+            "request": p["native_request"],
+            "expected_before": p["native_preview"]["beforeSnapshot"],
+            "work_key": self.work_key,
+        }
+
+    def wire_fingerprint(self) -> str:
+        return digest(self.wire)
+
+    @cached_property
+    def work_key(self) -> str:
+        from app.services.transaction_ops.resolution_plan import operation_identity
+
+        return operation_identity(self.proposal)
+
+    async def deliver(self, db, tenant_id, claimed) -> dict:
+        from app.services.transaction_ops import native_accounting_transport as transport
+
+        p, key = self.proposal, self.work_key
+        try:
+            result = await transport._request(
+                db,
+                tenant_id,
+                p["connection_id"],
+                p["scope"]["netsuite_account_id"],
+                "apply",
+                {
+                    **self.wire,
+                    "approval_audit_id": str(claimed.operation_id),
+                    "approval_expires_at": (datetime.now(timezone.utc) + NATIVE_APPROVAL_WINDOW).isoformat(),
+                },
+            )
+        except Exception as exc:
+            # The request may have reached NetSuite: only the readback can say.
+            self.receipt = {"unconfirmed": True, "reason": f"{type(exc).__name__}: {exc}"[:300]}
+            return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
+        self.receipt = result if isinstance(result, dict) else {"value": result}
+        if not isinstance(result, dict):
+            return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
+        writes = result.get("financial_writes")
+        confirmed = (
+            result.get("success") is True
+            and result.get("record_type") == p["record_type"]
+            and result.get("record_id") == p["record_id"]
+            and result.get("work_key") == key
+            and type(writes) is int
+            and writes == 1
+        )
+        refused = (
+            result.get("success") is False
+            and result.get("status") == "not_submitted"
+            and type(writes) is int
+            and writes == 0
+        )
+        if confirmed:
+            return self._sent(
+                {
+                    "status": "accepted",
+                    "verified": False,
+                    "record_type": str(p["record_type"]),
+                    "record_id": str(p["record_id"]),
+                    "work_key": key,
+                }
+            )
+        if refused:
+            self.refusal = self._refusal_text(result, "NetSuite did not apply the amendment.")
+            return self._sent({"status": "failed", "code": "provider_rejected", "verified": False})
+        return self._sent(
+            {
+                "status": "unknown",
+                "code": "transport_indeterminate",
+                "verified": False,
+                "identity": self._identity(result),
+            }
+        )
+
+    @classmethod
+    def _kept(cls, verification: dict) -> dict:
+        """The native readback's verdict, without the record blobs it compared against
+        (the after snapshot, the invoice, the sales order). The base class's size bound
+        still applies to what remains — a balanced GL has no row cap."""
+        return {key: verification[key] for key in NATIVE_LEDGER_VERIFICATION_KEYS if key in verification}
+
+
+# One adapter per provider the chat confirmation source records on the row; the
+# orchestrator picks by provider and the recovery scan projects readbacks the same way.
+ADAPTERS_BY_PROVIDER = {
+    chat_confirmation.PROVIDER_MCP: AccountingCardAdapter,
+    chat_confirmation.PROVIDER_NATIVE: NativeAmendmentAdapter,
+}
+
+
+def ledger_view(provider: str, verification: dict) -> dict:
+    """The readback as the ledger row stores it for this provider (exact strings, no
+    record blobs where the adapter drops them), for readbacks made without an adapter."""
+    return ledger_safe(ADAPTERS_BY_PROVIDER.get(provider, AccountingCardAdapter).ledger_verification(verification))

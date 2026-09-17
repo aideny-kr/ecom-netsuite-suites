@@ -22,8 +22,9 @@ from app.models.transaction_ops import TransactionOperation
 from app.services.chat.orchestrator import run_chat_turn
 from app.services.chat.write_confirmation_service import build_confirmation_payload
 from app.services.transaction_ops import state_service as state
+from app.services.transaction_ops import tax_correction
 from app.services.transaction_ops.resolution_plan import operation_identity
-from tests.test_accounting_approval_flow import inputs, kind_proposal
+from tests.test_accounting_approval_flow import inputs, kind_proposal, native_payload
 
 KINDS = ("tax", "credit", "discount", "sales_order", "api_credit")
 
@@ -70,7 +71,7 @@ async def _slot(_):
     yield
 
 
-async def approve(db, card, *, preflight=None, dispatch=None, readback=None, authorize=None):
+async def approve(db, card, *, preflight=None, dispatch=None, readback=None, authorize=None, transport=None):
     actor, session, message, _, _ = card
     preflight = preflight or AsyncMock()
     dispatch = dispatch or AsyncMock(return_value=json.dumps({"success": True, "id": "30"}))
@@ -85,6 +86,8 @@ async def approve(db, card, *, preflight=None, dispatch=None, readback=None, aut
         patch("app.services.transaction_ops.tax_correction.verify_after", readback),
         patch("app.services.transaction_ops.accounting_recheck.queue", recheck),
         patch("app.services.chat.orchestrator.execute_tool_call", dispatch),
+        # the native amendment RESTlet, when the card is native (the kernel adapter calls it directly)
+        patch("app.services.transaction_ops.native_accounting_transport._request", transport or AsyncMock()),
         # the record link resolves the account from the connector that executed the write
         patch(
             "app.services.mcp_connector_service.get_mcp_connector",
@@ -576,3 +579,198 @@ async def test_a_transient_revalidation_failure_is_reported_as_itself_not_as_cha
     assert "no longer holds" not in so["error"]
     row = await _row(db, card[2])
     assert row.result_json["code"] == "evidence_revalidation_failed"  # the ledger keeps the code, not the text
+
+
+# ── The native amendment card through the kernel ─────────────────────────────────────────
+
+
+@pytest.fixture
+async def native_card(db, admin_user):
+    """A pending native amendment card (tool transaction_ops_accounting_amendment_apply)."""
+    actor, _ = admin_user
+    p = kind_proposal("native_credit")
+    p["tenant_id"] = str(actor.tenant_id)
+    session = ChatSession(tenant_id=actor.tenant_id, user_id=actor.id, title="approve native")
+    db.add(session)
+    await db.flush()
+    payload = native_payload(p, str(session.id))
+    params = payload.tool_input
+    message = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=session.id,
+        role="assistant",
+        content="",
+        structured_output={**payload.model_dump(mode="json"), "status": "pending"},
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(message)
+    await db.flush()
+    return actor, session, message, p, params
+
+
+def _native_receipt(p):
+    return {
+        "success": True,
+        "schema_version": 1,
+        "status": "posted_pending_independent_verification",
+        "record_type": p["record_type"],
+        "record_id": p["record_id"],
+        "work_key": operation_identity(p),
+        "financial_writes": 1,
+    }
+
+
+async def test_a_native_amendment_runs_through_the_kernel_end_to_end(db, native_card):
+    """The last legacy card: no card-side claim, no reservation audit, no second permit. The
+    RESTlet is called once behind the ledger's permit with the ledger row as its approval id."""
+    actor, _, message, p, params = native_card
+    transport = AsyncMock(return_value=_native_receipt(p))
+    events, so, stubs = await approve(db, native_card, transport=transport)
+    row = await _row(db, message)
+    assert row.status == "verified" and row.provider == "netsuite_native" and row.adapter == "native_amendment"
+    assert state.permit_consumed(row) and row.work_key == operation_identity(p)
+    assert row.result_json["receipt"]["record_id"] == p["record_id"]
+    assert transport.await_count == 1 and stubs["dispatch"].await_count == 0
+    sent = transport.await_args.args[5]
+    assert sent["work_key"] == operation_identity(p) and sent["approval_audit_id"] == str(row.id)
+    assert so["status"] == "approved" and so["operation_id"] == str(row.id)
+    claim = so["accounting_execution"]
+    assert claim["operation_id"] == str(row.id) and claim["approved_by"] == str(actor.id)
+    assert claim["receipt"]["record_id"] == p["record_id"] and claim["receipt"]["record_type"] == p["record_type"]
+    assert "reservation_audit_id" not in claim["receipt"] and claim["attempts"] > 0
+    assert so["accounting_verification"]["status"] == "verified"
+    assert so["accounting_recheck"] == {"status": "queued", "run_id": "recheck-run"}
+    assert p["scope"]["netsuite_account_id"].replace("_", "-").lower() in so["record_url"]
+    legacy = list(
+        await db.scalars(
+            select(AuditEvent).where(
+                AuditEvent.resource_id == str(message.id), AuditEvent.action.like("accounting.native_dispatch.%")
+            )
+        )
+    )
+    assert legacy == []
+    assert stubs["preflight"].await_args.args[2:] == (so["tool_name"], params, p)
+    assert stubs["readback"].await_args.kwargs["receipt"] == _native_receipt(p)
+    stubs["recheck"].assert_awaited_once()
+    text = _text(events)
+    assert "independently verified" in text and "[View" in text
+
+
+async def test_a_native_amendment_whose_evidence_changed_sends_nothing(db, native_card):
+    actor, _, message, p, _ = native_card
+    transport = AsyncMock(return_value=_native_receipt(p))
+    events, so, stubs = await approve(
+        db,
+        native_card,
+        preflight=AsyncMock(side_effect=ValueError("native_current_subledger_changed")),
+        transport=transport,
+    )
+    row = await _row(db, message)
+    assert row.status == "rejected_before_effect" and not state.permit_consumed(row)
+    assert row.result_json["code"] == "native_current_subledger_changed"
+    assert transport.await_count == 0 and stubs["readback"].await_count == 0
+    assert so["status"] == "failed" and so["error"] == "native_current_subledger_changed"
+    released = await db.scalar(
+        select(AuditEvent).where(
+            AuditEvent.resource_id == str(message.id),
+            AuditEvent.action == "accounting_correction.precondition_failed",
+        )
+    )
+    assert released.payload["financial_writes"] == 0 and released.payload["approved_by"] == str(actor.id)
+
+
+async def test_a_native_retry_after_a_refusal_sends_the_base_work_key(db, native_card):
+    """A lineage retry claims a NEW work key on the ledger, but the RESTlet stamps and later
+    verifies custbody_ecom_tx_ops_work_key against the business identity, so the send
+    carries the base key."""
+    actor, session, message, p, _ = native_card
+    await approve(db, native_card, preflight=AsyncMock(side_effect=ValueError("native_approved_record_changed")))
+    first = await _row(db, message)
+    assert first.status == "rejected_before_effect"
+    retry_card = ChatMessage(
+        tenant_id=actor.tenant_id,
+        session_id=session.id,
+        role="assistant",
+        content="",
+        structured_output={**message.structured_output, "status": "pending"},
+    )
+    for key in ("operation_id", "error"):
+        retry_card.structured_output.pop(key, None)
+    db.add(retry_card)
+    await db.flush()
+    transport = AsyncMock(return_value=_native_receipt(p))
+    events, so, stubs = await approve(db, (actor, session, retry_card, p, None), transport=transport)
+    second = await _row(db, retry_card)
+    assert second.status == "verified" and second.retry_of_operation_id == first.id
+    assert second.work_key != first.work_key and second.base_work_key == first.base_work_key
+    assert transport.await_args.args[5]["work_key"] == first.base_work_key == operation_identity(p)
+    assert transport.await_args.args[5]["approval_audit_id"] == str(second.id)
+
+
+@pytest.mark.parametrize("tamper", ["signature", "proposal", "params", "revoked", "owner", "status"])
+async def test_a_tampered_native_card_never_reaches_the_restlet(db, native_card, tamper):
+    """The retired dispatcher's tamper matrix, re-pinned on the kernel path: a forged token,
+    a proposal or signed input edited after minting, a revoked approver, an approver who
+    does not own the session, or a card no longer pending is refused before any send."""
+    from uuid import uuid4
+
+    actor, session, message, p, params = native_card
+    so = message.structured_output
+    preflight = authorize = None
+    if tamper == "signature":
+        so = {**so, "confirmation_token": "forged"}
+    elif tamper == "proposal":
+        so = {**so, "accounting_review": {**p, "source": {**p["source"], "total": "1.00"}}}
+        preflight = tax_correction.validate_approved  # the real binding check, no reads reached
+    elif tamper == "params":
+        so = {**so, "tool_input": {**params, "recordId": "999"}}
+        preflight = tax_correction.validate_approved
+    elif tamper == "revoked":
+        authorize = AsyncMock(side_effect=ValueError("approver_not_permitted"))
+    elif tamper == "owner":
+        session.user_id = uuid4()
+        await db.flush()
+    elif tamper == "status":
+        so = {**so, "status": "failed"}
+    message.structured_output = so
+    await db.flush()
+    transport = AsyncMock(return_value=_native_receipt(p))
+    events, so, stubs = await approve(
+        db, (actor, session, message, p, params), preflight=preflight, authorize=authorize, transport=transport
+    )
+    transport.assert_not_awaited()
+    stubs["dispatch"].assert_not_awaited()
+    stubs["readback"].assert_not_awaited()
+    row = await _row(db, message)
+    assert row is None or (row.status == "rejected_before_effect" and not state.permit_consumed(row))
+    assert so["status"] in ("failed", "pending", "executing") and so["status"] != "approved"
+    assert any(e.get("type") == "error" for e in events)
+
+
+async def test_a_legacy_native_reservation_blocks_a_new_approval_even_when_its_card_is_gone(db, native_card):
+    """The retired durable dispatcher reserved a work key in an audit row rather than on a
+    card, and an audit row outlives the session a card lives in (deleting a session hard-
+    deletes its messages). Until the legacy recovery scan goes, that audit is the only
+    thing between a pre-kernel native send still in flight and a second one."""
+    from app.services.audit_service import log_event
+    from app.services.transaction_ops import resolution_plan
+
+    actor, _, message, p, _ = native_card
+    await log_event(
+        db,
+        actor.tenant_id,
+        "transaction_ops",
+        resolution_plan.LEGACY_NATIVE_RESERVATION,
+        actor_id=actor.id,
+        resource_type="chat_message",
+        resource_id=str(uuid.uuid4()),  # the card this reserved has since been deleted
+        payload={"operation_key": operation_identity(p), "approved_by": str(actor.id), "financial_writes": 0},
+    )
+    await db.commit()
+    transport = AsyncMock(return_value=_native_receipt(p))
+    events, so, stubs = await approve(db, native_card, transport=transport)
+    transport.assert_not_awaited()
+    stubs["dispatch"].assert_not_awaited()
+    assert await _row(db, message) is None  # nothing was even claimed on the ledger
+    assert so["status"] == "pending"
+    assert any("already has an execution record" in e.get("error", "") for e in events if e.get("type") == "error")
