@@ -13,7 +13,7 @@ from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.services import feature_flag_service
 from app.services.ingestion.solidus_dispatch import refresh_due_sources as _refresh_sources
-from app.workers.celery_app import celery_app
+from app.workers.celery_app import RECON_ACTIONS_QUEUE, celery_app
 
 _SCAN_LIMIT = 200
 _DISPATCH_TIMEOUT = 5
@@ -240,7 +240,22 @@ def _reserve_publication(connection, tenant_id, run_id):
     return connection.default_channel.client.set(key, "1", nx=True, ex=_PUBLICATION_COOLDOWN)
 
 
-def publish_investigation(tenant_id, run_id, *, app=celery_app):
+async def _short_run_ids(db, tenant_id, run_ids):
+    """The due runs that are one-order recovery rechecks: they share the task name with
+    hour-long scans, so only the sender can keep them off the long queue."""
+    if not run_ids:
+        return set()
+    _, _, _, run = _dependencies()
+    await set_tenant_context(db, str(tenant_id))
+    rows = await db.execute(
+        select(run.id).where(
+            run.tenant_id == tenant_id, run.id.in_(list(run_ids)), run.origin == "recovery", run.max_orders == 1
+        )
+    )
+    return set(rows.scalars())
+
+
+def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon"):
     # wait_for cannot cancel a blocking thread, and asyncio.run waits for its
     # executor during shutdown. Bound the real Redis sockets and connection
     # attempts as well; use a private connection so these options cannot leak
@@ -265,7 +280,7 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app):
         app.send_task(
             "tasks.transaction_ops_run",
             kwargs={"tenant_id": str(tenant_id), "run_id": str(run_id)},
-            queue="recon",
+            queue=queue,
             retry=False,
             retry_policy={"max_retries": 0},
             connection=connection,
@@ -274,10 +289,10 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app):
         return True
 
 
-async def _dispatch(tenant_id, run_id, stats):
+async def _dispatch(tenant_id, run_id, stats, queue="recon"):
     try:
         published = await asyncio.wait_for(
-            asyncio.to_thread(publish_investigation, tenant_id, run_id),
+            asyncio.to_thread(lambda: publish_investigation(tenant_id, run_id, queue=queue)),
             timeout=_DISPATCH_TIMEOUT,
         )
         if published is False:
@@ -331,11 +346,12 @@ async def collect_due_runs(db, now: datetime) -> dict:
                 try:
                     recover = await _recovery_ids(db, tenant_id, now)
                     stats["truncated"] |= len(recover) > _SCAN_LIMIT
+                    short = await _short_run_ids(db, tenant_id, recover[:_SCAN_LIMIT])
                     # Release a read transaction before waiting on a broker.
                     await db.commit()
                     for run_id in recover[:_SCAN_LIMIT]:
                         stats["recovered"] += 1
-                        await _dispatch(tenant_id, run_id, stats)
+                        await _dispatch(tenant_id, run_id, stats, RECON_ACTIONS_QUEUE if run_id in short else "recon")
                     candidates = await _candidate_ids(db, tenant_id, now)
                     stats["truncated"] |= len(candidates) > _SCAN_LIMIT
                     await db.commit()

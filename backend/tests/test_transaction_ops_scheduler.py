@@ -48,6 +48,7 @@ def dependencies(monkeypatch):
     monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
     monkeypatch.setattr(mod.feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[TENANT]))
     monkeypatch.setattr(mod, "_recovery_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(mod, "_short_run_ids", AsyncMock(return_value=set()))
     monkeypatch.setattr(mod, "_candidate_ids", AsyncMock(return_value=[]))
     monkeypatch.setattr(mod, "_refresh_sources", AsyncMock(return_value=0))
     monkeypatch.setattr(mod, "_schedule_history", AsyncMock(return_value=(False, None)))
@@ -513,3 +514,19 @@ async def test_superseded_config_cannot_start_another_daily_scan(db, admin_user)
     await db.flush()
     assert previous.enabled is True
     assert previous.id not in await mod._candidate_ids(db, actor.tenant_id, NOW)
+
+
+async def test_a_one_order_recovery_recheck_is_published_to_the_actions_queue(dependencies):
+    """The recheck shares its task name with hour-long scans, so only the sender can keep a
+    one-order recovery read off the bulk queue."""
+    from app.workers.celery_app import RECON_ACTIONS_QUEUE
+
+    db = AsyncMock()
+    short, long = uuid4(), uuid4()
+    mod._recovery_ids.return_value = [short, long]
+    mod._short_run_ids.return_value = {short}
+    stats = await mod.collect_due_runs(db, NOW)
+    assert stats["dispatched"] == 2
+    queues = {c.kwargs["kwargs"]["run_id"]: c.kwargs["queue"] for c in mod.celery_app.send_task.call_args_list}
+    assert queues == {str(short): RECON_ACTIONS_QUEUE, str(long): "recon"}
+    mod._short_run_ids.assert_awaited_once_with(db, TENANT, [short, long])

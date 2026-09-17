@@ -24,6 +24,7 @@ from app.services.transaction_ops.treatments import treatment_or_none
 
 MAX_ATTEMPTS = 3
 RETRY_DELAY = timedelta(minutes=3)
+BUSY_RETRY_DELAY = timedelta(seconds=60)  # the slot, not the work, was the problem
 
 
 def enqueue(message, run, now):
@@ -512,6 +513,18 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
     except Exception as exc:
         await db.rollback()
         if not claimed:
+            # The per-account write slot was busy: nothing was claimed, so the retry marker
+            # still says whatever it said. Pull it to the next collector tick, or the
+            # receipt waits out a stale next_at behind a slot that is free again.
+            await set_tenant_context(db, str(tenant_id))
+            message = await _message(db, tenant_id, message_id)
+            work = (message.structured_output or {}).get("accounting_completion") if message else None
+            if work and work.get("status") == "pending":
+                message.structured_output = {
+                    **message.structured_output,
+                    "accounting_completion": {**work, "next_at": (now + BUSY_RETRY_DELAY).isoformat()},
+                }
+                await db.commit()
             return {"status": "busy", "financial_writes": 0}
         await set_tenant_context(db, str(tenant_id))
         message = await _message(db, tenant_id, message_id)
@@ -549,7 +562,6 @@ async def defer(db, tenant_id, message, now, reason):
 
         group_id = group_of(_claim(message))
         if group_id:
-
             await refresh_group(db, tenant_id, message.session_id, group_id)
         else:
             db.add(
