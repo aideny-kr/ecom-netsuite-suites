@@ -396,6 +396,11 @@ async def test_the_ledger_copy_of_a_native_readback_keeps_the_verdict_and_drops_
     assert stored["record_id"] == p["record_id"] and stored["source_revision"] == "rev-1"
     assert not {"invoice", "sales_order", "after"} & set(stored)
     assert len(json.dumps(stored)) < 8_000
+    # A row that could not keep the whole readback says which parts it dropped and carries
+    # the digest of what was actually read: after a crash the card may be rendered from
+    # this row alone, and a narrowed record must not read as a complete one.
+    assert stored["evidence_omitted"] == ["after", "invoice", "sales_order"]
+    assert stored["readback_digest"] == accounting_adapter.digest(verification)
     # The card keeps the full readback the person reviews.
     assert adapter.verification["after"] == verification["after"]
 
@@ -507,3 +512,64 @@ async def test_a_process_stopped_mid_send_spends_the_permit_and_never_sends_agai
         result, row = await _run(db, native_claimed, build_native(message))
     again.assert_not_awaited()
     assert result["status"] == "verified" and row.status == "verified"
+
+
+async def test_a_replayed_delivery_carries_the_identity_an_earlier_answer_named(db, native_claimed):
+    """A delivery that named a record without proving a save records an answer, not a
+    receipt. A second delivery of the same claim must hand that identity to its readback:
+    the recovery scan already did, and the live replay must not be the one place that
+    forgets — that is how a conflicting record gets reconciled away as verified."""
+    actor, message, claim = native_claimed
+    p = message.structured_output["accounting_review"]
+    foreign = {**confirmed(p), "record_id": "999", "work_key": "0" * 64}
+    identity = {"record_id": "999", "record_type": p["record_type"], "work_key": "0" * 64}
+    conflict = {"status": "needs_review", "reason": "native_receipt_identity_conflict"}
+
+    class Stopped(BaseException):
+        pass
+
+    # The process dies after the answer is recorded and before the readback: the row is
+    # still executing with a spent permit, which is the only state a second delivery can
+    # reach the permit from (a settled row answers from the ledger far earlier).
+    with patch(TRANSPORT, AsyncMock(return_value=foreign)):
+        with pytest.raises(Stopped):
+            await write_kernel.execute(
+                db, actor.tenant_id, claim, build_native(message, readback=AsyncMock(side_effect=Stopped))
+            )
+    await db.rollback()
+    for expired in (actor, message):
+        await db.refresh(expired)
+    row = await _row(db, claim)
+    assert row.status == "executing" and row.result_json["answer"] == identity
+    second = build_native(message, readback=AsyncMock(return_value=conflict))
+    with patch(TRANSPORT, AsyncMock()) as never:
+        result, row = await _run(db, native_claimed, second)
+    never.assert_not_awaited()
+    assert result["status"] == "unknown" and second.sent == "unknown"
+    assert second.receipt == identity
+    assert second.readback.await_args.kwargs["receipt"] == identity
+
+
+async def test_a_replayed_delivery_after_a_receipt_still_reads_as_accepted(db, native_claimed):
+    """The same reader must not turn a proven save into an unproven one: a row holding a
+    receipt replays as accepted, exactly as before answers existed."""
+    actor, message, claim = native_claimed
+    p = message.structured_output["accounting_review"]
+
+    class Stopped(BaseException):
+        pass
+
+    with patch(TRANSPORT, AsyncMock(return_value=confirmed(p))):
+        with pytest.raises(Stopped):
+            await write_kernel.execute(
+                db, actor.tenant_id, claim, build_native(message, readback=AsyncMock(side_effect=Stopped))
+            )
+    await db.rollback()
+    for expired in (actor, message):
+        await db.refresh(expired)
+    assert (await _row(db, claim)).status == "committed_unverified"
+    second = build_native(message)
+    with patch(TRANSPORT, AsyncMock()) as never:
+        await _run(db, native_claimed, second)
+    never.assert_not_awaited()
+    assert second.sent == "accepted" and second.receipt["record_id"] == p["record_id"]

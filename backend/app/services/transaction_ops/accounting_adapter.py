@@ -161,11 +161,12 @@ class AccountingCardAdapter:
             raise PreconditionChangedError(exc.code) from exc
         if granted:
             return None
-        # An earlier delivery consumed the permit; whatever it recorded is this
-        # delivery's receipt too, so the card and the audit do not lose it.
+        # An earlier delivery consumed the permit; whatever it recorded is this delivery's
+        # answer too — a receipt that proved a save, or the identity a non-receipt answer
+        # named — so neither the card nor this delivery's readback loses it.
         row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
-        self.receipt = (row.result_json or {}).get("receipt")
-        self.sent = "accepted" if self.receipt else "unknown"
+        self.receipt = state.recorded_answer(row)
+        self.sent = "accepted" if state.recorded_receipt(row) else "unknown"
         return {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
 
     async def send(self, db, tenant_id, claimed, preflight) -> dict:
@@ -353,7 +354,7 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
     def ledger_verification(cls, verification: dict) -> dict:
         kept = {key: verification[key] for key in NATIVE_LEDGER_VERIFICATION_KEYS if key in verification}
         if len(json.dumps(kept, default=str)) <= NATIVE_LEDGER_BUDGET:
-            return kept
+            return cls._annotate(kept, verification)
         # A balanced GL is not bounded by row count: a record with hundreds of lines would
         # push a legitimately verified readback past the row's own limit and leave the
         # amendment uncompletable. The row keeps the breakdown's shape, not its rows.
@@ -364,6 +365,17 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
             "digest": digest(gl),
             "omitted": "gl_exceeds_ledger_budget",
         }
+        return cls._annotate(kept, verification)
+
+    @classmethod
+    def _annotate(cls, kept: dict, verification: dict) -> dict:
+        """A row that cannot keep the whole readback says so, and carries the digest of
+        what the adapter actually read: after a crash the card may be rendered from this
+        row alone, and a person must be able to tell a narrowed record from a full one."""
+        omitted = sorted(set(verification) - set(kept))
+        if omitted:
+            kept["evidence_omitted"] = omitted
+            kept["readback_digest"] = digest(verification)
         return kept
 
 
