@@ -52,7 +52,8 @@ async def test_trigger_publishes_durable_pending_run(client, db, admin_user, pub
     response = await client.post(f"/api/v1/transaction-ops/configs/{config.id}/runs", json=body, headers=headers)
     assert response.status_code == 202, response.text
     assert response.json()["status"] == "pending"
-    publisher.assert_called_once_with(actor.tenant_id, UUID(response.json()["id"]))
+    # A human's "run now" is a full scan: it names the bulk queue, never the short-job one.
+    publisher.assert_called_once_with(actor.tenant_id, UUID(response.json()["id"]), queue="recon")
     assert (await client.post(f"/api/v1/transaction-ops/configs/{config.id}/runs", json=body, headers=headers)).json()[
         "id"
     ] == response.json()["id"]
