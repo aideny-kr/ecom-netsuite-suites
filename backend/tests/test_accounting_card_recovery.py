@@ -682,3 +682,26 @@ async def test_a_native_row_recovered_by_read_stores_the_readback_the_way_its_ad
     await db.refresh(message)
     assert message.structured_output["status"] == "approved"
     assert message.structured_output["accounting_verification"]["after"] == verification["after"]
+
+
+async def test_a_crash_after_an_answer_that_named_another_record_recovers_with_that_identity(
+    db, native_interrupted, monkeypatch
+):
+    """The live readback refuses an answer that names a different record than the approval.
+    After a crash the only memory of that answer is the row, so the recovery scan reads
+    back with the recorded identity instead of reconciling a different record away."""
+    tenant_id, message_id, claimed, p = native_interrupted
+    foreign = {"record_id": "999", "record_type": p["record_type"]}
+    await state.record_dispatch_answer(db, tenant_id, claimed.operation_id, foreign)
+    readback = AsyncMock(return_value={"status": "needs_review", "reason": "native_receipt_identity_conflict"})
+    monkeypatch.setattr("app.services.transaction_ops.native_accounting_service.verify_after", readback)
+    later = (await _row(db, claimed)).deadline_at + timedelta(seconds=1)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        await mod.recover(db, tenant_id, message_id, now=later)
+    readback.assert_awaited_once()
+    assert readback.await_args.args[3] == foreign  # tax_correction passes the receipt positionally
+    row = await _row(db, claimed)
+    assert row.status != "verified" and row.result_json["answer"] == foreign
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    assert message.structured_output["status"] != "approved"
