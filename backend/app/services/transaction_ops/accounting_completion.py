@@ -549,7 +549,6 @@ async def defer(db, tenant_id, message, now, reason):
 
         group_id = group_of(_claim(message))
         if group_id:
-
             await refresh_group(db, tenant_id, message.session_id, group_id)
         else:
             db.add(
