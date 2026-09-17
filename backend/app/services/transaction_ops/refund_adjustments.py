@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator
 
 from app.schemas.transaction_ops import EvidenceModel, _decimal
-from app.services.transaction_ops.netsuite_reader import _account, _sublist
+from app.services.transaction_ops.netsuite_reader import _account, _collection, _sublist
 
 Id = Annotated[str, Field(pattern=r"^[0-9]{1,30}$")]
 
@@ -35,6 +35,60 @@ class RefundAdjustmentProfile(EvidenceModel):
         return _account(value)
 
 
+# A credit memo's posting lines. Reclassification appends matched pairs, so the ceiling
+# sits well above the line count anyone writes by hand.
+LEDGER_ROWS = 40
+
+
+async def ledger_tax(request, credit_memo_id, subsidiary_id, profile, amount):
+    """Net a credit memo's postings by account and return the part that is tax.
+
+    The ledger is the only place both booking conventions are legible. Tax charged through
+    the tax engine arrives as its own posting line; tax reversed by convention arrives as an
+    ordinary item line aimed at a tax account. The REST item sublist renders the second as
+    though it were net sales, and on a legacy-tax nexus it omits the line tax fields
+    altogether, which is why reading it cannot work for every subsidiary.
+    """
+    result = await request(
+        "POST",
+        "/query/v1/suiteql",
+        params={"limit": LEDGER_ROWS + 1},
+        body={
+            "q": "SELECT tal.account, tal.accountingbook, tal.debit, tal.credit "
+            "FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction "
+            f"WHERE tal.transaction = {credit_memo_id} AND t.subsidiary = {subsidiary_id}"
+        },
+    )
+    rows, complete = _collection(result)
+    if not complete or len(rows) > LEDGER_ROWS:
+        raise ValueError("credit_ledger_incomplete")
+    # One accounting book only. Netting across books double counts, and a book the scope
+    # never named is not evidence about the book it did.
+    books = {str(row["accountingbook"]) for row in rows if row.get("accountingbook") is not None}
+    if len(books) != 1:
+        raise ValueError("credit_ledger_book_ambiguous")
+    nets: dict[str, Decimal] = {}
+    for row in rows:
+        account = row.get("account")
+        if account is None:
+            continue  # a non-posting line carries no account and no amount
+        nets[str(account)] = (
+            nets.get(str(account), Decimal(0)) + _decimal(row.get("debit") or 0) - _decimal(row.get("credit") or 0)
+        )
+    if not nets or sum(nets.values(), Decimal(0)) != 0:
+        raise ValueError("credit_ledger_unbalanced")
+    tax = sum((value for account, value in nets.items() if account in profile.taxed_accounts), Decimal(0))
+    debited = sum((value for value in nets.values() if value > 0), Decimal(0))
+    credited = sum((value for value in nets.values() if value < 0), Decimal(0))
+    # Read the split off the totals. A reclassification pair cancels exactly in the
+    # subsidiary's base currency but leaves a sub-cent residue in the account it moved value
+    # out of when netted in the order's own currency, which is the currency being compared,
+    # so nothing here may assume those pairs cancel.
+    if debited != amount or credited != -amount or not 0 <= tax <= amount:
+        raise ValueError("credit_ledger_disagrees_with_refund")
+    return tax
+
+
 async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id, currency_id, reference, allocations):
     profile = RefundAdjustmentProfile.model_validate(profile)
     if profile.subsidiary_id != subsidiary_id:
@@ -53,7 +107,6 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                 "GET", f"/record/v1/creditmemo/{link['credit_memo_id']}", params={"expandSubResources": "true"}
             )
             amount = _decimal(link["amount"])
-            native_tax = _decimal(record.get("taxTotal"))
             if (
                 record["id"] != link["credit_memo_id"]
                 or record["currency"]["id"] != currency_id
@@ -62,10 +115,6 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                 or _decimal(record["total"]) != amount
                 or _decimal(record["applied"]) != amount
                 or _decimal(record["unapplied"]) != 0
-                or native_tax is None
-                or native_tax < 0
-                or native_tax > amount
-                or (tax_reversal and native_tax != 0)
             ):
                 return []
             problems = []
@@ -80,20 +129,16 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                         "itemType",
                         "account",
                         "amount",
-                        "grossAmt",
-                        "tax1Amt",
                     }
                 ),
                 problems,
             )
             if problems or not lines:
                 return []
-            total, line_taxes, seen, items = Decimal(0), Decimal(0), set(), {}
+            seen, items = set(), {}
             for line in lines:
                 item, account = line["item"]["id"], line["account"]["id"]
                 value = _decimal(line["amount"])
-                line_tax = _decimal(line["tax1Amt"])
-                gross = _decimal(line["grossAmt"])
                 if (
                     line["line"] in seen
                     or line["itemType"]["id"] not in {"NonInvtPart", "InvtPart", "Service"}
@@ -104,22 +149,20 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                     or (not tax_reversal and item in profile.tax_item_accounts)
                     or value is None
                     or value <= 0
-                    or line_tax is None
-                    or line_tax < 0
-                    or gross != value + line_tax
-                    or (tax_reversal and line_tax != 0)
                 ):
                     return []
                 seen.add(line["line"])
                 items[item] = account
-                total += gross
-                line_taxes += line_tax
-            if total != amount or line_taxes != native_tax:
+            # The ledger is the authority on how much of this credit memo is tax. The record
+            # header disagrees with it by design on a reversal, where the whole amount posts
+            # to a tax account through an item line and taxTotal stays zero.
+            native_tax = await ledger_tax(request, link["credit_memo_id"], subsidiary_id, profile, amount)
+            if tax_reversal and native_tax != amount:
                 return []
             proofs.append(
                 {
                     "kind": "tax_reversal" if tax_reversal else "credit_memo",
-                    "tax_amount": str(amount if tax_reversal else native_tax),
+                    "tax_amount": str(native_tax),
                     "request_id": link["request_id"],
                     "source_refund_id": link["source_refund_id"],
                     "payment_number": link["payment_number"],

@@ -138,10 +138,40 @@ class CreditReader(CustomReader):
             },
         }
 
+        # A credit memo's postings. Left as None, it is derived from the record above so a
+        # test that edits the record does not silently leave the ledger describing something
+        # else. Set it directly to describe a shape the record cannot express, such as tax
+        # charged through the tax engine.
+        self.ledger = None
+        self.ledger_complete = True
+        self.ledger_reads = 0
+
+    AR_ACCOUNT = "119"
+
+    def postings(self):
+        if self.ledger is not None:
+            return self.ledger
+        rows = [{"account": self.AR_ACCOUNT, "accountingbook": "1", "debit": None, "credit": self.credit["total"]}]
+        rows.extend(
+            {"account": line["account"]["id"], "accountingbook": "1", "debit": line["amount"], "credit": None}
+            for line in self.credit["item"]["items"]
+        )
+        return rows
+
     async def request(self, method, path, **kwargs):
         if path == "/record/v1/creditmemo/3":
             self.calls += 1
             return deepcopy(self.credit)
+        if "transactionaccountingline" in kwargs.get("body", {}).get("q", ""):
+            self.calls += 1
+            self.ledger_reads += 1
+            rows = deepcopy(self.postings())
+            return {
+                "items": rows,
+                "count": len(rows),
+                "totalResults": len(rows),
+                "hasMore": not self.ledger_complete,
+            }
         return await super().request(method, path, **kwargs)
 
 
@@ -165,7 +195,6 @@ async def test_native_credit_lines_prove_tax_effect_separate_from_refund_money()
         lambda c: c.update(custbody_fw_order_number="R999999999"),
         lambda c: c.update(total="578.39"),
         lambda c: c.update(unapplied="1"),
-        lambda c: c.update(taxTotal="1"),
         lambda c: c["item"].update(hasMore=True),
         lambda c: c["item"]["items"][0].update(account={"id": "91"}),
         lambda c: c["item"]["items"][0].update(item={"id": "81"}),
@@ -260,19 +289,6 @@ class LedgerCreditReader(CreditReader):
             {"account": US_TAX_ACCOUNT, "accountingbook": "1", "debit": "33.80", "credit": None},
             {"account": US_NET_ACCOUNT, "accountingbook": "1", "debit": "400.00", "credit": None},
         ]
-        self.ledger_complete = True
-
-    async def request(self, method, path, **kwargs):
-        if "transactionaccountingline" in kwargs.get("body", {}).get("q", ""):
-            self.calls += 1
-            rows = deepcopy(self.ledger)
-            return {
-                "items": rows,
-                "count": len(rows),
-                "totalResults": len(rows),
-                "hasMore": not self.ledger_complete,
-            }
-        return await super().request(method, path, **kwargs)
 
 
 def ledger_profile():
@@ -281,11 +297,46 @@ def ledger_profile():
 
 async def test_us_credit_memo_proves_its_tax_split_from_the_ledger():
     """The REST record hides the split; the ledger holds it. Today this returns nothing."""
+    reader = LedgerCreditReader()
     result = await collect_refunds(
-        LedgerCreditReader(), "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
     )
+    assert reader.ledger_reads == 1, "the proof must have consulted the ledger, not the record header"
     assert result["amount"] == Decimal(US_CREDIT_TOTAL)
     proof = result["tax_adjustments"][0]
     assert proof["kind"] == "credit_memo"
     assert proof["amount"] == US_CREDIT_TOTAL
     assert proof["tax_amount"] == "33.80"
+
+
+@pytest.mark.parametrize(
+    "break_ledger",
+    [
+        pytest.param(lambda r: r.ledger.append(dict(r.ledger[1], debit="1.00")), id="unbalanced"),
+        pytest.param(lambda r: r.ledger[1].update(debit="30.00"), id="disagrees_with_refund"),
+        pytest.param(lambda r: r.ledger[2].update(accountingbook="2"), id="two_books"),
+        pytest.param(lambda r: setattr(r, "ledger_complete", False), id="truncated"),
+        pytest.param(lambda r: r.ledger.clear(), id="empty"),
+    ],
+)
+async def test_a_ledger_that_does_not_account_for_the_refund_proves_nothing(break_ledger):
+    reader = LedgerCreditReader()
+    break_ledger(reader)
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    assert result["amount"] == Decimal(US_CREDIT_TOTAL)
+    assert result["tax_adjustments"] == []
+
+
+async def test_tax_posted_by_an_item_line_is_still_tax():
+    """Framework BV reverses VAT as an ordinary item line into the VAT account, leaving the
+    record header at zero tax. The ledger is the only place that is visible."""
+    reader = CreditReader()
+    assert reader.credit["taxTotal"] == "0"
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=reader_profile()
+    )
+    proof = result["tax_adjustments"][0]
+    assert proof["kind"] == "tax_reversal"
+    assert proof["tax_amount"] == "578.38"
