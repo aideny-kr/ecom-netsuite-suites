@@ -63,10 +63,6 @@ _LEDGER_RESULT_KEYS = frozenset(
         "payload_fingerprint",
         "dispatch_reserved_at",
         "termination_reason",
-        # What the provider answered is written by _record_send_evidence and by nothing
-        # else: a completion may not overwrite a receipt or the identity an answer named.
-        "receipt",
-        "answer",
     }
 )
 # The write kernel's outcome taxonomy (docs/superpowers/specs/2026-09-15-write-kernel-design.md,
@@ -1221,6 +1217,13 @@ async def operation_for_work(db, tenant_id, work_key):
     return (await db.execute(query.execution_options(populate_existing=True))).scalar_one_or_none()
 
 
+# What the provider answered, written by _record_send_evidence. A completion may record
+# one in the same call that settles the row (migration 109's trigger expects exactly that:
+# "a receipt requires a permit"), but it may never CHANGE one that is already there —
+# whatever the earlier delivery saw is what every later read must see.
+SEND_EVIDENCE_KEYS = frozenset({"receipt", "answer"})
+
+
 def recorded_receipt(operation) -> dict | None:
     """The answer that proved a save, if the row holds one."""
     return (operation.result_json or {}).get("receipt")
@@ -1290,6 +1293,10 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
     row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
     if row.status not in IN_FLIGHT:
         raise StateError("operation_terminal")
+    recorded = row.result_json or {}
+    if any(key in recorded and evidence[key] != recorded[key] for key in SEND_EVIDENCE_KEYS & set(evidence)):
+        # A completion may record what the provider answered; it may never rewrite it.
+        raise StateError("send_evidence_immutable")
     # An unknown attempt can move only after caller-provided read-only provider
     # reconciliation; this service never dispatches it again. Handing it to a person
     # (needs_review) is an escalation, not a finding, and needs no reads.
