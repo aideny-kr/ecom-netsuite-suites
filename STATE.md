@@ -6,10 +6,28 @@
 routine — reconciliation, close, reporting — via scheduled jobs and agentic flows, with
 memory + reporting tools and **read AND WRITE** access to NetSuite and further MCPs.
 
-*Where we are: Rung 1 of 4. The read half is real and well-gated. The write half does not
-exist — zero posting code, no compensation, no durable execution. The longest-lead blocker
-is evidence, not code: nothing today can produce the error rate unattended posting rests
-on, because no reject/dispute action exists to generate negative labels.*
+*Where we are (2026-09-17): the write half now exists as a KERNEL. The transaction_ops
+operations ledger is the single write path (#269, migration 109 on staging): outcomes
+`executing | rejected_before_effect | committed_unverified | unknown | verified |
+needs_review`, a one-use dispatch permit before any send, independent readback before
+`verified`, `unknown` handed to a person by the daily ops digest (#265), one operator kill
+switch. Chat accounting cards run through it (#270); the native amendment card is the last
+legacy path. Compensation/reversal still does not exist. The longest-lead blocker is still
+evidence: no complete staging journey has been proven yet, and no reject/dispute action
+generates negative labels for unattended posting.*
+
+**The write-agent program's goal (2026-09-16, Aiden + Claude, from the two post-mortems in
+`docs/postmortem/2026-09-16-*`):** an agent that can carry out what it proposes. Every
+approved correction is prepared from fresh evidence, approved exactly by a human, sent at
+most once, verified by independent readback, and recovered truthfully when interrupted, so
+that a FULL accounting group (the 54-order Framework case) completes end to end on staging
+with every member in a specific final state. **Acceptance = one complete staging journey**
+(fresh evidence → scope → persisted proposal → exact approval → execution → readback →
+reconciliation → record/audit links → truthful status), never passing parts. Keep: exact
+approval, tenant/account/role boundaries, exact money, duplicate prevention, independent
+verification, audit. Relax: prescribed investigation sequences, unnecessarily narrow
+adapters. Ticket draft (ClickUp Suite Studio AI › Framework Launch, blocked on the MCP
+daily limit on 2026-09-16): `docs/superpowers/plans/2026-09-17-write-agent-program-ticket.md`.*
 
 **How we work** (this is a means, not the goal). A development cycle that suits a frontier
 model: minimum harness, loop engineering for feedback, graph engineering for flow, and one
@@ -34,6 +52,7 @@ Updated at the end of every task, not "later".
 
 | branch | tier | state | blocked on |
 |---|---|---|---|
+| `feat/g3-native-amendment-adapter` | T2 | **write-agent program, slices 2+3**: NativeAmendmentAdapter (retire `execution_claim` / `previous_execution` / reservation audit / `_via_kernel`), then G3.4 group durability (resumable per-member preparation, summary derived from child state, per-call timing + cost on the ledger row, receipts off the shared `recon` queue). Started 2026-09-17 from main@33038759; readers mapping the code first | nothing |
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 
@@ -110,6 +129,26 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 ## NEXT — ordered, with the why
 
+**Write-agent program order (agreed 2026-09-16; G3.4 pulled AHEAD of G3.3 because the
+post-mortem's losses were durability and attribution, not capability):**
+
+1. **Native amendment adapter** — the last card on the legacy claim path; retiring it deletes
+   the whole "a legacy reader assumes the card's own claim" defect class (four gate rounds on
+   #267 were that shape).
+2. **G3.4 group durability** — resumable per-case preparation (23 of 54 members lost to the
+   450 s cap), group summary derived from child state (7 shown vs 30 reconciled), per-call
+   timing + cost on the ledger row (~1 min per correction unattributed), receipts/completion
+   off the shared `recon` queue (298 s median check→publish delay).
+3. **The staging journey** — the acceptance rule, on the full Framework group. Staging's
+   NetSuite connection is Framework PRODUCTION 6738075: Aiden starts that run, never a session.
+4. **G3.3 generic writes + evidence-driven repair** (GenericRecordAdapter, repair policy in
+   code with per-class budgets, unchanged retries refused, changed meaning ⇒ new card).
+5. **G4 account-aware coverage** (needs a real account's rules; the staging read of the stored
+   live proposal is still blocked) · **G5 persist before scaling** · **G6 reviewed account
+   playbooks** · **G7 measurement** (cost per verified case) + the **llmOps super-admin page**
+   (traces per turn/tool/hook/provider call; the tool-timing metric today stops BEFORE the
+   preparation hook, which is how 474 s logged as 5 s).
+
 **Multimodal record creation (2026-08-28).** User asked for: upload xlsx/pdf/csv/photo →
 agent proposes NetSuite records → existing HITL card. Research (7-agent survey) found upload,
 storage, `file_id` plumbing and an injection-hardened preview ALREADY EXIST for
@@ -185,6 +224,26 @@ path — OCR confidence is unquantified and the card cannot show what was misrea
 
 Written so the next session does not re-litigate these.
 
+- **2026-09-16 · The transaction_ops ledger IS the write kernel, over a fourth ledger or
+  PR #218's `write_side_effects`** · because three idempotency mechanisms already competed
+  and the ledger had the strongest claim → permit → guard → readback path; #218 is folded
+  (externalId + duplicate:posted), its table never applied. Spec:
+  `docs/superpowers/specs/2026-09-15-write-kernel-design.md`.
+- **2026-09-16 · Tracing over a LangGraph/LangChain rewrite** · because the product agent is
+  ONE tool-use loop on the raw SDK with no LLM sub-agents (the group run's concurrency is
+  three asyncio workers), the post-mortems' failures were contracts/execution/acceptance,
+  never orchestration, the ledger with its DB triggers already is the state machine, and a
+  rewrite reopens the vs-MCP benchmark gate on every chat change. Visibility comes from
+  spans + per-call cost on the ledger row + an llmOps super-admin page after G3.
+- **2026-09-16 · Acceptance is one complete staging journey, not passing parts** · because
+  focused regressions and four gate rounds passed while the real proposal→group path still
+  crashed (post-mortem); the 55-item staging test had exercised rejection, not correction.
+- **2026-09-16 · Rebased work ships as NEW branches/PRs (`-r2`), never a force-push** ·
+  because `.claude/settings.local.json` denies `git push --force*` on purpose; the review
+  record stays on the closed PR (#266 → #269, #267 → #270) and is linked from the new one.
+- **2026-09-16 · The kill switch runs BEFORE the ledger claim for chat cards** · because a
+  halted send must consume no permit and leave no execution record; the
+  `precondition_failed` audit alone releases the card for a fresh approval.
 - **2026-09-10 · Rolling period is SHIPPED and RUNNING UNATTENDED — do not resume it** ·
   because STATE.md previously said "gate round 1 in flight" and pointed "resume here" at a
   worktree that no longer exists, which is exactly the stale-state trap this file exists to
@@ -424,8 +483,28 @@ Written so the next session does not re-litigate these.
 - **Don't treat one clean gate round as done.** Observed major counts across rounds on a
   single PR: 0 → 2 → 3 → 1 → 0.
 - **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
+- **Don't add a fourth write ledger, a per-kind Python recipe, or a new RESTlet for a write
+  path.** The kernel + adapters + treatment registry carry new kinds; count mechanisms before
+  adding one.
+- **Don't name a keyword parameter `scope` in transaction_ops.** Twice in one day a local
+  `scope` list shadowed a new `scope=` parameter (`chat_confirmation.intent_of`,
+  `review_evidence.current_review_evidence`); both were caught only by a test.
+- **Don't leave a subquery/CTE anonymous when it is copied generatively** (`.prefix_with`,
+  `.alias()` chains): the anonymous name is derived from `id()` and the copy keeps the freed
+  original's id → `table name "anon_8" specified more than once` in CI only. Name it.
+- **Don't force-push, and don't ask to relax that rule.** Ship the rebased head as a new
+  branch and PR.
 
 ## OPEN — needs a human, blocking something
+
+- **The staging journey run (write-agent acceptance) needs Aiden to start it**: staging's
+  NetSuite connection is Framework PRODUCTION; a session must never initiate that write.
+- **ClickUp program ticket** (`docs/superpowers/plans/2026-09-17-write-agent-program-ticket.md`, list Suite Studio
+  AI › Framework Launch 901421078818): the MCP connector's daily limit blocked creation on
+  2026-09-16; create it on the next session and bind sessions to it. The G3 slices have no
+  tickets of their own (Aiden, 2026-09-16).
+- **The staging read of the stored live CM proposal** (G4's real-account fixture) is still
+  blocked by the auto-mode classifier refusing the Supabase query.
 
 
 - **`feat/rolling-period`'s last full `verify.sh` is RED — on two auth tests this branch
