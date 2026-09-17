@@ -2540,8 +2540,8 @@ async def run_chat_turn(
                 if _via_kernel:
                     from app.services.transaction_ops import write_kernel as _write_kernel
                     from app.services.transaction_ops.accounting_adapter import (
+                        ADAPTERS_BY_PROVIDER,
                         AccountingCardAdapter,
-                        NativeAmendmentAdapter,
                     )
                     from app.services.transaction_ops.tax_correction import validate_approved as _validate_treatment
                     from app.services.transaction_ops.tax_correction import verify_after as _readback_treatment
@@ -2586,13 +2586,10 @@ async def run_chat_turn(
                     await db.commit()
                     await set_tenant_context(db, str(tenant_id))
                     # The treatment dispatchers (validate_approved / verify_after) are the seams
-                    # for both cards; only the send differs: the MCP card's is the signed tool
-                    # dispatcher, the native card's is the amendment RESTlet itself.
-                    _adapter_class = (
-                        NativeAmendmentAdapter
-                        if _chat_confirmation.provider_of(_so) == _chat_confirmation.PROVIDER_NATIVE
-                        else AccountingCardAdapter
-                    )
+                    # for every card; only the send differs: the MCP card's is the signed tool
+                    # dispatcher, the native card's is the amendment RESTlet itself, so the
+                    # native adapter is handed no tool dispatcher at all.
+                    _adapter_class = ADAPTERS_BY_PROVIDER[_chat_confirmation.provider_of(_so)]
                     _kernel_adapter = _adapter_class(
                         name=_chat_confirmation.adapter_of(_so["accounting_review"]),
                         message=_confirm_msg,
@@ -2602,7 +2599,7 @@ async def run_chat_turn(
                         session_id=str(session.id),
                         correlation_id=correlation_id,
                         validate=_validate_treatment,
-                        dispatch=execute_tool_call,
+                        dispatch=execute_tool_call if _adapter_class is AccountingCardAdapter else None,
                         readback=_readback_treatment,
                         approval_context=_approval_context,
                     )
@@ -2818,10 +2815,9 @@ async def run_chat_turn(
                 if _so.get("accounting_execution") and isinstance(_exec_result, dict):
                     # Retain a returned native identity even when verification
                     # fails, so later recovery cannot ignore a conflicting receipt.
-                    _receipt_keys = ("recordId", "id", "internalId")
-                    if family_of(_so.get("accounting_review")) == "amendment":
-                        _receipt_keys += ("record_id", "record_type", "work_key")
-                    _receipt_ids = {k: _exec_result[k] for k in _receipt_keys if _exec_result.get(k)}
+                    from app.services.transaction_ops.accounting_adapter import RECEIPT_IDS
+
+                    _receipt_ids = {k: _exec_result[k] for k in RECEIPT_IDS if _exec_result.get(k)}
                     _so = {
                         **_so,
                         "accounting_execution": {**_so["accounting_execution"], "receipt": _receipt_ids},

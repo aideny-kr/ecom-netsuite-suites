@@ -558,7 +558,7 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
     verified. The card is then rendered from the row. Nothing here sends.
     """
     from app.services.transaction_ops import state_service as state
-    from app.services.transaction_ops.accounting_adapter import json_copy, ledger_safe
+    from app.services.transaction_ops.accounting_adapter import json_copy, ledger_view
     from app.services.transaction_ops.accounting_group import accounting_write_slot
     from app.services.transaction_ops.tax_correction import verify_after
 
@@ -619,7 +619,9 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
                     verification = await verify_after(db, tenant_id, p, receipt=receipt)
                 verification = json_copy(verification)
                 if verification.get("status") == "verified":
-                    proof, reason = ledger_safe(verification), "done"
+                    # The row keeps what the provider's adapter would keep (the native
+                    # readback carries whole records that would exceed the row's bound).
+                    proof, reason = ledger_view(operation.provider, verification), "done"
             except Exception as exc:
                 # Provider helpers can fail inside a database transaction; release it
                 # before recording. The committed lease and spend are never refunded.

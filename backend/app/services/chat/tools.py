@@ -593,6 +593,14 @@ async def _execute_tool_call_once(
         # The native amendment leaves only through the write kernel's NativeAmendmentAdapter,
         # behind the ledger's one-use permit; the tool surface itself never sends. (The
         # durable dispatcher that used to run here minted a second permit of its own.)
+        # Nothing legitimate reaches this branch, so a caller that does is worth a trace.
+        logger.warning(
+            "Refused a direct native amendment tool call (tenant=%s session=%s approved=%s); "
+            "the write kernel is the only sender",
+            tenant_id,
+            session_id,
+            human_approved,
+        )
         return json.dumps(
             {
                 "success": False,

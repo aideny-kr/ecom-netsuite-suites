@@ -7,12 +7,18 @@ that the card keeps the human-readable reason the ledger deliberately does not.
 """
 
 import json
-from unittest.mock import AsyncMock
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 
+from app.models.audit import AuditEvent
+from app.models.chat import ChatMessage, ChatSession
 from app.services.transaction_ops import accounting_adapter, chat_confirmation, write_kernel
 from app.services.transaction_ops import state_service as state
+from app.services.transaction_ops.resolution_plan import operation_identity
+from tests.test_accounting_approval_flow import kind_proposal, native_payload
 from tests.test_accounting_recheck import approved_credit  # noqa: F401
 from tests.test_accounting_recovery import interrupted_credit  # noqa: F401
 from tests.test_chat_confirmation_source import _bind_card, _row, authorized  # noqa: F401
@@ -223,15 +229,6 @@ async def test_a_refusal_before_the_permit_still_records_its_timing(db, claimed)
 # predicates: only an answer that proves THIS work (record, work key, one financial write)
 # is a receipt.
 
-from datetime import datetime, timedelta, timezone  # noqa: E402
-from unittest.mock import patch  # noqa: E402
-
-from sqlalchemy import select  # noqa: E402
-
-from app.models.audit import AuditEvent  # noqa: E402
-from app.models.chat import ChatMessage, ChatSession  # noqa: E402
-from app.services.transaction_ops.resolution_plan import operation_identity  # noqa: E402
-from tests.test_accounting_approval_flow import kind_proposal, native_payload  # noqa: E402
 
 TRANSPORT = "app.services.transaction_ops.native_accounting_transport._request"
 LEGACY_RESERVATION = "accounting.native_dispatch.reserved"
