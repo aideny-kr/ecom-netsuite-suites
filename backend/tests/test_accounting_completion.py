@@ -294,3 +294,26 @@ async def test_a_finished_recheck_leaves_a_terminal_status_on_the_card(db, recon
     settlement = run.progress_json["settlement"]
     assert recheck["status"] == settlement["status"] in {"succeeded", "difference", "unverified"}
     assert recheck["run_id"] == str(run.id) and recheck["checked_at"] == settlement["checked_at"]
+
+
+async def test_a_busy_write_slot_pulls_the_receipt_retry_to_the_next_tick(db, ready, monkeypatch):
+    """The completion used to return "busy" and leave next_at wherever it was, so a receipt
+    behind a momentarily busy per-account slot waited out a stale marker (up to three
+    minutes) instead of the next collector tick."""
+    actor, _, _, message, _, _ = ready
+
+    @asynccontextmanager
+    async def busy(_p, **_kwargs):
+        raise RuntimeError("accounting_capacity_busy")
+        yield
+
+    monkeypatch.setattr("app.services.transaction_ops.accounting_group.accounting_write_slot", busy)
+    now = datetime.now(timezone.utc)
+    before = message.structured_output["accounting_completion"]
+    result = await mod.complete(db, actor.tenant_id, message.id, now=now)
+    assert result == {"status": "busy", "financial_writes": 0}
+    await db.refresh(message)
+    work = message.structured_output["accounting_completion"]
+    assert work["status"] == "pending" and work["attempts"] == before["attempts"]
+    assert work["next_at"] == (now + mod.BUSY_RETRY_DELAY).isoformat()
+    assert "accounting_receipt" not in message.structured_output

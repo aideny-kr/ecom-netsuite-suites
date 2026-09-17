@@ -6,6 +6,19 @@ from app.core.config import settings
 
 RECON_COLLECTOR_PRIORITY = 3
 RECON_COLLECTOR_QUEUE = "recon-control"
+# Short, human-facing correction jobs (a receipt after a verified recheck, a one-order
+# recovery read, one approved execution) used to queue on `recon` behind hour-long scans
+# and 30-child group dispatches on a two-process worker: the post-mortem measured a
+# 298 s median between a finished check and its published receipt. They get their own
+# queue and their own worker, the pattern the collectors already proved.
+RECON_ACTIONS_PRIORITY = 3
+RECON_ACTIONS_QUEUE = "recon-actions"
+RECON_ACTION_TASKS = (
+    "tasks.transaction_ops_execute",
+    "tasks.transaction_ops_recover",
+    "tasks.transaction_ops_recover_credit",
+    "tasks.transaction_ops_complete_accounting",
+)
 
 celery_app = Celery(
     "ecom_netsuite",
@@ -62,6 +75,7 @@ celery_app.conf.update(
         "sync": {"exchange": "sync", "routing_key": "sync"},
         "recon": {"exchange": "recon", "routing_key": "recon"},
         RECON_COLLECTOR_QUEUE: {"exchange": RECON_COLLECTOR_QUEUE, "routing_key": RECON_COLLECTOR_QUEUE},
+        RECON_ACTIONS_QUEUE: {"exchange": RECON_ACTIONS_QUEUE, "routing_key": RECON_ACTIONS_QUEUE},
         "export": {"exchange": "export", "routing_key": "export"},
     },
     # Redis transport supports per-message priority with no new queues and no
@@ -103,6 +117,9 @@ celery_app.conf.update(
                 "queue": RECON_COLLECTOR_QUEUE,
                 "priority": RECON_COLLECTOR_PRIORITY,
             },
+            # The short correction jobs. Their senders pass the same queue explicitly
+            # (an explicit `queue=` kwarg beats a route), so both must agree.
+            **{name: {"queue": RECON_ACTIONS_QUEUE, "priority": RECON_ACTIONS_PRIORITY} for name in RECON_ACTION_TASKS},
         },
         _default_send_task_priority,
     ),

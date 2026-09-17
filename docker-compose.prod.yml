@@ -50,7 +50,7 @@ services:
   worker: &worker-runtime
     image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest
     env_file: .env.production
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 -Q default,sync,recon,export
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --prefetch-multiplier=1 -Q default,sync,recon,export
     restart: unless-stopped
     logging:
       driver: json-file
@@ -62,6 +62,12 @@ services:
   worker-collectors:
     <<: *worker-runtime
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --prefetch-multiplier=1 -Q recon-control
+
+  # Short correction jobs (receipts, one-order recovery reads, single executions) must not
+  # wait behind hour-long scans or a 30-child group dispatch on the bulk worker.
+  worker-actions:
+    <<: *worker-runtime
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --prefetch-multiplier=1 -Q recon-actions
 
   beat:
     image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest

@@ -84,6 +84,12 @@ services:
     <<: *worker-runtime
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --prefetch-multiplier=1 -Q recon-control
 
+  # Short correction jobs (receipts, one-order recovery reads, single executions) must not
+  # wait behind hour-long scans or a 30-child group dispatch on the bulk worker.
+  worker-actions:
+    <<: *worker-runtime
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --prefetch-multiplier=1 -Q recon-actions
+
   beat:
     build:
       context: ./backend
