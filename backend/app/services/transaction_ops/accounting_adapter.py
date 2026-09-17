@@ -17,6 +17,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import cached_property
 from typing import Any, Callable
 
 from app.models.transaction_ops import TransactionOperation
@@ -53,7 +54,9 @@ NATIVE_LEDGER_VERIFICATION_KEYS = (
     "full_reconciliation_required",
 )
 _CODE = re.compile(r"[a-z][a-z0-9_:.]{2,79}")
-_RECEIPT_IDS = ("recordId", "id", "internalId", "record_id", "record_type", "work_key")
+# The provider answer keys that identify a saved record; the card keeps the same set
+# (orchestrator) so a card never displays a different receipt than its ledger row.
+RECEIPT_IDS = ("recordId", "id", "internalId", "record_id", "record_type", "work_key")
 REFUSALS = {
     "confirmation_changed": "The approval card changed after it was accepted. No update was sent.",
     "approval_not_authorized": "The approver is no longer permitted to send this correction. No update was sent.",
@@ -99,8 +102,8 @@ class AccountingCardAdapter:
     session_id: str
     correlation_id: str
     validate: Callable  # (db, tenant_id, tool_name, tool_input, proposal) -> None; ValueError = changed
-    dispatch: Callable | None = None  # execute_tool_call(**kwargs) -> str (the MCP card's send)
-    readback: Callable | None = None  # (db, tenant_id, proposal, receipt=...) -> {"status": ...}
+    readback: Callable  # (db, tenant_id, proposal, receipt=...) -> {"status": ...}
+    dispatch: Callable | None = None  # execute_tool_call(**kwargs) -> str; the MCP card's send, unused natively
     approval_context: dict | None = None
     provider: str = chat_confirmation.PROVIDER_MCP
     refusal: str | None = None
@@ -161,9 +164,13 @@ class AccountingCardAdapter:
         return {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
 
     async def send(self, db, tenant_id, claimed, preflight) -> dict:
+        """The permit, then exactly one delivery; the delivery is the adapter's."""
         replayed = await self.permit(db, tenant_id, claimed)
         if replayed is not None:
             return replayed
+        return await self.deliver(db, tenant_id, claimed)
+
+    async def deliver(self, db, tenant_id, claimed) -> dict:
         if self.dispatch is None:
             raise RuntimeError("dispatcher_required")
         raw = await self.dispatch(
@@ -186,7 +193,7 @@ class AccountingCardAdapter:
         outcome = classify_write_outcome(result)
         if outcome == "indeterminate":
             return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
-        ids = {key: str(result[key]) for key in _RECEIPT_IDS if result.get(key) is not None}
+        ids = {key: str(result[key]) for key in RECEIPT_IDS if result.get(key) is not None}
         if outcome == "failed":
             self.refusal = _extract_error_message(result) or "NetSuite reported the write failed."
             if ids:
@@ -201,16 +208,17 @@ class AccountingCardAdapter:
         return receipt
 
     async def verify(self, db, tenant_id, claimed, preflight, *, read):
-        if self.readback is None:
-            raise RuntimeError("readback_required")
         verification = await read(self.verify_calls, self.readback, self.proposal, receipt=self.receipt)
         self.verification = json_copy(verification)
         if self.verification.get("status") != "verified":
             return None
         return ledger_safe(self.ledger_verification(self.verification))
 
-    def ledger_verification(self, verification: dict) -> dict:
-        """The part of a readback the ledger row keeps; the card keeps all of it."""
+    @classmethod
+    def ledger_verification(cls, verification: dict) -> dict:
+        """The part of a readback the ledger row keeps; the card keeps all of it. A class
+        method so the recovery scan, which reads back without an adapter instance, stores
+        the same projection (``ledger_view``)."""
         return verification
 
 
@@ -235,28 +243,28 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
     preflight_calls: int = NATIVE_PREFLIGHT_CALLS
     verify_calls: int = NATIVE_VERIFY_CALLS
 
-    def wire_fingerprint(self) -> str:
+    def wire(self) -> dict:
+        """What leaves for the RESTlet, minus the per-send approval fields: the permit's
+        fingerprint and the send itself read the proposal through this one accessor."""
         p = self.proposal
-        return digest(
-            {
-                "request": p["native_request"],
-                "expected_before": p["native_preview"]["beforeSnapshot"],
-                "work_key": self.work_key,
-            }
-        )
+        return {
+            "request": p["native_request"],
+            "expected_before": p["native_preview"]["beforeSnapshot"],
+            "work_key": self.work_key,
+        }
 
-    @property
+    def wire_fingerprint(self) -> str:
+        return digest(self.wire())
+
+    @cached_property
     def work_key(self) -> str:
         from app.services.transaction_ops.resolution_plan import operation_identity
 
         return operation_identity(self.proposal)
 
-    async def send(self, db, tenant_id, claimed, preflight) -> dict:
+    async def deliver(self, db, tenant_id, claimed) -> dict:
         from app.services.transaction_ops import native_accounting_transport as transport
 
-        replayed = await self.permit(db, tenant_id, claimed)
-        if replayed is not None:
-            return replayed
         p, key = self.proposal, self.work_key
         try:
             result = await transport._request(
@@ -266,9 +274,7 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
                 p["scope"]["netsuite_account_id"],
                 "apply",
                 {
-                    "request": p["native_request"],
-                    "expected_before": p["native_preview"]["beforeSnapshot"],
-                    "work_key": key,
+                    **self.wire(),
                     "approval_audit_id": str(claimed.operation_id),
                     "approval_expires_at": (datetime.now(timezone.utc) + NATIVE_APPROVAL_WINDOW).isoformat(),
                 },
@@ -312,5 +318,20 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
             return self._sent({"status": "failed", "code": "provider_rejected", "verified": False})
         return self._sent({"status": "unknown", "code": "transport_indeterminate", "verified": False})
 
-    def ledger_verification(self, verification: dict) -> dict:
+    @classmethod
+    def ledger_verification(cls, verification: dict) -> dict:
         return {key: verification[key] for key in NATIVE_LEDGER_VERIFICATION_KEYS if key in verification}
+
+
+# One adapter per provider the chat confirmation source records on the row; the
+# orchestrator picks by provider and the recovery scan projects readbacks the same way.
+ADAPTERS_BY_PROVIDER = {
+    chat_confirmation.PROVIDER_MCP: AccountingCardAdapter,
+    chat_confirmation.PROVIDER_NATIVE: NativeAmendmentAdapter,
+}
+
+
+def ledger_view(provider: str, verification: dict) -> dict:
+    """The readback as the ledger row stores it for this provider (exact strings, no
+    record blobs where the adapter drops them), for readbacks made without an adapter."""
+    return ledger_safe(ADAPTERS_BY_PROVIDER.get(provider, AccountingCardAdapter).ledger_verification(verification))

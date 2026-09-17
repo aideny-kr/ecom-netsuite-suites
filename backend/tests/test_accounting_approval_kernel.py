@@ -22,6 +22,7 @@ from app.models.transaction_ops import TransactionOperation
 from app.services.chat.orchestrator import run_chat_turn
 from app.services.chat.write_confirmation_service import build_confirmation_payload
 from app.services.transaction_ops import state_service as state
+from app.services.transaction_ops import tax_correction
 from app.services.transaction_ops.resolution_plan import operation_identity
 from tests.test_accounting_approval_flow import inputs, kind_proposal, native_payload
 
@@ -708,3 +709,43 @@ async def test_a_native_retry_after_a_refusal_sends_the_base_work_key(db, native
     assert second.work_key != first.work_key and second.base_work_key == first.base_work_key
     assert transport.await_args.args[5]["work_key"] == first.base_work_key == operation_identity(p)
     assert transport.await_args.args[5]["approval_audit_id"] == str(second.id)
+
+
+@pytest.mark.parametrize("tamper", ["signature", "proposal", "params", "revoked", "owner", "status"])
+async def test_a_tampered_native_card_never_reaches_the_restlet(db, native_card, tamper):
+    """The retired dispatcher's tamper matrix, re-pinned on the kernel path: a forged token,
+    a proposal or signed input edited after minting, a revoked approver, an approver who
+    does not own the session, or a card no longer pending is refused before any send."""
+    from uuid import uuid4
+
+    actor, session, message, p, params = native_card
+    so = message.structured_output
+    preflight = authorize = None
+    if tamper == "signature":
+        so = {**so, "confirmation_token": "forged"}
+    elif tamper == "proposal":
+        so = {**so, "accounting_review": {**p, "source": {**p["source"], "total": "1.00"}}}
+        preflight = tax_correction.validate_approved  # the real binding check, no reads reached
+    elif tamper == "params":
+        so = {**so, "tool_input": {**params, "recordId": "999"}}
+        preflight = tax_correction.validate_approved
+    elif tamper == "revoked":
+        authorize = AsyncMock(side_effect=ValueError("approver_not_permitted"))
+    elif tamper == "owner":
+        session.user_id = uuid4()
+        await db.flush()
+    elif tamper == "status":
+        so = {**so, "status": "failed"}
+    message.structured_output = so
+    await db.flush()
+    transport = AsyncMock(return_value=_native_receipt(p))
+    events, so, stubs = await approve(
+        db, (actor, session, message, p, params), preflight=preflight, authorize=authorize, transport=transport
+    )
+    transport.assert_not_awaited()
+    stubs["dispatch"].assert_not_awaited()
+    stubs["readback"].assert_not_awaited()
+    row = await _row(db, message)
+    assert row is None or (row.status == "rejected_before_effect" and not state.permit_consumed(row))
+    assert so["status"] in ("failed", "pending", "executing") and so["status"] != "approved"
+    assert any(e.get("type") == "error" for e in events)
