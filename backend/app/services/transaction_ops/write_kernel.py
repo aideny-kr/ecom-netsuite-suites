@@ -131,10 +131,23 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
         async with asyncio.timeout(min(seconds, READ_TIMEOUT_SECONDS)):
             return await function(db, tenant_id, *args, **kwargs)
 
+    # Where the attempt's time went, stamped by the kernel's own clock and recorded with the
+    # outcome: the post-mortem could not attribute a minute per correction because nothing
+    # between the claim and the completion was timed.
+    timing = {}
+
+    def mark(name):
+        timing[name] = clock().isoformat()
+
     async def complete(outcome, code, **details):
         try:
             row = await state.complete_operation(
-                db, tenant_id, claimed.operation_id, outcome=outcome, result_json={"code": code, **details}, now=clock()
+                db,
+                tenant_id,
+                claimed.operation_id,
+                outcome=outcome,
+                result_json={"code": code, **details, "timing": dict(timing)},
+                now=clock(),
             )
         except state.StateError as exc:
             if exc.code not in LEDGER_KNOWS_BETTER:
@@ -149,8 +162,11 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
     async def attempt():
         """The attempt itself: what the adapter found, sent and read back, as a decision
         (outcome, code, details). Recording the decision is not part of it."""
+        mark("preflight_started_at")
         preflight = await adapter.preflight(db, tenant_id, claimed, read=read)
+        mark("preflight_ended_at")
         receipt = await adapter.send(db, tenant_id, claimed, preflight)
+        mark("sent_at")
         if receipt["status"] == "failed":
             return "rejected_before_effect", "provider_rejected_without_save", {}
         if receipt["status"] == "accepted":
@@ -158,6 +174,7 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
             # the row says so before the readback, in case nothing after this runs.
             try:
                 await state.record_receipt(db, tenant_id, claimed.operation_id, receipt, now=clock())
+                mark("receipt_recorded_at")
             except state.StateError as exc:
                 if exc.code != "receipt_without_permit":
                     raise
@@ -169,7 +186,10 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
             # keeps that identity, so a readback after a crash still sees the conflict
             # this attempt's own readback would have seen.
             await state.record_dispatch_answer(db, tenant_id, claimed.operation_id, receipt["identity"], now=clock())
+            mark("answer_recorded_at")
+        mark("verify_started_at")
         proof = await adapter.verify(db, tenant_id, claimed, preflight, read=read)
+        mark("verify_ended_at")
         if proof is not None:
             return "verified", "independently_verified", {"verification": proof}
         # A receipt without proof stays committed_unverified (readback again later); no

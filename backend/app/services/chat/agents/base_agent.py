@@ -2394,6 +2394,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 if block.name == "transaction_ops_accounting_group"
                                 else candidate_confirmation
                             )
+                            _prep_started = time.monotonic()
                             prepared = await prepare_confirmation(
                                 db=db,
                                 tenant_id=self.tenant_id,
@@ -2492,17 +2493,21 @@ class BaseSpecialistAgent(abc.ABC):
                         if prepared:
                             card, note = prepared
                             self._write_confirmation_emitted = True
+                            # The card's entry carries request-to-card (the tool's own entry
+                            # above stops BEFORE preparation, which is how a 474 s group
+                            # request was logged as 5 s) and the preparation's own time.
                             tool_calls_log.append(
                                 build_tool_call_log_entry(
                                     step=step,
                                     agent_name=self.agent_name,
                                     tool_name=card.tool_name,
                                     params=card.tool_input,
-                                    duration_ms=0,
+                                    duration_ms=int((time.monotonic() - t0) * 1000),
                                     result_str=json.dumps(
                                         {
                                             "confirmation_required": True,
                                             "proposal_origin": "verified_accounting_evidence",
+                                            "prepared_in_ms": int((time.monotonic() - _prep_started) * 1000),
                                             "financial_writes": 0,
                                         }
                                     ),

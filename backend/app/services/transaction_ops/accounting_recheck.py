@@ -212,6 +212,17 @@ async def record_outcome(db, tenant_id, run, reason, *, now):
         "cash_settlement": "not_verified",
     }
     run.progress_json = {**(run.progress_json or {}), "settlement": result}
+    # The card's recheck reaches a terminal state here; "queued" used to be its last word
+    # by construction, indistinguishable in the field from a recheck that never ran.
+    message.structured_output = {
+        **message.structured_output,
+        "accounting_recheck": {
+            **(message.structured_output.get("accounting_recheck") or {}),
+            "status": verdict,
+            "run_id": str(run.id),
+            "checked_at": result["checked_at"],
+        },
+    }
     from app.services.transaction_ops.accounting_completion import enqueue
 
     enqueue(message, run, now)

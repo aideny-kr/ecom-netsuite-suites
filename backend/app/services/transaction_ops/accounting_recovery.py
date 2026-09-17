@@ -36,6 +36,13 @@ def evidence_digest(so):
     ).hexdigest()
 
 
+def group_of(claim) -> str | None:
+    """The group a card was approved under, from its claim (legacy or projection). Every
+    writer stores it as ``approval_context.group_approval_id``; the completion worker once
+    read it at the top of the claim and so never refreshed a parent (the 7-vs-30 summary)."""
+    return ((claim or {}).get("approval_context") or {}).get("group_approval_id") or None
+
+
 def execution_claim(so, confirmation_id, actor_id, context, *, now):
     """The card's OWN claim, the shape every accounting card carried before the ledger.
 
@@ -529,7 +536,7 @@ async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):
                     "accounting_recheck": so.get("accounting_recheck"),
                 },
             )
-            parent_id = claim["approval_context"].get("group_approval_id")
+            parent_id = group_of(claim)
             if parent_id:
                 await refresh_group(db, tenant_id, message.session_id, parent_id)
             await db.commit()

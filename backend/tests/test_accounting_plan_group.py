@@ -79,3 +79,42 @@ async def test_group_prepares_exact_followup_once_and_late_recovery_is_not_stran
     original_member = parent.structured_output["accounting_group"]["members"][0]
     assert original_member["card"]["accounting_receipt"]["status"] == "partially_resolved"
     assert original_member["resolution_receipt"]["status"] == "reconciled"
+
+
+async def test_the_group_summary_counts_prepared_and_unprepared_members_separately(db, admin_user):
+    """54 selected, 31 prepared, 30 reconciled read as '7 of 54' because the summary counted
+    every member as an order to reconcile and was only refreshed by whoever ran last. The
+    summary now says how many of the PREPARED corrections reconciled, how many members were
+    never prepared (and why), and when it was computed."""
+    actor = admin_user[0]
+    so, fake_session = group_fixture(2)
+    session = ChatSession(id=fake_session.id, tenant_id=actor.tenant_id, user_id=actor.id)
+    db.add(session)
+    await db.flush()
+    so["accounting_group"]["scope"] = so["accounting_group"]["members"][0]["card"]["accounting_review"]["scope"]
+    for member in so["accounting_group"]["members"]:
+        member["card"].update(
+            status="approved", accounting_receipt={"status": "reconciled", "next_step": {"status": "complete"}}
+        )
+    so["accounting_group"]["members"].append(
+        {
+            "case_id": str(uuid4()),
+            "order_reference": "R000000999",
+            "preparation_status": "incomplete",
+            "reason": "Preparation time limit reached. No correction was submitted for this order.",
+            "investigation_routes": [{"code": "preparation_incomplete", "next_step": "Resume preparation"}],
+        }
+    )
+    parent = ChatMessage(
+        tenant_id=actor.tenant_id, session_id=session.id, role="assistant", content="", structured_output=so
+    )
+    db.add(parent)
+    await db.flush()
+    await accounting_plan_group.refresh(db, actor.tenant_id, parent)
+    progress = parent.structured_output["accounting_plan_progress"]
+    assert progress["orders"] == 3 and progress["prepared"] == 2 and progress["unprepared"] == 1
+    assert progress["deadline"] == 1 and progress["results_ready"] == 2 and progress["reconciled"] == 2
+    assert progress["remaining"] == 0 and progress["status"] == "prepared_reconciled"
+    assert progress["computed_at"]
+    assert "2 of 2 approved corrections reconciled" in parent.content
+    assert "1 of 3 orders" in parent.content and "not prepared" in parent.content

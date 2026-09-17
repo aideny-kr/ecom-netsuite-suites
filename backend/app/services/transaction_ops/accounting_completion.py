@@ -357,7 +357,7 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
     and their audit are committed together; a killed worker can safely resume.
     """
     from app.services.transaction_ops.accounting_group import accounting_write_slot
-    from app.services.transaction_ops.accounting_recovery import _authorize_read, refresh_group
+    from app.services.transaction_ops.accounting_recovery import _authorize_read, group_of, refresh_group
 
     now = now or datetime.now(timezone.utc)
     await set_tenant_context(db, str(tenant_id))
@@ -461,7 +461,7 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
                     if native_verified
                     else "The complete correction and reconciliation could not be verified.",
                 }
-                group_id = claim.get("group_approval_id")
+                group_id = group_of(claim)
                 if next_card:
                     # Explicit order survives equal transaction timestamps and UUID sorting.
                     next_card.created_at = now + timedelta(microseconds=1)
@@ -545,11 +545,10 @@ async def defer(db, tenant_id, message, now, reason):
         status="error",
     )
     if status == "blocked":
-        claim = _claim(message)
-        group_id = claim.get("group_approval_id") if claim else None
-        if group_id:
-            from app.services.transaction_ops.accounting_recovery import refresh_group
+        from app.services.transaction_ops.accounting_recovery import group_of, refresh_group
 
+        group_id = group_of(_claim(message))
+        if group_id:
             await refresh_group(db, tenant_id, message.session_id, group_id)
         else:
             db.add(

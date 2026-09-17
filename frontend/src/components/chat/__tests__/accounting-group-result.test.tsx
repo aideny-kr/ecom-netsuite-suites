@@ -30,3 +30,26 @@ it("shows full-order results, original approval and real links without another w
   expect(within(result).getByRole("link", { name: "Sales order", hidden: true })).toHaveAttribute("href", receipt.record_links[0].url);
   expect(screen.queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument();
 });
+
+
+it("counts orders that were never prepared apart from the approved corrections", () => {
+  // The run behind the September post-mortem: 54 selected, 31 prepared, 30 reconciled. The
+  // old line read "30 / 54 orders reconciled · N need further review", which folded orders
+  // that never got a correction into the review queue and could never reach a terminal
+  // state. They are counted, and named, separately.
+  const data: WriteConfirmationData = {
+    ...creditCard, accounting_review: null, status: "approved",
+    accounting_plan_progress: {
+      orders: 54, prepared: 31, unprepared: 23, deadline: 23,
+      results_ready: 30, reconciled: 30, remaining: 1, status: "in_progress",
+      computed_at: "2026-09-17T03:00:00Z",
+    },
+    accounting_group: { group_id: "group", concurrency: 3, members: [] },
+  };
+  render(<AccountingGroupCard data={data} onConfirm={vi.fn()} onReject={vi.fn()} />);
+  expect(
+    screen.getByText(
+      "30 / 31 approved corrections reconciled · 1 still to reconcile · 23 of 54 orders not prepared",
+    ),
+  ).toBeVisible();
+});

@@ -190,6 +190,36 @@ async def test_a_rejection_that_names_a_saved_record_is_decided_by_the_readback(
     assert adapter.sent == "unknown" and adapter.readback.await_count == 1
 
 
+async def test_the_ledger_row_records_where_the_attempt_spent_its_time(db, claimed):
+    """The post-mortem could not attribute about a minute per correction. Every attempt now
+    stamps its phase boundaries on the row with the outcome, in order."""
+    _, message, _ = claimed
+    result, row = await _run(db, claimed, build(message))
+    assert result["status"] == "verified"
+    timing = row.result_json["timing"]
+    order = [
+        "preflight_started_at",
+        "preflight_ended_at",
+        "sent_at",
+        "receipt_recorded_at",
+        "verify_started_at",
+        "verify_ended_at",
+    ]
+    # jsonb keeps no key order; the stamps themselves must be in phase order.
+    assert set(timing) == set(order)
+    stamps = [timing[key] for key in order]
+    assert stamps == sorted(stamps)
+    assert row.result_json["dispatch_reserved_at"] <= timing["sent_at"]
+
+
+async def test_a_refusal_before_the_permit_still_records_its_timing(db, claimed):
+    _, message, _ = claimed
+    adapter = build(message, validate=AsyncMock(side_effect=ValueError("credit_api_source_changed")))
+    result, row = await _run(db, claimed, adapter)
+    assert result["status"] == "rejected_before_effect"
+    assert set(row.result_json["timing"]) == {"preflight_started_at"}
+
+
 # ── The native amendment card (RESTlet customscript_ecom_acct_amend) ─────────────────────
 #
 # The native card's adapter runs the native service's FULL preflight before the permit,

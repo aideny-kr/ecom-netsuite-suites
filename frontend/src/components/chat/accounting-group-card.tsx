@@ -75,7 +75,10 @@ export function AccountingGroupCard({
         )}
         {progress && progress.results_ready > 0 && (
           <p role="status" className="text-[13px] font-medium">
-            {progress.reconciled} / {progress.orders} orders reconciled · {progress.remaining} need further review
+            {progress.prepared === undefined
+              ? `${progress.reconciled} / ${progress.orders} orders reconciled · ${progress.remaining} need further review`
+              : `${progress.reconciled} / ${progress.prepared} approved corrections reconciled · ${progress.remaining} still to reconcile` +
+                (progress.unprepared ? ` · ${progress.unprepared} of ${progress.orders} orders not prepared` : "")}
           </p>
         )}
         <p className="text-[13px] leading-relaxed text-muted-foreground">

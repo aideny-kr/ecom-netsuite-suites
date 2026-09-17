@@ -175,6 +175,10 @@ async def test_a_verified_correction_is_one_ledger_row_one_send_and_a_queued_rec
     )
     assert verification.payload["approved_by"] == str(actor.id)
     assert verification.payload["before"] == p["before"]
+    # The approve click's own spans, so a slow correction is attributable from the audit.
+    assert set(verification.payload["timing"]) == {"claim_ms", "kernel_ms"}
+    assert all(isinstance(v, int) and v >= 0 for v in verification.payload["timing"].values())
+    assert set(row.result_json["timing"]) >= {"preflight_started_at", "preflight_ended_at", "sent_at"}
 
 
 async def test_changed_evidence_sends_nothing_and_releases_the_intent(db, card):

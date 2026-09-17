@@ -2534,6 +2534,9 @@ async def run_chat_turn(
 
                 _kernel_result = None
                 _kernel_adapter = None
+                # Where the approve click spent its time (the post-mortem's unattributed
+                # minute per correction); recorded on the verification audit below.
+                _approval_timing = {}
                 if _via_kernel:
                     from app.services.transaction_ops import write_kernel as _write_kernel
                     from app.services.transaction_ops.accounting_adapter import ADAPTERS_BY_PROVIDER
@@ -2543,6 +2546,7 @@ async def run_chat_turn(
                     # The CAS above moved the stored card to executing; the in-memory copy
                     # must say the same before the ledger reads it.
                     _confirm_msg.structured_output = {**_so, "status": "executing"}
+                    _claim_started = time.monotonic()
                     try:
                         _claimed = await _chat_confirmation.claim(db, tenant_id, _confirm_msg, actor_id=user_id)
                     except ValueError as exc:
@@ -2596,7 +2600,10 @@ async def run_chat_turn(
                         readback=_readback_treatment,
                         approval_context=_approval_context,
                     )
+                    _approval_timing["claim_ms"] = int((time.monotonic() - _claim_started) * 1000)
+                    _kernel_started = time.monotonic()
                     _kernel_result = await _write_kernel.execute(db, tenant_id, _claimed, _kernel_adapter)
+                    _approval_timing["kernel_ms"] = int((time.monotonic() - _kernel_started) * 1000)
                     await set_tenant_context(db, str(tenant_id))
                     # The projection is refreshed from the row the kernel just completed.
                     _kernel_row = await _state._one(db, tenant_id, _Operation, _claimed.operation_id)
@@ -2856,6 +2863,7 @@ async def run_chat_turn(
                             "before": _so["accounting_review"]["before"],
                             "receipt": _exec_result,
                             "verification": json.loads(json.dumps(_verification, default=str)),
+                            "timing": _approval_timing,
                         },
                         status="success" if _verification["status"] == "verified" else "error",
                     )
