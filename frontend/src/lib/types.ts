@@ -1000,8 +1000,26 @@ export interface WriteConfirmationData {
     completion_audit_id: string;
     next_step: { status: string; reasons?: string[]; confirmation_id?: string };
   };
-  accounting_plan_progress?: { orders: number; results_ready: number; reconciled: number; remaining: number; status: string };
-  accounting_recheck?: { status: "queued" | "not_queued"; run_id?: string; reason?: string };
+  accounting_plan_progress?: {
+    orders: number;
+    results_ready: number;
+    reconciled: number;
+    remaining: number;
+    status: string;
+    // Members that were never prepared are counted apart from the approved corrections;
+    // `deadline` says how many of them hit the preparation time limit.
+    prepared?: number;
+    unprepared?: number;
+    deadline?: number;
+    computed_at?: string;
+  };
+  // "queued" is no longer the last word: the recheck run's verdict lands here when it finishes.
+  accounting_recheck?: {
+    status: "queued" | "not_queued" | "succeeded" | "difference" | "unverified";
+    run_id?: string;
+    reason?: string;
+    checked_at?: string;
+  };
   tool_name: string;
   tool_input: Record<string, unknown>;
   confirmation_token: string;

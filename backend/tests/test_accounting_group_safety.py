@@ -217,6 +217,18 @@ async def test_preparation_publishes_children_only_with_complete_parent(monkeypa
     else:
         card, _ = await task
         assert len(card.accounting_group["members"]) == 7
+        # Every member carries what its preparation cost, and the proposed audit the spread:
+        # the run that lost 23 of 54 members to the time limit had no per-case cost at all.
+        for member in card.accounting_group["members"]:
+            assert isinstance(member["timing"]["evidence_ms"], int)
+            assert member["timing"]["total_ms"] >= member["timing"]["evidence_ms"]
+        proposed = next(
+            c for c in group.log_event.await_args_list if c.kwargs.get("action") == "accounting_group.proposed"
+        )
+        timing = proposed.kwargs["payload"]["timing"]
+        assert timing["prepared"] == 7 and timing["deadline"] == 0 and timing["skipped"] == 0
+        assert isinstance(timing["wall_ms"], int) and timing["member_ms_max"] >= timing["member_ms_median"]
+        assert (timing["concurrency"], timing["timeout_s"]) == (group.CONCURRENCY, group.PREPARATION_TIMEOUT)
         db.add.assert_not_called()  # A failed model handoff can still commit a plain error safely.
         parent = ChatMessage(
             tenant_id=session.tenant_id,

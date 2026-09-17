@@ -250,3 +250,47 @@ async def test_real_remaining_difference_reports_verified_result_even_if_next_pr
     assert message.structured_output["accounting_receipt"]["next_step"]["status"] == "blocked"
     assert message.structured_output["accounting_receipt"]["balance"]["amounts"]["order_total"]["delta"] == "-1.00"
     guard.assert_not_awaited()
+
+
+async def test_a_group_child_completion_refreshes_its_parent_instead_of_posting_a_standalone_receipt(
+    db, ready, monkeypatch
+):
+    """The post-mortem's 7-vs-30: every claim writer stores the group link under
+    approval_context, and the completion worker read it at the top of the claim, so no
+    receipt ever refreshed the parent and a standalone receipt message appeared instead."""
+    from uuid import uuid4
+
+    actor, _, case, message, run, _ = ready
+    monkeypatch.setattr(mod, "prepare_next", AsyncMock(return_value=None))
+    refresh = AsyncMock()
+    monkeypatch.setattr("app.services.transaction_ops.accounting_recovery.refresh_group", refresh)
+    parent_id = str(uuid4())
+    so = deepcopy(message.structured_output)
+    so["accounting_execution"]["approval_context"] = {
+        "confirmation_id": str(message.id),
+        "group_approval_id": parent_id,
+        "manifest_digest": "m" * 64,
+    }
+    message.structured_output = so
+    await db.commit()
+    before = set(await db.scalars(select(ChatMessage.id).where(ChatMessage.session_id == message.session_id)))
+    result = await mod.complete(db, actor.tenant_id, message.id, now=datetime.now(timezone.utc))
+    assert result["status"] == "reconciled"
+    refresh.assert_awaited_once()
+    assert str(refresh.await_args.args[3]) == parent_id
+    after = set(await db.scalars(select(ChatMessage.id).where(ChatMessage.session_id == message.session_id)))
+    assert after == before, "a group child's receipt lives on the child and the parent, never on a new message"
+    await db.refresh(message)
+    assert message.structured_output["accounting_receipt"]["completion_message_id"] is None
+
+
+async def test_a_finished_recheck_leaves_a_terminal_status_on_the_card(db, reconciled_credit):  # noqa: F811
+    """'queued' used to be the recheck's last word on the card by construction; the field now
+    ends as the run's verdict, with the run and the check time, so a queued recheck that
+    never ran is distinguishable from one that finished."""
+    _, _, _, message, run, _ = reconciled_credit
+    await db.refresh(message)
+    recheck = message.structured_output["accounting_recheck"]
+    settlement = run.progress_json["settlement"]
+    assert recheck["status"] == settlement["status"] in {"succeeded", "difference", "unverified"}
+    assert recheck["run_id"] == str(run.id) and recheck["checked_at"] == settlement["checked_at"]

@@ -8,6 +8,7 @@ fresh preconditions, external-call audit and independent invoice/GL proof.
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -42,6 +43,23 @@ def require_bounded_group(group):
 
 GROUP_TOOL = "transaction_ops_accounting_group_apply"  # Not exposed to model/MCP dispatch.
 _authorization_session_factory = async_session_factory
+
+
+def preparation_timing(members, wall_ms):
+    """What the preparation cost: the wall clock, how many members were prepared, skipped
+    or left at the deadline, and the per-member spread, so the cap can be tuned from
+    measured cost instead of a guess."""
+    totals = sorted(m["timing"]["total_ms"] for m in members if (m.get("timing") or {}).get("total_ms") is not None)
+    return {
+        "wall_ms": wall_ms,
+        "concurrency": CONCURRENCY,
+        "timeout_s": PREPARATION_TIMEOUT,
+        "prepared": sum(1 for m in members if m.get("card")),
+        "skipped": sum(1 for m in members if not m.get("card") and m.get("preparation_status") != "incomplete"),
+        "deadline": sum(1 for m in members if m.get("preparation_status") == "incomplete"),
+        "member_ms_max": totals[-1] if totals else None,
+        "member_ms_median": totals[len(totals) // 2] if totals else None,
+    }
 
 
 def digest(value):
@@ -139,6 +157,14 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
         return None
 
     async def prepare(member):
+        # Per-member timing travels on the member (into the parent card and the audits):
+        # the run that lost 23 of 54 members to the 450 s cap had no per-case cost at all.
+        started = time.monotonic()
+        timing = {}
+
+        def elapsed():
+            return int((time.monotonic() - started) * 1000)
+
         async with async_session_factory() as child_db:
             await set_tenant_context(child_db, str(tenant_id))
             context = dict(
@@ -155,6 +181,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                     evidence = await execute_accounting_evidence(
                         {"case_id": member["case_id"]}, context={**context, "group_preparation": True}
                     )
+                    timing["evidence_ms"] = elapsed()
                     collected = evidence.get("accounting_evidence") or {}
                     routes = collected.get("investigation_routes", [])
                     investigation_evidence = summarize(collected)
@@ -180,7 +207,8 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         # preparation must never leave independently actionable orphans.
                         # Keep the per-case evidence/candidate audit, without a ChatMessage.
                         await child_db.commit()
-                        return {**member, "confirmation_id": str(uuid.uuid4()), "card": value}
+                        timing["total_ms"] = elapsed()
+                        return {**member, "confirmation_id": str(uuid.uuid4()), "card": value, "timing": timing}
                     reason = (
                         "Solution identified. Account configuration, native preview and approval are still required."
                         if collected.get("resolution_intents")
@@ -190,6 +218,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 await child_db.rollback()
                 await set_tenant_context(child_db, str(tenant_id))
                 reason = f"Preparation needs review ({type(exc).__name__})."
+            timing["total_ms"] = elapsed()
             await log_event(
                 child_db,
                 tenant_id,
@@ -199,7 +228,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 resource_type="transaction_case",
                 resource_id=member["case_id"],
                 correlation_id=correlation_id,
-                payload={"reason": reason, "investigation_routes": routes, "financial_writes": 0},
+                payload={"reason": reason, "investigation_routes": routes, "timing": timing, "financial_writes": 0},
             )
             await child_db.commit()
             return {
@@ -207,8 +236,10 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 "reason": reason,
                 "investigation_routes": routes,
                 "investigation_evidence": investigation_evidence,
+                "timing": timing,
             }
 
+    preparation_started = time.monotonic()
     try:
         with reference_read_batch() as reads:
             members = await bounded_map(
@@ -266,6 +297,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
             "eligible": len(eligible),
             "treatment_batches": group["treatment_batches"],
             "investigation_batches": group["investigation_batches"],
+            "timing": preparation_timing(members, int((time.monotonic() - preparation_started) * 1000)),
             "financial_writes": 0,
         },
     )
