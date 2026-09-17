@@ -57,7 +57,17 @@ _EVIDENCE_AGE = timedelta(minutes=15)
 _OPERATION_CALLS = 96
 _OPERATION_TIME = timedelta(seconds=300)
 _LEDGER_RESULT_KEYS = frozenset(
-    {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason", "answer"}
+    {
+        "dispatch_reserved",
+        "provider",
+        "payload_fingerprint",
+        "dispatch_reserved_at",
+        "termination_reason",
+        # What the provider answered is written by _record_send_evidence and by nothing
+        # else: a completion may not overwrite a receipt or the identity an answer named.
+        "receipt",
+        "answer",
+    }
 )
 # The write kernel's outcome taxonomy (docs/superpowers/specs/2026-09-15-write-kernel-design.md,
 # section 3). The repair rule is a function of the status: a retry is allowed only from

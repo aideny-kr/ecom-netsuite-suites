@@ -478,10 +478,12 @@ async def test_a_large_gl_breakdown_keeps_its_shape_so_a_verified_row_can_always
     stored = row.result_json["verification"]
     assert stored["status"] == "verified" and stored["source_revision"] == "rev-2"
     assert stored["ledger"] == {
-        "rows": 1200,
+        "omitted": "exceeds_ledger_budget",
         "digest": accounting_adapter.digest(verification["ledger"]),
-        "omitted": "gl_exceeds_ledger_budget",
+        "bytes": len(json.dumps(verification["ledger"])),
+        "rows": 1200,
     }
+    assert stored["evidence_omitted"] == ["ledger"] and stored["readback_digest"]
     assert len(json.dumps(row.result_json)) < 64 * 1024
     # The person reviewing the card still sees every line.
     assert adapter.verification["ledger"]["rows"] == rows
@@ -573,3 +575,40 @@ async def test_a_replayed_delivery_after_a_receipt_still_reads_as_accepted(db, n
         await _run(db, native_claimed, second)
     never.assert_not_awaited()
     assert second.sent == "accepted" and second.receipt["record_id"] == p["record_id"]
+
+
+async def test_an_oversized_readback_is_bounded_for_every_provider_not_only_the_native_one(db, claimed):
+    """Every treatment's readback carries whole records — the MCP credit path returns the
+    same invoice, sales order and GL breakdown the native one does — and the ledger row is
+    capped at 64 KiB. The bound lives in the base adapter, so no provider can hand the row
+    something it cannot store and leave a verified correction uncompletable."""
+    _, message, _ = claimed
+    verification = {
+        "status": "verified",
+        "credit_memo_id": "30",
+        "record_id": "30",
+        "financial_writes": 0,
+        "invoice": {"lines": [{"n": i, "memo": "x" * 40} for i in range(900)]},
+        "sales_order": {"lines": [{"n": i, "memo": "y" * 40} for i in range(900)]},
+        "gl": [{"account": f"a{i}", "debit": "1.00", "credit": "0.00"} for i in range(900)],
+    }
+    assert len(json.dumps(verification)) > 64 * 1024
+    adapter = build(message, readback=AsyncMock(return_value=verification))
+    result, row = await _run(db, claimed, adapter)
+    assert result["status"] == "verified" and row.status == "verified"
+    stored = row.result_json["verification"]
+    assert len(json.dumps(row.result_json)) < 64 * 1024
+    assert stored["status"] == "verified" and stored["credit_memo_id"] == "30"
+    assert sorted(stored["evidence_omitted"]) == ["gl", "invoice", "sales_order"]
+    assert stored["readback_digest"] == accounting_adapter.digest(verification)
+    assert adapter.verification["invoice"] == verification["invoice"]  # the card keeps it all
+
+
+def test_the_bound_belongs_to_the_base_so_an_unregistered_provider_is_bounded_too():
+    """ledger_view falls back to the base adapter; the fallback must bound, not pass through."""
+    verification = {"status": "verified", "record_id": "7", "rows": [{"n": i, "memo": "z" * 60} for i in range(900)]}
+    assert len(json.dumps(verification)) > 32 * 1024
+    stored = accounting_adapter.ledger_view("a_provider_that_does_not_exist", verification)
+    assert len(json.dumps(stored)) < accounting_adapter.LEDGER_VERIFICATION_BUDGET
+    assert stored["status"] == "verified" and stored["record_id"] == "7"
+    assert stored["rows"]["omitted"] == "exceeds_ledger_budget" and stored["rows"]["rows"] == 900
