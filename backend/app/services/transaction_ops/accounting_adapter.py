@@ -36,10 +36,44 @@ VERIFY_CALLS = 8
 NATIVE_PREFLIGHT_CALLS = 12
 NATIVE_VERIFY_CALLS = 10
 NATIVE_APPROVAL_WINDOW = timedelta(minutes=2)  # how long the RESTlet may honour one permit
-# The ledger row is bounded (state_service._bounded_json caps it at 64 KiB). The verdict
-# keys below are scalars; the GL breakdown grows with the record, so the projection keeps
-# its shape and digest past this budget rather than its rows. The card keeps all of it.
-NATIVE_LEDGER_BUDGET = 32_768
+# The ledger row is bounded (state_service._bounded_json caps it at 64 KiB) and EVERY
+# treatment's readback carries whole records: an after snapshot, the linked invoice and
+# sales order, a GL breakdown with no row cap (credit_api_correction.verify_after and
+# native_accounting_service.verify_after return the same shapes). So the bound belongs to
+# the base adapter, not to one provider: a readback that does not fit is kept as its
+# members' shapes and digests, and the row says what it could not keep. The card keeps all.
+LEDGER_VERIFICATION_BUDGET = 32_768
+# What a row must always be able to say, whatever the readback carried.
+LEDGER_VERDICT_KEYS = frozenset(
+    {"status", "reason", "record_type", "record_id", "credit_memo_id", "financial_writes", "retry_allowed", "scope"}
+)
+
+
+def _size(value) -> int:
+    return len(json.dumps(value, default=str))
+
+
+def _shape(value) -> dict:
+    """A member the row cannot keep: how big it was, what it hashed to, how many rows."""
+    rows = value.get("rows") if isinstance(value, dict) else value
+    shape = {"omitted": "exceeds_ledger_budget", "digest": digest(value), "bytes": _size(value)}
+    if isinstance(rows, list):
+        shape["rows"] = len(rows)
+    return shape
+
+
+def _largest_droppable(kept: dict) -> str | None:
+    """The biggest member that is neither part of the verdict nor already a shape."""
+    members = {
+        key: _size(value)
+        for key, value in kept.items()
+        if key not in LEDGER_VERDICT_KEYS
+        and isinstance(value, (dict, list))
+        and not (isinstance(value, dict) and value.get("omitted") == "exceeds_ledger_budget")
+    }
+    return max(members, key=members.get) if members else None
+
+
 # The native readback returns whole records for the person (the after snapshot, the
 # invoice and sales order it compared against); the ledger keeps the verdict and the
 # ledger rows, never the record blobs (state_service._bounded_json caps a row at 64 KiB).
@@ -161,11 +195,12 @@ class AccountingCardAdapter:
             raise PreconditionChangedError(exc.code) from exc
         if granted:
             return None
-        # An earlier delivery consumed the permit; whatever it recorded is this
-        # delivery's receipt too, so the card and the audit do not lose it.
+        # An earlier delivery consumed the permit; whatever it recorded is this delivery's
+        # answer too — a receipt that proved a save, or the identity a non-receipt answer
+        # named — so neither the card nor this delivery's readback loses it.
         row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
-        self.receipt = (row.result_json or {}).get("receipt")
-        self.sent = "accepted" if self.receipt else "unknown"
+        self.receipt = state.recorded_answer(row)
+        self.sent = "accepted" if state.recorded_receipt(row) else "unknown"
         return {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
 
     async def send(self, db, tenant_id, claimed, preflight) -> dict:
@@ -240,10 +275,33 @@ class AccountingCardAdapter:
 
     @classmethod
     def ledger_verification(cls, verification: dict) -> dict:
-        """The part of a readback the ledger row keeps; the card keeps all of it. A class
-        method so the recovery scan, which reads back without an adapter instance, stores
-        the same projection (``ledger_view``)."""
-        return verification
+        """The part of a readback the ledger row keeps; the card keeps all of it.
+
+        A class method so the recovery scan, which reads back without an adapter instance,
+        stores the same projection (``ledger_view``). The size bound is applied here for
+        every provider: an adapter may narrow the readback first (``_kept``), and whatever
+        still does not fit is replaced by its shape, largest member first, so no provider
+        can hand the row something it cannot store.
+        """
+        kept, dropped = cls._kept(verification), []
+        while _size(kept) > LEDGER_VERIFICATION_BUDGET:
+            member = _largest_droppable(kept)
+            if member is None:
+                break
+            kept[member] = _shape(kept[member])
+            dropped.append(member)
+        omitted = sorted(set(verification) - set(kept)) + sorted(dropped)
+        if omitted:
+            # A card rendered from this row alone after a crash must not read as complete
+            # evidence: the row names what it dropped and hashes what was actually read.
+            kept["evidence_omitted"] = omitted
+            kept["readback_digest"] = digest(verification)
+        return kept
+
+    @classmethod
+    def _kept(cls, verification: dict) -> dict:
+        """What this provider would keep before the size bound applies."""
+        return dict(verification)
 
 
 @dataclass
@@ -350,21 +408,11 @@ class NativeAmendmentAdapter(AccountingCardAdapter):
         )
 
     @classmethod
-    def ledger_verification(cls, verification: dict) -> dict:
-        kept = {key: verification[key] for key in NATIVE_LEDGER_VERIFICATION_KEYS if key in verification}
-        if len(json.dumps(kept, default=str)) <= NATIVE_LEDGER_BUDGET:
-            return kept
-        # A balanced GL is not bounded by row count: a record with hundreds of lines would
-        # push a legitimately verified readback past the row's own limit and leave the
-        # amendment uncompletable. The row keeps the breakdown's shape, not its rows.
-        gl = kept.get("ledger")
-        rows = gl.get("rows") if isinstance(gl, dict) else gl
-        kept["ledger"] = {
-            "rows": len(rows or []),
-            "digest": digest(gl),
-            "omitted": "gl_exceeds_ledger_budget",
-        }
-        return kept
+    def _kept(cls, verification: dict) -> dict:
+        """The native readback's verdict, without the record blobs it compared against
+        (the after snapshot, the invoice, the sales order). The base class's size bound
+        still applies to what remains — a balanced GL has no row cap."""
+        return {key: verification[key] for key in NATIVE_LEDGER_VERIFICATION_KEYS if key in verification}
 
 
 # One adapter per provider the chat confirmation source records on the row; the
