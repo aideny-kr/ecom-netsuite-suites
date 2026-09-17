@@ -230,6 +230,13 @@ class Settings(BaseSettings):
     # environment and restarting the backend, worker and beat containers (a redeploy
     # does that); a running process never re-reads it.
     TRANSACTION_OPS_DISPATCH_ENABLED: bool = True
+    # Where the short correction jobs (a receipt after a verified recheck, a one-order
+    # recovery read, one approved execution) are published. They belong on their own queue
+    # with their own worker, but the staging/production compose file lives ON THE VM and is
+    # hand-edited (it carries a local redis the repo's copy does not), so the service has to
+    # exist there before anything is sent to it. Default: the bulk queue, exactly as before.
+    # Set to "recon-actions" in .env.production once worker-actions is running.
+    TRANSACTION_OPS_ACTIONS_QUEUE: str = "recon"
     # The daily ops digest always writes its per-tenant audit row; this only
     # controls whether the same digest is also emailed to the tenant's admins.
     OPS_DIGEST_EMAIL_ENABLED: bool = True

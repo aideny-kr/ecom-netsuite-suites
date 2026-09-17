@@ -519,7 +519,7 @@ async def test_superseded_config_cannot_start_another_daily_scan(db, admin_user)
 async def test_a_one_order_recovery_recheck_is_published_to_the_actions_queue(dependencies):
     """The recheck shares its task name with hour-long scans, so only the sender can keep a
     one-order recovery read off the bulk queue."""
-    from app.workers.celery_app import RECON_ACTIONS_QUEUE
+    from app.workers.celery_app import ACTIONS_QUEUE
 
     db = AsyncMock()
     short, long = uuid4(), uuid4()
@@ -528,5 +528,5 @@ async def test_a_one_order_recovery_recheck_is_published_to_the_actions_queue(de
     stats = await mod.collect_due_runs(db, NOW)
     assert stats["dispatched"] == 2
     queues = {c.kwargs["kwargs"]["run_id"]: c.kwargs["queue"] for c in mod.celery_app.send_task.call_args_list}
-    assert queues == {str(short): RECON_ACTIONS_QUEUE, str(long): "recon"}
+    assert queues == {str(short): ACTIONS_QUEUE, str(long): "recon"}
     mod._short_run_ids.assert_awaited_once_with(db, TENANT, [short, long])
