@@ -1,6 +1,7 @@
 """Exercise the actual deployment shell guards with isolated Docker responses."""
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -14,7 +15,14 @@ import yaml
     [("deploy", "deploy-staging"), ("deploy", "deploy-production"), ("rollback", "rollback")],
 )
 @pytest.mark.parametrize(
-    "failed_service,failure", [("", ""), ("worker", "stale"), ("worker-collectors", "stale"), ("beat", "exited")]
+    "failed_service,failure",
+    [
+        ("", ""),
+        ("worker", "stale"),
+        ("worker-collectors", "stale"),
+        ("worker-actions", "stale"),
+        ("beat", "exited"),
+    ],
 )
 def test_release_rejects_stale_or_stopped_background_services(tmp_path, workflow, job, failed_service, failure):
     root = Path(__file__).resolve().parents[2]
@@ -23,10 +31,22 @@ def test_release_rejects_stale_or_stopped_background_services(tmp_path, workflow
         step["with"]["script"] for step in definition["jobs"][job]["steps"] if "script" in step.get("with", {})
     )
     up_commands = [shlex.split(line) for line in script.splitlines() if "compose" in line and " up " in line]
-    assert any("worker-collectors" in command for command in up_commands)
+    started = {
+        service
+        for command in up_commands
+        if "--no-deps" in command
+        for service in command[command.index("--no-deps") + 1 :]
+    }
+    # The guard's service list is READ from the workflow, never restated here: a release
+    # that starts a background service the health check does not cover is the failure this
+    # test exists to prevent, and hard-coding the list would hide exactly that.
+    loop = re.search(r"for service in ([^;]+); do", script)
+    guarded = loop.group(1).split()
+    assert set(guarded) == started, f"{started ^ set(guarded)} started or guarded, not both"
+    assert {"worker", "worker-collectors", "worker-actions", "beat"} <= started
     # Execute the checked-in guard, including all its retries and exit behavior.
     # The outer loop's indentation distinguishes it from the inner retry loop.
-    start = script.index("for service in backend worker worker-collectors beat; do")
+    start = script.index(loop.group(0))
     guard = script[start:].split("\ndone", 1)[0] + "\ndone\n"
     # YAML has removed the script's common indentation; the outer loop closes
     # unindented, while its inner loop stays indented.
@@ -66,6 +86,4 @@ def test_release_rejects_stale_or_stopped_background_services(tmp_path, workflow
         assert observed.count(f"ecom-netsuite-{failed_service}-1") == 12
         assert f"{failed_service} is stale or not running" in result.stdout
     else:
-        assert observed == [
-            f"ecom-netsuite-{service}-1" for service in ("backend", "worker", "worker-collectors", "beat")
-        ]
+        assert observed == [f"ecom-netsuite-{service}-1" for service in guarded]
