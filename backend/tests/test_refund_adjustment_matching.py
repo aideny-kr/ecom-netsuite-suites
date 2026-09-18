@@ -190,7 +190,7 @@ class CreditReader(CustomReader):
 
 
 def reader_profile():
-    return {**PROFILE, "subsidiary_id": "1", "tax_reversal_reason_ids": ["102"]}
+    return {**PROFILE, "subsidiary_id": "1", "tax_reversal_reason_ids": ["102"], "tax_accounts": ["90"]}
 
 
 async def test_native_credit_lines_prove_tax_effect_separate_from_refund_money():
@@ -532,3 +532,15 @@ async def test_a_line_naming_an_account_the_ledger_never_posted_to_proves_nothin
         reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
     )
     assert result["tax_adjustments"] == []
+
+
+async def test_a_subsidiary_that_has_not_declared_its_tax_accounts_stays_as_it_was():
+    """Framework BV carries a refund profile today but no tax_accounts. Inferring them from
+    the tax-item map would move it onto the ledger proof on deploy day, with nobody deciding
+    to. Refusing leaves its reconciliation untouched until someone declares them."""
+    reader = LedgerCreditReader()
+    profile = {k: v for k, v in ledger_profile().items() if k != "tax_accounts"}
+    result = await collect_refunds(reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=profile)
+    assert result["amount"] == Decimal(US_CREDIT_TOTAL)
+    assert result["tax_adjustments"] == []
+    assert reader.ledger_reads == 0, "and it should not spend a provider call to find that out"

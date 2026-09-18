@@ -27,7 +27,10 @@ class RefundAdjustmentProfile(EvidenceModel):
 
     @property
     def taxed_accounts(self) -> frozenset[str]:
-        return frozenset(self.tax_accounts) or frozenset(self.tax_item_accounts.values())
+        # No fallback. Inferring this from the tax-item map, which exists to describe reversal
+        # items, would switch a subsidiary onto the ledger proof the moment this deploys,
+        # without anyone deciding to. An empty set refuses rather than guesses.
+        return frozenset(self.tax_accounts)
 
     @field_validator("account_id")
     @classmethod
@@ -123,6 +126,11 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
         raise ValueError("adjustment_profile_scope_mismatch")
     # Only links that could be proved. Fetching a ledger for one that fails validation below
     # widens the query with ids this function has not accepted.
+    if not profile.taxed_accounts:
+        # This subsidiary has not been told which of its accounts carry tax, so nothing below
+        # could tell tax from net. Stopping here leaves its reconciliation exactly as it was
+        # and spends no provider call finding that out, once per order, forever.
+        return []
     memo_ids = {
         str(link["credit_memo_id"])
         for link in links
