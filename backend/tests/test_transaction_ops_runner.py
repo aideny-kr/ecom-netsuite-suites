@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS
 from app.services.transaction_ops.runner import run_investigation
 
 NOW = datetime(2026, 9, 4, 12, tzinfo=timezone.utc)
@@ -361,7 +362,9 @@ async def test_runner_collects_refunds_with_reserved_reads_and_preserves_partial
         assert state.run.termination_reason == "budget"
         native_refunds.assert_not_awaited()
     else:
-        assert ("reserve", 27, 0) in state.events
+        # Derived, not spelled out: this is the refund read budget plus the OAuth
+        # maintenance allowance, and the literal went stale the moment the budget moved.
+        assert ("reserve", MAX_REFUND_CALLS + 3, 0) in state.events
         native_refunds.assert_awaited_once()
 
 
