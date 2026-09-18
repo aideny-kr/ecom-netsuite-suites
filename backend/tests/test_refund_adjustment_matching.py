@@ -419,3 +419,60 @@ async def test_a_tax_account_missing_from_the_profile_is_caught_not_understated(
     profile = {**ledger_profile(), "tax_accounts": ["999"]}
     result = await collect_refunds(reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=profile)
     assert result["tax_adjustments"] == []
+
+
+async def test_a_credit_memo_with_no_tax_line_must_prove_it_rather_than_omit_it():
+    """An absent taxTotal is missing evidence, not a zero. A subtotal equal to the total is
+    what proves there was nowhere for tax to be."""
+    reader = LedgerCreditReader()
+    del reader.credit["taxTotal"]
+    reader.credit.update(total="400.00", applied="400.00", subtotal="400.00")
+    reader.requests[0]["amount"] = "400.00"
+    reader.record["total"] = "400.00"
+    reader.record["apply"]["items"] = [{"apply": True, "doc": {"id": "3"}, "line": 0, "amount": "400.00"}]
+    reader.ledger = [
+        {"transaction": "3", "account": "119", "accountingbook": "1", "netamount": "-400.00"},
+        {"transaction": "3", "account": US_NET_ACCOUNT, "accountingbook": "1", "netamount": "400.00"},
+    ]
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    assert result["tax_adjustments"][0]["tax_amount"] == "0"
+
+    # Same record, but the subtotal no longer accounts for the whole total: tax is unproven.
+    reader = LedgerCreditReader()
+    del reader.credit["taxTotal"]
+    reader.credit["subtotal"] = "400.00"
+    assert (
+        await collect_refunds(reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile())
+    )["tax_adjustments"] == []
+
+
+@pytest.mark.parametrize(
+    "break_record",
+    [
+        pytest.param(lambda r: r.credit.update(taxTotal=None), id="tax_total_present_but_null"),
+        pytest.param(lambda r: r.credit["item"]["items"][0].update(amount="380.00"), id="lines_do_not_sum_to_net"),
+        pytest.param(lambda r: r.ledger[1].update(netamount=None), id="posting_line_with_no_amount"),
+    ],
+)
+async def test_incomplete_record_evidence_proves_nothing(break_record):
+    reader = LedgerCreditReader()
+    break_record(reader)
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    assert result["amount"] == Decimal(US_CREDIT_TOTAL)
+    assert result["tax_adjustments"] == []
+
+
+async def test_a_reversal_whose_tax_engine_also_computed_tax_is_not_a_clean_reversal():
+    """A reversal posts everything to a tax account by hand; a non-zero engine total means
+    the record is saying two different things about the same money."""
+    reader = CreditReader()
+    assert reader.requests[0]["reason_id"] == "102"
+    reader.credit["taxTotal"] = "10.00"
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=reader_profile()
+    )
+    assert result["tax_adjustments"] == []

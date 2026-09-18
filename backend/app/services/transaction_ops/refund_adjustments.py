@@ -95,15 +95,17 @@ def ledger_tax(rows, profile, amount, receivable):
         raise ValueError("credit_ledger_book_ambiguous")
     nets: dict[str, Decimal] = {}
     for row in rows:
-        value = _decimal(row.get("netamount") or 0)
-        account = row.get("account")
+        account, posted = row.get("account"), row.get("netamount")
         if account is None:
             # A non-posting line carries no account and no amount. Carrying an amount with
             # no account is not that, and dropping it would hide value from every total.
-            if value != 0:
+            if posted is not None and _decimal(posted) != 0:
                 raise ValueError("credit_ledger_unattributed_amount")
             continue
-        nets[str(account)] = nets.get(str(account), Decimal(0)) + value
+        # An absent amount on a posting line is missing evidence, never a zero.
+        if posted is None:
+            raise ValueError("credit_ledger_amount_missing")
+        nets[str(account)] = nets.get(str(account), Decimal(0)) + _decimal(posted)
     if not nets or sum(nets.values(), Decimal(0)) != 0:
         raise ValueError("credit_ledger_unbalanced")
     tax = sum((value for account, value in nets.items() if account in profile.taxed_accounts), Decimal(0))
@@ -166,7 +168,7 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
             )
             if problems or not lines:
                 return []
-            seen, items = set(), {}
+            seen, items, lines_total = set(), {}, Decimal(0)
             for line in lines:
                 item, account = line["item"]["id"], line["account"]["id"]
                 value = _decimal(line["amount"])
@@ -184,6 +186,7 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                     return []
                 seen.add(line["line"])
                 items[item] = account
+                lines_total += value
             # The ledger is the authority on how much of this credit memo is tax. The record
             # header disagrees with it by design on a reversal, where the whole amount posts
             # to a tax account through an item line and taxTotal stays zero.
@@ -191,13 +194,27 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                 postings.get(str(link["credit_memo_id"])), profile, amount, record["account"]["id"]
             )
             # NetSuite's own tax figure, computed by its tax engine and independent of the
-            # account list this codebase declares. A reversal legitimately leaves it at zero
-            # while the whole amount posts to a tax account, so it corroborates the ordinary
-            # case only -- which is exactly where an incomplete tax_accounts list would
-            # otherwise understate the tax and still balance.
-            if tax_reversal and native_tax != amount:
-                return []
-            if not tax_reversal and _decimal(record.get("taxTotal") or 0) != native_tax:
+            # account list this codebase declares. It is what catches an incomplete
+            # tax_accounts list, which would otherwise understate the tax and still balance.
+            declared = record.get("taxTotal")
+            if "taxTotal" in record and declared is None:
+                return []  # present but null is malformed evidence, not a zero
+            if declared is None:
+                # No tax line at all. Absence is not zero, so prove it from the record's own
+                # arithmetic: a subtotal equal to the total leaves nowhere for tax to be.
+                if _decimal(record["subtotal"]) != amount:
+                    return []
+                declared = Decimal(0)
+            else:
+                declared = _decimal(declared)
+            if tax_reversal:
+                # A reversal posts its whole amount to a tax account through an item line and
+                # the tax engine computes nothing, so NetSuite's own figure must be zero.
+                if declared != 0 or native_tax != amount:
+                    return []
+            elif declared != native_tax or lines_total != amount - native_tax:
+                # The item lines must also account for the net. Dropping this with the line
+                # tax fields left the sublist proving item identity and nothing about money.
                 return []
             proofs.append(
                 {
