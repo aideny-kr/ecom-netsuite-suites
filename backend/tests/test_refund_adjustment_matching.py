@@ -114,6 +114,7 @@ class CreditReader(CustomReader):
             "currency": {"id": "1"},
             "subsidiary": {"id": "1"},
             "custbody_fw_order_number": REFERENCE,
+            "account": {"id": "119"},
             "total": "578.38",
             "taxTotal": "0",
             "applied": "578.38",
@@ -157,8 +158,7 @@ class CreditReader(CustomReader):
                 "transaction": memo,
                 "account": self.AR_ACCOUNT,
                 "accountingbook": "1",
-                "debit": None,
-                "credit": self.credit["total"],
+                "netamount": "-" + self.credit["total"],
             }
         ]
         rows.extend(
@@ -166,8 +166,7 @@ class CreditReader(CustomReader):
                 "transaction": memo,
                 "account": line["account"]["id"],
                 "accountingbook": "1",
-                "debit": line["amount"],
-                "credit": None,
+                "netamount": line["amount"],
             }
             for line in self.credit["item"]["items"]
         )
@@ -300,9 +299,9 @@ class LedgerCreditReader(CreditReader):
             }
         ]
         self.ledger = [
-            {"transaction": "3", "account": "119", "accountingbook": "1", "debit": None, "credit": US_CREDIT_TOTAL},
-            {"transaction": "3", "account": US_TAX_ACCOUNT, "accountingbook": "1", "debit": "33.80", "credit": None},
-            {"transaction": "3", "account": US_NET_ACCOUNT, "accountingbook": "1", "debit": "400.00", "credit": None},
+            {"transaction": "3", "account": "119", "accountingbook": "1", "netamount": "-" + US_CREDIT_TOTAL},
+            {"transaction": "3", "account": US_TAX_ACCOUNT, "accountingbook": "1", "netamount": "33.80"},
+            {"transaction": "3", "account": US_NET_ACCOUNT, "accountingbook": "1", "netamount": "400.00"},
         ]
 
 
@@ -329,9 +328,19 @@ async def test_us_credit_memo_proves_its_tax_split_from_the_ledger():
 @pytest.mark.parametrize(
     "break_ledger",
     [
-        pytest.param(lambda r: r.ledger.append(dict(r.ledger[1], debit="1.00")), id="unbalanced"),
-        pytest.param(lambda r: r.ledger[1].update(debit="30.00"), id="disagrees_with_refund"),
+        pytest.param(lambda r: r.ledger.append(dict(r.ledger[1], netamount="1.00")), id="unbalanced"),
+        pytest.param(
+            lambda r: (r.ledger[0].update(netamount="-500.00"), r.ledger[2].update(netamount="466.20")),
+            id="balances_but_receivable_is_not_the_refund",
+        ),
         pytest.param(lambda r: r.ledger[2].update(accountingbook="2"), id="two_books"),
+        pytest.param(lambda r: r.ledger[2].update(accountingbook=None), id="a_posting_with_no_book"),
+        pytest.param(
+            lambda r: r.ledger.append(
+                {"transaction": "3", "account": None, "accountingbook": "1", "netamount": "5.00"}
+            ),
+            id="amount_attributed_to_no_account",
+        ),
         pytest.param(lambda r: setattr(r, "ledger_complete", False), id="truncated"),
         pytest.param(lambda r: r.ledger.clear(), id="empty"),
     ],
@@ -357,3 +366,56 @@ async def test_tax_posted_by_an_item_line_is_still_tax():
     proof = result["tax_adjustments"][0]
     assert proof["kind"] == "tax_reversal"
     assert proof["tax_amount"] == "578.38"
+
+
+async def test_the_split_is_read_in_the_order_currency_not_the_subsidiary_base():
+    """transactionaccountingline posts in the subsidiary's base currency while the refund is
+    stated in the order's own. Reading the base-currency columns rejects every foreign
+    order, so the proof must take the line's transaction-currency amount."""
+    reader = LedgerCreditReader()
+    for row in reader.ledger:
+        # Base-currency columns alongside, at a different rate. Reading these would make the
+        # receivable disagree with the refund and discard a correct credit memo.
+        row["debit"] = "999.99"
+        row["credit"] = "999.99"
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    assert result["tax_adjustments"][0]["tax_amount"] == "33.80"
+
+
+async def test_an_inventory_return_posts_its_own_matched_pair_without_disturbing_the_refund():
+    """A return books inventory against cost of goods. That pair never touches the
+    receivable, and demanding every debit add up to the refund would reject the entry."""
+    reader = LedgerCreditReader()
+    reader.ledger.extend(
+        [
+            {"transaction": "3", "account": "212", "accountingbook": "1", "netamount": "120.00"},
+            {"transaction": "3", "account": "230", "accountingbook": "1", "netamount": "-120.00"},
+        ]
+    )
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    proof = result["tax_adjustments"][0]
+    assert proof["amount"] == US_CREDIT_TOTAL
+    assert proof["tax_amount"] == "33.80"
+
+
+async def test_netsuite_own_tax_total_must_agree_when_the_credit_is_not_a_reversal():
+    """The header total comes from NetSuite's tax engine, independent of the account list we
+    declare. Without it an incomplete tax_accounts silently understates tax and still
+    balances."""
+    reader = LedgerCreditReader()
+    reader.credit["taxTotal"] = "30.00"
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    assert result["tax_adjustments"] == []
+
+
+async def test_a_tax_account_missing_from_the_profile_is_caught_not_understated():
+    reader = LedgerCreditReader()
+    profile = {**ledger_profile(), "tax_accounts": ["999"]}
+    result = await collect_refunds(reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=profile)
+    assert result["tax_adjustments"] == []

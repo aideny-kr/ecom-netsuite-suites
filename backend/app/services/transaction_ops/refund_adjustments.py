@@ -1,16 +1,14 @@
 """Account-scoped tax-credit interpretation; never infer a tax effect from cash alone."""
 
-import re
 from decimal import Decimal
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 
 from app.schemas.transaction_ops import EvidenceModel, _decimal
-from app.services.transaction_ops.netsuite_reader import _account, _collection, _sublist
+from app.services.transaction_ops.netsuite_reader import _account, _collection, _id, _sublist
 
 Id = Annotated[str, Field(pattern=r"^[0-9]{1,30}$")]
-_IDENTIFIER = re.compile(r"[0-9]{1,30}")
 
 
 class RefundAdjustmentProfile(EvidenceModel):
@@ -49,17 +47,24 @@ async def ledger_postings(request, memo_ids, subsidiary_id):
     per-order ceiling is already tight enough that a busy order loses its refund evidence
     entirely rather than reporting a budget error.
     """
-    if not all(_IDENTIFIER.fullmatch(str(memo_id)) for memo_id in [*memo_ids, subsidiary_id]):
+    identifiers = [_id(value) for value in [*sorted(memo_ids), subsidiary_id]]
+    if not all(identifiers):
         raise ValueError("credit_ledger_identifier_rejected")
-    ceiling = LEDGER_ROWS * len(memo_ids)
+    *memos, subsidiary = identifiers
+    ceiling = LEDGER_ROWS * len(memos)
     result = await request(
         "POST",
         "/query/v1/suiteql",
         params={"limit": ceiling + 1},
         body={
-            "q": "SELECT tal.transaction, tal.account, tal.accountingbook, tal.debit, tal.credit "
-            "FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction "
-            f"WHERE tal.transaction IN ({','.join(sorted(memo_ids))}) AND t.subsidiary = {subsidiary_id}"
+            # netamount, not debit/credit: the accounting line posts in the subsidiary's base
+            # currency while the refund is stated in the order's own, and those differ on any
+            # foreign-currency order. The line carries the transaction-currency figure.
+            "q": "SELECT tal.transaction, tal.account, tal.accountingbook, tl.netamount "
+            "FROM transactionaccountingline tal "
+            "JOIN transactionline tl ON tl.transaction = tal.transaction AND tl.id = tal.transactionline "
+            "JOIN transaction t ON t.id = tal.transaction "
+            f"WHERE tal.transaction IN ({','.join(memos)}) AND t.subsidiary = {subsidiary}"
         },
     )
     rows, complete = _collection(result)
@@ -71,7 +76,7 @@ async def ledger_postings(request, memo_ids, subsidiary_id):
     return grouped
 
 
-def ledger_tax(rows, profile, amount):
+def ledger_tax(rows, profile, amount, receivable):
     """Net one credit memo's postings by account; return the tax part and the netting itself.
 
     The ledger is the only place both booking conventions are legible. Tax charged through
@@ -82,29 +87,30 @@ def ledger_tax(rows, profile, amount):
     """
     if not rows:
         raise ValueError("credit_ledger_missing")
-    # One accounting book only. Netting across books double counts, and a book the scope
-    # never named is not evidence about the book it did.
-    books = {str(row["accountingbook"]) for row in rows if row.get("accountingbook") is not None}
-    if len(books) != 1:
+    # Every posting names its book or none of them are evidence. Excluding the unnamed ones
+    # before counting would let exactly the ambiguous case through the guard meant to catch
+    # it, while still folding their amounts into the netting below.
+    books = {row.get("accountingbook") for row in rows}
+    if None in books or len({str(book) for book in books}) != 1:
         raise ValueError("credit_ledger_book_ambiguous")
     nets: dict[str, Decimal] = {}
     for row in rows:
+        value = _decimal(row.get("netamount") or 0)
         account = row.get("account")
         if account is None:
-            continue  # a non-posting line carries no account and no amount
-        nets[str(account)] = (
-            nets.get(str(account), Decimal(0)) + _decimal(row.get("debit") or 0) - _decimal(row.get("credit") or 0)
-        )
+            # A non-posting line carries no account and no amount. Carrying an amount with
+            # no account is not that, and dropping it would hide value from every total.
+            if value != 0:
+                raise ValueError("credit_ledger_unattributed_amount")
+            continue
+        nets[str(account)] = nets.get(str(account), Decimal(0)) + value
     if not nets or sum(nets.values(), Decimal(0)) != 0:
         raise ValueError("credit_ledger_unbalanced")
     tax = sum((value for account, value in nets.items() if account in profile.taxed_accounts), Decimal(0))
-    debited = sum((value for value in nets.values() if value > 0), Decimal(0))
-    credited = sum((value for value in nets.values() if value < 0), Decimal(0))
-    # Read the split off the totals. A reclassification pair cancels exactly in the
-    # subsidiary's base currency but leaves a sub-cent residue in the account it moved value
-    # out of when netted in the order's own currency, which is the currency being compared,
-    # so nothing here may assume those pairs cancel.
-    if debited != amount or credited != -amount or not 0 <= tax <= amount:
+    # The receivable carries the refund and nothing else has to. An inventory return posts a
+    # matched inventory and cost pair that never touches it, and requiring every debit to add
+    # up to the refund would reject that entry despite it being correct.
+    if nets.get(str(receivable)) != -amount or not 0 <= tax <= amount:
         raise ValueError("credit_ledger_disagrees_with_refund")
     return tax, {account: str(value) for account, value in sorted(nets.items()) if value}
 
@@ -181,8 +187,17 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
             # The ledger is the authority on how much of this credit memo is tax. The record
             # header disagrees with it by design on a reversal, where the whole amount posts
             # to a tax account through an item line and taxTotal stays zero.
-            native_tax, ledger = ledger_tax(postings.get(str(link["credit_memo_id"])), profile, amount)
+            native_tax, ledger = ledger_tax(
+                postings.get(str(link["credit_memo_id"])), profile, amount, record["account"]["id"]
+            )
+            # NetSuite's own tax figure, computed by its tax engine and independent of the
+            # account list this codebase declares. A reversal legitimately leaves it at zero
+            # while the whole amount posts to a tax account, so it corroborates the ordinary
+            # case only -- which is exactly where an incomplete tax_accounts list would
+            # otherwise understate the tax and still balance.
             if tax_reversal and native_tax != amount:
+                return []
+            if not tax_reversal and _decimal(record.get("taxTotal") or 0) != native_tax:
                 return []
             proofs.append(
                 {
