@@ -476,3 +476,59 @@ async def test_a_reversal_whose_tax_engine_also_computed_tax_is_not_a_clean_reve
         reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=reader_profile()
     )
     assert result["tax_adjustments"] == []
+
+
+async def test_a_reversals_lines_must_account_for_the_refund_too():
+    """The line-sum invariant used to apply to both kinds. When it came back it landed only
+    in the ordinary branch, which is the same asymmetry the round before had."""
+    reader = CreditReader()
+    reader.credit["item"]["items"][0]["amount"] = "500.00"
+    reader.ledger = [
+        {"transaction": "3", "account": "119", "accountingbook": "1", "netamount": "-578.38"},
+        {"transaction": "3", "account": "90", "accountingbook": "1", "netamount": "578.38"},
+    ]
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=reader_profile()
+    )
+    assert result["tax_adjustments"] == []
+
+
+async def test_one_item_posting_to_two_accounts_is_refused_not_quietly_halved():
+    reader = LedgerCreditReader()
+    reader.credit["item"]["items"] = [
+        {
+            "line": 1,
+            "item": {"id": "1603"},
+            "account": {"id": US_NET_ACCOUNT},
+            "itemType": {"id": "NonInvtPart"},
+            "amount": "200.00",
+        },
+        {
+            "line": 2,
+            "item": {"id": "1603"},
+            "account": {"id": "700"},
+            "itemType": {"id": "NonInvtPart"},
+            "amount": "200.00",
+        },
+    ]
+    reader.ledger = [
+        {"transaction": "3", "account": "119", "accountingbook": "1", "netamount": "-" + US_CREDIT_TOTAL},
+        {"transaction": "3", "account": US_TAX_ACCOUNT, "accountingbook": "1", "netamount": "33.80"},
+        {"transaction": "3", "account": US_NET_ACCOUNT, "accountingbook": "1", "netamount": "200.00"},
+        {"transaction": "3", "account": "700", "accountingbook": "1", "netamount": "200.00"},
+    ]
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    assert result["tax_adjustments"] == []
+
+
+async def test_a_line_naming_an_account_the_ledger_never_posted_to_proves_nothing():
+    """Totals alone would pass. The evidence would then attribute money to an account the
+    books never saw, which is precisely what ledger_accounts exists to make checkable."""
+    reader = LedgerCreditReader()
+    reader.credit["item"]["items"][0]["account"] = {"id": "999"}
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=ledger_profile()
+    )
+    assert result["tax_adjustments"] == []

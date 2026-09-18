@@ -114,14 +114,20 @@ def ledger_tax(rows, profile, amount, receivable):
     # up to the refund would reject that entry despite it being correct.
     if nets.get(str(receivable)) != -amount or not 0 <= tax <= amount:
         raise ValueError("credit_ledger_disagrees_with_refund")
-    return tax, {account: str(value) for account, value in sorted(nets.items()) if value}
+    return tax, {account: str(value) for account, value in sorted(nets.items())}
 
 
 async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id, currency_id, reference, allocations):
     profile = RefundAdjustmentProfile.model_validate(profile)
     if profile.subsidiary_id != subsidiary_id:
         raise ValueError("adjustment_profile_scope_mismatch")
-    memo_ids = {str(link["credit_memo_id"]) for link in links if link.get("credit_memo_id")}
+    # Only links that could be proved. Fetching a ledger for one that fails validation below
+    # widens the query with ids this function has not accepted.
+    memo_ids = {
+        str(link["credit_memo_id"])
+        for link in links
+        if link.get("credit_memo_id") and link.get("stage") == "refund_verified"
+    }
     try:
         postings = await ledger_postings(request, memo_ids, subsidiary_id) if memo_ids else {}
     except (KeyError, TypeError, ValueError, ArithmeticError):
@@ -182,6 +188,9 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                     or (not tax_reversal and item in profile.tax_item_accounts)
                     or value is None
                     or value <= 0
+                    # The same item on two lines has to agree on where it posts. Without this
+                    # the dict below keeps the last account and silently discards the other.
+                    or items.get(item, account) != account
                 ):
                     return []
                 seen.add(line["line"])
@@ -207,14 +216,21 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                 declared = Decimal(0)
             else:
                 declared = _decimal(declared)
-            if tax_reversal:
-                # A reversal posts its whole amount to a tax account through an item line and
-                # the tax engine computes nothing, so NetSuite's own figure must be zero.
-                if declared != 0 or native_tax != amount:
-                    return []
-            elif declared != native_tax or lines_total != amount - native_tax:
-                # The item lines must also account for the net. Dropping this with the line
-                # tax fields left the sublist proving item identity and nothing about money.
+            # One check for both kinds. The kind supplies the numbers it has to match, never
+            # which checks run. Three review rounds each found a check present in one branch
+            # and missing in the symmetric one, twice in this exact place, so the branch is
+            # gone from the checking rather than the instances being fixed one at a time.
+            # A reversal posts its whole amount to a tax account through an item line and the
+            # tax engine computes nothing, so its declared figure is zero and its lines carry
+            # the full amount. An ordinary credit memo declares the tax the ledger found and
+            # its lines carry the rest.
+            expected = (Decimal(0), amount, amount) if tax_reversal else (native_tax, amount - native_tax, native_tax)
+            if (declared, lines_total, native_tax) != expected:
+                return []
+            # The sublist and the ledger have to name the same accounts. Comparing only totals
+            # lets the evidence attribute money to an account the ledger never posted to, and
+            # a reviewer re-deriving the verdict could not reconcile the two.
+            if not set(items.values()) <= set(ledger):
                 return []
             proofs.append(
                 {
