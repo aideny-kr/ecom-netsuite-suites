@@ -11,7 +11,7 @@ from app.services.transaction_ops.netsuite_reader import _account, _collection, 
 from app.services.transaction_ops.netsuite_refund_requests import read_request_links, verify_request_allocations
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile, read_tax_adjustments
 
-MAX_REFUND_CALLS = 24
+MAX_REFUND_CALLS = 25  # +1 for the single batched credit-memo ledger read
 MAX_DOCUMENTS = 100
 MAX_EDGES = 200
 MAX_DEPTH = 6
