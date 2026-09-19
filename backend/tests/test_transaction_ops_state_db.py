@@ -694,3 +694,16 @@ async def test_storage_lets_a_hold_fall_while_spend_rises(db, setup_state):
             ),
             {"id": run.id},
         )
+
+
+async def test_a_settle_renews_the_lease_like_every_other_owner_write(db, setup_state):
+    """A read can run close to the lease window; the settle that follows it is the owner's
+    next write and keeps the lease, as a reservation or a checkpoint does."""
+    actor, _, run = setup_state
+    now = datetime.now(timezone.utc)
+    token = await state.claim_run(db, actor.tenant_id, run.id, now=now)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=4, hold=True, now=now)
+    later = now + timedelta(seconds=150)
+    assert await state.settle_budget(db, actor.tenant_id, run.id, lease_token=token, release=4, spent=1, now=later)
+    row = await state.get_run(db, actor.tenant_id, run.id)
+    assert row.lease_until == min(row.deadline_at, later + timedelta(seconds=180))

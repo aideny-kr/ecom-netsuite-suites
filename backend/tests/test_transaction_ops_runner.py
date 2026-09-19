@@ -659,3 +659,24 @@ async def test_a_read_that_fails_is_still_charged_only_what_it_sent():
     )
     assert ("settle", 10, 4) in state.events
     assert state.run.progress_json["metered_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_settle_that_fails_after_a_failed_read_leaves_the_reads_own_error():
+    """Settling runs in a ``finally``. If it raised there, its error would replace the
+    read's, and a caller that degrades on read failures (the refund read) would instead
+    abort on a state error. The hold is charged in full at finish, so nothing is lost by
+    letting the read's error through."""
+    from app.services.transaction_ops.state_service import StateError
+
+    async def fails(*args, **kwargs):
+        raise ValueError("upstream unavailable")
+
+    baseline = State()
+    expected = await run_with(baseline, _source_reader=AsyncMock(return_value=source_order()), _target_reader=fails)
+
+    state = State()
+    state.settle_budget = AsyncMock(side_effect=StateError("run_lease_lost"))
+    result = await run_with(state, _source_reader=AsyncMock(return_value=source_order()), _target_reader=fails)
+    state.settle_budget.assert_awaited_once()
+    assert result["termination_reason"] == expected["termination_reason"] == "error"

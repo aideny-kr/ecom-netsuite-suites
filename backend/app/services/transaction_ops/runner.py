@@ -321,6 +321,7 @@ async def run_investigation(
     from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
     from app.services.transaction_ops.netsuite_changes import read_changed_orders
     from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
+    from app.services.transaction_ops.netsuite_reader import MAX_API_CALLS as NETSUITE_READ_CALLS
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
     from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS, read_netsuite_refunds
     from app.services.transaction_ops.netsuite_transport import (
@@ -395,24 +396,33 @@ async def run_investigation(
         """
         from app.services.transaction_ops.call_meter import metered
 
+        async def settle(meter):
+            progress["metered_calls"] = progress.get("metered_calls", 0) + meter.calls
+            unused = max(0, data_calls - meter.calls)
+            await state.settle_budget(
+                db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
+            )
+
         with metered() as meter:
-            failed = False
             try:
-                return await bounded_read(factory, **options)
-            except BaseException:
-                failed = True
-                raise
-            finally:
-                progress["metered_calls"] = progress.get("metered_calls", 0) + meter.calls
-                unused = max(0, data_calls - meter.calls)
-                await state.settle_budget(
-                    db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
-                )
-                # A read that raises ends the run without another checkpoint, so the count
-                # would be lost with it. Saved only then: a write per successful read would
-                # be three more per order, and the next checkpoint records it anyway.
-                if failed:
+                result = await bounded_read(factory, **options)
+            except BaseException as error:
+                # The read's own error must reach the caller: some callers degrade on a
+                # failed read, and a bookkeeping error raised here would turn that into an
+                # abort. Nothing is lost if the settle fails, since finishing the run
+                # charges the hold in full. A read that raises also ends the run without
+                # another checkpoint, so the count is saved here or lost with it.
+                try:
+                    await settle(meter)
                     await save()
+                except Exception as bookkeeping:
+                    error.add_note(f"settling the read's budget also failed: {bookkeeping!r}")
+                raise
+            # A successful read is settled outside any handler, so a lost lease here stops
+            # the run as it would at the next checkpoint. The count is saved at that
+            # checkpoint rather than with another write per read.
+            await settle(meter)
+            return result
 
     try:
         if not await (_enabled or enabled)(db, tenant_id):
@@ -653,7 +663,7 @@ async def run_investigation(
                 progress["pending_refs"] = progress["pending_refs"][1:]
                 await save()
                 continue
-            if not await reserve(10, hold=True):  # At most 7 data reads plus ordinary OAuth token maintenance.
+            if not await reserve(10, hold=True):  # NETSUITE_READ_CALLS data reads plus OAuth maintenance.
                 return await finish("budget")
             targets = await metered_read(
                 lambda: target_reader(
@@ -666,7 +676,7 @@ async def run_investigation(
                     mapping.reference_field,
                 ),
                 held=10,
-                data_calls=7,
+                data_calls=NETSUITE_READ_CALLS,
                 retry_calls=10,
             )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())

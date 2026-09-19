@@ -714,6 +714,7 @@ async def settle_budget(db, tenant_id, run_id, *, lease_token, release, spent, n
         raise StateError("run_hold_exceeded")
     row.api_calls_held -= release
     row.api_calls_used += spent
+    row.lease_until = min(row.deadline_at, now + _LEASE)
     await _commit(db, tenant_id)
     return True
 
