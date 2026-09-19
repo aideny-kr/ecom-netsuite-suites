@@ -364,11 +364,11 @@ async def run_investigation(
             "needs_review": progress["needs_review"],
         }
 
-    async def reserve(calls, orders=0):
+    async def reserve(calls, orders=0, *, hold=False):
         if not await (_enabled or enabled)(db, tenant_id):
             raise FeatureRevokedError
         return await state.reserve_budget(
-            db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, now=clock()
+            db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, hold=hold, now=clock()
         )
 
     async def bounded_read(factory, *, retry_calls=0):
@@ -380,6 +380,39 @@ async def run_investigation(
             save=save,
             remaining=lambda: (run.deadline_at - clock()).total_seconds(),
         )
+
+    async def metered_read(factory, *, held, data_calls, **options):
+        """A bounded read charged for what it sent rather than the worst case reserved.
+
+        ``held`` is the reservation made with ``hold=True`` just before this read, and
+        ``data_calls`` its data share. Only that share can come back: the rest covers
+        sign-in token maintenance, which happens when a reader is built and outside the
+        metered send path, so it is charged whether or not a refresh occurred. A retry
+        reserves again inside ``bounded_read`` and its sends are metered here, which can
+        only shrink the amount returned. The settle runs on failure too, since a failed
+        read still did not make the calls it did not make; if it never runs, finishing the
+        run charges the whole hold.
+        """
+        from app.services.transaction_ops.call_meter import metered
+
+        with metered() as meter:
+            failed = False
+            try:
+                return await bounded_read(factory, **options)
+            except BaseException:
+                failed = True
+                raise
+            finally:
+                progress["metered_calls"] = progress.get("metered_calls", 0) + meter.calls
+                unused = max(0, data_calls - meter.calls)
+                await state.settle_budget(
+                    db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
+                )
+                # A read that raises ends the run without another checkpoint, so the count
+                # would be lost with it. Saved only then: a write per successful read would
+                # be three more per order, and the next checkpoint records it anyway.
+                if failed:
+                    await save()
 
     try:
         if not await (_enabled or enabled)(db, tenant_id):
@@ -620,9 +653,9 @@ async def run_investigation(
                 progress["pending_refs"] = progress["pending_refs"][1:]
                 await save()
                 continue
-            if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
+            if not await reserve(10, hold=True):  # At most 7 data reads plus ordinary OAuth token maintenance.
                 return await finish("budget")
-            targets = await bounded_read(
+            targets = await metered_read(
                 lambda: target_reader(
                     db,
                     tenant_id,
@@ -632,6 +665,8 @@ async def run_investigation(
                     reference,
                     mapping.reference_field,
                 ),
+                held=10,
+                data_calls=7,
                 retry_calls=10,
             )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
@@ -643,13 +678,15 @@ async def run_investigation(
             if source_adjustment_basis(orders[0]) and report.get("balance", {}).get("status") == "difference":
                 # At most 4 invoice reads +12 application reads, plus OAuth maintenance.
                 # Reserve before the optional proof, preserving the runner's hard budget.
-                if not await reserve(20):
+                if not await reserve(20, hold=True):
                     await state.record_finding(
                         db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
                     )
                     return await finish("budget")
-                commercial = await bounded_read(
-                    lambda: read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report)
+                commercial = await metered_read(
+                    lambda: read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report),
+                    held=20,
+                    data_calls=16,
                 )
                 if commercial:
                     targets["commercial_credit_evidence"] = commercial
@@ -675,10 +712,10 @@ async def run_investigation(
                 except Exception:
                     refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
                 if len(targets.get("orders") or []) == 1 and targets["orders"][0].get("header_complete") is True:
-                    if not await reserve(MAX_REFUND_CALLS + 3):
+                    if not await reserve(MAX_REFUND_CALLS + 3, hold=True):
                         return await finish("budget")
                     try:
-                        refunds["target"] = await bounded_read(
+                        refunds["target"] = await metered_read(
                             lambda: (_target_refunds_reader or read_netsuite_refunds)(
                                 db,
                                 tenant_id,
@@ -692,7 +729,9 @@ async def run_investigation(
                                     if mapping.refund_adjustments
                                     else {}
                                 ),
-                            )
+                            ),
+                            held=MAX_REFUND_CALLS + 3,
+                            data_calls=MAX_REFUND_CALLS,
                         )
                     except (state_service.StateError, FeatureRevokedError):
                         raise

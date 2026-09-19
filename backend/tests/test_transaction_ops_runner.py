@@ -104,13 +104,24 @@ class State:
         self.run.lease_token = self.token
         return self.token
 
-    async def reserve_budget(self, *args, api_calls=0, orders=0, lease_token=None, **kwargs):
+    async def reserve_budget(self, *args, api_calls=0, orders=0, hold=False, lease_token=None, **kwargs):
         assert lease_token == self.token
         self.events.append(("reserve", api_calls, orders))
         if api_calls > self.budget:
             self.run.status, self.run.termination_reason = "finished", "budget"
             return False
         self.budget -= api_calls
+        if hold:
+            self.held = getattr(self, "held", 0) + api_calls
+        return True
+
+    async def settle_budget(self, *args, release, spent, lease_token=None, **kwargs):
+        assert lease_token == self.token
+        # The real settle refuses to release more than is held; so does this one.
+        assert 0 <= spent <= release <= getattr(self, "held", 0)
+        self.held -= release
+        self.events.append(("settle", release, spent))
+        self.budget += release - spent
         return True
 
     async def update_progress(self, *args, lease_token=None, **kwargs):
@@ -373,7 +384,9 @@ async def test_reads_are_reserved_before_calls_and_missing_observation_is_durabl
     state = State()
     result = await execute(state)
     assert result["termination_reason"] == "done"
-    assert state.events == [("reserve", 2, 1), "source", ("reserve", 10, 0), "target"]
+    # The fake order read makes no real provider calls, so all 7 of its data calls go back;
+    # the 3 reserved for sign-in maintenance stay charged.
+    assert state.events == [("reserve", 2, 1), "source", ("reserve", 10, 0), "target", ("settle", 10, 3)]
     assert state.reports[REF]["comparison"]["recommended_action"] == "propose_missing_sync"
     assert state.reports[REF]["source"]["total"] == "100"
     assert state.run.progress_json["processed"] == 1
@@ -572,3 +585,77 @@ async def test_commercial_credit_read_reserves_budget_before_native_access(monke
         assert state.run.progress_json["pending_refs"] == [REF]
     else:
         reader.assert_awaited_once()
+
+
+def calls_then(count, result):
+    """A reader that makes ``count`` real provider calls before returning."""
+    from app.services.transaction_ops.call_meter import note_call
+
+    async def read(*args, **kwargs):
+        for _ in range(count):
+            note_call()
+        return result() if callable(result) else result
+
+    return read
+
+
+async def run_with(state, **readers):
+    return await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _order_mirror=AsyncMock(),
+        _enabled=AsyncMock(return_value=True),
+        _clock=lambda: NOW,
+        **readers,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_read_is_charged_what_it_used_not_the_worst_case_it_reserved():
+    """The order read reserves 10: at most 7 data calls plus 3 for sign-in maintenance.
+    Two real calls leave 5 data calls unused, which go back. The sign-in allowance stays
+    charged, because a token refresh happens outside the metered path and cannot be seen."""
+    state = State()
+    await run_with(
+        state,
+        _source_reader=AsyncMock(return_value=source_order()),
+        _target_reader=calls_then(2, missing_target),
+    )
+    assert ("reserve", 10, 0) in state.events
+    assert ("settle", 10, 5) in state.events
+    assert state.run.progress_json["metered_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_uses_every_reserved_call_gets_nothing_back():
+    state = State()
+    await run_with(
+        state,
+        _source_reader=AsyncMock(return_value=source_order()),
+        _target_reader=calls_then(9, missing_target),
+    )
+    # Nine is more than the 7 data calls reserved: never hand back a negative amount,
+    # and never let a settle charge less than was actually made.
+    assert ("settle", 10, 10) in state.events
+    assert state.run.progress_json["metered_calls"] == 9
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_fails_is_still_charged_only_what_it_sent():
+    from app.services.transaction_ops.call_meter import note_call
+
+    state = State()
+
+    async def fails_after_one_call(*args, **kwargs):
+        note_call()
+        raise ValueError("upstream unavailable")
+
+    await run_with(
+        state,
+        _source_reader=AsyncMock(return_value=source_order()),
+        _target_reader=fails_after_one_call,
+    )
+    assert ("settle", 10, 4) in state.events
+    assert state.run.progress_json["metered_calls"] == 1

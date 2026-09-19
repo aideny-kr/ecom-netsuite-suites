@@ -572,3 +572,125 @@ async def test_run_queue_and_claim_use_database_budget_clock(db, admin_user, mon
     database_now = await db.scalar(text("SELECT clock_timestamp()"))
     assert run.deadline_at <= database_now + timedelta(seconds=run.config_snapshot["deadline_seconds"])
     assert run.lease_until <= database_now + timedelta(minutes=3)
+
+
+async def _figures(db, tenant_id, run_id):
+    row = await state.get_run(db, tenant_id, run_id)
+    return row.api_calls_used, row.api_calls_held
+
+
+async def test_a_hold_counts_against_the_ceiling_before_it_is_settled(db, setup_state):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    top = run.max_api_calls
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=top - 1, hold=True)
+    assert await _figures(db, actor.tenant_id, run.id) == (0, top - 1)
+    assert not await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=2)
+
+
+async def test_a_settle_charges_what_was_sent_and_frees_the_rest(db, setup_state):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    top = run.max_api_calls
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=top, hold=True)
+    assert await state.settle_budget(db, actor.tenant_id, run.id, lease_token=token, release=top, spent=top - 5)
+    assert await _figures(db, actor.tenant_id, run.id) == (top - 5, 0)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=5)
+    assert not await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=1)
+    assert await _figures(db, actor.tenant_id, run.id) == (top, 0)
+
+
+async def test_a_plain_reservation_is_spent_at_once(db, setup_state):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=3)
+    assert await _figures(db, actor.tenant_id, run.id) == (3, 0)
+
+
+async def test_a_settle_cannot_release_more_than_is_held(db, setup_state):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=3)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=2, hold=True)
+    with pytest.raises(state.StateError, match="run_hold_exceeded"):
+        await state.settle_budget(db, actor.tenant_id, run.id, lease_token=token, release=5, spent=0)
+    assert await _figures(db, actor.tenant_id, run.id) == (3, 2)
+
+
+async def test_only_the_lease_holder_can_settle(db, setup_state):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=8, hold=True)
+    with pytest.raises(state.StateError, match="run_lease_lost"):
+        await state.settle_budget(db, actor.tenant_id, run.id, lease_token=uuid4(), release=8, spent=0)
+    assert await _figures(db, actor.tenant_id, run.id) == (0, 8)
+
+
+async def test_finishing_charges_an_unsettled_hold_in_full(db, setup_state):
+    """A crash or a read that never settles must not under-count: whatever is still held
+    when the run finishes is assumed to have been sent."""
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=2)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=8, hold=True)
+    await state.finish_run(db, actor.tenant_id, run.id, "error", lease_token=token)
+    assert await _figures(db, actor.tenant_id, run.id) == (10, 0)
+    assert not await state.settle_budget(db, actor.tenant_id, run.id, lease_token=token, release=8, spent=0)
+    assert await _figures(db, actor.tenant_id, run.id) == (10, 0)
+
+
+async def test_a_budget_stop_charges_the_hold_it_could_not_extend(db, setup_state):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    top = run.max_api_calls
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=top, hold=True)
+    assert not await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=1)
+    row = await state.get_run(db, actor.tenant_id, run.id)
+    assert (row.status, row.termination_reason) == ("finished", "budget")
+    assert (row.api_calls_used, row.api_calls_held) == (top, 0)
+
+
+@pytest.mark.parametrize(("release", "spent"), [(-1, 0), (1.5, 0), ("3", 0), (3, 4), (3, -1)])
+async def test_a_settle_must_be_whole_calls_spending_no_more_than_released(db, setup_state, release, spent):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    with pytest.raises(ValueError):
+        await state.settle_budget(db, actor.tenant_id, run.id, lease_token=token, release=release, spent=spent)
+
+
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    [
+        # Spend stays append-only in storage; only the hold may fall.
+        ("UPDATE transaction_ops_runs SET api_calls_used = 0, api_calls_held = 5 WHERE id=:id", "immutable run spend"),
+        # The ceiling covers both columns.
+        ("UPDATE transaction_ops_runs SET api_calls_held = max_api_calls - 4 WHERE id=:id", "ck_tx_run_spend"),
+        # A finished run holds nothing.
+        (
+            "UPDATE transaction_ops_runs SET status='finished', termination_reason='done', finished_at=now(),"
+            " lease_token=NULL, lease_until=NULL WHERE id=:id",
+            "still holds reserved calls",
+        ),
+    ],
+)
+async def test_storage_refuses_what_the_service_never_does(db, setup_state, statement, message):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=5)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=5, hold=True)
+    with pytest.raises(DBAPIError, match=message):
+        async with db.begin_nested():
+            await db.execute(text(statement), {"id": run.id})
+
+
+async def test_storage_lets_a_hold_fall_while_spend_rises(db, setup_state):
+    actor, _, run = setup_state
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    assert await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=5, hold=True)
+    async with db.begin_nested():
+        await db.execute(
+            text(
+                "UPDATE transaction_ops_runs SET api_calls_held = 0, api_calls_used = api_calls_used + 2 WHERE id=:id"
+            ),
+            {"id": run.id},
+        )

@@ -246,6 +246,12 @@ class _Reader:
         if self.calls >= self.max_api_calls:
             raise NetSuiteEvidenceError("api_call_budget")
         self.calls += 1
+        # Counted where the reader's own limit counts it, so a request that then fails on
+        # the wire is still charged: it was sent. Coalesced reference reads never reach
+        # here and are correctly free.
+        from app.services.transaction_ops.call_meter import note_call
+
+        note_call()
         # All record schemas use content negotiation. Without this Accept
         # header NetSuite returns a link catalog, not field metadata. Keep the
         # record-type path syntax bounded; this does not grant write access.

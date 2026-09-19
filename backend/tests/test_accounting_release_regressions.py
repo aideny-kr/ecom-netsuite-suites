@@ -194,6 +194,7 @@ async def test_readonly_recheck_reserves_budget_audits_and_never_reuses_failed_e
         lease_token=uuid4(),
         deadline_at=now + timedelta(minutes=5),
         api_calls_used=0,
+        api_calls_held=0,
         max_api_calls=remaining_calls,
         params_json={"verified_at": (now - timedelta(seconds=1)).isoformat(), "approval_message_id": str(uuid4())},
     )
@@ -307,9 +308,12 @@ async def test_full_runner_persists_credit_recheck_case_and_audit_without_writes
     assert result["termination_reason"] == "done"
     assert run.progress_json["settlement"]["status"] == expected
     assert run.progress_json["settlement"]["cash_settlement"] == "not_verified"
-    # Everything the run spends besides the refund read, plus that budget. Spelled out as a
-    # literal this silently became wrong the moment the budget changed.
-    assert run.api_calls_used == 73 + MAX_REFUND_CALLS
+    # Everything the run reserves besides the refund read, plus that budget, less the data
+    # share of the two metered reads: these fake readers send nothing, so the order read
+    # (7 data calls) and the refund read (MAX_REFUND_CALLS) are charged only their OAuth
+    # maintenance share. Spelled out as a literal this silently became wrong the moment
+    # the budget changed.
+    assert run.api_calls_used == 73 + MAX_REFUND_CALLS - 7 - MAX_REFUND_CALLS
     fresh.assert_awaited_once()  # No extra subledger reads at the partial refund checkpoint.
     guard.assert_not_awaited()
     assert not await state_service.list_proposals(db, actor.tenant_id, run_id=run.id)

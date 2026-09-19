@@ -577,6 +577,9 @@ async def list_runs(db, tenant_id, *, config_id=None, runnable_only=False, perio
 
 
 def _finish(row, reason, now):
+    # An unsettled hold is assumed spent: a crash or a failed settle cannot under-count.
+    row.api_calls_used += row.api_calls_held or 0
+    row.api_calls_held = 0
     row.status, row.termination_reason, row.finished_at = "finished", reason, now
     row.lease_token = row.lease_until = None
 
@@ -630,7 +633,7 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
         row.status == "pending"
         and (row.origin in {"manual", "chat", "schedule"} or is_settlement(row))
         and row.lease_token is None
-        and row.api_calls_used == row.orders_used == 0
+        and row.api_calls_used == row.orders_used == (row.api_calls_held or 0) == 0
     ):
         deadline = _first_claim_deadline(row, now)
     if deadline is None or now >= deadline:
@@ -652,7 +655,13 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
     return row.lease_token
 
 
-async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, orders=0, now=None):
+async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, orders=0, hold=False, now=None):
+    """Pay for calls before making them; the run ends on ``budget`` if they do not fit.
+
+    With ``hold`` the calls are held rather than spent, for a read that will report what
+    it actually sent through ``settle_budget``. Either way they count against the ceiling
+    from this moment.
+    """
     if any(type(value) is not int or value < 0 for value in (api_calls, orders)) or api_calls + orders == 0:
         raise ValueError("Reserve positive integer spend before a call")
     now = _clock(now)
@@ -665,13 +674,46 @@ async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, ord
         await _commit(db, tenant_id)
         return False
     _lease(row, lease_token, now)
-    if row.api_calls_used + api_calls > row.max_api_calls or row.orders_used + orders > row.max_orders:
+    held = row.api_calls_held or 0
+    if row.api_calls_used + held + api_calls > row.max_api_calls or row.orders_used + orders > row.max_orders:
         await _finish_audited(db, tenant_id, row, "budget", now)
         await _commit(db, tenant_id)
         return False
-    row.api_calls_used += api_calls
+    if hold:
+        # Settled at what the read sent (settle_budget); unsettled, it is charged in full
+        # when the run finishes, which is the worst-case charge a plain reservation makes.
+        row.api_calls_held = held + api_calls
+    else:
+        row.api_calls_used += api_calls
     row.orders_used += orders
     row.lease_until = min(row.deadline_at, now + _LEASE)
+    await _commit(db, tenant_id)
+    return True
+
+
+async def settle_budget(db, tenant_id, run_id, *, lease_token, release, spent, now=None):
+    """Settle a read's hold: charge what it sent, drop the rest of what it reserved.
+
+    Reserving the worst case before each read is what keeps a run under its ceiling, and
+    that stays true: a settle moves ``spent`` from held to used and frees only the part the
+    read demonstrably did not send, so used + held never grows and used never falls. Held
+    to the same lease as the reservation, so only the worker that reserved can settle. A
+    finished run is left alone: finishing already charged its holds in full.
+    """
+    if any(type(value) is not int for value in (release, spent)) or not 0 <= spent <= release:
+        raise ValueError("Settle whole calls, spending no more than was released")
+    if release == 0:
+        return False
+    now = _clock(now)
+    row = await get_run(db, tenant_id, run_id, lock=True)
+    if row.status == "finished":
+        await _commit(db, tenant_id)
+        return False
+    _lease(row, lease_token, now)
+    if release > (row.api_calls_held or 0):
+        raise StateError("run_hold_exceeded")
+    row.api_calls_held -= release
+    row.api_calls_used += spent
     await _commit(db, tenant_id)
     return True
 
