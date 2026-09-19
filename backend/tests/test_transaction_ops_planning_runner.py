@@ -47,7 +47,8 @@ async def test_runner_persists_a_pending_human_proposal_and_does_not_execute(db,
 
     async def guard(*args):
         current = await state.get_run(db, actor.tenant_id, run.id)
-        assert current.api_calls_used == 16  # Source + NetSuite + guard before I/O.
+        # Source (2) + NetSuite (10 reserved, less its 7 data calls: the fake sends none) + guard (4), before I/O.
+        assert current.api_calls_used == 2 + 10 - 7 + 4
         return case.guard
 
     result = await run_case(db, planning_run, guard)

@@ -129,7 +129,8 @@ async def test_investigation_spends_before_unsaved_preview_and_persists_only_a_p
 
     async def preview(db, tenant, config, payload):
         current = await state.get_run(db, tenant, run.id)
-        assert current.api_calls_used == 16
+        # Source (2) + NetSuite (10 reserved, less its 7 data calls: the fake sends none) + guard (4), before I/O.
+        assert current.api_calls_used == 2 + 10 - 7 + 4
         assert payload == case.prepared.payload_json
         return case.guard
 
