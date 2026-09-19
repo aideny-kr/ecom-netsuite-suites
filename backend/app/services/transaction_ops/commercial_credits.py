@@ -16,6 +16,7 @@ from app.services.transaction_ops.netsuite_reader import (
 )
 
 MAX_CREDIT_READS = 12
+MAX_INVOICE_READS = 4  # The order's invoice lookup, before the credit reads above.
 APPLICATION_FIELDS = frozenset({"doc", "apply", "amount", "line", "type", "refNum", "createdFrom"})
 CREDIT_FIELDS = HEADER_FIELDS | {
     "createdFrom",
@@ -396,7 +397,11 @@ async def read_commercial_credit_for_order(db, tenant_id, config, source, target
     }
     try:
         async with authenticated_reader(
-            db, tenant_id, config["netsuite_connection_id"], config["netsuite_account_id"], max_api_calls=4
+            db,
+            tenant_id,
+            config["netsuite_connection_id"],
+            config["netsuite_account_id"],
+            max_api_calls=MAX_INVOICE_READS,
         ) as reader:
             raw = await reader.request(
                 "POST",

@@ -680,3 +680,31 @@ async def test_a_settle_that_fails_after_a_failed_read_leaves_the_reads_own_erro
     result = await run_with(state, _source_reader=AsyncMock(return_value=source_order()), _target_reader=fails)
     state.settle_budget.assert_awaited_once()
     assert result["termination_reason"] == expected["termination_reason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_is_paid_by_its_own_reservation_not_again_by_the_first_hold():
+    """A retry reserves its own full cost. Its sends are covered there, so they must not
+    also shrink what the first attempt hands back, or the same calls are charged twice."""
+    from app.services.transaction_ops.call_meter import note_call
+    from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
+
+    attempts = []
+
+    async def times_out_then_succeeds(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            for _ in range(3):
+                note_call()
+            raise NetSuiteEvidenceError("read_timeout")
+        for _ in range(2):
+            note_call()
+        return missing_target()
+
+    state = State()
+    await run_with(state, _source_reader=AsyncMock(return_value=source_order()), _target_reader=times_out_then_succeeds)
+    assert len(attempts) == 2
+    # First attempt: 3 of 7 data calls sent, so 4 come back; the retry's 10 are spent as reserved.
+    assert ("reserve", 10, 0) in state.events
+    assert ("settle", 10, 6) in state.events
+    assert state.run.progress_json["metered_calls"] == 5

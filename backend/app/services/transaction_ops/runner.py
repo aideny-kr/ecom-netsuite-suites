@@ -5,6 +5,7 @@ customer-data writes. Each provider read is preceded by a committed reservation;
 the cursor is committed before reads and after each persisted observation.
 """
 
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -317,6 +318,7 @@ async def run_investigation(
 ):
     from app.services.ingestion.solidus_sync import save_observed_order
     from app.services.transaction_ops import metabase_reader
+    from app.services.transaction_ops.call_meter import metered
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
     from app.services.transaction_ops.netsuite_changes import read_changed_orders
@@ -372,12 +374,12 @@ async def run_investigation(
             db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, hold=hold, now=clock()
         )
 
-    async def bounded_read(factory, *, retry_calls=0):
+    async def bounded_read(factory, *, retry_calls=0, reserve_retry=None):
         return await read_with_recovery(
             factory,
             retry_calls=retry_calls,
             progress=progress,
-            reserve=reserve,
+            reserve=reserve_retry or reserve,
             save=save,
             remaining=lambda: (run.deadline_at - clock()).total_seconds(),
         )
@@ -389,23 +391,34 @@ async def run_investigation(
         ``data_calls`` its data share. Only that share can come back: the rest covers
         sign-in token maintenance, which happens when a reader is built and outside the
         metered send path, so it is charged whether or not a refresh occurred. A retry
-        reserves again inside ``bounded_read`` and its sends are metered here, which can
-        only shrink the amount returned. The settle runs on failure too, since a failed
-        read still did not make the calls it did not make; if it never runs, finishing the
-        run charges the whole hold.
+        pays its own full reservation inside ``bounded_read``, so the hold is settled on
+        the first attempt's sends alone: counting the retry's sends against it as well
+        would charge them twice. The settle runs on failure too, since a failed read still
+        did not make the calls it did not make; if it never runs, finishing the run charges
+        the whole hold.
         """
-        from app.services.transaction_ops.call_meter import metered
+        first_attempt = None
+
+        async def reserve_retry(calls):
+            nonlocal first_attempt
+            if first_attempt is None:
+                first_attempt = meter.calls
+            return await reserve(calls)
 
         async def settle(meter):
             progress["metered_calls"] = progress.get("metered_calls", 0) + meter.calls
-            unused = max(0, data_calls - meter.calls)
+            sent = meter.calls if first_attempt is None else first_attempt
+            unused = max(0, data_calls - sent)
             await state.settle_budget(
                 db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
             )
 
         with metered() as meter:
             try:
-                result = await bounded_read(factory, **options)
+                result = await bounded_read(factory, reserve_retry=reserve_retry, **options)
+            except asyncio.CancelledError:
+                # Cancelled from outside: no more awaits here. Finishing charges the hold.
+                raise
             except BaseException as error:
                 # The read's own error must reach the caller: some callers degrade on a
                 # failed read, and a bookkeeping error raised here would turn that into an
@@ -681,12 +694,14 @@ async def run_investigation(
             )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
             from app.services.transaction_ops.commercial_credits import (
+                MAX_CREDIT_READS,
+                MAX_INVOICE_READS,
                 read_commercial_credit_for_order,
                 source_adjustment_basis,
             )
 
             if source_adjustment_basis(orders[0]) and report.get("balance", {}).get("status") == "difference":
-                # At most 4 invoice reads +12 application reads, plus OAuth maintenance.
+                # MAX_INVOICE_READS + MAX_CREDIT_READS data reads, plus OAuth maintenance.
                 # Reserve before the optional proof, preserving the runner's hard budget.
                 if not await reserve(20, hold=True):
                     await state.record_finding(
@@ -696,7 +711,7 @@ async def run_investigation(
                 commercial = await metered_read(
                     lambda: read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report),
                     held=20,
-                    data_calls=16,
+                    data_calls=MAX_INVOICE_READS + MAX_CREDIT_READS,
                 )
                 if commercial:
                     targets["commercial_credit_evidence"] = commercial
