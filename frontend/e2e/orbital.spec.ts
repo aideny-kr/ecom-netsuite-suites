@@ -82,6 +82,10 @@ async function fixture(page: Page, role = "admin") {
           analytics_export: true,
         },
       };
+    else if (path === "/api/v1/onboarding/soul")
+      data = { exists: false, bot_tone: null, netsuite_quirks: null };
+    else if (path === "/api/v1/jobs")
+      data = { items: [], total: 0, page: 1, page_size: 10, pages: 0 };
     else if (path === "/api/v1/settings/branding")
       data = { brand_name: "Framework", brand_color_hsl: null };
     else if (path.includes("/connection/validate")) data = { valid: true };
@@ -755,4 +759,58 @@ test('persisted MCP Chat table downloads CSV and Excel without a REST query', as
   await expect(page.getByRole('button',{name:'Excel',exact:true})).toBeVisible();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await screenshot(page,'chat-data-frame-downloads-mobile');
+});
+
+for (const entry of ["/settings", "/connections"]) {
+test(`Company profile deep link selects Workspace from Agent and supports history at ${entry}`, async ({page}) => {
+  await fixture(page);
+  await page.goto(`${entry}#agent`);
+  const sections = page.getByRole('navigation', {name:'Settings sections'});
+  await expect(sections.getByRole('link', {name:/Agent Models/})).toHaveAttribute('aria-current','location');
+  await page.getByRole('link', {name:'Company profile',exact:true}).click();
+  await expect(page).toHaveURL(/#workspace$/);
+  await expect(sections.getByRole('link', {name:/Workspace Profile/})).toHaveAttribute('aria-current','location');
+  await expect(page.getByRole('heading', {name:'Company profile',exact:true})).toBeVisible();
+  await page.goBack();
+  await expect(sections.getByRole('link', {name:/Agent Models/})).toHaveAttribute('aria-current','location');
+  await page.goForward();
+  await expect(page.getByRole('heading', {name:'Company profile',exact:true})).toBeVisible();
+});
+}
+
+
+test("Company instructions stay in one editor without navigation writes", async ({ page }) => {
+  const state = await fixture(page);
+  await page.goto("/settings#agent");
+  await expect(page.getByRole("heading", { name: "Company instructions", exact: true })).toHaveCount(1);
+  await page.getByLabel("Agent tone", { exact: true }).fill("Synthetic unsaved tone");
+  await page.getByLabel("Agent tone", { exact: true }).press("Tab");
+  await expect(page.getByLabel("NetSuite guidance", { exact: true })).toBeFocused();
+  await page.getByLabel("NetSuite guidance", { exact: true }).fill("Synthetic unsaved guidance");
+  const sections = page.getByRole("navigation", { name: "Settings sections" });
+  await sections.getByRole("link", { name: /^Advanced/ }).click();
+  await expect(page.getByRole("heading", { name: "Activity and maintenance" })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByLabel("Agent tone", { exact: true })).toHaveValue("Synthetic unsaved tone");
+  await expect(page.getByLabel("NetSuite guidance", { exact: true })).toHaveValue("Synthetic unsaved guidance");
+  expect(state.writes).toHaveLength(0);
+  await page.getByRole("heading", { name: "Company instructions", exact: true }).scrollIntoViewIfNeeded();
+  await screenshot(page, "instructions-desktop");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByLabel("Agent tone", { exact: true }).scrollIntoViewIfNeeded();
+  await screenshot(page, "instructions-mobile");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test("Viewer Settings keeps five groups and hides instruction and policy editors", async ({ page }) => {
+  const state = await fixture(page, "readonly");
+  await page.goto("/settings#agent");
+  const sections = page.getByRole("navigation", { name: "Settings sections" });
+  await expect(sections.getByRole("link")).toHaveCount(5);
+  await expect(page.getByText("An administrator manages agent configuration and approval policy.")).toBeVisible();
+  await expect(page.getByLabel("Agent tone", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save instructions", exact: true })).toHaveCount(0);
+  await sections.getByRole("link", { name: /^Team & access/ }).click();
+  await expect(page.getByText(/Contact your administrator to manage team members/)).toBeVisible();
+  expect(state.writes).toHaveLength(0);
 });
