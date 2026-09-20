@@ -67,6 +67,23 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-sonnet-5"
     # Staged rollout of evidence-based answer review; no mutation permission changes.
     CHAT_EVIDENCE_COMPLETION_ENABLED: bool = False
+    # ── TypeSafe Jev (typed-decision model) ─────────────────────────────────
+    # Everything defaults to OFF and DENIED. A call leaves the process only when
+    # the key is set AND the tenant is in JEV_TENANT_ALLOWLIST (comma-separated
+    # tenant UUIDs) — enforced in services/typesafe/client.py, the one choke point.
+    # Real tenants stay off the allowlist until zero-retention terms are agreed.
+    # Spec: docs/superpowers/specs/2026-09-20-typesafe-jev-integration-research.md
+    TYPESAFE_API_KEY: str = ""
+    JEV_TENANT_ALLOWLIST: str = ""
+    # Pinned: `jev-latest` moves on release and would silently shift tuned thresholds.
+    JEV_MODEL: str = "jev-1.13.0"
+    JEV_TIMEOUT_SECONDS: float = 1.5
+    # off | shadow (current path decides; Jev is recorded beside it) | live (Jev
+    # decides when confident, current path otherwise).
+    JEV_RECON_RESOLUTION_MODE: str = "off"
+    JEV_PRETURN_MODE: str = "off"
+    JEV_RECON_MIN_CONFIDENCE: float = 0.8
+    JEV_ROUTE_MIN_CONFIDENCE: float = 0.8
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).
     OPENROUTER_API_KEY: str = ""
     DEFAULT_AI_PROVIDER: str = "anthropic"
