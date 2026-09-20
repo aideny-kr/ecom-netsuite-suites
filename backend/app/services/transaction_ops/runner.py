@@ -5,6 +5,7 @@ customer-data writes. Each provider read is preceded by a committed reservation;
 the cursor is committed before reads and after each persisted observation.
 """
 
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -317,10 +318,12 @@ async def run_investigation(
 ):
     from app.services.ingestion.solidus_sync import save_observed_order
     from app.services.transaction_ops import metabase_reader
+    from app.services.transaction_ops.call_meter import metered
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
     from app.services.transaction_ops.netsuite_changes import read_changed_orders
     from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
+    from app.services.transaction_ops.netsuite_reader import MAX_API_CALLS as NETSUITE_READ_CALLS
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
     from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS, read_netsuite_refunds
     from app.services.transaction_ops.netsuite_transport import (
@@ -364,22 +367,75 @@ async def run_investigation(
             "needs_review": progress["needs_review"],
         }
 
-    async def reserve(calls, orders=0):
+    async def reserve(calls, orders=0, *, hold=False):
         if not await (_enabled or enabled)(db, tenant_id):
             raise FeatureRevokedError
         return await state.reserve_budget(
-            db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, now=clock()
+            db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, hold=hold, now=clock()
         )
 
-    async def bounded_read(factory, *, retry_calls=0):
+    async def bounded_read(factory, *, retry_calls=0, reserve_retry=None):
         return await read_with_recovery(
             factory,
             retry_calls=retry_calls,
             progress=progress,
-            reserve=reserve,
+            reserve=reserve_retry or reserve,
             save=save,
             remaining=lambda: (run.deadline_at - clock()).total_seconds(),
         )
+
+    async def metered_read(factory, *, held, data_calls, **options):
+        """A bounded read charged for what it sent rather than the worst case reserved.
+
+        ``held`` is the reservation made with ``hold=True`` just before this read, and
+        ``data_calls`` its data share. Only that share can come back: the rest covers
+        sign-in token maintenance, which happens when a reader is built and outside the
+        metered send path, so it is charged whether or not a refresh occurred. A retry
+        pays its own full reservation inside ``bounded_read``, so the hold is settled on
+        the first attempt's sends alone: counting the retry's sends against it as well
+        would charge them twice. The settle runs on failure too, since a failed read still
+        did not make the calls it did not make; if it never runs, finishing the run charges
+        the whole hold.
+        """
+        first_attempt = None
+
+        async def reserve_retry(calls):
+            nonlocal first_attempt
+            if first_attempt is None:
+                first_attempt = meter.calls
+            return await reserve(calls)
+
+        async def settle(meter):
+            progress["metered_calls"] = progress.get("metered_calls", 0) + meter.calls
+            sent = meter.calls if first_attempt is None else first_attempt
+            unused = max(0, data_calls - sent)
+            await state.settle_budget(
+                db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
+            )
+
+        with metered() as meter:
+            try:
+                result = await bounded_read(factory, reserve_retry=reserve_retry, **options)
+            except asyncio.CancelledError:
+                # Cancelled from outside: no more awaits here. Finishing charges the hold.
+                raise
+            except BaseException as error:
+                # The read's own error must reach the caller: some callers degrade on a
+                # failed read, and a bookkeeping error raised here would turn that into an
+                # abort. Nothing is lost if the settle fails, since finishing the run
+                # charges the hold in full. A read that raises also ends the run without
+                # another checkpoint, so the count is saved here or lost with it.
+                try:
+                    await settle(meter)
+                    await save()
+                except Exception as bookkeeping:
+                    error.add_note(f"settling the read's budget also failed: {bookkeeping!r}")
+                raise
+            # A successful read is settled outside any handler, so a lost lease here stops
+            # the run as it would at the next checkpoint. The count is saved at that
+            # checkpoint rather than with another write per read.
+            await settle(meter)
+            return result
 
     try:
         if not await (_enabled or enabled)(db, tenant_id):
@@ -620,9 +676,9 @@ async def run_investigation(
                 progress["pending_refs"] = progress["pending_refs"][1:]
                 await save()
                 continue
-            if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
+            if not await reserve(10, hold=True):  # NETSUITE_READ_CALLS data reads plus OAuth maintenance.
                 return await finish("budget")
-            targets = await bounded_read(
+            targets = await metered_read(
                 lambda: target_reader(
                     db,
                     tenant_id,
@@ -632,24 +688,30 @@ async def run_investigation(
                     reference,
                     mapping.reference_field,
                 ),
+                held=10,
+                data_calls=NETSUITE_READ_CALLS,
                 retry_calls=10,
             )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
             from app.services.transaction_ops.commercial_credits import (
+                MAX_CREDIT_READS,
+                MAX_INVOICE_READS,
                 read_commercial_credit_for_order,
                 source_adjustment_basis,
             )
 
             if source_adjustment_basis(orders[0]) and report.get("balance", {}).get("status") == "difference":
-                # At most 4 invoice reads +12 application reads, plus OAuth maintenance.
+                # MAX_INVOICE_READS + MAX_CREDIT_READS data reads, plus OAuth maintenance.
                 # Reserve before the optional proof, preserving the runner's hard budget.
-                if not await reserve(20):
+                if not await reserve(20, hold=True):
                     await state.record_finding(
                         db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
                     )
                     return await finish("budget")
-                commercial = await bounded_read(
-                    lambda: read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report)
+                commercial = await metered_read(
+                    lambda: read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report),
+                    held=20,
+                    data_calls=MAX_INVOICE_READS + MAX_CREDIT_READS,
                 )
                 if commercial:
                     targets["commercial_credit_evidence"] = commercial
@@ -675,10 +737,10 @@ async def run_investigation(
                 except Exception:
                     refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
                 if len(targets.get("orders") or []) == 1 and targets["orders"][0].get("header_complete") is True:
-                    if not await reserve(MAX_REFUND_CALLS + 3):
+                    if not await reserve(MAX_REFUND_CALLS + 3, hold=True):
                         return await finish("budget")
                     try:
-                        refunds["target"] = await bounded_read(
+                        refunds["target"] = await metered_read(
                             lambda: (_target_refunds_reader or read_netsuite_refunds)(
                                 db,
                                 tenant_id,
@@ -692,7 +754,9 @@ async def run_investigation(
                                     if mapping.refund_adjustments
                                     else {}
                                 ),
-                            )
+                            ),
+                            held=MAX_REFUND_CALLS + 3,
+                            data_calls=MAX_REFUND_CALLS,
                         )
                     except (state_service.StateError, FeatureRevokedError):
                         raise

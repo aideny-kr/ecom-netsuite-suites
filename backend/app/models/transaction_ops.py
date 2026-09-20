@@ -82,7 +82,7 @@ class TransactionRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             name="ck_tx_run_reason",
         ),
         CheckConstraint(
-            "api_calls_used >= 0 AND api_calls_used <= max_api_calls "
+            "api_calls_used >= 0 AND api_calls_held >= 0 AND api_calls_used + api_calls_held <= max_api_calls "
             "AND orders_used >= 0 AND orders_used <= max_orders",
             name="ck_tx_run_spend",
         ),
@@ -99,6 +99,8 @@ class TransactionRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     max_api_calls: Mapped[int] = mapped_column(Integer)
     max_orders: Mapped[int] = mapped_column(Integer)
     api_calls_used: Mapped[int] = mapped_column(Integer, default=0)
+    # Reserved for a read in flight and not yet settled; see migration 110.
+    api_calls_held: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     orders_used: Mapped[int] = mapped_column(Integer, default=0)
     deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

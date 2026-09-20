@@ -178,7 +178,7 @@ async def reconcile(db, tenant_id, run, p, report):
     result = None
     defect = None
     remaining = (run.deadline_at - now).total_seconds()
-    if remaining <= 0 or run.api_calls_used + READ_CALLS > run.max_api_calls:
+    if remaining <= 0 or run.api_calls_used + (run.api_calls_held or 0) + READ_CALLS > run.max_api_calls:
         reason = "credit_recheck_budget_exhausted"
     else:
         # Reserve before reading; a failure also consumes its reserved budget.

@@ -13,7 +13,6 @@ from app.services.chat.write_confirmation_service import build_confirmation_payl
 from app.services.transaction_ops import accounting_credit_recheck as recheck
 from app.services.transaction_ops import accounting_group, accounting_recheck, credit_api_correction
 from app.services.transaction_ops.credit_reallocation import build_intent
-from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS
 from tests.test_accounting_recheck import approved_credit  # noqa: F401
 from tests.test_credit_api_correction import schema
 from tests.test_posting_balance import inputs
@@ -194,6 +193,7 @@ async def test_readonly_recheck_reserves_budget_audits_and_never_reuses_failed_e
         lease_token=uuid4(),
         deadline_at=now + timedelta(minutes=5),
         api_calls_used=0,
+        api_calls_held=0,
         max_api_calls=remaining_calls,
         params_json={"verified_at": (now - timedelta(seconds=1)).isoformat(), "approval_message_id": str(uuid4())},
     )
@@ -307,9 +307,11 @@ async def test_full_runner_persists_credit_recheck_case_and_audit_without_writes
     assert result["termination_reason"] == "done"
     assert run.progress_json["settlement"]["status"] == expected
     assert run.progress_json["settlement"]["cash_settlement"] == "not_verified"
-    # Everything the run spends besides the refund read, plus that budget. Spelled out as a
-    # literal this silently became wrong the moment the budget changed.
-    assert run.api_calls_used == 73 + MAX_REFUND_CALLS
+    # Every reservation the run makes, less the data share of the two metered reads that
+    # these fake readers never send: 7 for the order read and MAX_REFUND_CALLS for the
+    # refund read. Each keeps its OAuth maintenance share; what remains is 73 - 7.
+    # Spelled out as a literal this silently became wrong the moment the budget changed.
+    assert run.api_calls_used == 73 - 7
     fresh.assert_awaited_once()  # No extra subledger reads at the partial refund checkpoint.
     guard.assert_not_awaited()
     assert not await state_service.list_proposals(db, actor.tenant_id, run_id=run.id)

@@ -36,6 +36,7 @@ def _run(now, *, max_api_calls=200):
         lease_token=uuid4(),
         deadline_at=now + timedelta(minutes=5),
         api_calls_used=0,
+        api_calls_held=0,
         max_api_calls=max_api_calls,
         params_json={"verified_at": (now - timedelta(seconds=1)).isoformat(), "approval_message_id": str(uuid4())},
     )
