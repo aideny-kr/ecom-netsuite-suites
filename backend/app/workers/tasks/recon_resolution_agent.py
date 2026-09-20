@@ -47,6 +47,31 @@ def _update_job_progress(tenant_id: str, job_id, processed: int, total: int) -> 
         logger.warning("resolution_agent.progress_update_failed", extra={"job_id": str(job_id)})
 
 
+async def _record_jev_comparison(db: AsyncSession, tenant_id, run_id, proposal_id, shadow: dict) -> None:
+    """Persist one Jev-vs-LLM comparison. Decisions and timings only — no tenant text.
+
+    Inside a savepoint: apply_agent_proposal commits this session once per item, and
+    a failed audit insert must not take the proposal down with it.
+    """
+    from app.services.audit_service import log_event
+
+    try:
+        async with db.begin_nested():
+            await log_event(
+                db=db,
+                tenant_id=tenant_id,
+                category="reconciliation",
+                action="recon.jev_comparison",
+                actor_type="system",
+                resource_type="recon_resolution_proposal",
+                resource_id=str(proposal_id),
+                correlation_id=str(run_id),
+                payload=shadow,
+            )
+    except Exception:
+        logger.warning("resolution_agent.jev_comparison_not_recorded", extra={"proposal_id": str(proposal_id)})
+
+
 async def run_resolution_agent(
     db: AsyncSession,
     tenant_id: str,
@@ -64,11 +89,10 @@ async def run_resolution_agent(
     from app.services.reconciliation.resolution_agent import (
         PER_ITEM_TIMEOUT_SECONDS,
         apply_agent_proposal,
-        classify_item,
         fetch_agent_eligible,
         gather_context,
-        validate_output,
     )
+    from app.services.reconciliation.resolution_jev import decide_item
 
     tid = uuid.UUID(str(tenant_id))
     rid = uuid.UUID(str(run_id))
@@ -104,13 +128,15 @@ async def run_resolution_agent(
     contract_violations = 0
 
     for item in items:
+        shadow = None
         try:
             context = await gather_context(db, tid, item)
-            out = await asyncio.wait_for(
-                classify_item(adapter, model, context),
+            # decide_item is the LLM path unchanged when JEV_RECON_RESOLUTION_MODE
+            # is off; both models' answers go through the same validate_output.
+            validated, shadow = await asyncio.wait_for(
+                decide_item(tid, adapter, model, context, materiality),
                 timeout=PER_ITEM_TIMEOUT_SECONDS,
             )
-            validated = validate_output(out, context, materiality)
         except Exception:
             logger.warning("resolution_agent.item_classification_failed", extra={"proposal_id": str(item.id)})
             validated = {
@@ -127,6 +153,8 @@ async def run_resolution_agent(
         else:
             upgraded += 1
 
+        if shadow is not None:
+            await _record_jev_comparison(db, tid, rid, item.id, shadow)
         await apply_agent_proposal(db, item, validated)
         processed += 1
 
