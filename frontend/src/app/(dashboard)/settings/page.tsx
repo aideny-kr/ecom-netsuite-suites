@@ -1174,9 +1174,9 @@ function SoulSection() {
       setNetsuiteQuirks(updated.netsuite_quirks || "");
       setIsExisting(updated.exists);
       setIsEditing(false);
-      toast({ title: "AI Soul configuration saved" });
+      toast({ title: "Company instructions saved" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save AI soul configuration");
+      setError(err instanceof Error ? err.message : "Failed to save company instructions");
     } finally {
       setIsSaving(false);
     }
@@ -1188,9 +1188,9 @@ function SoulSection() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold">AI Personality & Core Logic (Soul)</h3>
+          <h3 className="text-lg font-semibold">Company instructions</h3>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
-            Set the tone and manner of the chatbot and specific quirks about your NetSuite setup.
+            Set the agent’s tone and guidance for your NetSuite setup. Save changes explicitly below.
           </p>
         </div>
         {isExisting && !isEditing && (
@@ -1213,7 +1213,7 @@ function SoulSection() {
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
                   <Brain className="h-4 w-4 text-primary" />
-                  <span className="text-[13px] font-medium">Chatbot Tone & Manner</span>
+                  <span className="text-[13px] font-medium">Agent tone</span>
                 </div>
                 <p className="text-[13px] text-muted-foreground whitespace-pre-wrap">
                   {botTone}
@@ -1229,7 +1229,7 @@ function SoulSection() {
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
                   <Database className="h-4 w-4 text-primary" />
-                  <span className="text-[13px] font-medium">NetSuite Quirks & Business Logic</span>
+                  <span className="text-[13px] font-medium">NetSuite guidance</span>
                 </div>
                 <p className="text-[13px] text-muted-foreground whitespace-pre-wrap">
                   {netsuiteQuirks}
@@ -1246,13 +1246,14 @@ function SoulSection() {
         ) : (
           <div className="space-y-5">
             <div className="space-y-1.5">
-              <label className="text-[13px] font-medium">
-                Chatbot Tone & Manner
+              <label htmlFor="company-agent-tone" className="text-[13px] font-medium">
+                Agent tone
               </label>
               <p className="text-[12px] text-muted-foreground mb-1">
                 Instructions on how the AI should behave (e.g., &quot;Professional, technical, concise, snarky...&quot;).
               </p>
               <textarea
+                id="company-agent-tone"
                 value={botTone}
                 onChange={(e) => setBotTone(e.target.value)}
                 placeholder="e.g. Always respond in bullet points and use emojis..."
@@ -1261,13 +1262,14 @@ function SoulSection() {
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-[13px] font-medium">
-                NetSuite Quirks & Business Logic
+              <label htmlFor="company-netsuite-guidance" className="text-[13px] font-medium">
+                NetSuite guidance
               </label>
               <p className="text-[12px] text-muted-foreground mb-1">
                 Custom fields, record specific rules, script behaviors or anything specific to your NetSuite instance.
               </p>
               <textarea
+                id="company-netsuite-guidance"
                 value={netsuiteQuirks}
                 onChange={(e) => setNetsuiteQuirks(e.target.value)}
                 placeholder="e.g. We use custbody_priority for SLA routing. Sales order net amount is calculated by ri_ue_copy_so_net_amount.js..."
@@ -1289,7 +1291,7 @@ function SoulSection() {
                 {isSaving ? (
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                 ) : null}
-                Save Configuration
+                Save instructions
               </Button>
               {isExisting && (
                 <Button
@@ -2887,7 +2889,7 @@ export default function SettingsPage() {
           </>}
         </SettingsSection>
         <SettingsSection id="agent" label="Agent">
-          <div className="rounded-xl border bg-card p-5"><h3 className="font-semibold">Skills and company context</h3><p className="mt-2 text-sm text-muted-foreground">Browse expertise in <Link className="text-primary underline" href="/skills">Skills</Link> and review saved context in <Link className="text-primary underline" href="/settings#workspace">Company profile</Link>.</p></div>
+          <div className="rounded-xl border bg-card p-5"><h3 className="font-semibold">Skills and company context</h3><p className="mt-2 text-sm text-muted-foreground">Browse expertise in <Link className="text-primary underline" href="/skills">Skills</Link> and review saved context in <a className="text-primary underline" href="#workspace">Company profile</a>.</p></div>
           {isAdmin && <><AiConfigSection /><ChatSettingsSection /><SoulSection /><SectionErrorBoundary name="Governance Policy"><GovernancePolicySection /></SectionErrorBoundary></>}
           {!isAdmin && <p className="text-sm text-muted-foreground">An administrator manages agent configuration and approval policy.</p>}
         </SettingsSection>

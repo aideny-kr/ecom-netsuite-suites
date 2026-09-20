@@ -187,11 +187,18 @@ def _raw_error(
     source: str | None = "import",
     code: str | None = "TIMEOUT",
     message: str = "Request timed out",
-    occurred_at: str | None = "2026-08-20T10:00:00Z",
-    purge_at: str = "2026-09-19T10:00:00Z",
+    occurred_at: str | None = None,
+    purge_at: str | None = None,
 ) -> dict:
     """Shaped like sanitizer.py's `_ERROR` allowlist -- same convention as
-    test_celigo_error_signatures.py's `_raw_error`."""
+    test_celigo_error_signatures.py's `_raw_error`.
+
+    The dates are relative to now, never literals. A fixed `purgeAt` becomes the
+    past as the calendar moves: these errors then read as PURGED rather than open,
+    and every test whose subject is an OPEN error silently changes meaning
+    overnight. That is what happened on 2026-09-20 to the two Phase E resolution
+    tests, whose purge date was 2026-09-19."""
+    now = datetime.now(timezone.utc)
     return {
         "errorId": celigo_id,
         "traceKey": f"trace_{celigo_id}",
@@ -199,8 +206,8 @@ def _raw_error(
         "source": source,
         "code": code,
         "message": message,
-        "occurredAt": occurred_at,
-        "purgeAt": purge_at,
+        "occurredAt": occurred_at if occurred_at is not None else (now - timedelta(days=30)).isoformat(),
+        "purgeAt": purge_at if purge_at is not None else (now + timedelta(days=30)).isoformat(),
         "_flowJobId": "job_1",
         "retriable": True,
     }
