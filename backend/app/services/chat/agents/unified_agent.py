@@ -906,6 +906,7 @@ class UnifiedAgent(BaseSpecialistAgent):
 
         self._routing_usage = TokenUsage()
         self._routing_error = False
+        self._jev_preturn_record = None
         self._request_kind = None
         self._selected_user_sources = ()
         from app.core.config import settings
@@ -940,7 +941,8 @@ class UnifiedAgent(BaseSpecialistAgent):
 
     async def _select_analytics_source(self, task, context, adapter, model, history=None):
         from app.services.chat.metabase_context import metabase_tool_names
-        from app.services.chat.request_routing import RequestRoute, classify_request
+        from app.services.chat.preturn_jev import route_request
+        from app.services.chat.request_routing import RequestRoute
         from app.services.chat.source_selection import SourceSelection, resolve_source_selection
         from app.services.chat.tool_inventory import available_data_sources
 
@@ -962,7 +964,9 @@ class UnifiedAgent(BaseSpecialistAgent):
             route = RequestRoute(kind="conversation", continuation=True)
         else:
             try:
-                routing = await classify_request(
+                # route_request IS classify_request when JEV_PRETURN_MODE is off.
+                routing, self._jev_preturn_record = await route_request(
+                    tenant_id=self.tenant_id,
                     task=task,
                     history=history,
                     adapter=adapter,
@@ -985,6 +989,34 @@ class UnifiedAgent(BaseSpecialistAgent):
             context_need=self._context_need,
             route=route,
         )
+
+    async def _record_jev_preturn(self, db, session_id=None):
+        """Persist the Jev-vs-router comparison: decisions and timings, never the user's words.
+
+        A savepoint, because this shares the turn's session and an audit failure must not
+        break the turn.
+        """
+        record, self._jev_preturn_record = getattr(self, "_jev_preturn_record", None), None
+        if record is None:
+            return
+        from app.services.audit_service import log_event
+
+        try:
+            async with db.begin_nested():
+                await log_event(
+                    db=db,
+                    tenant_id=self.tenant_id,
+                    category="chat",
+                    action="chat.jev_preturn_comparison",
+                    actor_id=self.user_id,
+                    actor_type="system",
+                    resource_type="chat_session",
+                    resource_id=str(session_id) if session_id else None,
+                    correlation_id=self.correlation_id,
+                    payload=record,
+                )
+        except Exception:
+            _logger.warning("unified_agent.jev_preturn_comparison_not_recorded", exc_info=True)
 
     def _finish_source_routing(self, result, selection):
         result.request_context = selection.request_context
@@ -1053,6 +1085,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             if not (plan_mode_clarify_only or plan_mode_resume_source)
             else self._plan_source_selection(plan_mode_resume_source)
         )
+        await self._record_jev_preturn(db)
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
         if self._transaction_workflow:
@@ -1129,6 +1162,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             if not (plan_mode_clarify_only or plan_mode_resume_source)
             else self._plan_source_selection(plan_mode_resume_source)
         )
+        await self._record_jev_preturn(db, session_id)
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
         if self._transaction_workflow:

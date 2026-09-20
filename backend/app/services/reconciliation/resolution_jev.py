@@ -23,7 +23,8 @@ import time
 from decimal import Decimal, InvalidOperation
 
 from app.core.config import settings
-from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, classify_item, validate_output
+from app.services.reconciliation import resolution_agent
+from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, validate_output
 from app.services.reconciliation.resolution_planner import FEE_EXPLAIN_TOLERANCE
 from app.services.typesafe.client import JevUnavailableError, ask
 
@@ -138,7 +139,9 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
     """Return (validated proposal, shadow record or None). Never raises for Jev's sake."""
     mode = settings.JEV_RECON_RESOLUTION_MODE
     if mode not in {"shadow", "live"}:
-        return validate_output(await classify_item(adapter, model, context), context, materiality), None
+        return validate_output(
+            await resolution_agent.classify_item(adapter, model, context), context, materiality
+        ), None
 
     record = {
         "mode": mode,
@@ -179,7 +182,7 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
         return validate_output(out, context, materiality), record
 
     start = time.monotonic()
-    out = await classify_item(adapter, model, context)
+    out = await resolution_agent.classify_item(adapter, model, context)
     record["llm_elapsed_ms"] = int((time.monotonic() - start) * 1000)
     validated = validate_output(out, context, materiality)
     record["llm_action"] = validated["action"]

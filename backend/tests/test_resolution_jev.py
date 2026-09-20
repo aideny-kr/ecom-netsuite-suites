@@ -79,7 +79,7 @@ def llm(monkeypatch):
         adapter_.calls += 1
         return {"action": adapter_.action, "narrative": "Fee explains the difference.", "key_evidence": ["fee"]}
 
-    monkeypatch.setattr(rj, "classify_item", fake_classify)
+    monkeypatch.setattr(rj.resolution_agent, "classify_item", fake_classify)
     return adapter
 
 
