@@ -18,6 +18,7 @@ beside it) · live (Jev decides at or above JEV_RECON_MIN_CONFIDENCE, else LLM).
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from decimal import Decimal, InvalidOperation
@@ -26,7 +27,7 @@ from app.core.config import settings
 from app.services.reconciliation import resolution_agent
 from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, validate_output
 from app.services.reconciliation.resolution_planner import FEE_EXPLAIN_TOLERANCE
-from app.services.typesafe.client import JevUnavailableError, ask
+from app.services.typesafe.client import try_ask
 
 _NUMERIC = re.compile(r"^[\s$€£-]*\d[\d,]*(\.\d+)?\s*$")
 
@@ -55,7 +56,6 @@ _CRITERIA = {
         "chargeback, dispute or refund is involved."
     ),
 }
-assert set(_CRITERIA) == AGENT_ALLOWED_ACTIONS
 
 _BASIS = {
     "variance_matches_payout_fee": "the variance matches the payout fee",
@@ -135,57 +135,80 @@ def template_narrative(action: str, facts: dict) -> str:
     return f"Decision model proposed {action}. Basis: {reason}. Proposal for human review only."
 
 
+async def _jev(tenant_id, context: dict) -> dict:
+    """Jev's reading as record fields. Cannot raise (try_ask), so the LLM path beside it is safe.
+
+    The criteria/allow-list check is a RUNTIME refusal, not an import-time assert: the worker
+    imports this module unconditionally, and an assert here would take the whole resolution
+    agent down the day someone adds an action — including for tenants with Jev off.
+    """
+    if set(_CRITERIA) != AGENT_ALLOWED_ACTIONS:
+        return {"jev_error": "criteria_out_of_sync"}
+    result, reason = await try_ask(tenant_id, build=lambda: build_request(context))
+    if result is None:
+        return {"jev_error": reason}
+    answer = result.answers["action"]
+    return {
+        "jev_action": answer["choice"],
+        "jev_confidence": answer["confidence"],
+        "jev_probabilities": answer["probabilities"],
+        "jev_elapsed_ms": result.elapsed_ms,
+        "jev_model": result.model,
+    }
+
+
+async def _llm(adapter, model: str, context: dict) -> tuple[dict, int]:
+    start = time.monotonic()
+    out = await resolution_agent.classify_item(adapter, model, context)
+    return out, int((time.monotonic() - start) * 1000)
+
+
 async def decide_item(tenant_id, adapter, model: str, context: dict, materiality) -> tuple[dict, dict | None]:
-    """Return (validated proposal, shadow record or None). Never raises for Jev's sake."""
+    """Return (validated proposal, comparison record or None).
+
+    ``decided_by`` names who actually determined the applied action: "jev", "llm", or
+    "guard" when validate_output vetoed Jev's pick — so the record can be used to measure
+    Jev honestly, including how often the safety net had to step in.
+    """
     mode = settings.JEV_RECON_RESOLUTION_MODE
     if mode not in {"shadow", "live"}:
-        return validate_output(
-            await resolution_agent.classify_item(adapter, model, context), context, materiality
-        ), None
+        out = await resolution_agent.classify_item(adapter, model, context)
+        return validate_output(out, context, materiality), None
 
     record = {
-        "mode": mode,
-        "jev_action": None,
-        "jev_confidence": None,
-        "jev_probabilities": None,
-        "jev_elapsed_ms": None,
-        "jev_error": None,
-        "llm_action": None,
-        "llm_elapsed_ms": None,
-        "agree": None,
-        "decided_by": "llm",
-    }
-    facts = derive_facts(context)
-    try:
-        result = await ask(tenant_id, *build_request(context))
-        answer = result.answers["action"]
-        record.update(
-            jev_action=answer["choice"],
-            jev_confidence=answer.get("confidence"),
-            jev_probabilities=answer.get("probabilities"),
-            jev_elapsed_ms=result.elapsed_ms,
-            jev_model=result.model,
-        )
-    except JevUnavailableError as exc:
-        record["jev_error"] = exc.reason
+        "mode": mode, "jev_action": None, "jev_confidence": None, "jev_probabilities": None,
+        "jev_elapsed_ms": None, "jev_error": None, "llm_action": None, "llm_elapsed_ms": None,
+        "agree": None, "decided_by": "llm", "guard_veto": None, "applied_action": None,
+    }  # fmt: skip
 
-    confident = (
-        record["jev_action"] is not None and (record["jev_confidence"] or 0) >= settings.JEV_RECON_MIN_CONFIDENCE
-    )
+    llm_out = None
+    if mode == "shadow":
+        # Concurrent: shadow must cost the item no extra time inside its timeout budget.
+        jev_fields, (llm_out, record["llm_elapsed_ms"]) = await asyncio.gather(
+            _jev(tenant_id, context), _llm(adapter, model, context)
+        )
+    else:
+        jev_fields = await _jev(tenant_id, context)
+    record.update(jev_fields)
+
+    confident = record["jev_action"] is not None and record["jev_confidence"] >= settings.JEV_RECON_MIN_CONFIDENCE
     if mode == "live" and confident:
-        record["decided_by"] = "jev"
+        facts = derive_facts(context)
         out = {
             "action": record["jev_action"],
             "narrative": template_narrative(record["jev_action"], facts),
             "key_evidence": [key for key in _BASIS if facts.get(key) is True],
         }
-        return validate_output(out, context, materiality), record
+        validated = validate_output(out, context, materiality)
+        record["guard_veto"] = validated.get("contract_violation")
+        record["decided_by"] = "guard" if record["guard_veto"] else "jev"
+        record["applied_action"] = validated["action"]
+        return validated, record
 
-    start = time.monotonic()
-    out = await resolution_agent.classify_item(adapter, model, context)
-    record["llm_elapsed_ms"] = int((time.monotonic() - start) * 1000)
-    validated = validate_output(out, context, materiality)
-    record["llm_action"] = validated["action"]
+    if llm_out is None:
+        llm_out, record["llm_elapsed_ms"] = await _llm(adapter, model, context)
+    validated = validate_output(llm_out, context, materiality)
+    record["llm_action"] = record["applied_action"] = validated["action"]
     if record["jev_action"] is not None:
         record["agree"] = record["jev_action"] == validated["action"]
     return validated, record

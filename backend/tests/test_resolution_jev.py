@@ -86,13 +86,15 @@ def llm(monkeypatch):
 def _patch_jev(monkeypatch, result=None, error=None):
     seen = {}
 
-    async def fake_ask(tenant_id, state, questions, **_):
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        if build is not None:
+            state, questions = build()
         seen["state"], seen["questions"], seen["tenant_id"] = state, questions, tenant_id
         if error:
-            raise error
-        return result
+            return None, error.reason
+        return result, None
 
-    monkeypatch.setattr(rj, "ask", fake_ask)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
     return seen
 
 
@@ -207,3 +209,72 @@ async def test_live_jev_cannot_write_off_a_material_variance(monkeypatch, llm):
     validated, _ = await rj.decide_item(TENANT, llm, "m", context, MATERIALITY)
     assert validated["action"] == "needs_human"
     assert validated["contract_violation"] == "writeoff_je above materiality"
+
+
+# ── gate round 1 ───────────────────────────────────────────────────────────
+
+
+async def test_a_guard_veto_is_recorded_as_the_guards_decision_not_jevs(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+    _patch_jev(monkeypatch, result=_jev("writeoff_je", 0.99))
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(root_cause="chargeback"), MATERIALITY)
+    assert validated["action"] == "needs_human"
+    assert record["decided_by"] == "guard" and record["guard_veto"] == "chargeback_policy"
+    assert record["jev_action"] == "writeoff_je" and record["applied_action"] == "needs_human"
+
+
+async def test_an_unvetoed_jev_decision_records_what_was_applied(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+    _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.95))
+    _, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert record["decided_by"] == "jev" and record["guard_veto"] is None
+    assert record["applied_action"] == "book_fee_line"
+
+
+async def test_shadow_runs_jev_and_the_llm_concurrently(monkeypatch, llm):
+    import asyncio
+
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+    started = []
+
+    async def slow_try_ask(*a, **k):
+        started.append("jev")
+        await asyncio.sleep(0.05)
+        return _jev("carry_forward", 0.9), None
+
+    async def slow_classify(adapter_, model, context):
+        started.append("llm")
+        await asyncio.sleep(0.05)
+        assert started == ["jev", "llm"], "the LLM call must start before Jev finishes"
+        return {"action": "book_fee_line", "narrative": "Fee explains it.", "key_evidence": []}
+
+    monkeypatch.setattr(rj, "try_ask", slow_try_ask)
+    monkeypatch.setattr(rj.resolution_agent, "classify_item", slow_classify)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert validated["action"] == "book_fee_line" and record["jev_action"] == "carry_forward"
+
+
+async def test_a_bug_in_the_request_builder_never_reaches_the_llm_path(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", "k")
+    monkeypatch.setattr(settings, "JEV_TENANT_ALLOWLIST", str(TENANT))
+
+    def broken(_context):
+        raise KeyError("bug")
+
+    monkeypatch.setattr(rj, "build_request", broken)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert validated["action"] == "book_fee_line" and record["jev_error"] == "unexpected:KeyError"
+
+
+async def test_out_of_sync_criteria_disable_jev_instead_of_crashing_the_worker(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+    seen = _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.99))
+    monkeypatch.setattr(rj, "AGENT_ALLOWED_ACTIONS", frozenset({*rj.AGENT_ALLOWED_ACTIONS, "brand_new_action"}))
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert validated["action"] == "book_fee_line" and llm.calls == 1
+    assert record["jev_error"] == "criteria_out_of_sync" and seen == {}
+
+
+def test_the_criteria_cover_exactly_the_allowed_actions():
+    assert set(rj._CRITERIA) == rj.AGENT_ALLOWED_ACTIONS

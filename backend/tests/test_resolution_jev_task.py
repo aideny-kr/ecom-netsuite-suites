@@ -29,12 +29,12 @@ async def _run(db, tenant, monkeypatch, *, mode, jev_action, jev_confidence):
     async def fake_config(_db, _tenant_id):
         return ("anthropic", "test-model", "sk-test", False)
 
-    async def fake_ask(tenant_id, state, questions, **_):
-        return _jev_answer(jev_action, jev_confidence)
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        return _jev_answer(jev_action, jev_confidence), None
 
     monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
     monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
-    monkeypatch.setattr(rj, "ask", fake_ask)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
     monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", mode)
 
     await agent_task.run_resolution_agent(db, str(tenant.id), str(run.id))
@@ -75,7 +75,7 @@ async def test_shadow_applies_the_llm_decision_and_records_the_comparison(db, te
     # Decisions and timings only: no tenant text leaves through the audit payload.
     assert set(payload) <= {
         "mode", "jev_action", "jev_confidence", "jev_probabilities", "jev_elapsed_ms", "jev_error",
-        "jev_model", "llm_action", "llm_elapsed_ms", "agree", "decided_by",
+        "jev_model", "llm_action", "llm_elapsed_ms", "agree", "decided_by", "guard_veto", "applied_action",
     }  # fmt: skip
 
 

@@ -999,24 +999,21 @@ class UnifiedAgent(BaseSpecialistAgent):
         record, self._jev_preturn_record = getattr(self, "_jev_preturn_record", None), None
         if record is None:
             return
-        from app.services.audit_service import log_event
+        from app.services.typesafe.audit import record_comparison
 
-        try:
-            async with db.begin_nested():
-                await log_event(
-                    db=db,
-                    tenant_id=self.tenant_id,
-                    category="chat",
-                    action="chat.jev_preturn_comparison",
-                    actor_id=self.user_id,
-                    actor_type="system",
-                    resource_type="chat_session",
-                    resource_id=str(session_id) if session_id else None,
-                    correlation_id=self.correlation_id,
-                    payload=record,
-                )
-        except Exception:
-            _logger.warning("unified_agent.jev_preturn_comparison_not_recorded", exc_info=True)
+        await record_comparison(
+            db,
+            tenant_id=self.tenant_id,
+            category="chat",
+            action="chat.jev_preturn_comparison",
+            payload=record,
+            actor_id=self.user_id,
+            resource_type="chat_session",
+            # run() has no session id in scope (only run_streaming does); the correlation id
+            # still ties the row to the turn.
+            resource_id=str(session_id) if session_id else None,
+            correlation_id=self.correlation_id,
+        )
 
     def _finish_source_routing(self, result, selection):
         result.request_context = selection.request_context
