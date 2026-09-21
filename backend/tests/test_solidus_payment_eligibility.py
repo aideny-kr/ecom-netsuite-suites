@@ -137,6 +137,7 @@ async def test_exclusion_retires_existing_case_without_claiming_reconciled_and_r
     case = (await case_service.list_cases(db, actor.tenant_id))[0]
     source = envelope()
     source["orders"][0].update(number=REF, payment_state="failed")
+    source["read_at"] = (CASE_NOW + timedelta(seconds=1)).isoformat()
     await observe(db, actor, config, exclusion_report(source), CASE_NOW + timedelta(seconds=1))
     assert not await case_service.list_cases(db, actor.tenant_id)
     assert not (await list_groups(db, actor.tenant_id))["groups"]
@@ -150,7 +151,11 @@ async def test_exclusion_retires_existing_case_without_claiming_reconciled_and_r
         )
     ).all()
     assert len(logs) == 1 and logs[0].payload["reason"] == "source_payment_failed"
-    await observe(db, actor, config, report(), CASE_NOW + timedelta(seconds=2))
+    await observe(db, actor, config, report(observed=CASE_NOW + timedelta(seconds=2)), CASE_NOW + timedelta(seconds=2))
+    assert (await case_service.list_cases(db, actor.tenant_id))[0].id == case.id
+    # A late response from the earlier failed-payment read cannot retire the
+    # subsequently paid order again.
+    await observe(db, actor, config, exclusion_report(source), CASE_NOW + timedelta(seconds=3))
     assert (await case_service.list_cases(db, actor.tenant_id))[0].id == case.id
 
 

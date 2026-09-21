@@ -107,12 +107,12 @@ async def evidence(db, actor, run, ref, status, when, *, source_id="service-1", 
     return row
 
 
-async def recheck(db, actor, root, *, snapshot=None, config_id=None):
+async def recheck(db, actor, root, *, snapshot=None, config_id=None, params=None):
     row = TransactionRun(
         tenant_id=actor.tenant_id,
         config_id=config_id or root.config_id,
         config_snapshot=snapshot or root.config_snapshot,
-        params_json={"order_references": ["R123456789"]},
+        params_json=params or {"order_references": ["R123456789"]},
         work_key=uuid4().hex,
         origin="manual",
         status="finished",
@@ -150,6 +150,87 @@ async def test_later_rechecks_update_review_rows_filters_counts_and_links_withou
     assert (await client.get(url + "?status=needs_review", headers=headers)).json()["items"] == []
     historical = (await client.get(f"/api/v1/transaction-ops/runs/{root.id}/findings", headers=headers)).json()
     assert next(r for r in historical if r["id"] == str(old.id))["report_json"]["balance"]["status"] == "difference"
+
+
+@pytest.mark.parametrize("same_cohort", [False, True])
+async def test_resolved_review_ignores_late_and_interim_scans_but_reopens_new_difference(
+    db, admin_user, monkeypatch, same_cohort
+):
+    from sqlalchemy import select
+
+    from app.services.transaction_ops.review_evidence import period_evidence
+
+    actor = admin_user[0]
+    _, root = await review(db, actor, monkeypatch)
+    ref, now = "R123456789", root.created_at
+    old = await evidence(db, actor, root, ref, "difference", now)
+    old.report_json = {**old.report_json, "_observation": {"final": True, "observed_at": now.isoformat()}}
+    checked = await recheck(db, actor, root)
+    matched = await evidence(db, actor, checked, ref, "matched", now + timedelta(seconds=20))
+    matched.report_json = {
+        **matched.report_json,
+        "_observation": {"final": True, "observed_at": (now + timedelta(seconds=10)).isoformat()},
+    }
+    scan = await recheck(db, actor, root, params=root.params_json if same_cohort else None)
+    delayed = await evidence(db, actor, scan, ref, "difference", now + timedelta(seconds=30))
+    for final, observed in [(True, now), (False, now + timedelta(seconds=40))]:
+        delayed.report_json = {
+            **delayed.report_json,
+            "_observation": {"final": final, "observed_at": observed.isoformat()},
+        }
+        await db.flush()
+        result = await period_review.review_results(db, actor.tenant_id, root.id)
+        assert result["summary"] == {"checked": 1, "matched": 1, "needs_review": 0, "not_verified": 0}
+        assert result["items"][0]["id"] == str(matched.id)
+        # The same evidence query drives the issue groups and cannot resurrect
+        # the historical mismatch when the updated daily row is incomplete.
+        current, _ = await period_evidence(db, actor.tenant_id, root.id)
+        assert list(await db.scalars(select(current.c.id))) == [matched.id]
+    delayed.report_json = {
+        **delayed.report_json,
+        "_observation": {"final": True, "observed_at": (now + timedelta(seconds=40)).isoformat()},
+    }
+    await db.flush()
+    result = await period_review.review_results(db, actor.tenant_id, root.id, status="needs_review")
+    assert result["total"] == 1 and result["items"][0]["id"] == str(delayed.id)
+
+
+@pytest.mark.parametrize("old_status,new_status", [("difference", "matched"), ("matched", "difference")])
+async def test_legacy_late_save_cannot_outrank_newer_marked_reads(db, admin_user, monkeypatch, old_status, new_status):
+    actor = admin_user[0]
+    _, root = await review(db, actor, monkeypatch)
+    now = root.created_at
+    old = await evidence(db, actor, root, "R123456789", old_status, now + timedelta(minutes=30))
+    old.report_json = {
+        **old.report_json,
+        "source": {"record_id": "service-1", "observed_at": now.isoformat()},
+        "targets": [{"observed_at": (now + timedelta(seconds=1)).isoformat()}],
+    }
+    newer = await recheck(db, actor, root)
+    new = await evidence(db, actor, newer, "R123456789", new_status, now + timedelta(minutes=21))
+    new.report_json = {
+        **new.report_json,
+        "_observation": {"final": True, "observed_at": (now + timedelta(minutes=20)).isoformat()},
+    }
+    await db.flush()
+    result = await period_review.review_results(db, actor.tenant_id, root.id)
+    assert result["items"][0]["id"] == str(new.id)
+    assert result["items"][0]["balance"]["status"] == new_status
+
+
+@pytest.mark.parametrize("bad_time", [None, "2026-09-32T00:00:00Z", "not-a-timestamp", "2026-09-20T00:00:00"])
+async def test_malformed_legacy_time_uses_save_time_without_breaking_review(db, admin_user, monkeypatch, bad_time):
+    actor = admin_user[0]
+    _, root = await review(db, actor, monkeypatch)
+    old = await evidence(db, actor, root, "R123456789", "difference", root.created_at)
+    old.report_json = {
+        **old.report_json,
+        "source": {"record_id": "service-1", "observed_at": bad_time},
+        "targets": [],
+    }
+    await db.flush()
+    result = await period_review.review_results(db, actor.tenant_id, root.id)
+    assert result["items"][0]["id"] == str(old.id)
 
 
 @pytest.mark.parametrize(

@@ -137,7 +137,7 @@ async def test_examples_require_same_scope_mapping_issue_and_verified_financial_
     assert all(row["requires_new_human_approval"] for row in result["examples"])
     with pytest.raises(state.StateError, match="not_found"):
         await history(db, tenant_b.id, current.id)
-    different_issue = {**report(), "order_reference": current.order_reference}
+    different_issue = {**report(observed=datetime.now(timezone.utc)), "order_reference": current.order_reference}
     different_issue["balance"]["missing_metrics"] = ["refunds"]
     # A new immutable observation changes applicability; old history stays saved.
     run = await state.create_run(

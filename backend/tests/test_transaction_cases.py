@@ -78,6 +78,62 @@ async def test_case_carries_across_runs_reopens_and_preserves_observations(db, a
             )
 
 
+async def test_late_old_evidence_cannot_reopen_reconciled_case_but_new_discrepancy_can(db, admin_user):
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    await observe(db, actor, config, report(observed=NOW), NOW)
+    case = (await case_service.list_cases(db, actor.tenant_id))[0]
+    matched_at = NOW + timedelta(minutes=1)
+    await observe(db, actor, config, report("matched", matched_at), matched_at)
+    # An overlapping daily job finishes after the correction's readback but
+    # carries the original, pre-correction snapshots.
+    await observe(db, actor, config, report(observed=NOW), matched_at + timedelta(minutes=1))
+    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "reconciled"
+    assert case.latest_report_json["balance"]["status"] == "matched"
+    assert len(await case_service.list_observations(db, actor.tenant_id, case.id)) == 3
+    # Repeated fresh reads of the same corrected amounts do not create a case.
+    later = NOW + timedelta(minutes=3)
+    await observe(db, actor, config, report("matched", later), later)
+    assert await case_service.list_cases(db, actor.tenant_id, status="open") == []
+    assert len(await case_service.list_cases(db, actor.tenant_id)) == 1
+    changed = later + timedelta(minutes=1)
+    await observe(db, actor, config, report(observed=changed), changed)
+    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "open"
+
+
+async def test_finding_observation_marker_is_server_owned(db, admin_user):
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    body = report()
+    body["_observation"] = {"final": False, "observed_at": "3000-01-01T00:00:00Z"}
+    finding = await observe(db, actor, config, body, NOW)
+    assert finding.report_json["_observation"] == {"final": True, "observed_at": NOW.isoformat()}
+
+
+async def test_repeated_scans_apply_existing_net_and_tax_credit_without_reopening_case(db, admin_user):
+    from app.services.transaction_ops.order_reconciliation import reconcile_order
+    from tests.test_refund_adjustment_matching import balance_case
+
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    source, target, scope, refunds = balance_case()
+    source["orders"][0]["included_tax_total"] = "18"
+    proof = refunds["target"]["tax_adjustments"][0]
+    proof.update(kind="credit_memo", reason_id="3", tax_amount="0", item_accounts={"81": "91"})
+    # Before correction the gross refund agrees, but its tax allocation does not.
+    for minute, tax in enumerate(["0", "2", "2", "2", "1"]):
+        now = NOW + timedelta(minutes=minute)
+        source["read_at"] = target["observed_at"] = now.isoformat()
+        proof["tax_amount"] = tax
+        body = report(observed=now)
+        body["balance"] = reconcile_order(source, target, scope, refunds=refunds)
+        await observe(db, actor, config, body, now)
+        cases = await case_service.list_cases(db, actor.tenant_id)
+        assert len(cases) == 1
+        assert cases[0].status == ("reconciled" if tax == "2" else "open")
+        assert body["balance"]["amounts"]["refunds"]["delta"] == "0.00"
+
+
 @pytest.mark.asyncio
 async def test_stale_or_partial_match_cannot_close_case_and_other_tenant_cannot_read(db, admin_user, tenant_b):
     actor = admin_user[0]
