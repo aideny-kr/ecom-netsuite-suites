@@ -86,3 +86,26 @@ def test_inventory_report_uses_bigquery_and_report_id_is_not_guessed():
     )
     schedule.plan_json = {"steps": [{"type": "report.compose", "params": {"report_id": str(uuid.uuid4())}}]}
     assert schedule_use(schedule, "mcp", SimpleNamespace(id=uuid.uuid4(), provider="bigquery")) is None
+
+
+def test_tracking_financial_report_requires_netsuite_without_a_fixed_period():
+    from app.services.connection_usage import schedule_use
+
+    schedule = Schedule(
+        schedule_type="job",
+        plan_json={
+            "steps": [
+                {
+                    "type": "report.compose",
+                    "params": {"playbook_key": "income_statement", "mode": "tracking", "params": {}},
+                }
+            ]
+        },
+    )
+    netsuite = SimpleNamespace(id=uuid.uuid4(), provider="netsuite")
+    assert schedule_use(schedule, "api", netsuite) == "provider requirement"
+    assert schedule_use(schedule, "mcp", SimpleNamespace(id=uuid.uuid4(), provider="bigquery")) is None
+    schedule.plan_json["steps"][0]["params"]["playbook_key"] = "inventory_aging"
+    assert schedule_use(schedule, "api", netsuite) is None
+    schedule.plan_json["steps"][0]["params"]["playbook_key"] = "unknown"
+    assert schedule_use(schedule, "api", netsuite) is None

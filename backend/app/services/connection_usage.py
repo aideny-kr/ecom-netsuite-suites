@@ -37,16 +37,25 @@ def schedule_use(schedule, kind, connection):
             if step.get("type") == "report.compose":
                 # Derive the provider from the existing pure recipe builder,
                 # not from the generic report.compose step name. No query runs.
-                from app.services.report.playbooks import build_playbook_recipe
+                from app.services.report.playbooks import PLAYBOOKS, build_playbook_recipe, supports_tracking_mode
 
                 params = step.get("params") or {}
                 if not isinstance(params, dict) or "playbook_key" not in params:
                     continue  # Report-ID refresh sources need separate review.
                 try:
-                    _, recipe = build_playbook_recipe(params["playbook_key"], params.get("params") or {})
+                    if params.get("mode") == "tracking":
+                        # Tracking resolves the accounting period at execution;
+                        # its supported playbooks use NetSuite financial reports.
+                        if params["playbook_key"] not in PLAYBOOKS or not supports_tracking_mode(
+                            params["playbook_key"]
+                        ):
+                            continue
+                        tools = {"netsuite_financial_report"}
+                    else:
+                        _, recipe = build_playbook_recipe(params["playbook_key"], params.get("params") or {})
+                        tools = {source.get("tool") for source in recipe.get("sources", {}).values()}
                 except (ValueError, TypeError, AttributeError):
                     continue
-                tools = {source.get("tool") for source in recipe.get("sources", {}).values()}
                 if (
                     (kind, connection.provider) == ("api", "netsuite")
                     and "netsuite_financial_report" in tools
