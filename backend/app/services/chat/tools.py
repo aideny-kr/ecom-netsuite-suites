@@ -528,10 +528,11 @@ async def _execute_tool_call_once(
     # out of ns_getRecordTypeMetadata / ns_getSubsidiaries / ns_runCustomSuiteQL,
     # and blocking those would break validation, the slot form and the posting
     # invariants.
-    if not human_approved:
-        from app.services.chat.mutation_guard import classify_mutation as _classify_at_chokepoint
+    from app.services.chat.mutation_guard import classify_mutation, is_record_type_allowed
 
-        _verb = _classify_at_chokepoint(tool_name)
+    _verb = classify_mutation(tool_name)  # the NetSuite mutation verb, or None for every read
+    ext_parsed = parse_external_tool_name(tool_name)
+    if not human_approved:
         if _verb:
             logger.warning(
                 "HITL guard refused an unapproved %s via %s (tenant=%s session=%s)",
@@ -556,13 +557,59 @@ async def _execute_tool_call_once(
             )
     # ── End HITL guard ──
 
-    if tool_name == "transaction_ops_accounting_amendment_apply":
-        from app.services.transaction_ops.native_accounting_dispatch import execute as execute_native
+    # ── System-record deny-list, at the same choke point ──
+    # is_record_type_allowed used to be consulted only where a card is minted. A card
+    # minted before the comparison became case-insensitive, or by a caller that never
+    # minted one, would still reach the ERP here: the approval token proves a human saw
+    # this payload, not that the payload was allowed (agent-graph.md #11). So the list
+    # is enforced where the write leaves, for every NetSuite mutation verb, approved or
+    # not. Only the connector-facing verbs carry a recordType; the internal amendment
+    # tool validates its own binding in its dispatcher.
+    if ext_parsed is not None and _verb:
+        _record_type = (tool_input or {}).get("recordType") if isinstance(tool_input, dict) else None
+        if not is_record_type_allowed(_record_type):
+            logger.warning(
+                "Deny-list refused a %s on record type %r via %s (tenant=%s session=%s approved=%s)",
+                _verb,
+                _record_type,
+                tool_name,
+                tenant_id,
+                session_id,
+                human_approved,
+            )
+            return json.dumps(
+                {
+                    "error": (
+                        f"This {_verb} was NOT executed: {_record_type!r} is a system record type this "
+                        "workspace never writes, or no record type was given."
+                    ),
+                    "blocked_record_type": True,
+                    "instruction": "Do not retry this call with a different spelling of the record type.",
+                }
+            )
+    # ── End deny-list ──
 
-        result = await execute_native(
-            db, tenant_id, actor_id, session_id, tool_input, approval_context, correlation_id=correlation_id
+    if tool_name == "transaction_ops_accounting_amendment_apply":
+        # The native amendment leaves only through the write kernel's NativeAmendmentAdapter,
+        # behind the ledger's one-use permit; the tool surface itself never sends. (The
+        # durable dispatcher that used to run here minted a second permit of its own.)
+        # Nothing legitimate reaches this branch, so a caller that does is worth a trace.
+        logger.warning(
+            "Refused a direct native amendment tool call (tenant=%s session=%s approved=%s); "
+            "the write kernel is the only sender",
+            tenant_id,
+            session_id,
+            human_approved,
         )
-        return json.dumps(result, default=str, allow_nan=False)
+        return json.dumps(
+            {
+                "success": False,
+                "status": "not_submitted",
+                "error": "The native accounting amendment is sent by the write kernel from its approval card.",
+                "financial_writes": 0,
+                "retry_allowed": False,
+            }
+        )
 
     if tool_name == "escalate_reasoning":
         # Control signal handled by the agent loop (it bumps thinking depth).
@@ -587,8 +634,7 @@ async def _execute_tool_call_once(
         )
         return json.dumps(result, default=str)
 
-    # Check if it's an external tool
-    ext_parsed = parse_external_tool_name(tool_name)
+    # An external (connector) tool
     if ext_parsed is not None:
         connector_id, raw_tool_name = ext_parsed
         from app.services.chat.external_tool_audit import audited_external_call

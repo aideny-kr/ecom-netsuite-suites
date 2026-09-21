@@ -193,6 +193,7 @@ async def test_readonly_recheck_reserves_budget_audits_and_never_reuses_failed_e
         lease_token=uuid4(),
         deadline_at=now + timedelta(minutes=5),
         api_calls_used=0,
+        api_calls_held=0,
         max_api_calls=remaining_calls,
         params_json={"verified_at": (now - timedelta(seconds=1)).isoformat(), "approval_message_id": str(uuid4())},
     )
@@ -203,7 +204,15 @@ async def test_readonly_recheck_reserves_budget_audits_and_never_reuses_failed_e
     monkeypatch.setattr(recheck.state, "_commit", AsyncMock())
     monkeypatch.setattr(recheck.state, "get_run", AsyncMock(return_value=run))
     monkeypatch.setattr(recheck.state, "_lease", lambda *args: None)
-    result = await recheck.reconcile(AsyncMock(), p["tenant_id"], run, p, report)
+    db = AsyncMock()
+
+    @asynccontextmanager
+    async def read_session(caller_db):
+        yield db  # the provider read runs on its own session; here the same mock stands in for both
+
+    monkeypatch.setattr(recheck, "_read_session", read_session)
+    monkeypatch.setattr(recheck, "set_tenant_context", AsyncMock())
+    result = await recheck.reconcile(db, p["tenant_id"], run, p, report)
     assert result["balance"]["status"] == expected
     assert fresh.await_count == (remaining_calls >= recheck.READ_CALLS)
     assert audit.call_args.kwargs["payload"]["financial_writes"] == 0
@@ -298,7 +307,11 @@ async def test_full_runner_persists_credit_recheck_case_and_audit_without_writes
     assert result["termination_reason"] == "done"
     assert run.progress_json["settlement"]["status"] == expected
     assert run.progress_json["settlement"]["cash_settlement"] == "not_verified"
-    assert run.api_calls_used == 97
+    # Every reservation the run makes, less the data share of the two metered reads that
+    # these fake readers never send: 7 for the order read and MAX_REFUND_CALLS for the
+    # refund read. Each keeps its OAuth maintenance share; what remains is 73 - 7.
+    # Spelled out as a literal this silently became wrong the moment the budget changed.
+    assert run.api_calls_used == 73 - 7
     fresh.assert_awaited_once()  # No extra subledger reads at the partial refund checkpoint.
     guard.assert_not_awaited()
     assert not await state_service.list_proposals(db, actor.tenant_id, run_id=run.id)
@@ -314,3 +327,27 @@ async def test_full_runner_persists_credit_recheck_case_and_audit_without_writes
         )
     )
     assert len(audits) == 1 and audits[0].payload["financial_writes"] == 0
+
+
+async def test_mixed_legacy_and_mcp_members_build_and_validate_one_group_card(mcp_credit):
+    """The group crash was an MCP proposal meeting a native-only branch; a mixed group must build and sign."""
+    from tests.test_accounting_group import group_fixture
+
+    p, _, _ = mcp_credit
+    so, session = group_fixture(2)
+    legacy = so["accounting_group"]["members"]
+    first, second = [m["card"]["accounting_review"] for m in legacy]
+    second.update({key: first[key] for key in ("connector_id", "connection_id")})
+    members = [*legacy, member(p, session.id), {"case_id": "unfinished", "reason": "deadline"}]
+
+    card = accounting_group.build_group_card(members, {"group_id": "mixed", "scope": p["scope"]}, str(session.id))
+
+    assert card.proposed_fields == {"eligible_orders": 3}
+    batches = {b["treatment"]["kind"]: b for b in card.accounting_group["treatment_batches"]}
+    assert set(batches) == {"credit_tax_reallocation", "invoice_tax"}
+    assert batches["credit_tax_reallocation"]["treatment"]["execution_transport"] == "mcp_record_api"
+    assert "connector_schema" in batches["credit_tax_reallocation"]["treatment"]["profile"]
+    assert batches["invoice_tax"]["treatment"]["execution_transport"] is None
+    assert sorted(batches["invoice_tax"]["case_ids"]) == sorted(m["case_id"] for m in legacy)
+    assert len(card.accounting_group["investigation_batches"]) == 1
+    assert accounting_group.validate_manifest(card.model_dump(mode="json"), str(session.id)) == members

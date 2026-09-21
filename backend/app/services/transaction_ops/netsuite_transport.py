@@ -297,7 +297,7 @@ async def dispatch_netsuite_operation(db, tenant_id, claimed: ClaimedOperation, 
     ).scalar_one_or_none()
     if previous is None or previous.proposal_id != claimed.proposal_id or previous.work_key != claimed.work_key:
         raise NetSuiteActionError("claimed_operation_mismatch")
-    if (previous.result_json or {}).get("dispatch_reserved") is True:
+    if state.permit_consumed(previous):
         return {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
     permit = await state.reserve_operation_budget(db, tenant_id, claimed.operation_id, api_calls=MAX_GUARD_READ_CALLS)
     if permit is None:

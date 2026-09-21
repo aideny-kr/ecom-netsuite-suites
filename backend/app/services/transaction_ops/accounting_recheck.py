@@ -12,31 +12,37 @@ from sqlalchemy import select
 from app.models.chat import ChatMessage
 from app.models.transaction_ops import TransactionFinding, TransactionRun
 from app.schemas.transaction_runs import ConfigOut
+from app.services.transaction_ops import accounting_credit_recheck
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.settlement import SCOPE
+from app.services.transaction_ops.treatments import is_mcp, reconciliation_target_id, supports, treatment_of
+
+# Provider-call ceiling of one recheck run. The MCP existing-credit recheck adds the
+# subledger read budget it reserves in accounting_credit_recheck plus a small headroom,
+# so the two numbers cannot drift apart: raising READ_CALLS raises the ceiling that has
+# to afford it. 64 + 56 + 8 preserves the 128 the previous literal allowed.
+RECHECK_CALLS = 64
+MCP_RECHECK_HEADROOM = 8
 
 
-def supports(proposal):
-    """Only the implemented invoice corrections have native verification contracts."""
-    return bool(proposal) and (
-        proposal.get("kind")
-        in {
-            "sales_adjustment_credit",
-            "invoice_sales_adjustment",
-            "sales_order_source_alignment",
-            "credit_tax_reallocation",
-            "sales_order_line_alignment",
-        }
-        or (
-            proposal.get("kind") in {None, "invoice_tax"}
-            and proposal.get("record_type") == "invoice"
-            and set(proposal.get("proposed_fields") or {}) == {"taxRate"}
-        )
-    )
+def needs_subledger_recheck(proposal):
+    """The one recheck that re-reads the subledger: an existing-credit correction sent over MCP."""
+    return proposal.get("kind") == "credit_tax_reallocation" and is_mcp(proposal)
 
 
-async def queue(db, tenant_id, message, actor_id, *, now):
+def recheck_call_ceiling(proposal):
+    # Keyed on transport, not kind: every MCP-transported recheck kept the larger
+    # ceiling before, and narrowing it to one kind would halve the budget of the
+    # others without any change in what they read.
+    if is_mcp(proposal):
+        return RECHECK_CALLS + accounting_credit_recheck.READ_CALLS + MCP_RECHECK_HEADROOM
+    return RECHECK_CALLS
+
+
+async def queue(db, tenant_id, message, actor_id, *, now, config_id=None):
+    """``config_id`` is the config the card's ledger claim recorded as its recovery scope,
+    for a card whose review does not name one (the invoice-tax builder never does)."""
     so = message.structured_output or {}
     p = so.get("accounting_review") or {}
     verification = so.get("accounting_verification") or {}
@@ -59,7 +65,10 @@ async def queue(db, tenant_id, message, actor_id, *, now):
         )
         if existing:
             return existing
-        config = await state.get_config(db, tenant_id, UUID(p["config_id"]))
+        effective = config_id or effective_config_id(so)
+        if not effective:
+            raise state.StateError("accounting_recheck_unscoped")
+        config = await state.get_config(db, tenant_id, UUID(str(effective)))
         snapshot = ConfigOut.model_validate(config).model_dump(mode="json")
         for field in ("source_connection_id", "source_step_id", "netsuite_account_id", "subsidiary_id", "record_type"):
             actual, approved = snapshot.get(field), p["scope"].get(field)
@@ -81,7 +90,7 @@ async def queue(db, tenant_id, message, actor_id, *, now):
                 "order_references": [p["order_reference"]],
             },
             config_snapshot=snapshot,
-            max_api_calls=min(config.max_api_calls, 128 if p.get("execution_transport") == "mcp_record_api" else 64),
+            max_api_calls=min(config.max_api_calls, recheck_call_ceiling(p)),
             max_orders=1,
             deadline_at=now + timedelta(seconds=config.deadline_seconds),
             progress_json={},
@@ -108,38 +117,38 @@ async def approval_for_run(db, tenant_id, run):
         or (so.get("accounting_verification") or {}).get("status") != "verified"
         or p.get("tenant_id") != str(tenant_id)
         or not supports(p)
-        or str(run.config_id) != p.get("config_id")
+        or str(run.config_id) != str(effective_config_id(so) or "")
         or run.params_json["order_references"] != [p.get("order_reference")]
     ):
         raise state.StateError("accounting_recheck_approval_mismatch")
     return message, p
 
 
+def effective_config_id(so) -> str | None:
+    """The config a card's recheck runs under: the one its review names, else the one its
+    ledger claim recorded as the recovery scope (a card whose builder set none)."""
+    p = so.get("accounting_review") or {}
+    claim = so.get("accounting_execution") or {}
+    return p.get("config_id") or ((claim.get("recovery_scope") or {}).get("config_id"))
+
+
 def report_in_scope(run, p, report, now):
     try:
         targets = report["targets"]
         verified_at = datetime.fromisoformat(run.params_json["verified_at"])
-        if p.get("kind") in {"sales_order_source_alignment", "sales_order_line_alignment"}:
-            target_id = p["record_id"]
-        elif p.get("kind") == "credit_tax_reallocation":
-            # A credit can be created from an invoice (or have no createdFrom).
-            # Bind to the independently collected invoice -> sales-order edge.
-            target_id = p["sales_order_id"]
-            if not target_id or str(target_id) != str(p["support"]["invoice"]["createdFrom"]["id"]):
-                return False
-        else:
-            target_id = p["before"]["createdFrom"]["id"]
+        # A declared reconciliation target wins; otherwise the treatment's rule. A
+        # credit can be created from an invoice, so it binds through the collected
+        # invoice -> sales-order edge and refuses when that edge disagrees.
+        target_id = reconciliation_target_id(p)
+        if target_id is None:
+            return False
+        treatment = treatment_of(p)
         return (
             len(targets) == 1
             and str(targets[0]["record_id"]) == str(target_id)
             and str(report["source"]["record_id"]) == str(p["source"]["id"])
             and report["balance"]["currency"]
-            == (
-                p["profile"]["currency"]
-                if p.get("kind")
-                in {"sales_adjustment_credit", "invoice_sales_adjustment", "sales_order_source_alignment"}
-                else p["source"]["currency"]
-            )
+            == (p["profile"]["currency"] if treatment.family == "commercial" else p["source"]["currency"])
             and all(
                 verified_at <= datetime.fromisoformat(value["observed_at"]) <= now
                 for value in (report["source"], targets[0])
@@ -149,23 +158,30 @@ def report_in_scope(run, p, report, now):
         return False
 
 
-async def bound_report(db, tenant_id, run, report, *, now):
-    _, p = await approval_for_run(db, tenant_id, run)
-    if report_in_scope(run, p, report, now):
-        if p.get("kind") == "credit_tax_reallocation" and p.get("execution_transport") == "mcp_record_api":
-            from app.services.transaction_ops.accounting_credit_recheck import reconcile
+async def bound_report(db, tenant_id, run, report, *, now, subledger_recheck=True):
+    """Bind a recheck run's report to its approval.
 
-            return await reconcile(db, tenant_id, run, p, report)
-        return report
-    return {
-        **report,
-        "balance": {
-            **(report.get("balance") or {}),
-            "status": "not_verified",
-            "reason": "accounting_recheck_identity_or_freshness_unverified",
-        },
-        "evidence_limits": {"code": "accounting_recheck_identity_or_freshness_unverified"},
-    }
+    The scope check is cheap and runs on every write, so an interim finding never
+    sits in the findings list unannotated. The subledger recheck reserves provider
+    budget and re-reads NetSuite, so the caller asks for it only on the final write.
+    """
+    not_verified = accounting_credit_recheck.not_verified_report
+    try:
+        _, p = await approval_for_run(db, tenant_id, run)
+    except state.StateError as exc:
+        # The approval this run was queued for no longer matches, or its message is
+        # gone. Binding fails closed on the report; the run itself must still
+        # terminate normally, so this never raises out of a finding write. Only this
+        # module's own codes are published; any other lookup failure gets one reason.
+        code = getattr(exc, "code", None) or str(exc)
+        if not code.startswith("accounting_recheck_"):
+            code = "accounting_recheck_approval_unavailable"
+        return not_verified(report, code)
+    if not report_in_scope(run, p, report, now):
+        return not_verified(report, "accounting_recheck_identity_or_freshness_unverified")
+    if subledger_recheck and needs_subledger_recheck(p):
+        return await accounting_credit_recheck.reconcile(db, tenant_id, run, p, report)
+    return report
 
 
 async def record_outcome(db, tenant_id, run, reason, *, now):
@@ -196,6 +212,17 @@ async def record_outcome(db, tenant_id, run, reason, *, now):
         "cash_settlement": "not_verified",
     }
     run.progress_json = {**(run.progress_json or {}), "settlement": result}
+    # The card's recheck reaches a terminal state here; "queued" used to be its last word
+    # by construction, indistinguishable in the field from a recheck that never ran.
+    message.structured_output = {
+        **message.structured_output,
+        "accounting_recheck": {
+            **(message.structured_output.get("accounting_recheck") or {}),
+            "status": verdict,
+            "run_id": str(run.id),
+            "checked_at": result["checked_at"],
+        },
+    }
     from app.services.transaction_ops.accounting_completion import enqueue
 
     enqueue(message, run, now)

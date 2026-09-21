@@ -16,7 +16,17 @@ execution_case = execution_fixtures.execution_case
 
 @pytest.fixture
 async def unknown_case(db, execution_case):
+    """A permit was consumed and the provider gave no trustworthy receipt: the transport-unknown
+    outcome that only read-only reconciliation may move. (An accepted receipt whose readback is
+    unproven is committed_unverified, a different row state; see the executor tests.)"""
     case = execution_case.case
+    previous = case.dispatch.side_effect
+
+    async def lost_response(*args):
+        await previous(*args)
+        return {"status": "unknown", "verified": False}
+
+    case.dispatch.side_effect = lost_response
     case.read_target.side_effect = [execution_case.before, execution_case.before]
     case.read_guard.side_effect = [case.guard, case.guard]
     assert (await execute(db, execution_case))["status"] == "unknown"
@@ -90,7 +100,7 @@ async def test_running_operation_is_not_recovered_before_its_deadline(db, execut
     result = await mod.recover_operation(
         db, case.actor.tenant_id, claim.operation_id, _clock=lambda: row.deadline_at + timedelta(seconds=1)
     )
-    assert result["status"] == "failed"
+    assert result["status"] == "rejected_before_effect"
     mod.read_framework_order.assert_not_awaited()
 
 

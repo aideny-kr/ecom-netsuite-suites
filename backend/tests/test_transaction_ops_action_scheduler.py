@@ -1,13 +1,19 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 from app.services.transaction_ops import action_scheduler as mod
+from app.services.transaction_ops import state_service as state
 from app.workers.base_task import InstrumentedTask
+from app.workers.celery_app import ACTIONS_QUEUE
 from app.workers.tasks import transaction_ops as workers
+from tests import test_transaction_ops_dispatch as dispatch_fixtures
 from tests import test_transaction_ops_executor as execution_fixtures
 from tests import test_transaction_ops_recovery as recovery_fixtures
+from tests.test_transaction_ops_dispatch import reserve
 from tests.test_transaction_ops_executor import execute, operation
 from tests.test_transaction_ops_recovery import mock_recovery
+
+ready = dispatch_fixtures.ready
 
 execution_case = execution_fixtures.execution_case
 unknown_case = recovery_fixtures.unknown_case
@@ -52,7 +58,9 @@ def test_action_workers_are_bounded_without_broker_retries_and_have_a_minute_col
         task = getattr(workers, f"transaction_ops_{name}")
         assert task.name == f"tasks.transaction_ops_{name}"
         assert isinstance(task, InstrumentedTask) and task.max_retries == 0
-        expected_queue = "recon-control" if name == "collect_actions" else "recon"
+        # Short correction jobs have their own queue and worker; only the collector keeps
+        # the control queue, and nothing here still rides the bulk `recon` queue.
+        expected_queue = "recon-control" if name == "collect_actions" else ACTIONS_QUEUE
         assert task.queue == expected_queue and task.time_limit <= 340
     entries = [
         e
@@ -60,3 +68,59 @@ def test_action_workers_are_bounded_without_broker_retries_and_have_a_minute_col
         if e["task"] == "tasks.transaction_ops_collect_actions"
     ]
     assert len(entries) == 1 and entries[0]["schedule"] == 60.0
+
+
+async def test_a_receipted_attempt_is_recovered_only_after_its_deadline(db, ready, monkeypatch):
+    """A receipt moves the row to committed_unverified while the sending process is still
+    running its own readback; the recovery scan must not race it. Only after the attempt's
+    deadline does the row become due for a read-only recovery."""
+    actor, _, _, claim = ready
+    assert await reserve(db, actor.tenant_id, claim)
+    row = await state.record_receipt(
+        db, actor.tenant_id, claim.operation_id, {"status": "accepted", "record_id": "63", "verified": False}
+    )
+    assert row.status == "committed_unverified"
+    publish = AsyncMock()
+    monkeypatch.setattr(mod, "_dispatch", publish)
+    stats = await mod.collect_due_actions(db, datetime.now(timezone.utc))
+    assert stats["recoveries"] == 0
+    publish.assert_not_awaited()
+    stats = await mod.collect_due_actions(db, row.deadline_at + timedelta(seconds=1))
+    assert stats["recoveries"] == 1
+    assert publish.call_args.args[:3] == (actor.tenant_id, "recover", row.id)
+
+
+def test_the_publisher_sends_short_jobs_to_the_actions_queue_and_group_dispatch_to_recon():
+    """An explicit queue kwarg beats task_routes, so the publisher must name the same queue
+    the routes do: receipts, recoveries and single executions leave the bulk queue; a group
+    dispatch (thirty children per slice) stays with the long work."""
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock, Mock
+    from uuid import uuid4
+
+    from app.workers.celery_app import ACTIONS_QUEUE, celery_app
+
+    app = MagicMock()
+    app.send_task = Mock()
+
+    @contextmanager
+    def connection(**_kwargs):
+        yield "connection"
+
+    app.connection_for_write = connection
+    seen = {}
+    for kind in ("execute", "recover", "credit_recover", "complete", "group"):
+        mod.publish_action(uuid4(), kind, uuid4(), app=app)
+        seen[kind] = app.send_task.call_args.kwargs["queue"]
+    assert seen == {
+        "execute": ACTIONS_QUEUE,
+        "recover": ACTIONS_QUEUE,
+        "credit_recover": ACTIONS_QUEUE,
+        "complete": ACTIONS_QUEUE,
+        "group": "recon",
+    }
+    for kind, queue in seen.items():
+        route = celery_app.amqp.router.route({}, mod._TASKS[kind])
+        # the routes agree with the explicit kwarg (the long group dispatch has no override)
+        assert route.get("queue").name == queue if "queue" in route else queue == "recon", kind
+        assert celery_app.tasks[mod._TASKS[kind]].queue == queue, kind

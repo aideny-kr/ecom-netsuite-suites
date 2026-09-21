@@ -216,6 +216,30 @@ class Settings(BaseSettings):
     # person approves a job. This flag exists as an emergency kill-switch, not
     # an opt-in gate.
     SCHEDULED_JOBS_ENABLED: bool = True
+    # Operator kill switch for every path that can SEND a write to a connected
+    # system: scheduled transaction-ops execution (the kernel's one-use send permit
+    # and the Beat collector), the durable group drain, AND every human-approved
+    # chat write, accounting-tagged or not. A switch that left manual ERP writes
+    # open would not be a kill switch. Reads, recovery, completion, evidence,
+    # rejections and existing approvals are untouched; only sending stops, with an
+    # audited `dispatch_disabled` reason. Enforced at four points on purpose: each
+    # has different resume semantics (an in-flight operation ends failed/blocked,
+    # a queued group member stays queued, an approved proposal stays approved, a
+    # chat card whose approve arrives while off ends failed). Default on. Settings
+    # are read once when a process starts, so flipping it means setting it in the
+    # environment and restarting the backend, worker and beat containers (a redeploy
+    # does that); a running process never re-reads it.
+    TRANSACTION_OPS_DISPATCH_ENABLED: bool = True
+    # Where the short correction jobs (a receipt after a verified recheck, a one-order
+    # recovery read, one approved execution) are published. They belong on their own queue
+    # with their own worker, but the staging/production compose file lives ON THE VM and is
+    # hand-edited (it carries a local redis the repo's copy does not), so the service has to
+    # exist there before anything is sent to it. Default: the bulk queue, exactly as before.
+    # Set to "recon-actions" in .env.production once worker-actions is running.
+    TRANSACTION_OPS_ACTIONS_QUEUE: str = "recon"
+    # The daily ops digest always writes its per-tenant audit row; this only
+    # controls whether the same digest is also emailed to the tenant's admins.
+    OPS_DIGEST_EMAIL_ENABLED: bool = True
 
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False

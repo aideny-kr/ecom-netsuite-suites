@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 
@@ -19,6 +20,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core.config import settings
 from app.core.database import set_tenant_context
 from app.models.celigo import CeligoFlow, CeligoFlowStep
 from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
@@ -55,8 +57,34 @@ _EVIDENCE_AGE = timedelta(minutes=15)
 _OPERATION_CALLS = 96
 _OPERATION_TIME = timedelta(seconds=300)
 _LEDGER_RESULT_KEYS = frozenset(
-    {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason"}
+    {
+        "dispatch_reserved",
+        "provider",
+        "payload_fingerprint",
+        "dispatch_reserved_at",
+        "termination_reason",
+    }
 )
+# The write kernel's outcome taxonomy (docs/superpowers/specs/2026-09-15-write-kernel-design.md,
+# section 3). The repair rule is a function of the status: a retry is allowed only from
+# rejected_before_effect and only as a lineage row; unknown may only be reconciled by reads;
+# committed_unverified may only be verified by reads; needs_review waits for a person.
+OUTCOMES = frozenset({"rejected_before_effect", "committed_unverified", "unknown", "verified", "needs_review"})
+TERMINAL = frozenset({"verified", "rejected_before_effect", "needs_review"})
+SETTLED = frozenset({"unknown", "committed_unverified"})  # a permit was consumed; reads only from here
+# The states the write kernel may still write to. ``unknown`` is settled but not open: only
+# read-only reconciliation (recovery) may move it, never the attempt that produced it.
+OPEN = frozenset({"executing", "committed_unverified"})
+IN_FLIGHT = frozenset({"executing", *SETTLED})  # an attempt that blocks a new one on the same work or entity
+TERMINATION = {
+    "verified": "done",
+    "unknown": "stall",
+    "committed_unverified": "stall",
+    "rejected_before_effect": "error",
+    "needs_review": "blocked",
+}
+PROVIDERS = {"correct_amounts": "netsuite", "sync_missing_order": "netsuite", "resolve_celigo_error": "celigo"}
+ADAPTERS = {"netsuite": "guard_restlet", "celigo": "celigo"}
 
 
 class StateError(ValueError):
@@ -64,6 +92,46 @@ class StateError(ValueError):
         super().__init__(code)
         self.code = code
         self.http_status = http_status
+
+
+def lineage_work_key(base_work_key: str, retry_of_operation_id) -> str:
+    """The work key of a retry: the business identity plus the attempt it retries, so the
+    one-attempt-per-work rule admits it and the row still inherits the base key."""
+    return business_digest({"base_work": base_work_key, "retry_of_operation": str(retry_of_operation_id)})
+
+
+def permit_consumed(operation) -> bool:
+    """Whether the one-use send permit was reserved on this row. A consumed permit cannot be
+    told apart from a sent request, so every outcome after it is at least ``unknown``."""
+    return (operation.result_json or {}).get("dispatch_reserved") is True
+
+
+@dataclass(frozen=True)
+class ApprovedIntent:
+    """What an approval source hands the ledger to claim: the approval's identity, the
+    business identity of the work (``work_key``), the collision scope (``entity_key``) and
+    the provider/adapter that will carry it. The source has already checked the approval is
+    valid; the ledger checks the work is new and the document free."""
+
+    approval_kind: str
+    approval_id: uuid.UUID
+    approved_by: uuid.UUID
+    surface: str
+    provider: str
+    adapter: str
+    action: str
+    work_key: str
+    entity_key: str
+    netsuite_account_id: str
+    subsidiary_id: str
+    record_type: str
+    target_record_id: str | None
+    evidence_digest: str
+    valid_until: datetime
+    currency: str | None = None
+    config_id: uuid.UUID | None = None
+    order_reference: str | None = None  # with config_id, the scope a read-only recovery runs under
+    retry_of_operation_id: uuid.UUID | None = None
 
 
 def _clock(now=None):
@@ -509,6 +577,9 @@ async def list_runs(db, tenant_id, *, config_id=None, runnable_only=False, perio
 
 
 def _finish(row, reason, now):
+    # An unsettled hold is assumed spent: a crash or a failed settle cannot under-count.
+    row.api_calls_used += row.api_calls_held or 0
+    row.api_calls_held = 0
     row.status, row.termination_reason, row.finished_at = "finished", reason, now
     row.lease_token = row.lease_until = None
 
@@ -562,7 +633,7 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
         row.status == "pending"
         and (row.origin in {"manual", "chat", "schedule"} or is_settlement(row))
         and row.lease_token is None
-        and row.api_calls_used == row.orders_used == 0
+        and row.api_calls_used == row.orders_used == (row.api_calls_held or 0) == 0
     ):
         deadline = _first_claim_deadline(row, now)
     if deadline is None or now >= deadline:
@@ -584,7 +655,13 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
     return row.lease_token
 
 
-async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, orders=0, now=None):
+async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, orders=0, hold=False, now=None):
+    """Pay for calls before making them; the run ends on ``budget`` if they do not fit.
+
+    With ``hold`` the calls are held rather than spent, for a read that will report what
+    it actually sent through ``settle_budget``. Either way they count against the ceiling
+    from this moment.
+    """
     if any(type(value) is not int or value < 0 for value in (api_calls, orders)) or api_calls + orders == 0:
         raise ValueError("Reserve positive integer spend before a call")
     now = _clock(now)
@@ -597,12 +674,46 @@ async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, ord
         await _commit(db, tenant_id)
         return False
     _lease(row, lease_token, now)
-    if row.api_calls_used + api_calls > row.max_api_calls or row.orders_used + orders > row.max_orders:
+    held = row.api_calls_held or 0
+    if row.api_calls_used + held + api_calls > row.max_api_calls or row.orders_used + orders > row.max_orders:
         await _finish_audited(db, tenant_id, row, "budget", now)
         await _commit(db, tenant_id)
         return False
-    row.api_calls_used += api_calls
+    if hold:
+        # Settled at what the read sent (settle_budget); unsettled, it is charged in full
+        # when the run finishes, which is the worst-case charge a plain reservation makes.
+        row.api_calls_held = held + api_calls
+    else:
+        row.api_calls_used += api_calls
     row.orders_used += orders
+    row.lease_until = min(row.deadline_at, now + _LEASE)
+    await _commit(db, tenant_id)
+    return True
+
+
+async def settle_budget(db, tenant_id, run_id, *, lease_token, release, spent, now=None):
+    """Settle a read's hold: charge what it sent, drop the rest of what it reserved.
+
+    Reserving the worst case before each read is what keeps a run under its ceiling, and
+    that stays true: a settle moves ``spent`` from held to used and frees only the part the
+    read demonstrably did not send, so used + held never grows and used never falls. Held
+    to the same lease as the reservation, so only the worker that reserved can settle. A
+    finished run is left alone: finishing already charged its holds in full.
+    """
+    if any(type(value) is not int for value in (release, spent)) or not 0 <= spent <= release:
+        raise ValueError("Settle whole calls, spending no more than was released")
+    if release == 0:
+        return False
+    now = _clock(now)
+    row = await get_run(db, tenant_id, run_id, lock=True)
+    if row.status == "finished":
+        await _commit(db, tenant_id)
+        return False
+    _lease(row, lease_token, now)
+    if release > (row.api_calls_held or 0):
+        raise StateError("run_hold_exceeded")
+    row.api_calls_held -= release
+    row.api_calls_used += spent
     row.lease_until = min(row.deadline_at, now + _LEASE)
     await _commit(db, tenant_id)
     return True
@@ -675,11 +786,17 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     )
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
-    if final and run.origin == "recovery" and run.params_json.get("approval_message_id"):
+    if run.origin == "recovery" and run.params_json.get("approval_message_id"):
         from app.services.transaction_ops.accounting_recheck import bound_report
 
+        # Every write is bound to the approval; only the final one may spend the
+        # subledger read budget on the expensive recheck.
         request = request.model_copy(
-            update={"report_json": await bound_report(db, tenant_id, run, request.report_json, now=now)}
+            update={
+                "report_json": await bound_report(
+                    db, tenant_id, run, request.report_json, now=now, subledger_recheck=final
+                )
+            }
         )
     row = (
         await db.execute(
@@ -811,9 +928,9 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
             await _commit(db, tenant_id)
             return existing
         if attempted is not None:
-            result = attempted.result_json or {}
-            known_no_write = attempted.status == "failed" and (
-                result.get("dispatch_reserved") is not True or result.get("code") == "provider_rejected_without_save"
+            known_no_write = attempted.status in ("failed", "rejected_before_effect") and (
+                not permit_consumed(attempted)
+                or (attempted.result_json or {}).get("code") == "provider_rejected_without_save"
             )
             if not known_no_write or attempt_number == 2:
                 await _commit(db, tenant_id)
@@ -909,7 +1026,7 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
             .join(related, and_(related.id == TransactionOperation.proposal_id, related.tenant_id == tenant_id))
             .where(
                 TransactionOperation.tenant_id == tenant_id,
-                TransactionOperation.status.in_(("executing", "unknown")),
+                TransactionOperation.status.in_(IN_FLIGHT),
                 func.lower(func.replace(related.netsuite_account_id, "_", "-"))
                 == row.netsuite_account_id.replace("_", "-").lower(),
                 related.subsidiary_id == row.subsidiary_id,
@@ -951,62 +1068,312 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
         await _audit(db, tenant_id, "proposal.invalidate", row)
         await _commit(db, tenant_id)
         return None
+    # Lineage: a retry proposal names the attempt it corrects; the new row keeps that
+    # attempt's base work key so the business identity is never changed to pass the
+    # duplicate check.
+    retry = (row.evidence_json or {}).get("retry") or {}
+    previous = None
+    if retry.get("previous_operation_id"):
+        previous = (
+            await db.execute(
+                select(TransactionOperation).where(
+                    TransactionOperation.tenant_id == tenant_id,
+                    TransactionOperation.id == uuid.UUID(str(retry["previous_operation_id"])),
+                )
+            )
+        ).scalar_one_or_none()
+    provider = PROVIDERS.get(row.action)
     operation = TransactionOperation(
         tenant_id=tenant_id,
         proposal_id=row.id,
+        approval_kind="transaction_proposal",
+        approval_id=row.id,
+        surface="scheduled",
+        provider=provider,
+        adapter=ADAPTERS.get(provider),
         work_key=row.work_key,
         entity_key=entity_key,
+        base_work_key=previous.base_work_key if previous is not None else row.work_key,
+        retry_of_operation_id=previous.id if previous is not None else None,
         attempted_at=now,
         deadline_at=min(now + _OPERATION_TIME, row.valid_until),
         max_api_calls=_OPERATION_CALLS,
         api_calls_used=0,
         status="executing",
+        # The scope a read-only recovery runs under, recorded at the claim like every
+        # other source's (create_operation_recovery reads it from the row).
+        result_json={"recovery_scope": {"config_id": str(row.config_id), "order_reference": row.order_reference}},
     )
     db.add(operation)
     await db.flush()
-    intent = ClaimedOperation(
-        operation_id=operation.id,
-        proposal_id=row.id,
-        work_key=row.work_key,
-        config_id=row.config_id,
-        action=row.action,
-        currency=row.currency,
-        netsuite_account_id=row.netsuite_account_id,
-        subsidiary_id=row.subsidiary_id,
-        record_type=row.record_type,
-        target_record_id=row.target_record_id,
-        before_json=row.before_json,
-        after_json=row.after_json,
-    )
+    intent = _claimed_from_proposal(operation.id, row)
     await _audit(db, tenant_id, "operation.attempt", operation)
     await _commit(db, tenant_id)
     return intent
 
 
+async def claim_intent(db, tenant_id, intent: ApprovedIntent, *, now=None) -> ClaimedOperation:
+    """Claim approved work from any approval source before its fresh, budgeted reads.
+
+    The source (chat_confirmation.claim, or claim_approved_operation for a proposal) has
+    already established the approval is valid. This is the generic half: the tenant lock,
+    one attempt per approval, one attempt per piece of work (``work_key``), one in-flight
+    attempt per document (``entity_key``; the partial unique index is the backstop), the
+    lineage of a retry, the executing row, its audit and the commit.
+    """
+    now = _clock(now)
+    await set_tenant_context(db, str(tenant_id))
+    await db.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+    claimed = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.approval_kind == intent.approval_kind,
+                TransactionOperation.approval_id == intent.approval_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if claimed is not None:
+        raise StateError("approval_already_claimed")
+    attempted = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == intent.work_key
+            )
+        )
+    ).scalar_one_or_none()
+    if attempted is not None:
+        raise StateError("operation_already_attempted")
+    in_flight = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.entity_key == intent.entity_key,
+                TransactionOperation.status.in_(IN_FLIGHT),
+            )
+        )
+    ).scalar_one_or_none()
+    if in_flight is not None:
+        raise StateError("entity_in_flight")
+    previous = None
+    if intent.retry_of_operation_id is not None:
+        previous = await _one(db, tenant_id, TransactionOperation, intent.retry_of_operation_id)
+        if previous.status != "rejected_before_effect":
+            raise StateError("retry_requires_rejected_before_effect")
+    operation = TransactionOperation(
+        tenant_id=tenant_id,
+        proposal_id=None,
+        approval_kind=intent.approval_kind,
+        approval_id=intent.approval_id,
+        surface=intent.surface,
+        provider=intent.provider,
+        adapter=intent.adapter,
+        work_key=intent.work_key,
+        entity_key=intent.entity_key,
+        base_work_key=previous.base_work_key if previous is not None else intent.work_key,
+        retry_of_operation_id=previous.id if previous is not None else None,
+        attempted_at=now,
+        deadline_at=min(now + _OPERATION_TIME, intent.valid_until),
+        max_api_calls=_OPERATION_CALLS,
+        api_calls_used=0,
+        status="executing",
+        result_json={
+            "evidence_digest": intent.evidence_digest,
+            "approved_by": str(intent.approved_by),
+            # Recorded at the claim so a recovery pass reads under the scope the approval had,
+            # never one a later caller supplies.
+            "recovery_scope": {
+                "config_id": str(intent.config_id) if intent.config_id else None,
+                "order_reference": intent.order_reference,
+            },
+        },
+    )
+    db.add(operation)
+    await db.flush()
+    claimed = ClaimedOperation(
+        operation_id=operation.id,
+        proposal_id=None,
+        approval_kind=intent.approval_kind,
+        approval_id=intent.approval_id,
+        work_key=intent.work_key,
+        config_id=intent.config_id,
+        action=intent.action,
+        currency=intent.currency,
+        netsuite_account_id=intent.netsuite_account_id,
+        subsidiary_id=intent.subsidiary_id,
+        record_type=intent.record_type,
+        target_record_id=intent.target_record_id,
+        before_json={},
+        after_json={},
+    )
+    await _audit(
+        db,
+        tenant_id,
+        "operation.attempt",
+        operation,
+        payload={
+            "approval_kind": intent.approval_kind,
+            "approval_id": str(intent.approval_id),
+            "surface": intent.surface,
+        },
+    )
+    await _commit(db, tenant_id)
+    return claimed
+
+
+async def operation_for_approval(db, tenant_id, approval_kind, approval_id):
+    """The ledger row an approval claimed, or None."""
+    await set_tenant_context(db, str(tenant_id))
+    return (
+        await db.execute(
+            select(TransactionOperation)
+            .where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.approval_kind == approval_kind,
+                TransactionOperation.approval_id == approval_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def latest_operation_for_base(db, tenant_id, base_work_key):
+    """The most recent attempt on a business identity across its retry lineage, or None."""
+    await set_tenant_context(db, str(tenant_id))
+    return (
+        await db.execute(
+            select(TransactionOperation)
+            .where(TransactionOperation.tenant_id == tenant_id, TransactionOperation.base_work_key == base_work_key)
+            .order_by(TransactionOperation.attempted_at.desc(), TransactionOperation.id.desc())
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def operation_for_work(db, tenant_id, work_key):
+    """The ledger row for a piece of work, or None; the duplicate check's own lookup."""
+    await set_tenant_context(db, str(tenant_id))
+    query = select(TransactionOperation).where(
+        TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == work_key
+    )
+    return (await db.execute(query.execution_options(populate_existing=True))).scalar_one_or_none()
+
+
+# What the provider answered, written by _record_send_evidence. A completion may record
+# one in the same call that settles the row (migration 109's trigger expects exactly that:
+# "a receipt requires a permit"), but it may never CHANGE one that is already there —
+# whatever the earlier delivery saw is what every later read must see.
+SEND_EVIDENCE_KEYS = frozenset({"receipt", "answer"})
+
+
+def recorded_receipt(operation) -> dict | None:
+    """The answer that proved a save, if the row holds one."""
+    return (operation.result_json or {}).get("receipt")
+
+
+def recorded_answer(operation) -> dict | None:
+    """What the row remembers of the send: the receipt that proved a save, or the identity
+    a non-receipt answer named.
+
+    Every later read — a replayed delivery, the recovery scan — asks this one question, so
+    none of them can be taught about a receipt and forget an answer.
+    """
+    recorded = operation.result_json or {}
+    return recorded.get("receipt") or recorded.get("answer")
+
+
+async def _record_send_evidence(db, tenant_id, operation_id, key, value, *, settles):
+    """The one writer of what the provider answered: lock, refuse a row that moved on,
+    merge under its key, audit, commit. A receipt settles the row to committed_unverified;
+    an answer that proved nothing leaves the status exactly where it was."""
+    evidence = _bounded_json({key: value})
+    row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if row.status != "executing":
+        await _commit(db, tenant_id)
+        return row
+    if not permit_consumed(row):
+        if settles:
+            raise StateError("receipt_without_permit")
+        await _commit(db, tenant_id)
+        return row
+    row.result_json = {**(row.result_json or {}), **evidence}
+    if settles:
+        row.status = "committed_unverified"
+        row.result_json = {**row.result_json, "termination_reason": "stall"}
+    await _audit(db, tenant_id, f"operation.{key}", row, payload={key: evidence[key]})
+    await _commit(db, tenant_id)
+    return row
+
+
+async def record_dispatch_answer(db, tenant_id, operation_id, answer, *, now=None):
+    """The provider named a record but proved no save: the row keeps that identity.
+
+    Written between the send and the readback for an answer the adapter could not call a
+    receipt (indeterminate, or an error beside a record id). It is never a receipt, so the
+    status does not move and nothing may be resent; it exists so a later read — this
+    attempt's readback, a replayed delivery's, or the recovery scan's — still refuses an
+    answer that named a different record than the approval did.
+    """
+    return await _record_send_evidence(db, tenant_id, operation_id, "answer", answer, settles=False)
+
+
+async def record_receipt(db, tenant_id, operation_id, receipt, *, now=None):
+    """The provider identified the record as saved: the attempt is committed, not yet proven.
+
+    Written between the send and the independent readback, so the row says what is true
+    if the process dies in between. Only reads may follow; the permit is already spent.
+    """
+    return await _record_send_evidence(db, tenant_id, operation_id, "receipt", receipt, settles=True)
+
+
 async def complete_operation(db, tenant_id, operation_id, *, outcome, result_json, now=None):
-    if outcome not in {"verified", "unknown", "failed"}:
+    if outcome not in OUTCOMES:
         raise ValueError("Invalid operation outcome")
     evidence = _bounded_json(result_json)
     if _LEDGER_RESULT_KEYS.intersection(evidence):
         raise StateError("reserved_operation_result_key")
     row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if row.status not in {"executing", "unknown"}:
+    if row.status not in IN_FLIGHT:
         raise StateError("operation_terminal")
-    # An unknown attempt can become verified/failed only after caller-provided
-    # read-only provider verification; this service never dispatches it again.
-    if row.status == "unknown" and evidence.get("reconciled") is not True:
+    recorded = row.result_json or {}
+    if any(key in recorded and evidence[key] != recorded[key] for key in SEND_EVIDENCE_KEYS & set(evidence)):
+        # A completion may record what the provider answered; it may never rewrite it.
+        raise StateError("send_evidence_immutable")
+    # An unknown attempt can move only after caller-provided read-only provider
+    # reconciliation; this service never dispatches it again. Handing it to a person
+    # (needs_review) is an escalation, not a finding, and needs no reads.
+    if row.status == "unknown" and outcome != "needs_review" and evidence.get("reconciled") is not True:
         raise StateError("reconciliation_evidence_required")
+    if row.status == "committed_unverified":
+        # A receipt exists, so the attempt can never be called "before effect" or
+        # "unknown" again, and only an independent readback may call it verified.
+        if outcome in ("rejected_before_effect", "unknown"):
+            raise StateError("receipt_recorded")
+        if outcome == "verified" and not isinstance(evidence.get("verification"), dict):
+            raise StateError("verification_evidence_required")  # the guard trigger asks the same question
     row.status, row.completed_at = outcome, _clock(now)
-    row.result_json = {
-        **(row.result_json or {}),
-        **evidence,
-        "termination_reason": {"verified": "done", "unknown": "stall", "failed": "error"}[outcome],
-    }
-    proposal = await get_proposal(db, tenant_id, row.proposal_id)
-    if outcome == "verified":
+    row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": TERMINATION[outcome]}
+    # A transaction proposal's row settles its case and records the proposal's approval; a
+    # row from any other approval source (a chat confirmation) records the approval it
+    # carries on itself, and its own surface owns what follows a verified outcome.
+    proposal = await get_proposal(db, tenant_id, row.proposal_id) if row.proposal_id is not None else None
+    if outcome == "verified" and proposal is not None:
         from app.services.transaction_ops.settlement import queue
 
         await queue(db, tenant_id, row, proposal, now=row.completed_at)
+    approval = {"approval_kind": row.approval_kind, "approval_id": str(row.approval_id)}
+    if proposal is not None:
+        approval.update(
+            run_id=str(proposal.run_id),
+            config_id=str(proposal.config_id),
+            approved_by=str(proposal.decided_by),
+            approved_at=proposal.decided_at.isoformat(),
+            evidence_fingerprint=proposal.evidence_fingerprint,
+        )
+    else:
+        recorded = row.result_json or {}
+        approval.update(approved_by=recorded.get("approved_by"), evidence_digest=recorded.get("evidence_digest"))
     await _audit(
         db,
         tenant_id,
@@ -1015,11 +1382,7 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
         payload={
             "outcome": outcome,
             "code": evidence.get("code"),
-            "run_id": str(proposal.run_id),
-            "config_id": str(proposal.config_id),
-            "approved_by": str(proposal.decided_by),
-            "approved_at": proposal.decided_at.isoformat(),
-            "evidence_fingerprint": proposal.evidence_fingerprint,
+            **approval,
             # The result verifies the approved operation. A separate fresh case
             # observation must establish agreement on gross, tax and refunds.
             "settlement_status": "not_evaluated",
@@ -1030,13 +1393,18 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
 
 
 async def reserve_operation_dispatch(
-    db, tenant_id, claimed: ClaimedOperation, *, provider, payload_fingerprint, now=None
+    db, tenant_id, claimed: ClaimedOperation, *, provider, payload_fingerprint, now=None, authorize=None
 ):
     """Consume one durable send permit. A crash after this commit permits only reads.
 
     An adapter calls this after its final fresh provider preflight and before
     its single mutation. No job retry or reconstructed claim can reserve again.
     Provider receipts never grant approval, reset the permit, or prove success.
+
+    Every approval source authorizes the same way: ``authorize(db, tenant_id, operation,
+    claimed, now)`` raises StateError when the approval no longer holds. A transaction
+    proposal's claim brings its own (the proposal re-check); any other source must pass
+    one, or no permit is minted.
     """
     now = _clock(now)
     if not isinstance(payload_fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", payload_fingerprint):
@@ -1049,11 +1417,39 @@ async def reserve_operation_dispatch(
     ).scalar_one_or_none()
     if tenant is None or not tenant.is_active:
         raise StateError("tenant_unavailable", 403)
-    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
+    if claimed.proposal_id is not None:
+        authorize = _proposal_still_authorized
+    elif authorize is None:
+        raise StateError("approval_source_required")
     operation = await _one(db, tenant_id, TransactionOperation, claimed.operation_id, lock=True)
-    expected = ClaimedOperation(
-        operation_id=operation.id,
+    if (
+        operation.proposal_id != claimed.proposal_id
+        or operation.approval_kind != claimed.approval_kind
+        or operation.approval_id != claimed.approval_id
+        or operation.work_key != claimed.work_key
+    ):
+        raise StateError("claimed_operation_mismatch")
+    if permit_consumed(operation):
+        await _commit(db, tenant_id)
+        return False
+    if operation.status != "executing":
+        raise StateError("operation_not_executable")
+    if operation.provider != provider:
+        raise StateError("unsupported_dispatch_provider")
+    if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
+        # A spent attempt is settled here, before the approval source is asked anything.
+        await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
+        raise StateError("operation_budget_exhausted")
+    await authorize(db, tenant_id, operation, claimed, now)
+    return await _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now)
+
+
+def _claimed_from_proposal(operation_id, proposal) -> ClaimedOperation:
+    """The claim a transaction proposal produces; rebuilt at the permit to compare."""
+    return ClaimedOperation(
+        operation_id=operation_id,
         proposal_id=proposal.id,
+        approval_id=proposal.id,
         work_key=proposal.work_key,
         config_id=proposal.config_id,
         action=proposal.action,
@@ -1065,20 +1461,17 @@ async def reserve_operation_dispatch(
         before_json=proposal.before_json,
         after_json=proposal.after_json,
     )
-    if claimed != expected or operation.proposal_id != proposal.id or operation.work_key != proposal.work_key:
+
+
+async def _proposal_still_authorized(db, tenant_id, operation, claimed, now):
+    """The transaction proposal's permit-time re-check: the claim still matches the
+    proposal exactly, the proposal is approved and fresh, the config still proposes
+    actions, the feature is on, and the decider is still a permitted human."""
+    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
+    if claimed != _claimed_from_proposal(operation.id, proposal):
         raise StateError("claimed_operation_mismatch")
-    if (operation.result_json or {}).get("dispatch_reserved") is True:
-        await _commit(db, tenant_id)
-        return False
-    if operation.status != "executing" or proposal.status != "approved":
+    if proposal.status != "approved":
         raise StateError("operation_not_executable")
-    required_provider = {
-        "correct_amounts": "netsuite",
-        "sync_missing_order": "netsuite",
-        "resolve_celigo_error": "celigo",
-    }
-    if required_provider.get(proposal.action) != provider:
-        raise StateError("unsupported_dispatch_provider")
     if now >= proposal.valid_until:
         raise StateError("stale_evidence")
     config = await get_config(db, tenant_id, proposal.config_id)
@@ -1095,9 +1488,20 @@ async def reserve_operation_dispatch(
         )
     ).scalar_one_or_none()
     await _human(db, tenant_id, actor, "recon.run")
+
+
+async def _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now):
+    """The one-use permit itself: budgeted, written to the row, audited, committed. Every
+    approval source's refusals run before this; nothing after it may refuse."""
     if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
         raise StateError("operation_budget_exhausted")
+    if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+        # The operator switch is the LAST refusal before the permit, so it only
+        # speaks for operations that would otherwise have been sent. Anything a more
+        # specific check would have refused anyway keeps that reason.
+        await _block_operation(db, tenant_id, operation, now, "dispatch_disabled")
+        raise StateError("dispatch_disabled")
     operation.api_calls_used += 1
     operation.result_json = {
         **(operation.result_json or {}),
@@ -1117,11 +1521,31 @@ async def reserve_operation_dispatch(
     return True
 
 
+async def _block_operation(db, tenant_id, operation, now, code):
+    """The operator switch refused the send before the one-use permit existed.
+
+    Nothing was sent, so this is a refusal before any effect, never an unknown:
+    ``dispatch_reserved`` is never set, a duplicate delivery reads the terminal row and
+    spends nothing, and the approved work needs a fresh human decision once dispatch is
+    re-enabled (the taxonomy admits a lineage retry from this state). Every more specific
+    refusal (provider, stale evidence, config, flags, actor, budget) runs first, so a
+    ``blocked`` row always means "this would have been sent".
+    """
+    operation.status = "rejected_before_effect"
+    operation.completed_at = now
+    operation.result_json = {**(operation.result_json or {}), "termination_reason": "blocked", "code": code}
+    await _audit(db, tenant_id, "operation.blocked", operation, payload={"code": code, "financial_writes": 0})
+    await _commit(db, tenant_id)
+
+
 async def _exhaust_operation(db, tenant_id, operation, now, code):
     # This lock is shared with the dispatch permit. An old worker cannot send
     # after recovery marks a pre-dispatch operation failed. A consumed permit
     # cannot be distinguished from a sent request, so it always stays unknown.
-    operation.status = "unknown" if (operation.result_json or {}).get("dispatch_reserved") is True else "failed"
+    if operation.status == "executing":
+        # Only an executing attempt changes state on exhaustion; a settled one (a receipt
+        # exists, the readback ran out of budget) keeps its state and gains the reason.
+        operation.status = "unknown" if permit_consumed(operation) else "rejected_before_effect"
     operation.completed_at = now
     operation.result_json = {**(operation.result_json or {}), "termination_reason": "budget", "code": code}
     await _audit(db, tenant_id, "operation.exhaust", operation, payload={"outcome": operation.status, "code": code})
@@ -1147,14 +1571,21 @@ async def reserve_operation_budget(db, tenant_id, operation_id, *, api_calls, no
     if tenant is None or not tenant.is_active:
         raise StateError("tenant_unavailable", 403)
     operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if operation.status != "executing":
+    # Reads are budgeted while the attempt is executing and, after a receipt, while it is
+    # committed but unverified: the independent readback is what proves it. A send permit
+    # still requires `executing` (reserve_operation_dispatch), so this never enables a resend.
+    if operation.status not in OPEN:
         raise StateError("operation_not_executable")
     if now >= operation.deadline_at or operation.api_calls_used + api_calls > operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
         return None
-    flags = await get_all_flags(db, tenant_id)
-    if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
-        raise StateError("feature_disabled", 403)
+    if operation.proposal_id is not None:
+        # The scheduled feature's flags gate a proposal's reads mid-flight. Any other
+        # approval source (a chat confirmation) is gated by its own policy at the claim
+        # and at the permit, not by the reconciliation product's flags.
+        flags = await get_all_flags(db, tenant_id)
+        if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
+            raise StateError("feature_disabled", 403)
     operation.api_calls_used += api_calls
     permit = OperationReadPermit(
         deadline_at=operation.deadline_at, remaining_api_calls=operation.max_api_calls - operation.api_calls_used
@@ -1171,9 +1602,12 @@ async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
     if operation.status != "executing" or now < operation.deadline_at:
         await _commit(db, tenant_id)
         return None
-    sent = (operation.result_json or {}).get("dispatch_reserved") is True
     await _exhaust_operation(
-        db, tenant_id, operation, now, "interrupted_after_dispatch" if sent else "interrupted_before_dispatch"
+        db,
+        tenant_id,
+        operation,
+        now,
+        "interrupted_after_dispatch" if permit_consumed(operation) else "interrupted_before_dispatch",
     )
     return operation
 
@@ -1184,6 +1618,10 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
     Every recheck gets its own fixed run budget. No operation spend, approval,
     deadline or dispatch reservation is reset. No schedule/model may supply a
     new read-request key without a current authenticated human actor.
+
+    A proposal's row takes its scope from the proposal; a row from another approval
+    source takes it from the ``recovery_scope`` its claim recorded, never from the
+    caller; without one there is no budgeted read.
     """
     now = _clock(now)
     manual = evaluation_key is not None
@@ -1207,10 +1645,18 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
     if existing:
         await _commit(db, tenant_id)
         return existing
-    if operation.status != "unknown" or (operation.result_json or {}).get("dispatch_reserved") is not True:
+    if operation.status not in SETTLED or not permit_consumed(operation):
         raise StateError("operation_not_recoverable")
-    proposal = await get_proposal(db, tenant_id, operation.proposal_id)
-    config = await get_config(db, tenant_id, proposal.config_id)
+    scope = (operation.result_json or {}).get("recovery_scope") or {}
+    config_id = uuid.UUID(str(scope["config_id"])) if scope.get("config_id") else None
+    order_reference = scope.get("order_reference")
+    if (config_id is None or not order_reference) and operation.proposal_id is not None:
+        # Rows claimed before the scope was recorded at the claim: the proposal still has it.
+        proposal = await get_proposal(db, tenant_id, operation.proposal_id)
+        config_id, order_reference = proposal.config_id, proposal.order_reference
+    if config_id is None or not order_reference:
+        raise StateError("recovery_unscoped")
+    config = await get_config(db, tenant_id, config_id)
     if not config.enabled:
         raise StateError("config_disabled")
     pending = (
@@ -1239,7 +1685,7 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
         origin="recovery",
         params_json={
             "operation_id": str(operation.id),
-            "order_references": [proposal.order_reference],
+            "order_references": [order_reference],
             **({"manual_recheck": True, "evaluation_key": str(evaluation_key)} if manual else {}),
         },
         config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),
@@ -1280,7 +1726,9 @@ async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reaso
     ):
         _lease(run, lease_token, now)
     _finish(run, reason, now)
-    if operation.status == "unknown":
+    if operation.status in SETTLED:
+        # Reads only: a proof moves the row to verified; without one it keeps its state
+        # (unknown stays unknown, committed_unverified stays committed_unverified).
         details = _bounded_json(
             {
                 "reconciled": True,
@@ -1288,14 +1736,14 @@ async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reaso
                 **({"verification": proof} if proof is not None else {}),
             }
         )
-        operation.status = "verified" if proof is not None else "unknown"
+        operation.status = "verified" if proof is not None else operation.status
         operation.completed_at = now
         operation.result_json = {
             **(operation.result_json or {}),
             **details,
             "termination_reason": "done" if proof is not None else reason,
         }
-        if proof is not None:
+        if proof is not None and operation.proposal_id is not None:
             from app.services.transaction_ops.settlement import queue
 
             proposal = await get_proposal(db, tenant_id, operation.proposal_id)

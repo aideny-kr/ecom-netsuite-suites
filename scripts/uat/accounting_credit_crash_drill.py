@@ -26,15 +26,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Reuse the strict loopback database guard and exact ephemeral-tenant cleanup.
-import transaction_ops_crash_drill as base
-
 import httpx
+import transaction_ops_crash_drill as base
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.models.chat import ChatMessage, ChatSession
+from app.models.transaction_ops import TransactionOperation
 from app.schemas.transaction_runs import ConfigOut
 from app.services.chat.orchestrator import run_chat_turn
 from app.services.chat.write_confirmation_service import build_confirmation_payload
@@ -57,17 +57,20 @@ async def child(path, port):
     async def send(**kwargs):
         assert kwargs["human_approved"] is True
         assert kwargs["approval_context"]["confirmation_id"] == str(message_id)
-        # Assert durable attribution exists on ANOTHER committed connection.
+        # Assert durable attribution exists on ANOTHER committed connection: the ledger
+        # row the card claimed, executing, with the one-use permit already consumed.
         async with factory() as audit_db:
             await set_tenant_context(audit_db, str(tenant))
-            assert await audit_db.scalar(
-                select(AuditEvent.id).where(
-                    AuditEvent.tenant_id == tenant,
-                    AuditEvent.resource_id == str(message_id),
-                    AuditEvent.action == accounting_recovery.CLAIM_ACTION,
-                    AuditEvent.actor_id == actor,
+            row = await audit_db.scalar(
+                select(TransactionOperation).where(
+                    TransactionOperation.tenant_id == tenant,
+                    TransactionOperation.approval_kind == "chat_confirmation",
+                    TransactionOperation.approval_id == message_id,
                 )
             )
+            assert row is not None and row.status == "executing"
+            assert row.result_json.get("dispatch_reserved") is True
+            assert row.result_json.get("approved_by") == str(actor)
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
                 f"http://127.0.0.1:{port}/credit", json=kwargs["tool_input"]
@@ -239,7 +242,9 @@ async def run(output):
             assert child_process.returncode == -signal.SIGKILL
 
             async def verify(db, tenant_id, proposal, receipt):
-                assert receipt is None
+                assert (
+                    not receipt
+                )  # the kill came before any receipt; the dispatcher passes {}
                 async with httpx.AsyncClient() as client:
                     response = await client.get(f"http://127.0.0.1:{port}/credit")
                 assert response.json() == params

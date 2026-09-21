@@ -18,10 +18,13 @@ from app.models.transaction_ops import TransactionCase, TransactionFinding, Tran
 from app.models.user import User
 from app.services.audit_service import log_event
 from app.services.transaction_ops.accounting_history import _claim, verified_resolution
+from app.services.transaction_ops.accounting_recheck import effective_config_id
 from app.services.transaction_ops.resolution_plan import completed_plan, operation_identity
+from app.services.transaction_ops.treatments import treatment_or_none
 
 MAX_ATTEMPTS = 3
 RETRY_DELAY = timedelta(minutes=3)
+BUSY_RETRY_DELAY = timedelta(seconds=60)  # the slot, not the work, was the problem
 
 
 def enqueue(message, run, now):
@@ -124,7 +127,7 @@ async def _evidence(db, tenant_id, message):
         or result.get("approved_by") != claim["approved_by"]
         or result.get("case_id") != p["case_id"]
         or run.origin != "recovery"
-        or str(run.config_id) != p["config_id"]
+        or str(run.config_id) != str(effective_config_id(so) or "")
         or run.work_key != business_digest({"accounting_recheck_confirmation": str(message.id)})
         or run.params_json.get("order_references") != [p["order_reference"]]
         or run.params_json.get("verification_scope") != SCOPE
@@ -164,7 +167,11 @@ def record_links(p, verification, report):
         order = {"id": report["targets"][0].get("record_id"), "tranId": p["order_reference"]}
     documents = []
     invoice = verification.get("invoice") or (p.get("support") or {}).get("invoice")
-    if not invoice and p.get("kind") not in {"sales_order_source_alignment", "sales_order_line_alignment"}:
+    # A correction whose reconciliation target is its own record is the sales order
+    # itself; every other treatment's "before" document (and a foreign kind's, as
+    # before this registry) is the invoice it corrected.
+    row = treatment_or_none(p)
+    if not invoice and (row is None or row.reconciliation_target != "record"):
         invoice = {**p["before"], "id": p["record_id"]}
     if invoice:
         documents.append({**invoice, "record_type": "invoice"})
@@ -351,7 +358,7 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
     and their audit are committed together; a killed worker can safely resume.
     """
     from app.services.transaction_ops.accounting_group import accounting_write_slot
-    from app.services.transaction_ops.accounting_recovery import _authorize_read, refresh_group
+    from app.services.transaction_ops.accounting_recovery import _authorize_read, group_of, refresh_group
 
     now = now or datetime.now(timezone.utc)
     await set_tenant_context(db, str(tenant_id))
@@ -455,7 +462,7 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
                     if native_verified
                     else "The complete correction and reconciliation could not be verified.",
                 }
-                group_id = claim.get("group_approval_id")
+                group_id = group_of(claim)
                 if next_card:
                     # Explicit order survives equal transaction timestamps and UUID sorting.
                     next_card.created_at = now + timedelta(microseconds=1)
@@ -506,6 +513,18 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
     except Exception as exc:
         await db.rollback()
         if not claimed:
+            # The per-account write slot was busy: nothing was claimed, so the retry marker
+            # still says whatever it said. Pull it to the next collector tick, or the
+            # receipt waits out a stale next_at behind a slot that is free again.
+            await set_tenant_context(db, str(tenant_id))
+            message = await _message(db, tenant_id, message_id)
+            work = (message.structured_output or {}).get("accounting_completion") if message else None
+            if work and work.get("status") == "pending":
+                message.structured_output = {
+                    **message.structured_output,
+                    "accounting_completion": {**work, "next_at": (now + BUSY_RETRY_DELAY).isoformat()},
+                }
+                await db.commit()
             return {"status": "busy", "financial_writes": 0}
         await set_tenant_context(db, str(tenant_id))
         message = await _message(db, tenant_id, message_id)
@@ -539,11 +558,10 @@ async def defer(db, tenant_id, message, now, reason):
         status="error",
     )
     if status == "blocked":
-        claim = _claim(message)
-        group_id = claim.get("group_approval_id") if claim else None
-        if group_id:
-            from app.services.transaction_ops.accounting_recovery import refresh_group
+        from app.services.transaction_ops.accounting_recovery import group_of, refresh_group
 
+        group_id = group_of(_claim(message))
+        if group_id:
             await refresh_group(db, tenant_id, message.session_id, group_id)
         else:
             db.add(

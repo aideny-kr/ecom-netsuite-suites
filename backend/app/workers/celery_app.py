@@ -1,10 +1,29 @@
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_init
 
 from app.core.config import settings
 
 RECON_COLLECTOR_PRIORITY = 3
 RECON_COLLECTOR_QUEUE = "recon-control"
+# Short, human-facing correction jobs (a receipt after a verified recheck, a one-order
+# recovery read, one approved execution) used to queue on `recon` behind hour-long scans
+# and 30-child group dispatches on a two-process worker: the post-mortem measured a
+# 298 s median between a finished check and its published receipt. They get their own
+# queue and their own worker, the pattern the collectors already proved.
+RECON_ACTIONS_PRIORITY = 3
+# The queue the dedicated worker consumes; always declared so a worker can subscribe.
+RECON_ACTIONS_QUEUE = "recon-actions"
+# Where short jobs are actually PUBLISHED. The VM's compose is hand-edited and may not have
+# the worker yet, and a queue nothing consumes is work that never runs, so this defaults to
+# the bulk queue and the operator moves it once worker-actions is up.
+ACTIONS_QUEUE = settings.TRANSACTION_OPS_ACTIONS_QUEUE or "recon"
+RECON_ACTION_TASKS = (
+    "tasks.transaction_ops_execute",
+    "tasks.transaction_ops_recover",
+    "tasks.transaction_ops_recover_credit",
+    "tasks.transaction_ops_complete_accounting",
+)
 
 celery_app = Celery(
     "ecom_netsuite",
@@ -61,6 +80,7 @@ celery_app.conf.update(
         "sync": {"exchange": "sync", "routing_key": "sync"},
         "recon": {"exchange": "recon", "routing_key": "recon"},
         RECON_COLLECTOR_QUEUE: {"exchange": RECON_COLLECTOR_QUEUE, "routing_key": RECON_COLLECTOR_QUEUE},
+        RECON_ACTIONS_QUEUE: {"exchange": RECON_ACTIONS_QUEUE, "routing_key": RECON_ACTIONS_QUEUE},
         "export": {"exchange": "export", "routing_key": "export"},
     },
     # Redis transport supports per-message priority with no new queues and no
@@ -102,6 +122,9 @@ celery_app.conf.update(
                 "queue": RECON_COLLECTOR_QUEUE,
                 "priority": RECON_COLLECTOR_PRIORITY,
             },
+            # The short correction jobs. Their senders pass the same queue explicitly
+            # (an explicit `queue=` kwarg beats a route), so both must agree.
+            **{name: {"queue": ACTIONS_QUEUE, "priority": RECON_ACTIONS_PRIORITY} for name in RECON_ACTION_TASKS},
         },
         _default_send_task_priority,
     ),
@@ -128,6 +151,7 @@ celery_app.conf.include = [
     "app.workers.tasks.metadata_discovery",
     "app.workers.tasks.metric_catalog_reseed",
     "app.workers.tasks.onboarding_discovery",
+    "app.workers.tasks.ops_digest",
     "app.workers.tasks.oracle_skill_reseed",
     "app.workers.tasks.proactive_token_refresh",
     "app.workers.tasks.shopify_sync",
@@ -152,6 +176,12 @@ celery_app.conf.include = [
 ]
 
 celery_app.conf.beat_schedule = {
+    "ops-digest-daily": {
+        # After the nightly syncs and recon sweeps (01:00-06:30 UTC) so the digest
+        # covers their outcomes. One audit row per tenant per run, email optional.
+        "task": "tasks.ops_digest",
+        "schedule": crontab(hour=7, minute=0),
+    },
     "transaction-operations-actions-minute": {
         "task": "tasks.transaction_ops_collect_actions",
         "schedule": 60.0,
@@ -262,3 +292,16 @@ celery_app.conf.beat_schedule = {
         "options": {"expires": 120},
     },
 }
+
+
+@worker_init.connect
+def init_worker_observability(**_kwargs):
+    """Initialise Sentry in every Celery worker process.
+
+    Before this hook, ``sentry_sdk.init`` ran only inside the FastAPI lifespan, so an
+    unattended worker exception surfaced nowhere but the job row. The API and the
+    workers share one initialiser so the two processes cannot drift apart.
+    """
+    from app.core.observability import init_sentry
+
+    init_sentry()

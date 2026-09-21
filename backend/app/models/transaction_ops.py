@@ -82,7 +82,7 @@ class TransactionRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             name="ck_tx_run_reason",
         ),
         CheckConstraint(
-            "api_calls_used >= 0 AND api_calls_used <= max_api_calls "
+            "api_calls_used >= 0 AND api_calls_held >= 0 AND api_calls_used + api_calls_held <= max_api_calls "
             "AND orders_used >= 0 AND orders_used <= max_orders",
             name="ck_tx_run_spend",
         ),
@@ -99,6 +99,8 @@ class TransactionRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     max_api_calls: Mapped[int] = mapped_column(Integer)
     max_orders: Mapped[int] = mapped_column(Integer)
     api_calls_used: Mapped[int] = mapped_column(Integer, default=0)
+    # Reserved for a read in flight and not yet settled; see migration 110.
+    api_calls_held: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     orders_used: Mapped[int] = mapped_column(Integer, default=0)
     deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
@@ -160,28 +162,58 @@ class TransactionOperation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "transaction_ops_operations"
     __table_args__ = (
         UniqueConstraint("tenant_id", "work_key"),
-        UniqueConstraint("tenant_id", "proposal_id"),
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("tenant_id", "approval_kind", "approval_id", name="uq_tx_operation_approval"),
+        ForeignKeyConstraint(
+            ["tenant_id", "retry_of_operation_id"],
+            ["transaction_ops_operations.tenant_id", "transaction_ops_operations.id"],
+            name="fk_tx_operation_retry_of",
+        ),
         Index(
             "uq_tx_operation_unsettled_entity",
             "tenant_id",
             "entity_key",
             unique=True,
-            postgresql_where=text("status IN ('executing','unknown')"),
+            postgresql_where=text("status IN ('executing','unknown','committed_unverified')"),
         ),
         ForeignKeyConstraint(
             ["tenant_id", "proposal_id"], ["transaction_ops_proposals.tenant_id", "transaction_ops_proposals.id"]
         ),
-        CheckConstraint("status IN ('executing','verified','unknown','failed')", name="ck_tx_operation_status"),
+        # The kernel's outcome taxonomy (spec section 3). 'failed' is legacy: accepted for one
+        # release so branches still writing it work against a shared database, never written here.
+        CheckConstraint(
+            "status IN ('executing','rejected_before_effect','committed_unverified','unknown','verified',"
+            "'needs_review','failed')",
+            name="ck_tx_operation_status",
+        ),
+        CheckConstraint(
+            "approval_kind IN ('transaction_proposal','chat_confirmation')", name="ck_tx_operation_approval_kind"
+        ),
+        CheckConstraint("surface IN ('chat','scheduled','group','backfill')", name="ck_tx_operation_surface"),
+        CheckConstraint(
+            "approval_kind <> 'transaction_proposal' OR (proposal_id IS NOT NULL AND approval_id = proposal_id)",
+            name="ck_tx_operation_proposal_approval",
+        ),
         CheckConstraint(
             "max_api_calls BETWEEN 1 AND 96 AND api_calls_used >= 0 AND api_calls_used <= max_api_calls",
             name="ck_tx_operation_spend",
         ),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
-    proposal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    proposal_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Who approved this attempt (a transaction proposal or a chat confirmation) and where.
+    approval_kind: Mapped[str] = mapped_column(String(32), default="transaction_proposal")
+    approval_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    surface: Mapped[str] = mapped_column(String(16), default="scheduled")
+    provider: Mapped[str | None] = mapped_column(String(32))
+    adapter: Mapped[str | None] = mapped_column(String(64))
     work_key: Mapped[str] = mapped_column(String(64))
     entity_key: Mapped[str] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(String(20), default="executing", index=True)
+    # Lineage: a corrected resubmit gets its own row and work key but keeps the business
+    # identity it retries, so it can never evade the duplicate check.
+    base_work_key: Mapped[str] = mapped_column(String(64))
+    retry_of_operation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    status: Mapped[str] = mapped_column(String(32), default="executing", index=True)
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     max_api_calls: Mapped[int] = mapped_column(Integer)

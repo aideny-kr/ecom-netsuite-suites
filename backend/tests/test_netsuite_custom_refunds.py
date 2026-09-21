@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.services.transaction_ops.netsuite_refunds import collect_refunds
+from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS, collect_refunds
 from tests.test_netsuite_refund_graph import Reader, edge
 
 REFERENCE = "R123456789"
@@ -208,7 +208,9 @@ async def test_custom_reader_preserves_the_existing_native_call_budget():
     reader.request = request
     with pytest.raises(ValueError, match="budget"):
         await collect_refunds(reader, "1", "1", "1", order_reference=REFERENCE)
-    assert reader.calls <= 24
+    # Bound to the constant, not a literal: the literal silently became wrong the
+    # first time the ceiling moved, and nothing else pins the intended headroom.
+    assert reader.calls <= MAX_REFUND_CALLS
 
 
 async def test_no_custom_record_permission_never_falls_back_to_proving_zero():

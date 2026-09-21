@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.core.config import settings
 from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.models.chat import ChatMessage, ChatSession
@@ -210,6 +211,17 @@ def outcome(card, action, *, interrupted=False):
         return {"status": "rejected"}
     if status == "approved" and (card.get("accounting_verification") or {}).get("status") == "verified":
         return {"status": "verified"}
+    if status == "failed" and card.get("repair_exit_reason") == "dispatch_disabled":
+        # The orchestrator's switch halted this member after its claim. Nothing was sent
+        # (audited as a zero-write precondition failure), so there is nothing to verify;
+        # the member needs a fresh approval once dispatch is re-enabled.
+        return {
+            "status": "blocked",
+            "reason": (
+                "Sending was disabled by the operator before this correction was sent. Nothing was "
+                "sent; prepare a fresh approval once dispatch is re-enabled."
+            ),
+        }
     if card.get("accounting_execution") or status in {"executing", "indeterminate", "approved"}:
         return {
             "status": "verification_pending",
@@ -291,6 +303,8 @@ async def _drain(db, tenant_id, parent_id, factory):
     ]
     remaining.sort(key=lambda m: work["members"][m["confirmation_id"]].get("attempts", 0))
 
+    halted = []
+
     async def process(member):
         identifier = member["confirmation_id"]
         async with factory() as child_db:
@@ -299,6 +313,14 @@ async def _drain(db, tenant_id, parent_id, factory):
             before = current["members"][identifier]["status"]
             error = None
             if before not in {"queued", "dispatching"}:
+                await child_db.rollback()
+                return
+            if before == "queued" and auth["action"] == "approve" and not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+                # Operator kill switch: never reserve or invoke this member. It stays
+                # queued and untouched, and resumes when dispatch is re-enabled. A
+                # member already dispatching is only inspected below, never resent.
+                # A rejection sends nothing, so it drains regardless of the switch.
+                halted.append(identifier)
                 await child_db.rollback()
                 return
             if before == "queued":
@@ -383,10 +405,15 @@ async def _drain(db, tenant_id, parent_id, factory):
     work = deepcopy(parent.structured_output["accounting_group_dispatch"])
     pending = sum(m["status"] in {"queued", "dispatching"} for m in work["members"].values())
     waiting = pending and all(m.get("attempts", 0) > 0 for m in work["members"].values() if m["status"] == "queued")
-    work.update(
-        status="queued" if pending else "finished",
-        next_at=((await clock(db)) + timedelta(seconds=30 if waiting else 0)).isoformat(),
-    )
+    # A halted group re-checks the switch every five minutes instead of spinning on
+    # the collector's cadence; the marker keeps the audit to one row per halt.
+    delay = timedelta(minutes=5) if halted else timedelta(seconds=30 if waiting else 0)
+    newly_halted = bool(halted) and not work.get("dispatch_disabled")
+    work.update(status="queued" if pending else "finished", next_at=((await clock(db)) + delay).isoformat())
+    if halted:
+        work["dispatch_disabled"] = True
+    else:
+        work.pop("dispatch_disabled", None)
     if not pending:
         work["finished_at"] = work["next_at"]
     parent.structured_output = {**parent.structured_output, "accounting_group_dispatch": work}
@@ -411,6 +438,22 @@ async def _drain(db, tenant_id, parent_id, factory):
         resource_id=str(parent_id),
         payload={"status": work["status"], "remaining": pending, "orders": len(work["members"]), "model_calls": 0},
     )
+    if newly_halted:
+        await log_event(
+            db,
+            tenant_id,
+            "transaction_ops",
+            "accounting_group.dispatch.disabled",
+            actor_id=UUID(auth["actor_id"]),
+            resource_type="chat_message",
+            resource_id=str(parent_id),
+            payload={
+                "group_approval_id": str(parent_id),
+                "halted_members": len(halted),
+                "setting": "TRANSACTION_OPS_DISPATCH_ENABLED",
+                "financial_writes": 0,
+            },
+        )
     if not pending:
         await log_event(
             db,
@@ -429,4 +472,10 @@ async def _drain(db, tenant_id, parent_id, factory):
             },
         )
     await db.commit()
-    return {"status": "waiting" if waiting else work["status"], "remaining": pending, "orders": len(work["members"])}
+    if halted:
+        status = "blocked"
+    elif waiting:
+        status = "waiting"
+    else:
+        status = work["status"]
+    return {"status": status, "remaining": pending, "orders": len(work["members"])}

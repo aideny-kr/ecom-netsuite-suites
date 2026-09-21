@@ -7,6 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops.source_eligibility import FAILED_PAYMENT, payment_failed
 from app.services.transaction_ops.source_reader import SourceReadError, read_framework_order
+from app.services.transaction_ops.treatments import family_of, is_mcp, treatment_of
 
 SOURCE_FIELDS = (
     "business_entity",
@@ -297,7 +298,7 @@ async def verify_after(db, tenant_id, proposal, receipt=None):
         from app.services.transaction_ops.credit_api_correction import verify_after as verify_credit
 
         return await verify_credit(db, tenant_id, proposal, receipt)
-    if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+    if family_of(proposal) == "amendment":  # an unregistered kind falls through to the readback below
         from app.services.transaction_ops.native_accounting_service import verify_after as verify_native
 
         return await verify_native(db, tenant_id, proposal, receipt)
@@ -382,11 +383,11 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
 
         return await validate_credit(db, tenant_id, tool_name, tool_input, proposal)
     if tool_name == "transaction_ops_accounting_amendment_apply":
-        from app.services.transaction_ops.native_accounting_service import validate_binding
+        from app.services.transaction_ops.native_accounting_service import validate_approved as validate_native
 
-        # Full fresh evidence runs once in the durable native send dispatcher.
-        validate_binding(tenant_id, tool_name, tool_input, proposal)
-        return
+        # The native card's whole preflight (binding, fresh evidence, the rebuilt intent,
+        # the RESTlet's capabilities and preview) runs here, before the kernel's permit.
+        return await validate_native(db, tenant_id, tool_name, tool_input, proposal)
     from urllib.parse import urlsplit
 
     from app.services.chat.tools import parse_external_tool_name
@@ -494,10 +495,8 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
     from app.services.transaction_ops.case_resolution_scope import validate
 
     await validate(db, tenant_id, p)
-    if (
-        p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
-        and p.get("execution_transport") != "mcp_record_api"
-    ):
+    treatment = treatment_of(p)
+    if treatment.family == "amendment" and not is_mcp(p):
         from app.services.transaction_ops.native_accounting_service import confirmation
 
         return await confirmation(db, tenant_id, actor_id, session_id, p, policy, correlation_id)
@@ -520,10 +519,7 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         raise ValueError("The configured policy blocks this correction.")
     if await classify_connector_mutation(name, db, tenant_id) != mutation:
         raise ValueError("The scoped connector does not expose a verified update operation.")
-    if (
-        p.get("kind") in {"invoice_sales_adjustment", "sales_order_source_alignment"}
-        or p.get("execution_transport") == "mcp_record_api"
-    ):
+    if treatment.prefetch_metadata or is_mcp(p):
         from app.services.chat.record_metadata_service import prefetch_scoped_invoice_metadata
 
         await prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, p, correlation_id)

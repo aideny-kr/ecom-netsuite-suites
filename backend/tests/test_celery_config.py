@@ -338,3 +338,51 @@ def test_collectors_execute_while_bulk_worker_is_saturated(tmp_path):
         if keys:
             clients.delete(*keys)
         clients.close()
+
+
+def test_short_correction_jobs_have_their_own_queue_worker_and_priority():
+    """The post-mortem measured a 298 s median between a finished recheck and its published
+    receipt: short jobs queued on `recon` behind hour-long scans and group dispatches on a
+    two-process worker that reserved up to eight messages. They now route to
+    `recon-actions`, a dedicated worker consumes it in both compose files, and the bulk
+    worker reserves one message per process."""
+    import shlex
+
+    import yaml
+
+    from app.core.config import settings
+    from app.workers.celery_app import (
+        ACTIONS_QUEUE,
+        RECON_ACTION_TASKS,
+        RECON_ACTIONS_PRIORITY,
+        RECON_ACTIONS_QUEUE,
+        celery_app,
+    )
+    from app.workers.tasks import transaction_ops  # noqa: F401
+
+    # The dedicated queue is always declared so a worker can subscribe, but where the jobs
+    # are PUBLISHED follows one setting, and it defaults to the bulk queue: the VM's compose
+    # is hand-edited, and a queue nothing consumes is work that never runs.
+    assert RECON_ACTIONS_QUEUE in celery_app.amqp.queues
+    assert ACTIONS_QUEUE == settings.TRANSACTION_OPS_ACTIONS_QUEUE == "recon"
+    for name in RECON_ACTION_TASKS:
+        route = celery_app.amqp.router.route({}, name)
+        assert route["queue"].name == ACTIONS_QUEUE and route["priority"] == RECON_ACTIONS_PRIORITY
+        assert celery_app.tasks[name].queue == ACTIONS_QUEUE
+    for name in ("tasks.transaction_ops_run", "tasks.transaction_ops_dispatch_group"):
+        # The long work keeps the bulk queue: no route override, the task's own queue and
+        # the senders' explicit kwarg both say `recon`.
+        assert "queue" not in celery_app.amqp.router.route({}, name)
+        assert celery_app.tasks[name].queue == "recon"
+    root = Path(__file__).resolve().parents[2]
+    for path in ("docker-compose.prod.yml", "docker-compose.yml"):
+        services = yaml.safe_load((root / path).read_text())["services"]
+        flags = shlex.split(services["worker-actions"]["command"])
+        assert flags[flags.index("-Q") + 1].split(",") == [RECON_ACTIONS_QUEUE], path
+        assert "--prefetch-multiplier=1" in flags, path
+        assert RECON_ACTIONS_QUEUE not in shlex.split(services["worker"]["command"])[-1].split(","), path
+        assert RECON_ACTIONS_QUEUE not in shlex.split(services["worker-collectors"]["command"])[-1].split(","), path
+    production = yaml.safe_load((root / "docker-compose.prod.yml").read_text())["services"]
+    assert "--prefetch-multiplier=1" in shlex.split(production["worker"]["command"])
+    deploy = (root / ".github/workflows/deploy.yml").read_text()
+    assert deploy.count("worker-actions") >= 4

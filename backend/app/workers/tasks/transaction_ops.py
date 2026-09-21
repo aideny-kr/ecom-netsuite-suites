@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from app.core.database import set_tenant_context, worker_async_session
 from app.workers.base_task import InstrumentedTask
-from app.workers.celery_app import RECON_COLLECTOR_PRIORITY, RECON_COLLECTOR_QUEUE, celery_app
+from app.workers.celery_app import ACTIONS_QUEUE, RECON_COLLECTOR_PRIORITY, RECON_COLLECTOR_QUEUE, celery_app
 
 
 @celery_app.task(
@@ -104,7 +104,7 @@ def transaction_ops_collect_due():
 @celery_app.task(
     base=InstrumentedTask,
     name="tasks.transaction_ops_execute",
-    queue="recon",
+    queue=ACTIONS_QUEUE,
     max_retries=0,
     soft_time_limit=330,
     time_limit=340,
@@ -127,7 +127,7 @@ def transaction_ops_execute(tenant_id: str, proposal_id: str):
 @celery_app.task(
     base=InstrumentedTask,
     name="tasks.transaction_ops_recover",
-    queue="recon",
+    queue=ACTIONS_QUEUE,
     max_retries=0,
     soft_time_limit=330,
     time_limit=340,
@@ -172,7 +172,7 @@ def transaction_ops_collect_actions():
 @celery_app.task(
     base=InstrumentedTask,
     name="tasks.transaction_ops_recover_credit",
-    queue="recon",
+    queue=ACTIONS_QUEUE,
     max_retries=0,
     soft_time_limit=110,
     time_limit=120,
@@ -193,7 +193,7 @@ def transaction_ops_recover_credit(tenant_id: str, message_id: str):
 @celery_app.task(
     base=InstrumentedTask,
     name="tasks.transaction_ops_complete_accounting",
-    queue="recon",
+    queue=ACTIONS_QUEUE,
     max_retries=0,
     soft_time_limit=170,
     time_limit=180,

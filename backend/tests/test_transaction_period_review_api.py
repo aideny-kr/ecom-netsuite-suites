@@ -72,7 +72,7 @@ async def test_review_queues_exact_calendar_cohort_and_idempotent_retry(client, 
     assert datetime.fromisoformat(data["params_json"]["window_end"]) == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
     assert datetime.fromisoformat(data["params_json"]["review"]["end"]) == datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
     assert data["params_json"]["window_basis"] == "updated_at"
-    publisher.assert_called_once_with(actor.tenant_id, UUID(data["id"]))
+    publisher.assert_called_once_with(actor.tenant_id, UUID(data["id"]), queue="recon")
     assert (await client.post(url, json=body, headers=headers)).json()["id"] == data["id"]
     assert publisher.call_count == 2  # Shared publisher deduplicates a retried pending run.
 

@@ -236,8 +236,15 @@ class ProposalOut(OutputModel):
 class OperationOut(OutputModel):
     id: UUID
     tenant_id: UUID
-    proposal_id: UUID
+    proposal_id: UUID | None
+    approval_kind: str
+    approval_id: UUID
+    surface: str
+    provider: str | None
+    adapter: str | None
     work_key: str
+    base_work_key: str
+    retry_of_operation_id: UUID | None
     status: str
     attempted_at: datetime
     deadline_at: datetime
@@ -262,14 +269,21 @@ class FindingOut(OutputModel):
 
 
 class ClaimedOperation(InputModel):
-    """Returned only after the executing ledger row has been committed."""
+    """Returned only after the executing ledger row has been committed.
+
+    A transaction proposal's claim carries the proposal's evidence (``before_json`` /
+    ``after_json``); a chat confirmation's claim carries none, because the card itself is
+    the payload of record and the ledger binds it by ``evidence_digest``.
+    """
 
     operation_id: UUID
-    proposal_id: UUID
+    proposal_id: UUID | None
+    approval_kind: str = "transaction_proposal"
+    approval_id: UUID | None = None
     work_key: str
-    config_id: UUID
-    action: ProposalAction
-    currency: str
+    config_id: UUID | None
+    action: str
+    currency: str | None
     netsuite_account_id: str
     subsidiary_id: str
     record_type: str

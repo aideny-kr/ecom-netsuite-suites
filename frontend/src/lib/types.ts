@@ -936,6 +936,31 @@ interface NativeAccountingReviewBase extends AccountingReviewBase {
   sales_adjustment_account: string;
   tax_account: string;
   expected_after: { total: string; subtotal: string; taxTotal: string };
+  refund_allocation?: {
+    status: "ready_for_finance_review";
+    source_refund_id: string;
+    payment_number: string;
+    currency: string;
+    net: string;
+    tax: string;
+    gross: string;
+    order_version_id: string;
+    parent_rollups?: Array<{ source_line_id: string; version_id: string; before: string; after: string }>;
+    authority: string;
+    lines: Array<{
+      source_line_id: string;
+      sku: string;
+      quantity: string;
+      price_before: string;
+      price_after: string;
+      tax_before: string;
+      tax_after: string;
+      net: string;
+      tax: string;
+      gross: string;
+      version_ids: string[];
+    }>;
+  };
 }
 
 export type NativeAccountingReview =
@@ -1000,8 +1025,26 @@ export interface WriteConfirmationData {
     completion_audit_id: string;
     next_step: { status: string; reasons?: string[]; confirmation_id?: string };
   };
-  accounting_plan_progress?: { orders: number; results_ready: number; reconciled: number; remaining: number; status: string };
-  accounting_recheck?: { status: "queued" | "not_queued"; run_id?: string; reason?: string };
+  accounting_plan_progress?: {
+    orders: number;
+    results_ready: number;
+    reconciled: number;
+    remaining: number;
+    status: string;
+    // Members that were never prepared are counted apart from the approved corrections;
+    // `deadline` says how many of them hit the preparation time limit.
+    prepared?: number;
+    unprepared?: number;
+    deadline?: number;
+    computed_at?: string;
+  };
+  // "queued" is no longer the last word: the recheck run's verdict lands here when it finishes.
+  accounting_recheck?: {
+    status: "queued" | "not_queued" | "succeeded" | "difference" | "unverified";
+    run_id?: string;
+    reason?: string;
+    checked_at?: string;
+  };
   tool_name: string;
   tool_input: Record<string, unknown>;
   confirmation_token: string;

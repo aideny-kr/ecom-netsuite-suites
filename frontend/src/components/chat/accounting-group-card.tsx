@@ -20,6 +20,10 @@ export function AccountingGroupCard({
   const [reviewed, setReviewed] = useState(false);
   const group = data.accounting_group!;
   const eligible = group.members.filter((m) => m.card);
+  const hasRefundAllocation = eligible.some((member) => {
+    const review = member.card?.accounting_review;
+    return review?.kind === "credit_tax_reallocation" && Boolean(review.refund_allocation);
+  });
   const verified = eligible.filter(
     (m) =>
       m.card?.status === "approved" &&
@@ -75,7 +79,10 @@ export function AccountingGroupCard({
         )}
         {progress && progress.results_ready > 0 && (
           <p role="status" className="text-[13px] font-medium">
-            {progress.reconciled} / {progress.orders} orders reconciled · {progress.remaining} need further review
+            {progress.prepared === undefined
+              ? `${progress.reconciled} / ${progress.orders} orders reconciled · ${progress.remaining} need further review`
+              : `${progress.reconciled} / ${progress.prepared} approved corrections reconciled · ${progress.remaining} still to reconcile` +
+                (progress.unprepared ? ` · ${progress.unprepared} of ${progress.orders} orders not prepared` : "")}
           </p>
         )}
         <p className="text-[13px] leading-relaxed text-muted-foreground">
@@ -135,6 +142,7 @@ export function AccountingGroupCard({
             Approval confirms those accounting choices. A changed record is
             stopped; an unconfirmed outcome stops further queued writes. Orders
             already running may finish.
+            {hasRefundAllocation && " For each audited refund, confirm that the displayed line changes belong to that refund. Audit history does not contain an explicit refund-to-line link."}
           </div>
         )}
         <div className="space-y-3">
@@ -276,8 +284,9 @@ export function AccountingGroupCard({
               disabled={disabled || blocked}
               onChange={(e) => setReviewed(e.target.checked)}
             />
-            I reviewed every correction, its financial effect and accounting
-            conditions.
+            {hasRefundAllocation
+              ? "I confirm the audited line changes belong to each displayed refund, and I reviewed every correction, its tax basis, financial effect and accounting conditions."
+              : "I reviewed every correction, its financial effect and accounting conditions."}
           </label>
           <div className="flex flex-wrap justify-end gap-2">
             <button

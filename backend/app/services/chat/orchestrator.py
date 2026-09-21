@@ -22,6 +22,7 @@ from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_categories import categorize, is_celigo_source
 from app.services.drive_rag.retriever import retrieve_drive_chunks
 from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
+from app.services.transaction_ops.treatments import DEPENDENT_KINDS, VERIFIED_KINDS, family_of
 
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
@@ -1794,6 +1795,41 @@ async def _ensure_session_messages_loaded(db: AsyncSession, session: ChatSession
         await db.refresh(session, attribute_names=["messages"])
 
 
+def _kernel_rendering(result: dict, adapter, *, record_type: str, mutation_type: str):
+    """What the approve branch says about a kernel outcome: the same three-way write outcome
+    the generic card uses (success / failed / indeterminate), whether the write succeeded,
+    the error to store, and the first sentence of the reply. Returns
+    ``(write_outcome, succeeded, error, content)``."""
+    status = result["status"]
+    if status == "verified":
+        if adapter.sent == "accepted":
+            return "success", True, None, f"Done — the {record_type} {mutation_type} has been executed successfully."
+        return "indeterminate", True, None, "The approved accounting change was verified using fresh NetSuite reads."
+    if status == "committed_unverified":
+        # Saved by the provider's account, not yet proven by the readback: the card says so
+        # (the verification block appends what the readback found).
+        return "success", True, None, f"The {record_type} {mutation_type} was sent and saved, but is not yet verified."
+    if status == "rejected_before_effect":
+        error = adapter.refusal or "NetSuite reported this write failed."
+        return "failed", False, error, f"The operation failed: {error}"
+    # unknown, or needs_review (a receipt the ledger could not tie to a permit)
+    error = (
+        "the receipt could not be tied to the send permit"
+        if status == "needs_review"
+        else f"the {mutation_type} did not complete within the time limit"
+    )
+    return (
+        "indeterminate",
+        False,
+        error,
+        f"**This {record_type} {mutation_type} may or may not have completed.** "
+        f"NetSuite did not confirm the result ({error}), which does NOT mean "
+        "it was rejected — the record may already exist.\n\n"
+        f"Check the {record_type} in NetSuite before trying again. Re-running this "
+        "now risks creating it twice.",
+    )
+
+
 async def _cas_claim_write_confirmation(
     db: AsyncSession,
     confirm_msg: ChatMessage,
@@ -2376,8 +2412,17 @@ async def run_chat_turn(
                     except Exception as exc:
                         yield {"type": "error", "error": f"No update was sent: {exc}"}
                         return
-                if _so.get("accounting_review"):
-                    from app.services.transaction_ops.accounting_recovery import execution_claim
+                # Every accounting card (MCP record API or the native amendment RESTlet) is
+                # claimed on the operation ledger and run by the write kernel below; its
+                # duplicate check and permit are the ledger's (write-kernel design, G3.2).
+                from app.services.transaction_ops import chat_confirmation as _chat_confirmation
+
+                _accounting = bool(_so.get("accounting_review"))
+                _via_kernel = _accounting
+                if _accounting:
+                    # The ledger's work-key uniqueness only sees attempts the ledger recorded; work
+                    # sent under a card's own claim before the kernel path existed lives on
+                    # earlier cards, so that history is still consulted here.
                     from app.services.transaction_ops.resolution_plan import previous_execution
 
                     _previous = await previous_execution(db, tenant_id, _confirm_msg.id, _so["accounting_review"])
@@ -2399,9 +2444,6 @@ async def run_chat_turn(
                             "Review the recorded verification or reconciliation result before taking another action.",
                         }
                         return
-                    _so = execution_claim(
-                        _so, _confirm_msg.id, user_id, _approval_context, now=datetime.now(timezone.utc)
-                    )
                 _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "executing")
                 if not _claimed:
                     yield {
@@ -2418,21 +2460,40 @@ async def run_chat_turn(
                 # final message write below are tenant-scoped writes.
                 await set_tenant_context(db, str(tenant_id))
 
-                # A crash leaves the claim executing. Credit recovery may only
-                # read its stable external ID and prove the exact application/GL;
-                # it never resubmits a write or restores a pending approval.
-                # Other write types still require manual outcome investigation.
-                # Accounting tax corrections carry server-built source and native preconditions.
-                # Check again after the single-use approval claim, immediately before any write.
-                if _so.get("mutation_type") in ("update", "create"):
-                    from app.services.transaction_ops.tax_correction import validate_approved
-
-                    try:
-                        await validate_approved(db, tenant_id, tool_name, tool_input, _so.get("accounting_review"))
-                        if _so.get("accounting_review"):
-                            await authorize_accounting_write(db, tenant_id, user_id, tool_name, tool_input)
-                    except Exception as exc:
-                        _confirm_msg.structured_output = {**_so, "status": "failed", "error": str(exc)}
+                if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+                    # Operator kill switch, checked after the single-use claim and
+                    # before anything can leave the system. It covers EVERY
+                    # human-approved chat write, accounting-tagged or not, by
+                    # design: a switch that left manual ERP writes open would not
+                    # be a kill switch. The approval is consumed,
+                    # not restored: a halted send needs a fresh human decision once
+                    # dispatch is re-enabled. Terminal, and never a repair re-entry:
+                    # nothing was rejected by NetSuite, so there is nothing to repair.
+                    _disabled_error = "Sending to connected systems is disabled by the operator. No change was sent."
+                    _confirm_msg.structured_output = {
+                        **_so,
+                        "status": "failed",
+                        "error": _disabled_error,
+                        "repair_exit_reason": "dispatch_disabled",
+                    }
+                    await log_event(
+                        db=db,
+                        tenant_id=tenant_id,
+                        actor_id=user_id,
+                        category="write",
+                        action="write.dispatch_disabled",
+                        resource_type="chat_message",
+                        resource_id=str(_confirm_msg.id),
+                        correlation_id=correlation_id,
+                        payload={"setting": "TRANSACTION_OPS_DISPATCH_ENABLED", "financial_writes": 0},
+                        status="error",
+                    )
+                    if _so.get("accounting_review"):
+                        # For an accounting correction the halt is a zero-write precondition
+                        # failure, and must be recorded as one: previous_execution releases a
+                        # failed card for a fresh approval only through this audit. Without
+                        # it the halted card would count as a prior execution and the same
+                        # correction could never be re-approved once dispatch is back.
                         await log_event(
                             db=db,
                             tenant_id=tenant_id,
@@ -2442,33 +2503,212 @@ async def run_chat_turn(
                             resource_type="chat_message",
                             resource_id=str(_confirm_msg.id),
                             correlation_id=correlation_id,
-                            payload={"approved_by": str(user_id), "financial_writes": 0, "reason": str(exc)},
+                            payload={"approved_by": str(user_id), "financial_writes": 0, "reason": "dispatch_disabled"},
                             status="error",
                         )
-                        await db.commit()
+                    await db.commit()
+                    yield {
+                        "type": "error",
+                        "code": "dispatch_disabled",
+                        "error": f"{_disabled_error} Prepare a fresh approval once dispatch is re-enabled.",
+                    }
+                    return
+
+                async def _refuse_before_send(reason: str) -> None:
+                    """Nothing was sent: the card says why and the audit releases the intent."""
+                    _confirm_msg.structured_output = {**_so, "status": "failed", "error": reason}
+                    _wc_flag_modified(_confirm_msg, "structured_output")
+                    await log_event(
+                        db=db,
+                        tenant_id=tenant_id,
+                        actor_id=user_id,
+                        category="transaction_ops",
+                        action="accounting_correction.precondition_failed",
+                        resource_type="chat_message",
+                        resource_id=str(_confirm_msg.id),
+                        correlation_id=correlation_id,
+                        payload={"approved_by": str(user_id), "financial_writes": 0, "reason": reason},
+                        status="error",
+                    )
+                    await db.commit()
+
+                _kernel_result = None
+                _kernel_adapter = None
+                # Where the approve click spent its time (the post-mortem's unattributed
+                # minute per correction); recorded on the verification audit below.
+                _approval_timing = {}
+                if _via_kernel:
+                    from app.services.transaction_ops import write_kernel as _write_kernel
+                    from app.services.transaction_ops.accounting_adapter import ADAPTERS_BY_PROVIDER
+                    from app.services.transaction_ops.tax_correction import validate_approved as _validate_treatment
+                    from app.services.transaction_ops.tax_correction import verify_after as _readback_treatment
+
+                    # The CAS above moved the stored card to executing; the in-memory copy
+                    # must say the same before the ledger reads it.
+                    _confirm_msg.structured_output = {**_so, "status": "executing"}
+                    _claim_started = time.monotonic()
+                    try:
+                        _claimed = await _chat_confirmation.claim(db, tenant_id, _confirm_msg, actor_id=user_id)
+                    except ValueError as exc:
+                        # A StateError carries a code; the authorization's own text is the reason.
+                        _reason = _chat_confirmation.refusal_text(exc)
+                        await _refuse_before_send(_reason)
+                        yield {"type": "error", "error": f"No change was sent to NetSuite: {_reason}"}
+                        return
+                    # The card stores the ledger row it is bound to (the permit checks it) and a
+                    # projection of that row in the shape the completion, history and group
+                    # readers consume; the approval-claimed audit those readers prove
+                    # provenance by is written from the same projection.
+                    from app.models.transaction_ops import TransactionOperation as _Operation
+                    from app.services.transaction_ops import state_service as _state
+                    from app.services.transaction_ops.accounting_recovery import CLAIM_ACTION as _CLAIM_ACTION
+
+                    _kernel_row = await _state._one(db, tenant_id, _Operation, _claimed.operation_id)
+                    _projection = _chat_confirmation.execution_projection(
+                        _confirm_msg.id, _kernel_row, _approval_context
+                    )
+                    _so = {**_so, "operation_id": str(_claimed.operation_id), "accounting_execution": _projection}
+                    _confirm_msg.structured_output = {**_so, "status": "executing"}
+                    _wc_flag_modified(_confirm_msg, "structured_output")
+                    await log_event(
+                        db,
+                        tenant_id,
+                        "transaction_ops",
+                        _CLAIM_ACTION,
+                        actor_id=user_id,
+                        resource_type="chat_message",
+                        resource_id=str(_confirm_msg.id),
+                        payload={**_projection, "financial_writes": 0},
+                    )
+                    await db.commit()
+                    await set_tenant_context(db, str(tenant_id))
+                    # The treatment dispatchers (validate_approved / verify_after) are the seams
+                    # for every card; only the send differs: the MCP card's is the signed tool
+                    # dispatcher, the native card's is the amendment RESTlet itself, so the
+                    # native adapter is handed no tool dispatcher at all.
+                    _adapter_class = ADAPTERS_BY_PROVIDER[_chat_confirmation.provider_of(_so)]
+                    _kernel_adapter = _adapter_class(
+                        name=_chat_confirmation.adapter_of(_so["accounting_review"]),
+                        message=_confirm_msg,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        actor_id=user_id,
+                        session_id=str(session.id),
+                        correlation_id=correlation_id,
+                        validate=_validate_treatment,
+                        dispatch=execute_tool_call if _adapter_class.USES_TOOL_DISPATCHER else None,
+                        readback=_readback_treatment,
+                        approval_context=_approval_context,
+                    )
+                    _approval_timing["claim_ms"] = int((time.monotonic() - _claim_started) * 1000)
+                    _kernel_started = time.monotonic()
+                    _kernel_result = await _write_kernel.execute(db, tenant_id, _claimed, _kernel_adapter)
+                    _approval_timing["kernel_ms"] = int((time.monotonic() - _kernel_started) * 1000)
+                    await set_tenant_context(db, str(tenant_id))
+                    # The projection is refreshed from the row the kernel just completed.
+                    _kernel_row = await _state._one(db, tenant_id, _Operation, _claimed.operation_id)
+                    _so = {
+                        **_so,
+                        "accounting_execution": _chat_confirmation.execution_projection(
+                            _confirm_msg.id, _kernel_row, _approval_context
+                        ),
+                    }
+                    if _kernel_result["status"] == "rejected_before_effect" and _kernel_adapter.receipt is None:
+                        _reason = _kernel_adapter.refusal or "the approved evidence no longer holds"
+                        await _refuse_before_send(_reason)
+                        yield {"type": "error", "error": f"No change was sent to NetSuite: {_reason}"}
+                        return
+
+                # A crash leaves the claim executing. Credit recovery may only
+                # read its stable external ID and prove the exact application/GL;
+                # it never resubmits a write or restores a pending approval.
+                # Other write types still require manual outcome investigation.
+                # Accounting tax corrections carry server-built source and native preconditions.
+                # Check again after the single-use approval claim, immediately before any write.
+                if not _via_kernel and _so.get("mutation_type") in ("update", "create"):
+                    from app.services.transaction_ops.tax_correction import validate_approved
+
+                    try:
+                        await validate_approved(db, tenant_id, tool_name, tool_input, _so.get("accounting_review"))
+                        if _so.get("accounting_review"):
+                            await authorize_accounting_write(db, tenant_id, user_id, tool_name, tool_input)
+                    except Exception as exc:
+                        await _refuse_before_send(str(exc))
                         yield {"type": "error", "error": f"No change was sent to NetSuite: {exc}"}
                         return
 
-                _exec_result_str = await execute_tool_call(
-                    # The ONE place this may be True. `tool_name`/`tool_input`
-                    # here came from validate_and_extract_confirmation, which
-                    # HMAC-verified the exact payload a human accepted — so
-                    # this is the approval, not a claim of one. Every other
-                    # caller of execute_tool_call leaves it default-False and
-                    # is refused at the dispatcher.
-                    human_approved=True,
-                    approval_context=_approval_context,
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    tenant_id=tenant_id,
-                    actor_id=user_id,
-                    correlation_id=correlation_id,
-                    db=db,
-                    session_id=str(session.id),
+                _exec_result_str = (
+                    ""
+                    if _via_kernel
+                    else await execute_tool_call(
+                        # The ONE place this may be True. `tool_name`/`tool_input`
+                        # here came from validate_and_extract_confirmation, which
+                        # HMAC-verified the exact payload a human accepted — so
+                        # this is the approval, not a claim of one. Every other
+                        # caller of execute_tool_call leaves it default-False and
+                        # is refused at the dispatcher.
+                        human_approved=True,
+                        approval_context=_approval_context,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        tenant_id=tenant_id,
+                        actor_id=user_id,
+                        correlation_id=correlation_id,
+                        db=db,
+                        session_id=str(session.id),
+                    )
                 )
 
                 _mutation_type = _so.get("mutation_type", "write")
                 _record_type = _so.get("record_type", "record")
+
+                async def _record_link(_exec_result):
+                    """A link to what was just written. Without it the operator is told "Done"
+                    and left to find the record by searching NetSuite for a name, or by
+                    knowing the URL shape for an internal id. Best-effort by construction:
+                    an unknown record type or a tenant with no NetSuite account id yields no
+                    link rather than a guessed one, and nothing here may turn a SUCCESSFUL
+                    write into an error. Returns ``(url, record_id)`` or ``(None, None)``."""
+                    try:
+                        from sqlalchemy import select as _sel
+
+                        from app.models.tenant import Tenant as _Tenant
+                        from app.services.chat.netsuite_record_url import build_record_url
+                        from app.services.chat.tools import parse_external_tool_name as _parse_ext
+                        from app.services.mcp_connector_service import get_mcp_connector as _get_conn
+
+                        _native_review = _so.get("accounting_review") or {}
+                        _native_amendment = family_of(_native_review) == "amendment"
+                        _new_id = (
+                            _exec_result.get("recordId")
+                            or _exec_result.get("id")
+                            or _exec_result.get("internalId")
+                            or (_exec_result.get("record_id") if _native_amendment else None)
+                            if isinstance(_exec_result, dict)
+                            else None
+                        )
+                        if not _new_id and _mutation_type == "update":
+                            _new_id = _so.get("record_id")
+                        if not _new_id:
+                            return None, None
+                        # Resolve the account from the CONNECTOR that executed this write,
+                        # not from the tenant's single netsuite_account_id: a tenant with a
+                        # sandbox and a production connector must never get a sandbox
+                        # write's link into PRODUCTION. The connector id is recoverable
+                        # from the signed tool_name.
+                        _acct = _native_review["scope"]["netsuite_account_id"] if _native_amendment else None
+                        _parsed_conn = _parse_ext(tool_name)
+                        if _parsed_conn:
+                            _conn_row = await _get_conn(db, _parsed_conn[0], tenant_id)
+                            _acct = ((_conn_row.metadata_json or {}) or {}).get("account_id") if _conn_row else None
+                        if not _acct and not _native_amendment:
+                            # Single-connector tenants have no ambiguity; fall back rather
+                            # than drop the link entirely.
+                            _acct = await db.scalar(_sel(_Tenant.netsuite_account_id).where(_Tenant.id == tenant_id))
+                        return build_record_url(_acct, _record_type, _new_id), _new_id
+                    except Exception:
+                        logger.warning("record link could not be built", exc_info=True)
+                        return None, None
 
                 _exec_succeeded = False
                 # Initialised BEFORE the try/except branches below —
@@ -2485,150 +2725,96 @@ async def run_chat_turn(
                 # established is unknown, never success.
                 _write_outcome: str = "indeterminate"
                 _exec_result = None
-                try:
-                    _exec_result = json.loads(_exec_result_str)
-                    # T2 gate round-2 finding: `.get("error")` alone missed a
-                    # PARSEABLE result that self-declares `success: false` with
-                    # no `error` key — the external MCP write tools share the
-                    # exact same transport/parsing path as ns_runReport, which
-                    # is already CONFIRMED (T2 re-review #1) to drop `error`
-                    # while still sending `success: false`. Reuse the repo's
-                    # existing, precedented predicate instead of inventing a
-                    # third variant — identical to extract_result_payload
-                    # (tool_call_results.py:462) and this file's own sibling
-                    # SSE-intercept guard (~line 852): `is False`, not `is not
-                    # True`, so a bare `{"id": "123"}` shape with no `success`
-                    # key at all (ns_createRecord's ordinary response) still
-                    # counts as success.
-                    # ...and that predicate now lives in write_outcome.py, which
-                    # adds the third case this branch was missing: a write whose
-                    # outcome we do not KNOW. A timeout is not a failure — on
-                    # 2026-08-27 one created customer 5264348 while this code
-                    # reported failure and opened a repair card carrying the
-                    # identical payload.
-                    _write_outcome = classify_write_outcome(_exec_result)
-                    if _write_outcome == "indeterminate":
-                        _exec_error = _extract_error_message(_exec_result) or (
-                            f"the {_mutation_type} did not complete within the time limit"
-                        )
+                if _via_kernel:
+                    _exec_result = _kernel_adapter.receipt
+                    _exec_result_str = json.dumps(_exec_result, default=str) if _exec_result is not None else ""
+                    _write_outcome, _exec_succeeded, _exec_error, _confirm_content = _kernel_rendering(
+                        _kernel_result, _kernel_adapter, record_type=_record_type, mutation_type=_mutation_type
+                    )
+                    if _exec_succeeded:
+                        _record_url, _new_id = await _record_link(_exec_result)
+                        if _record_url:
+                            _updated_so_record_url = _record_url
+                            _confirm_content += f"\n\n[View {_record_type} {_new_id} in NetSuite]({_record_url})"
+                if not _via_kernel:
+                    # The generic card and the native amendment card classify the dispatcher's
+                    # answer here; a kernel outcome was rendered above.
+                    try:
+                        _exec_result = json.loads(_exec_result_str)
+                        # T2 gate round-2 finding: `.get("error")` alone missed a
+                        # PARSEABLE result that self-declares `success: false` with
+                        # no `error` key — the external MCP write tools share the
+                        # exact same transport/parsing path as ns_runReport, which
+                        # is already CONFIRMED (T2 re-review #1) to drop `error`
+                        # while still sending `success: false`. Reuse the repo's
+                        # existing, precedented predicate instead of inventing a
+                        # third variant — identical to extract_result_payload
+                        # (tool_call_results.py:462) and this file's own sibling
+                        # SSE-intercept guard (~line 852): `is False`, not `is not
+                        # True`, so a bare `{"id": "123"}` shape with no `success`
+                        # key at all (ns_createRecord's ordinary response) still
+                        # counts as success.
+                        # ...and that predicate now lives in write_outcome.py, which
+                        # adds the third case this branch was missing: a write whose
+                        # outcome we do not KNOW. A timeout is not a failure — on
+                        # 2026-08-27 one created customer 5264348 while this code
+                        # reported failure and opened a repair card carrying the
+                        # identical payload.
+                        _write_outcome = classify_write_outcome(_exec_result)
+                        if _write_outcome == "indeterminate":
+                            _exec_error = _extract_error_message(_exec_result) or (
+                                f"the {_mutation_type} did not complete within the time limit"
+                            )
+                            _confirm_content = (
+                                f"**This {_record_type} {_mutation_type} may or may not have completed.** "
+                                f"NetSuite did not confirm the result ({_exec_error}), which does NOT mean "
+                                "it was rejected — the record may already exist.\n\n"
+                                f"Check the {_record_type} in NetSuite before trying again. Re-running this "
+                                "now risks creating it twice."
+                            )
+                        elif _write_outcome == "failed":
+                            _exec_error = _extract_error_message(_exec_result) or (
+                                f"NetSuite reported this {_mutation_type} failed but returned no further "
+                                f"detail — check the {_record_type} record directly in NetSuite to confirm "
+                                "whether it was created or changed."
+                            )
+                            _confirm_content = f"The operation failed: {_exec_error}"
+                        else:
+                            _exec_succeeded = True
+                            _confirm_content = (
+                                f"Done — the {_record_type} {_mutation_type} has been executed successfully."
+                            )
+                            _record_url, _new_id = await _record_link(_exec_result)
+                            if _record_url:
+                                _updated_so_record_url = _record_url
+                                _confirm_content += f"\n\n[View {_record_type} {_new_id} in NetSuite]({_record_url})"
+                    except (json.JSONDecodeError, TypeError):
+                        # UNPARSEABLE result. This used to report SUCCESS — telling
+                        # the operator a write had executed on the strength of a
+                        # response nobody could read. It is the same epistemic
+                        # position as a timeout, so it gets the same answer (the
+                        # indeterminate outcome ClickUp 86bbhmxd1 asked for).
+                        _write_outcome = "indeterminate"
+                        _exec_error = "NetSuite's response could not be read"
                         _confirm_content = (
                             f"**This {_record_type} {_mutation_type} may or may not have completed.** "
-                            f"NetSuite did not confirm the result ({_exec_error}), which does NOT mean "
-                            "it was rejected — the record may already exist.\n\n"
+                            "NetSuite's response could not be read, which does NOT mean it was "
+                            "rejected — the record may already exist.\n\n"
                             f"Check the {_record_type} in NetSuite before trying again. Re-running this "
                             "now risks creating it twice."
                         )
-                    elif _write_outcome == "failed":
-                        _exec_error = _extract_error_message(_exec_result) or (
-                            f"NetSuite reported this {_mutation_type} failed but returned no further "
-                            f"detail — check the {_record_type} record directly in NetSuite to confirm "
-                            "whether it was created or changed."
-                        )
-                        _confirm_content = f"The operation failed: {_exec_error}"
-                    else:
-                        _exec_succeeded = True
-                        _confirm_content = f"Done — the {_record_type} {_mutation_type} has been executed successfully."
-                        # Hand back a link to what was just written. Without
-                        # it the operator is told "Done" and left to find the
-                        # record by searching NetSuite for a name, or by
-                        # knowing the URL shape for an internal id. The id is
-                        # already in the response; only the link was missing.
-                        # Best-effort by construction: an unknown record type
-                        # or a tenant with no NetSuite account id yields no
-                        # link rather than a guessed one, and nothing here may
-                        # turn a SUCCESSFUL write into an error.
-                        try:
-                            from sqlalchemy import select as _sel
 
-                            from app.models.tenant import Tenant as _Tenant
-                            from app.services.chat.netsuite_record_url import build_record_url
-                            from app.services.chat.tools import parse_external_tool_name as _parse_ext
-                            from app.services.mcp_connector_service import get_mcp_connector as _get_conn
-
-                            _native_review = _so.get("accounting_review") or {}
-                            _native_amendment = _native_review.get("kind") in {
-                                "credit_tax_reallocation",
-                                "sales_order_line_alignment",
-                            }
-                            _new_id = (
-                                _exec_result.get("recordId")
-                                or _exec_result.get("id")
-                                or _exec_result.get("internalId")
-                                or (_exec_result.get("record_id") if _native_amendment else None)
-                                if isinstance(_exec_result, dict)
-                                else None
-                            )
-                            if not _new_id and _mutation_type == "update":
-                                _new_id = _so.get("record_id")
-                            if _new_id:
-                                # Resolve the account from the CONNECTOR that
-                                # executed this write, not from the tenant's
-                                # single netsuite_account_id. The moment a
-                                # tenant has both a sandbox and a production
-                                # connector, a tenant-wide value sends a
-                                # sandbox write's link into PRODUCTION — worse
-                                # than no link, because it invites someone to
-                                # conclude the write failed, or to go hunting
-                                # in production for a record deliberately kept
-                                # out of it. The connector id is recoverable
-                                # from the signed tool_name.
-                                _acct = _native_review["scope"]["netsuite_account_id"] if _native_amendment else None
-                                _parsed_conn = _parse_ext(tool_name)
-                                if _parsed_conn:
-                                    _conn_row = await _get_conn(db, _parsed_conn[0], tenant_id)
-                                    _acct = (
-                                        ((_conn_row.metadata_json or {}) or {}).get("account_id") if _conn_row else None
-                                    )
-                                if not _acct and not _native_amendment:
-                                    # Single-connector tenants have no
-                                    # ambiguity; fall back rather than drop the
-                                    # link entirely.
-                                    _acct = await db.scalar(
-                                        _sel(_Tenant.netsuite_account_id).where(_Tenant.id == tenant_id)
-                                    )
-                                _record_url = build_record_url(_acct, _record_type, _new_id)
-                                if _record_url:
-                                    _updated_so_record_url = _record_url
-                                    _confirm_content += (
-                                        f"\n\n[View {_record_type} {_new_id} in NetSuite]({_record_url})"
-                                    )
-                        except Exception:
-                            logger.warning("record link could not be built", exc_info=True)
-                except (json.JSONDecodeError, TypeError):
-                    # UNPARSEABLE result. This used to report SUCCESS — telling
-                    # the operator a write had executed on the strength of a
-                    # response nobody could read. It is the same epistemic
-                    # position as a timeout, so it gets the same answer (the
-                    # indeterminate outcome ClickUp 86bbhmxd1 asked for).
-                    _write_outcome = "indeterminate"
-                    _exec_error = "NetSuite's response could not be read"
-                    _confirm_content = (
-                        f"**This {_record_type} {_mutation_type} may or may not have completed.** "
-                        "NetSuite's response could not be read, which does NOT mean it was "
-                        "rejected — the record may already exist.\n\n"
-                        f"Check the {_record_type} in NetSuite before trying again. Re-running this "
-                        "now risks creating it twice."
-                    )
-
-                _credit_recovery = _write_outcome == "indeterminate" and (_so.get("accounting_review") or {}).get(
-                    "kind"
-                ) in {
-                    "sales_adjustment_credit",
-                    "invoice_sales_adjustment",
-                    "sales_order_source_alignment",
-                    "credit_tax_reallocation",
-                    "sales_order_line_alignment",
-                }
+                # The kernel reads back every treatment after an indeterminate send; the old
+                # path only the kinds with a native verification contract.
+                _credit_recovery = _write_outcome == "indeterminate" and (
+                    _via_kernel or (_so.get("accounting_review") or {}).get("kind") in VERIFIED_KINDS
+                )
                 if _so.get("accounting_execution") and isinstance(_exec_result, dict):
                     # Retain a returned native identity even when verification
                     # fails, so later recovery cannot ignore a conflicting receipt.
-                    _receipt_keys = ("recordId", "id", "internalId")
-                    if (_so.get("accounting_review") or {}).get("kind") in {
-                        "credit_tax_reallocation",
-                        "sales_order_line_alignment",
-                    }:
-                        _receipt_keys += ("record_id", "record_type", "work_key", "reservation_audit_id")
-                    _receipt_ids = {k: _exec_result[k] for k in _receipt_keys if _exec_result.get(k)}
+                    from app.services.transaction_ops.accounting_adapter import RECEIPT_IDS
+
+                    _receipt_ids = {k: _exec_result[k] for k in RECEIPT_IDS if _exec_result.get(k)}
                     _so = {
                         **_so,
                         "accounting_execution": {**_so["accounting_execution"], "receipt": _receipt_ids},
@@ -2637,13 +2823,15 @@ async def run_chat_turn(
                     from app.services.transaction_ops.tax_correction import verify_after
 
                     try:
-                        if _so["accounting_review"].get("kind") in {
-                            "sales_adjustment_credit",
-                            "invoice_sales_adjustment",
-                            "sales_order_source_alignment",
-                            "credit_tax_reallocation",
-                            "sales_order_line_alignment",
-                        }:
+                        if _via_kernel:
+                            # The kernel ran the treatment's readback under the operation budget
+                            # and recorded the outcome; the card shows what the readback saw.
+                            _verification = _kernel_adapter.verification or {
+                                "status": "needs_review",
+                                "reason": "verification_unavailable",
+                                "retry_allowed": False,
+                            }
+                        elif _so["accounting_review"].get("kind") in VERIFIED_KINDS:
                             async with asyncio.timeout(90):
                                 _verification = await verify_after(
                                     db, tenant_id, _so["accounting_review"], receipt=_exec_result
@@ -2675,19 +2863,16 @@ async def run_chat_turn(
                             "before": _so["accounting_review"]["before"],
                             "receipt": _exec_result,
                             "verification": json.loads(json.dumps(_verification, default=str)),
+                            "timing": _approval_timing,
                         },
                         status="success" if _verification["status"] == "verified" else "error",
                     )
                     if _verification["status"] == "verified":
-                        if _credit_recovery:
+                        if _credit_recovery and not _via_kernel:  # the kernel path rendered this already, with its link
                             _exec_succeeded = True
                             _exec_error = None
                             _confirm_content = "The approved accounting change was verified using fresh NetSuite reads."
-                        if (
-                            _so["accounting_review"].get("kind")
-                            in {"credit_tax_reallocation", "sales_order_line_alignment"}
-                            and not _updated_so_record_url
-                        ):
+                        if family_of(_so["accounting_review"]) == "amendment" and not _updated_so_record_url:
                             from app.services.chat.netsuite_record_url import build_record_url
 
                             _native_p = _so["accounting_review"]
@@ -2712,8 +2897,7 @@ async def run_chat_turn(
                             if _so["accounting_review"].get("kind") == "credit_tax_reallocation"
                             else "\n\nSales-order amendment independently re-read and verified; "
                             "the linked invoice, GL, billing and fulfillment evidence remain unchanged."
-                            if _so["accounting_review"].get("kind")
-                            in {"sales_order_source_alignment", "sales_order_line_alignment"}
+                            if _so["accounting_review"].get("kind") in DEPENDENT_KINDS
                             else "\n\nInvoice total, tax and GL were independently re-read and verified. "
                             "Sales-order reconciliation and deposit/cash settlement remain separate checks; no additional money was moved."
                         )
@@ -2902,7 +3086,14 @@ async def run_chat_turn(
 
                     try:
                         _recheck_run = await queue_accounting_recheck(
-                            db, tenant_id, _confirm_msg, user_id, now=datetime.now(timezone.utc)
+                            db,
+                            tenant_id,
+                            _confirm_msg,
+                            user_id,
+                            now=datetime.now(timezone.utc),
+                            config_id=(((_kernel_row.result_json or {}).get("recovery_scope") or {}).get("config_id"))
+                            if _via_kernel
+                            else None,
                         )
                         _recheck = {"status": "queued", "run_id": str(_recheck_run.id)}
                         _confirm_content += (

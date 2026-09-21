@@ -4,6 +4,7 @@ The parent row lock is held by refresh_group. A completed stage can publish its
 successor only once. The successor still requires a new human approval.
 """
 
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -45,14 +46,30 @@ async def refresh(db, tenant_id, parent):
             member["resolution_receipt"] = current
     complete = sum(bool(r) for r in receipts)
     reconciled = sum(bool(r and r["status"] == "reconciled") for r in latest)
+    # Counts are derived from the members' own state every time, and say which members
+    # were never prepared (and how many of those hit the preparation deadline) instead
+    # of folding them into "orders to reconcile" — a summary that could never reach a
+    # terminal state and read "7 of 54" while 30 children held reconciled receipts.
+    unprepared = [m for m in members if not m.get("confirmation_id")]
+    deadline = sum(m.get("preparation_status") == "incomplete" for m in unprepared)
+    if reconciled == len(members):
+        status = "reconciled"
+    elif eligible and reconciled == len(eligible):
+        status = "prepared_reconciled"
+    else:
+        status = "in_progress"
     progress = {
         **(so.get("accounting_plan_progress") or {}),
         "orders": len(members),
         "approved_orders": len(eligible),
+        "prepared": len(eligible),
+        "unprepared": len(unprepared),
+        "deadline": deadline,
         "results_ready": complete,
         "reconciled": reconciled,
-        "remaining": len(members) - reconciled,
-        "status": "reconciled" if reconciled == len(members) else "in_progress",
+        "remaining": len(eligible) - reconciled,
+        "status": status,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
     }
     parent.structured_output = {
         **so,
@@ -62,9 +79,16 @@ async def refresh(db, tenant_id, parent):
     if not complete:
         return
     parent.content = (
-        f"{reconciled} of {len(members)} orders reconciled. "
-        f"{complete} of {len(eligible)} approved corrections have full review results. "
-        "Each order retains its record links, original approver and audit evidence."
+        f"{reconciled} of {len(eligible)} approved corrections reconciled; "
+        f"{complete} of {len(eligible)} have full review results. "
+        + (
+            f"{len(unprepared)} of {len(members)} orders were not prepared"
+            + (f" ({deadline} reached the preparation time limit)" if deadline else "")
+            + " and still need a correction. "
+            if unprepared
+            else ""
+        )
+        + "Each order retains its record links, original approver and audit evidence."
     )
     # A failed or blocked sibling must not strand already prepared dependent cards.
     terminal = all(
@@ -145,5 +169,14 @@ async def refresh(db, tenant_id, parent):
                 "manifest_digest": card.tool_input["manifest_digest"],
             },
         )
-    progress.update(followup_published=True, status="reconciled" if reconciled == len(members) else "needs_review")
+    # Terminal: every prepared correction has an outcome. Unprepared members keep the
+    # summary from reading "reconciled", but they are not review work: they need a
+    # correction prepared, which the status names apart from a sibling that failed.
+    if reconciled == len(members):
+        final = "reconciled"
+    elif eligible and reconciled == len(eligible):
+        final = "prepared_reconciled"
+    else:
+        final = "needs_review"
+    progress.update(followup_published=True, status=final)
     parent.structured_output = {**parent.structured_output, "accounting_plan_progress": progress}

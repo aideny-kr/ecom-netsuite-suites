@@ -9,8 +9,8 @@ from decimal import Decimal
 from app.services.transaction_ops.accounting_preview import PreviewContractError, validate_receipt
 from app.services.transaction_ops.native_accounting_profile import NativeAccountingProfile
 from app.services.transaction_ops.netsuite_reader import _invalid_constant, _object
+from app.services.transaction_ops.treatments import AMENDMENT_RECORD_TYPES
 
-KINDS = {"credit_tax_reallocation": "creditmemo", "sales_order_line_alignment": "salesorder"}
 WORK_FIELD = "custbody_ecom_tx_ops_work_key"
 PROFILE_KEYS = ("schema_version", "account_id", "subsidiary_id", "role_id", "tax_regime", "fields")
 
@@ -33,7 +33,7 @@ def validate_capabilities(profile, receipt):
         or receipt.get("execution_authorized") is not False
         or receipt.get("profile") != profile_binding(profile)
         or receipt.get("suitetax") is not False
-        or set(receipt.get("treatments") or []) != set(KINDS)
+        or set(receipt.get("treatments") or []) != set(AMENDMENT_RECORD_TYPES)
     ):
         raise ValueError("native_capability_contract_mismatch")
     return {"available": True, "apply_enabled": receipt.get("apply_enabled") is True}
@@ -43,7 +43,7 @@ def validate_intent_profile(intent, profile):
     binding = profile_binding(profile)
     scope = intent["scope"]
     if (
-        KINDS.get(intent.get("kind")) != intent.get("record_type")
+        AMENDMENT_RECORD_TYPES.get(intent.get("kind")) != intent.get("record_type")
         or scope["netsuite_account_id"] != binding["account_id"]
         or str(scope["subsidiary_id"]) != binding["subsidiary_id"]
         or str(intent["accounting_book"]) != profile["accounting_book_id"]

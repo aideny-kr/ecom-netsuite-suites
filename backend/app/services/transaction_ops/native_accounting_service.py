@@ -100,7 +100,7 @@ def validate_binding(tenant_id, tool_name, params, proposal):
         or not proposal
         or proposal.get("tenant_id") != str(tenant_id)
         or params != signed_input(proposal)
-        or proposal.get("kind") not in protocol.KINDS
+        or proposal.get("kind") not in protocol.AMENDMENT_RECORD_TYPES
     ):
         raise ValueError("native_signed_proposal_mismatch")
     protocol.validate_intent_profile(proposal, proposal["native_profile"])
@@ -365,6 +365,9 @@ async def verify_after(db, tenant_id, proposal, receipt=None, *, _current=None):
             work_key=operation_identity(proposal),
         )
         before = proposal["support"]
+        for key in ("refund_audit", "refund_allocation"):
+            if _stable(support.get(key)) != _stable(before.get(key)):
+                raise ValueError("native_refund_audit_evidence_changed")
         for key in (
             "invoice",
             "refund",
