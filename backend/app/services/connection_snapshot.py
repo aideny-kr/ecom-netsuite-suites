@@ -39,7 +39,11 @@ def connection_snapshot(row):
     if isinstance(row, McpConnector) and row.is_enabled is False:
         reported = "disabled"
     verification = metadata.get("verification_status")
-    if verification not in {"ok", "partial", "error", "unsupported"}:
+    if (
+        verification not in {"ok", "partial", "error", "unsupported"}
+        or not row.last_health_check_at
+        or metadata.get("verification_at") != row.last_health_check_at.isoformat()
+    ):
         verification = None
     return {
         "id": str(row.id),

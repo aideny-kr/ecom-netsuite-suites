@@ -40,3 +40,49 @@ def test_pending_plan_and_legacy_exact_binding_are_included():
     assert schedule_use(schedule, "mcp", SimpleNamespace(id=cid, provider="netsuite_mcp")) is None
     schedule = Schedule(schedule_type="job", pending_plan_json={"steps": [{"type": "recon.run", "params": {}}]})
     assert schedule_use(schedule, "api", SimpleNamespace(id=cid, provider="netsuite")) == "provider requirement"
+
+
+def test_drive_delivery_warns_for_google_sheets_access():
+    from app.services.connection_usage import schedule_use
+
+    schedule = Schedule(
+        schedule_type="job", plan_json={"steps": [{"type": "drive.upload", "params": {"report_step": "report"}}]}
+    )
+    assert (
+        schedule_use(schedule, "mcp", SimpleNamespace(id=uuid.uuid4(), provider="google_sheets"))
+        == "provider requirement"
+    )
+
+
+def test_financial_report_does_not_claim_bigquery_is_its_source():
+    from app.services.connection_usage import schedule_use
+
+    schedule = Schedule(
+        schedule_type="job",
+        plan_json={
+            "steps": [
+                {
+                    "type": "report.compose",
+                    "params": {"playbook_key": "income_statement", "params": {"period": "Sep 2026"}},
+                }
+            ]
+        },
+    )
+    assert schedule_use(schedule, "mcp", SimpleNamespace(id=uuid.uuid4(), provider="bigquery")) is None
+    assert (
+        schedule_use(schedule, "api", SimpleNamespace(id=uuid.uuid4(), provider="netsuite")) == "provider requirement"
+    )
+
+
+def test_inventory_report_uses_bigquery_and_report_id_is_not_guessed():
+    from app.services.connection_usage import schedule_use
+
+    schedule = Schedule(
+        schedule_type="job",
+        plan_json={"steps": [{"type": "report.compose", "params": {"playbook_key": "inventory_aging", "params": {}}}]},
+    )
+    assert (
+        schedule_use(schedule, "mcp", SimpleNamespace(id=uuid.uuid4(), provider="bigquery")) == "provider requirement"
+    )
+    schedule.plan_json = {"steps": [{"type": "report.compose", "params": {"report_id": str(uuid.uuid4())}}]}
+    assert schedule_use(schedule, "mcp", SimpleNamespace(id=uuid.uuid4(), provider="bigquery")) is None

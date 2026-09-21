@@ -15,7 +15,7 @@ vi.mock("@/hooks/use-connections", () => ({
   useDeleteConnection: () => ({ mutateAsync: mocks.remove }), useTestConnection: () => ({ mutateAsync: vi.fn() }),
 }));
 vi.mock("@/hooks/use-mcp-connectors", () => ({
-  useMcpConnectors: () => ({ data: [{ id: "mcp1", label: "ERP tools", provider: "netsuite_mcp", status: "active", server_url: "https://example.test/mcp" }] }),
+  useMcpConnectors: () => ({ data: [{ id: "mcp1", label: "ERP tools", provider: "netsuite_mcp", status: "active", server_url: "https://example.test/mcp" }, { id: "shopify", label: "Shopify tools", provider: "shopify_mcp", status: "active", server_url: "https://shop.example.test/mcp" }, { id: "stripe", label: "Stripe tools", provider: "stripe_mcp", status: "active", server_url: "https://stripe.example.test/mcp" }] }),
   useDeleteMcpConnector: () => ({ mutateAsync: mocks.remove }), useTestMcpConnector: () => ({ mutateAsync: vi.fn() }),
 }));
 vi.mock("@/hooks/use-connection-health", () => ({ useConnectionHealth: () => ({ data: {
@@ -32,7 +32,7 @@ describe("per-method health and disconnect", () => {
     expect(screen.getByText("sandbox")).toBeVisible();
     expect(screen.getByText("rest_webservices · Reader")).toBeVisible();
     expect(screen.getAllByRole("link", { name: "Connection setup" })[1]).toHaveAttribute("href", "#connection-settings-mcp-mcp1");
-    expect(screen.getByText("No recorded check")).toBeVisible();
+    expect(within(screen.getByRole("heading", { name: "ERP tools" }).closest("article")!).getByText("No recorded check")).toBeVisible();
   });
   it("shows actual dependencies before any delete and cancellation performs no write", async () => {
     render(<ConnectionOverview />);
@@ -43,4 +43,13 @@ describe("per-method health and disconnect", () => {
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     expect(mocks.remove).not.toHaveBeenCalled();
   });
+});
+
+it("keeps generic Shopify and Stripe MCP controls in the system overview", () => {
+  render(<ConnectionOverview />);
+  for (const name of ["Shopify tools", "Stripe tools"]) {
+    const article = screen.getByRole("heading", { name }).closest("article")!;
+    expect(within(article).getByRole("button", { name: "Test" })).toBeVisible();
+    expect(within(article).getByRole("button", { name: `Delete ${name}` })).toBeVisible();
+  }
 });

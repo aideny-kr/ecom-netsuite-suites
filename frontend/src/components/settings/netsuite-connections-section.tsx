@@ -375,14 +375,9 @@ export function NetSuiteConnectionsSection({ netsuiteOnly = false }: { netsuiteO
   const oauthConns = (connections ?? []).filter(
     (c) => c.provider === "netsuite" && c.status !== "revoked",
   );
-  // Denylist, not allowlist: Test/Reauthorize/Delete for shopify_mcp and
-  // stripe_mcp live ONLY here -- there is no add-mcp-connector-dialog mount
-  // point and ConnectionStatusSection is read-only status with no controls.
-  // Excluded are bigquery and celigo_mcp, which each already have their own
-  // dedicated card elsewhere (the table selector; CeligoConnectorCard) -- an
-  // allowlist ("netsuite_mcp" only) previously over-corrected the activeMcp
-  // bug below by also hiding shopify_mcp/stripe_mcp's only UI. Don't repeat
-  // that: broaden display here, and narrow only what actually needs it.
+  // Production groups other providers in ConnectionOverview. Keep this editor
+  // limited to NetSuite when mounted there; legacy callers may still opt into
+  // generic rows. NetSuite-only credential updates are always scoped below.
   const mcpConns = (mcpConnectors ?? []).filter(
     (c) => c.status !== "revoked" && c.provider !== "bigquery" && c.provider !== "celigo_mcp" && (!netsuiteOnly || c.provider === "netsuite_mcp"),
   );

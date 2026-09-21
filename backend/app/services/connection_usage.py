@@ -21,15 +21,39 @@ def schedule_use(schedule, kind, connection):
     # These executors choose a company connection at run time. Do not invent
     # an exact binding, or scan free-form instructions/SQL for identifiers.
     required = {
-        ("mcp", "bigquery"): {"bigquery_sql", "report.compose"},
+        ("mcp", "bigquery"): {"bigquery_sql"},
+        ("mcp", "google_sheets"): {"drive.upload"},
         ("api", "netsuite"): {"recon.run"},
         ("api", "stripe"): {"recon.run"},
     }.get((kind, connection.provider), set())
     for plan in (schedule.plan_json, schedule.pending_plan_json):
-        if isinstance(plan, dict) and any(
-            step.get("type") in required for step in plan.get("steps", []) if isinstance(step, dict)
-        ):
-            return "provider requirement"
+        if not isinstance(plan, dict) or not isinstance(plan.get("steps"), list):
+            continue
+        for step in plan["steps"]:
+            if not isinstance(step, dict):
+                continue
+            if step.get("type") in required:
+                return "provider requirement"
+            if step.get("type") == "report.compose":
+                # Derive the provider from the existing pure recipe builder,
+                # not from the generic report.compose step name. No query runs.
+                from app.services.report.playbooks import build_playbook_recipe
+
+                params = step.get("params") or {}
+                if not isinstance(params, dict) or "playbook_key" not in params:
+                    continue  # Report-ID refresh sources need separate review.
+                try:
+                    _, recipe = build_playbook_recipe(params["playbook_key"], params.get("params") or {})
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                tools = {source.get("tool") for source in recipe.get("sources", {}).values()}
+                if (
+                    (kind, connection.provider) == ("api", "netsuite")
+                    and "netsuite_financial_report" in tools
+                    or (kind, connection.provider) == ("mcp", "bigquery")
+                    and "bigquery_sql" in tools
+                ):
+                    return "provider requirement"
     return None
 
 
@@ -72,7 +96,8 @@ async def connection_usage(db, user, kind, connection):
         "uses": uses,
         "visibility_limited": limited,
         "coverage": (
-            "Saved workflow plans and transaction source bindings. Skills and other dynamic consumers "
-            "select access at run time; this is not a complete impact analysis."
+            "Explicit workflow connection IDs, supported step provider requirements and transaction source bindings. "
+            "Report-ID refreshes, invalid or unsupported plans and dynamic skill consumers need separate review; "
+            "this is not a complete impact analysis."
         ),
     }

@@ -78,7 +78,8 @@ def test_disabled_and_partial_mcp_remain_distinct():
         auth_type="none",
         server_url="https://example.test/mcp",
         is_enabled=False,
-        metadata_json={"verification_status": "partial"},
+        last_health_check_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        metadata_json={"verification_status": "partial", "verification_at": "2026-09-01T00:00:00+00:00"},
     )
     result = snapshot(mcp)
     assert result["status"] == "disabled"
@@ -88,3 +89,16 @@ def test_disabled_and_partial_mcp_remain_distinct():
 @pytest.mark.parametrize("expiry", ["nonsense", {}, float("inf")])
 def test_malformed_expiry_fails_closed_without_failing_the_entire_list(expiry):
     assert snapshot(row(), {"expires_at": expiry})["status"] == "error"
+
+
+def test_verification_result_does_not_borrow_a_newer_refresh_timestamp():
+    checked = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    refreshed = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    result = snapshot(
+        row(
+            last_health_check_at=refreshed,
+            metadata_json={"verification_status": "ok", "verification_at": checked.isoformat()},
+        )
+    )
+    assert result["verification_status"] is None
+    assert result["last_health_check"] == refreshed.isoformat()

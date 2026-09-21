@@ -128,7 +128,7 @@ function ConnectionsContent({ setup }: { setup: Record<string, ReactNode> }) {
               })}
               {group === "netsuite" && (["api", "mcp"] as const).filter((kind) => !cards.some((card) => card.system === group && card.kind === kind)).map((kind) => <div key={kind} className="rounded-lg border border-dashed p-4 text-[13px]"><p>{kind === "api" ? "REST API" : "MCP / agent access"}: Not configured</p>{setup.netsuite ? <a className="mt-2 inline-block text-primary underline" href="#connection-setup-netsuite">Set up this access method</a> : <p className="mt-2 text-muted-foreground">Ask an administrator to configure this method.</p>}</div>)}
             </div>
-            {setup[group] && <div id={`connection-setup-${group}`} tabIndex={-1}><ConnectionGroup title="Connection setup" description="Existing authorization, source selection and configuration.">{setup[group]}</ConnectionGroup></div>}
+            {setup[group] && <ConnectionGroup title="Connection setup" description="Existing authorization, source selection and configuration."><div id={`connection-setup-${group}`} tabIndex={-1}>{setup[group]}</div></ConnectionGroup>}
           </section>)}
         </div>
       )}

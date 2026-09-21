@@ -316,6 +316,12 @@ async def connect_stripe(
         existing.error_reason = None
         existing.last_health_check_at = now
         existing.label = request.label
+        existing.metadata_json = {
+            **(existing.metadata_json or {}),
+            "account_name": getattr(getattr(account, "business_profile", None), "name", None),
+            "account_country": getattr(account, "country", None),
+            "account_id": getattr(account, "id", None),
+        }
     else:
         # Create new
         connection = Connection(

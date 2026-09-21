@@ -818,6 +818,7 @@ test("Viewer Settings keeps five groups and hides instruction and policy editors
 test("FW008 mixed method health, exact setup, dependency warning and narrow screen", async ({ page }) => {
   const state = await fixture(page);
   const apiId = "11111111-1111-4111-8111-111111111111", mcpId = "22222222-2222-4222-8222-222222222222";
+  await page.route("**/api/v1/connector-status/stripe", route => route.fulfill({ json: { connected: true, connection_id: "33333333-3333-4333-8333-333333333333", status: "online", api_key_hint: "synthetic", last_verified_at: "2026-09-01T12:00:00Z", last_sync_at: null, payouts_count: 0, payout_lines_count: 0, error_message: null } }));
   await page.route("**/api/v1/connections", route => route.fulfill({ json: [{ id: apiId, provider: "netsuite", label: "Synthetic ERP API", status: "active", auth_type: "oauth2", metadata_json: { client_id: "api-client" } }] }));
   await page.route("**/api/v1/mcp-connectors", route => route.fulfill({ json: [{ id: mcpId, provider: "netsuite_mcp", label: "Synthetic ERP MCP", status: "error", auth_type: "oauth2", server_url: "https://sandbox.example/mcp", metadata_json: { client_id: "mcp-client" }, is_enabled: true }] }));
   await page.route("**/api/v1/connections/health", route => route.fulfill({ json: {
@@ -842,6 +843,12 @@ test("FW008 mixed method health, exact setup, dependency warning and narrow scre
   await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
   expect(state.writes).toEqual([]);
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/connections#connection-setup-stripe");
+  await expect(page.getByRole("heading", { name: "Stripe Connector", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Disconnect Stripe", exact: true }).click();
+  await expect(page.getByRole("alertdialog").getByRole("link", { name: "Synthetic stock report" })).toBeVisible();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(state.writes).toEqual([]);
   await page.goto(`/connections#connection-mcp-${mcpId}`);
   await expect(page.locator(`#connection-mcp-${mcpId}`).getByText("Authorization expired", { exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
