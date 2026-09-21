@@ -290,6 +290,9 @@ class FlowErrorGroup:
     step_ids: list[str | None] = field(default_factory=list)
     trace_keys: list[str] = field(default_factory=list)
     errors: list[FlowError] = field(default_factory=list)
+    # Advisory failure category from services/celigo/triage_jev.py; None unless
+    # JEV_CELIGO_TRIAGE_MODE is live. Never an input to status, retry or resolution.
+    triage: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -1214,6 +1217,18 @@ async def flow_error_groups(
         )
         signatures_by_id = {s.id: s for s in sig_rows}
 
+    from app.services.celigo.triage_jev import triage_signatures
+
+    triage_by_fingerprint, triage_record = await triage_signatures(
+        tenant_id,
+        [
+            {"fingerprint": s.fingerprint, "source": s.source, "code": s.code, "sample_message": s.sample_message}
+            for s in signatures_by_id.values()
+        ],
+    )
+    if triage_record:
+        print(f"[JEV_CELIGO_TRIAGE] flow={flow_id} {triage_record}", flush=True)
+
     groups: list[FlowErrorGroup] = []
     for sig_id, rows in rows_by_signature.items():
         occurred_ats = [r.occurred_at for r in rows if r.occurred_at is not None]
@@ -1259,6 +1274,7 @@ async def flow_error_groups(
                 # route's `limit`) never materialises up to 2000 dataclasses
                 # per group to throw them away. None keeps every row.
                 errors=[_error_out(e) for e in (rows if errors_limit is None else rows[:errors_limit])],
+                triage=triage_by_fingerprint.get(sig.fingerprint) if sig is not None else None,
             )
         )
 
