@@ -116,3 +116,94 @@ async def test_malformed_answers_are_rejected(enabled, answers):
     with pytest.raises(jev.JevUnavailableError) as exc:
         await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
     assert exc.value.reason == "invalid_response"
+
+
+# ── gate round 1: a 200 with wrong VALUE types must not reach a caller ─────
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"yes": {"type": "noul", "noul": None}},
+        {"yes": {"type": "noul", "noul": "0.9"}},
+        {"yes": {"type": "noul", "noul": 1.7}},
+        {"yes": {"type": "noul", "noul": True}},
+        {"kind": {"type": "choice", "choice": "a", "probabilities": {"a": 1.0}}},  # no confidence
+        {"kind": {"type": "choice", "choice": "a", "probabilities": {"a": 1.0}, "confidence": "high"}},
+        {"kind": {"type": "choice", "choice": "a", "probabilities": [], "confidence": 0.9}},
+    ],
+)
+async def test_wrongly_typed_answer_values_are_rejected(enabled, bad):
+    transport, _ = _transport(lambda r: httpx.Response(200, json={**OK_BODY, "answers": {**OK_BODY["answers"], **bad}}))
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+    assert exc.value.reason == "invalid_response"
+
+
+async def test_score_answers_must_be_numeric(enabled):
+    questions = {"sev": {"type": "score", "instructions": "How bad?", "criteria": ["low", "high"]}}
+    body = {**OK_BODY, "answers": {"sev": {"type": "score", "score": None, "probabilities": {}, "confidence": 0.9}}}
+    transport, _ = _transport(lambda r: httpx.Response(200, json=body))
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, questions, transport=transport)
+    assert exc.value.reason == "invalid_response"
+
+
+# ── try_ask: the form every caller uses, which cannot raise ────────────────
+
+
+async def test_try_ask_returns_the_result_or_a_reason_and_never_raises(enabled, monkeypatch):
+    transport, _ = _transport(lambda r: httpx.Response(200, json=OK_BODY))
+    result, reason = await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+    assert result.answers["yes"]["noul"] == 0.95 and reason is None
+
+    transport, _ = _transport(lambda r: httpx.Response(529))
+    assert await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport) == (None, "http_529")
+
+    async def boom(*a, **k):
+        raise KeyError("a bug on our side")
+
+    monkeypatch.setattr(jev, "ask", boom)
+    assert await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS) == (None, "unexpected:KeyError")
+
+
+async def test_try_ask_lets_cancellation_through(enabled, monkeypatch):
+    import asyncio
+
+    async def cancelled(*a, **k):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(jev, "ask", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS)
+
+
+# ── session: a batch caller reuses one connection ──────────────────────────
+
+
+async def test_a_session_reuses_one_http_client_and_closes_it(enabled, monkeypatch):
+    built = []
+    real = httpx.AsyncClient
+
+    def counting(*args, **kwargs):
+        client = real(*args, **kwargs)
+        built.append(client)
+        return client
+
+    monkeypatch.setattr(jev.httpx, "AsyncClient", counting)
+    transport, calls = _transport(lambda r: httpx.Response(200, json=OK_BODY))
+    async with jev.session(transport=transport):
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS)
+    assert len(calls) == 2 and len(built) == 1
+    assert built[0].is_closed
+
+    await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)  # outside a session: its own client
+    assert len(built) == 2 and built[1].is_closed
+
+
+async def test_try_ask_contains_a_failing_request_builder(enabled):
+    def broken_builder():
+        raise ValueError("bad state")
+
+    assert await jev.try_ask(TENANT, build=broken_builder) == (None, "unexpected:ValueError")
