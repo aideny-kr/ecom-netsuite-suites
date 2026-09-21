@@ -82,6 +82,13 @@ class Settings(BaseSettings):
     # decides when confident, current path otherwise).
     JEV_RECON_RESOLUTION_MODE: str = "off"
     JEV_PRETURN_MODE: str = "off"
+    # off | shadow. The atomic benchmark judge only ever runs BESIDE the Haiku judge and
+    # annotates its rationale; there is deliberately no value that lets it set the merge
+    # gate's score (services/benchmarks/atomic_judge.py).
+    JEV_JUDGE_MODE: str = "off"
+    # off | shadow | live, for the two round-two read-only surfaces.
+    JEV_RERANK_MODE: str = "off"
+    JEV_CELIGO_TRIAGE_MODE: str = "off"
     JEV_RECON_MIN_CONFIDENCE: float = 0.8
     JEV_ROUTE_MIN_CONFIDENCE: float = 0.8
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).

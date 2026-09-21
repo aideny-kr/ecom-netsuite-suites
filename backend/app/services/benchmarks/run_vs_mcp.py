@@ -175,6 +175,8 @@ async def _score_answer(
     answer_text: str,
     expected_contains: list[str],
     use_llm_judge: bool,
+    tenant_id: uuid.UUID | None = None,
+    table_shown: bool = False,
 ) -> tuple[float, str]:
     """Score an agent answer. Returns (score, rationale).
 
@@ -198,7 +200,38 @@ async def _score_answer(
             answer_text=answer_text,
             expected_contains=expected_contains,
         )
-    return result.score, f"[{result.source}] {result.rationale}"
+    rationale = f"[{result.source}] {result.rationale}"
+    rationale += await _atomic_annotation(question, answer_text, expected_contains, tenant_id, table_shown)
+    return result.score, rationale
+
+
+async def _atomic_annotation(question, answer_text, expected_contains, tenant_id, table_shown=False) -> str:
+    """The atomic Jev judge's reading, appended for comparison. It never alters the score."""
+    from app.core.config import settings
+
+    if settings.JEV_JUDGE_MODE != "shadow" or tenant_id is None:
+        return ""
+    from app.services.benchmarks.atomic_judge import atomic_judge_score
+
+    try:
+        atomic = await atomic_judge_score(
+            tenant_id=tenant_id,
+            question=question,
+            answer_text=answer_text,
+            expected_contains=expected_contains,
+            result_table_displayed=table_shown,
+        )
+    except Exception:
+        atomic = None
+    return f" | atomic={atomic.score:.2f} ({atomic.rationale})" if atomic else " | atomic=unavailable"
+
+
+def _showed_a_data_table(tool_calls: list[dict]) -> bool:
+    """True when the in-house agent ran a tool whose result the UI renders as a table."""
+    from app.services.chat.tool_categories import categorize
+
+    names = [str(tc.get("name") or tc.get("tool") or "") for tc in (tool_calls or [])]
+    return any(categorize(name) in ("data_table", "bigquery", "financial_report") for name in names)
 
 
 def _score_tools(
@@ -461,6 +494,8 @@ async def _run_single_case(
             answer_text=agent_result.answer_text,
             expected_contains=case.expected_answer_contains,
             use_llm_judge=use_llm_judge,
+            tenant_id=tenant_id,
+            table_shown=_showed_a_data_table(agent_result.tool_calls),
         )
         ours_side = SideScore(
             answer_acc=ours_acc,
@@ -676,6 +711,7 @@ async def _run_single_case(
             answer_text=baseline_result.answer_text,
             expected_contains=case.expected_answer_contains,
             use_llm_judge=use_llm_judge,
+            tenant_id=tenant_id,
         )
         mcp_side = SideScore(
             answer_acc=mcp_acc,
