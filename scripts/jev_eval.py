@@ -184,13 +184,19 @@ async def eval_preturn(repeat: int) -> dict:
     for task, history, gold_kind, gold_cont, source_talk in PRETURN:
         persisted = pj.previous_request_context(history) is not None
         for _ in range(repeat):
-            result = await ask(SYNTHETIC_TENANT, *pj.build_request(task, history, SOURCES))
+            result = await ask(
+                SYNTHETIC_TENANT, *pj.build_request(task, history, SOURCES)
+            )
             latencies.append(result.elapsed_ms)
             tokens.append(result.input_tokens)
             # Every repeat is scored. Keeping only the last one would hide an unsafe or wrong
             # answer that appeared on an earlier repeat of the same request.
             a = result.answers
-            route = pj.to_route(a, floor=settings.JEV_ROUTE_MIN_CONFIDENCE, has_persisted_context=persisted)
+            route = pj.to_route(
+                a,
+                floor=settings.JEV_ROUTE_MIN_CONFIDENCE,
+                has_persisted_context=persisted,
+            )
             rows.append(
                 {
                     "task": task,
@@ -264,7 +270,9 @@ async def main() -> int:
     if not settings.TYPESAFE_API_KEY:
         print("TYPESAFE_API_KEY is not set; nothing was sent.", file=sys.stderr)
         return 2
-    settings.JEV_TENANT_ALLOWLIST = SYNTHETIC_TENANT  # synthetic cases only; see module docstring
+    settings.JEV_TENANT_ALLOWLIST = (
+        SYNTHETIC_TENANT  # synthetic cases only; see module docstring
+    )
 
     from app.services.typesafe.client import session
 
