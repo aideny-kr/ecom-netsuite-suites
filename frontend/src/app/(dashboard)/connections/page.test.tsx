@@ -1,3 +1,4 @@
+vi.mock("@/hooks/use-connection-health", () => ({ useConnectionHealth: () => ({ data: undefined }) }));
 import React from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";

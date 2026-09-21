@@ -77,6 +77,8 @@ async def test_native_google_routes_without_mcp_or_writes(db, admin_user, monkey
     monkeypatch.setattr("app.services.mcp_client_service.discover_tools", discovery)
     result = await mcp_connector_service.test_mcp_connector(db, row.id, user.tenant_id)
     assert result["status"] == expected
+    assert row.metadata_json["verification_status"] == expected
+    assert row.metadata_json["verification_at"] == row.last_health_check_at.isoformat()
     assert row.status == "active" and row.error_reason is None and row.last_health_check_at
     assert row.is_enabled is False and row.discovered_tools == []
     discovery.assert_not_awaited()

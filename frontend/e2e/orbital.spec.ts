@@ -814,3 +814,36 @@ test("Viewer Settings keeps five groups and hides instruction and policy editors
   await expect(page.getByText(/Contact your administrator to manage team members/)).toBeVisible();
   expect(state.writes).toHaveLength(0);
 });
+
+test("FW008 mixed method health, exact setup, dependency warning and narrow screen", async ({ page }) => {
+  const state = await fixture(page);
+  const apiId = "11111111-1111-4111-8111-111111111111", mcpId = "22222222-2222-4222-8222-222222222222";
+  await page.route("**/api/v1/connections", route => route.fulfill({ json: [{ id: apiId, provider: "netsuite", label: "Synthetic ERP API", status: "active", auth_type: "oauth2", metadata_json: { client_id: "api-client" } }] }));
+  await page.route("**/api/v1/mcp-connectors", route => route.fulfill({ json: [{ id: mcpId, provider: "netsuite_mcp", label: "Synthetic ERP MCP", status: "error", auth_type: "oauth2", server_url: "https://sandbox.example/mcp", metadata_json: { client_id: "mcp-client" }, is_enabled: true }] }));
+  await page.route("**/api/v1/connections/health", route => route.fulfill({ json: {
+    connections: [{ id: apiId, status: "active", verification_status: "ok", account_identity: "SYNTHETIC-SB1", access_scope: "rest_webservices", role: "Reader", client_id: "api-client", last_health_check: "2026-09-01T12:00:00Z" }],
+    mcp_connectors: [{ id: mcpId, status: "needs_reauth", client_id: "mcp-client", error_reason: "Authorization expired. Reconnect this method.", last_health_check: null }],
+  } }));
+  await page.route("**/api/v1/connections/usage/**", route => route.fulfill({ json: { uses: [{ name: "Synthetic stock report", href: "/scheduled-jobs/report-1", binding: "exact binding", active: true }], visibility_limited: false, coverage: "Saved supported bindings only; dynamic skills choose access at run time." } }));
+  await page.goto(`/settings#connection-mcp-${mcpId}`);
+  const panel = page.getByRole("region", { name: "Connections settings" });
+  await expect(panel.getByRole("heading", { name: "NetSuite", exact: true })).toHaveCount(1);
+  await expect(panel.getByText("Verified at last test", { exact: true })).toBeVisible();
+  await expect(page.locator(`#connection-mcp-${mcpId}`).getByText("Authorization expired", { exact: true })).toBeVisible();
+  await expect(panel.getByText("SYNTHETIC-SB1", { exact: true })).toBeVisible();
+  if (process.env.ORBITAL_EVIDENCE) await page.screenshot({ path: `${process.env.ORBITAL_EVIDENCE}/fw008-desktop.png`, animations: "disabled" });
+  await page.locator(`#connection-mcp-${mcpId}`).getByRole("link", { name: "Connection setup" }).click();
+  const editor = page.locator(`#connection-settings-mcp-${mcpId}`);
+  await expect(editor).toBeVisible();
+  await expect(editor.getByText("mcp-client", { exact: true })).toBeVisible();
+  await page.goBack();
+  await panel.getByRole("button", { name: "Delete Synthetic ERP API", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("link", { name: "Synthetic stock report" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(state.writes).toEqual([]);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/connections#connection-mcp-${mcpId}`);
+  await expect(page.locator(`#connection-mcp-${mcpId}`).getByText("Authorization expired", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+  if (process.env.ORBITAL_EVIDENCE) await page.screenshot({ path: `${process.env.ORBITAL_EVIDENCE}/fw008-mobile.png`, animations: "disabled" });
+});

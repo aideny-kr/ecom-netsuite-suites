@@ -1,4 +1,5 @@
 "use client";
+import { ConnectionUsage } from "./connection-usage";
 
 import { useCallback, useState } from "react";
 import {
@@ -214,6 +215,7 @@ export function SheetsConnectorCard() {
                 write to spreadsheets.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {deleteId && <ConnectionUsage kind="mcp" id={deleteId} />}
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
               <AlertDialogAction

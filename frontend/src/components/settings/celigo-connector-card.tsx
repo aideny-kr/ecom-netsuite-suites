@@ -96,6 +96,7 @@ export default function CeligoConnectorCard() {
   }
 
   async function handleDisconnect() {
+    if (!window.confirm("Disconnect Celigo inventory and agent access? Dependent investigations, workflows and skills will lose access. Review their source bindings before continuing. Saved evidence is retained.")) return;
     try {
       await disconnectMutation.mutateAsync();
       toast({ title: "Celigo disconnected" });

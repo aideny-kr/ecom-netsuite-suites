@@ -4,6 +4,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { SettingsSections, SettingsSection } from "@/components/settings/settings-sections";
 import { ConnectionGroup } from "@/components/settings/connection-group";
+import { StripeConnectorCard } from "@/components/settings/stripe-connector-card";
+import { NetSuiteDepositSyncCard } from "@/components/settings/netsuite-deposit-sync-card";
+import { SheetsConnectorCard } from "@/components/settings/sheets-connector-card";
+import { DriveFoldersSection } from "@/components/settings/drive-folders-section";
 import { ConnectionOverview } from "@/components/settings/connection-overview";
 import { useState, useEffect, useCallback, Component, type ReactNode, type ErrorInfo } from "react";
 import {
@@ -2835,6 +2839,8 @@ export default function SettingsPage() {
   const showBranding = useFeature("custom_branding");
   const { isAdmin } = usePermissions();
   const { user } = useAuth();
+  const { data: settingsMcp } = useMcpConnectors();
+  const sheetsAvailable = (settingsMcp ?? []).some((c) => c.provider === "google_sheets" && c.status !== "revoked");
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -2880,13 +2886,12 @@ export default function SettingsPage() {
           </>}
         </SettingsSection>
         <SettingsSection id="connections" label="Connections">
-          <ConnectionOverview />
-          {!isAdmin && <ConnectionStatusSection />}
-          {isAdmin && <>
-            <ConnectionGroup title="NetSuite" description="API access and agent tools, with separate authorizations and verification."><SectionErrorBoundary name="NetSuite Connections"><NetSuiteConnectionsSection /></SectionErrorBoundary></ConnectionGroup>
-            <ConnectionGroup title="BigQuery" description="Project, service account, datasets and query location."><SectionErrorBoundary name="BigQuery"><BigQueryConnectionSection /></SectionErrorBoundary></ConnectionGroup>
-            <ConnectionGroup title="Data sources & exports" description="Stripe reconciliation, NetSuite deposits and Google Sheets."><SectionErrorBoundary name="Data Source Connectors"><DataSourceConnectorsSection /></SectionErrorBoundary></ConnectionGroup>
-          </>}
+          <ConnectionOverview setup={isAdmin ? {
+            netsuite: <><SectionErrorBoundary name="NetSuite Connections"><NetSuiteConnectionsSection netsuiteOnly /></SectionErrorBoundary><NetSuiteDepositSyncCard /></>,
+            bigquery: <SectionErrorBoundary name="BigQuery"><BigQueryConnectionSection /></SectionErrorBoundary>,
+            stripe: <StripeConnectorCard />,
+            google_sheets: <><SheetsConnectorCard />{sheetsAvailable && <DriveFoldersSection />}</>,
+          } : {}} />
         </SettingsSection>
         <SettingsSection id="agent" label="Agent">
           <div className="rounded-xl border bg-card p-5"><h3 className="font-semibold">Skills and company context</h3><p className="mt-2 text-sm text-muted-foreground">Browse expertise in <Link className="text-primary underline" href="/skills">Skills</Link> and review saved context in <a className="text-primary underline" href="#workspace">Company profile</a>.</p></div>

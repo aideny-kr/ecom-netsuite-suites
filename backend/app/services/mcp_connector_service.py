@@ -282,6 +282,11 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
         connector.status = "error" if result["status"] == "error" else "active"
         connector.error_reason = result["message"] if result["status"] == "error" else None
         connector.last_health_check_at = datetime.now(timezone.utc)
+        connector.metadata_json = {
+            **(connector.metadata_json or {}),
+            "verification_status": result["status"],
+            "verification_at": connector.last_health_check_at.isoformat(),
+        }
         await db.flush()
         return {"connector_id": str(connector.id), **result}
 

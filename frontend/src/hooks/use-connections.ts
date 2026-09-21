@@ -28,6 +28,7 @@ export function useCreateConnection() {
       apiClient.post<Connection>("/api/v1/connections", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
@@ -40,6 +41,7 @@ export function useDeleteConnection() {
       apiClient.delete<void>(`/api/v1/connections/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
@@ -56,6 +58,7 @@ export function useUpdateConnection() {
       apiClient.patch<Connection>(`/api/v1/connections/${id}`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
@@ -116,6 +119,7 @@ export function useUpdateRestletUrl() {
       apiClient.patch(`/api/v1/connections/${id}/restlet-url`, { restlet_url }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }

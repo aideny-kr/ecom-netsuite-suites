@@ -30,6 +30,7 @@ export function useCreateMcpConnector() {
       apiClient.post<McpConnector>("/api/v1/mcp-connectors", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
@@ -42,6 +43,7 @@ export function useDeleteMcpConnector() {
       apiClient.delete<void>(`/api/v1/mcp-connectors/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
@@ -56,6 +58,7 @@ export function useTestMcpConnector() {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
@@ -159,6 +162,7 @@ export function useUpdateBigQueryTables() {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
       queryClient.invalidateQueries({ queryKey: ["bigquery-schema"] });
     },
   });
@@ -256,6 +260,7 @@ export function useReauthorizeMcpConnector() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
