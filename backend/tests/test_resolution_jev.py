@@ -294,3 +294,28 @@ async def test_live_falls_back_to_the_llm_when_building_jevs_proposal_breaks(mon
     validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
     assert validated["action"] == "book_fee_line" and llm.calls == 1
     assert record["decided_by"] == "llm" and record["jev_error"] == "unexpected:KeyError"
+
+
+# ── gate round 3: "Jev never sees an amount" must be true, not claimed ─────
+
+_REAL_FEE_TEXT = (
+    "Variance of $3.20 matches Stripe processing fee (fee_amount=3.20). NetSuite may have recorded gross amount."
+)
+
+
+def test_no_digit_of_any_kind_leaves_in_any_field():
+    import json
+
+    context = _context(
+        variance_explanation=_REAL_FEE_TEXT,
+        planner_narrative=f"Stripe processing fee. {_REAL_FEE_TEXT} Charged 1,284.55 on USD1284.55.",
+        evidence={"order_reference": "R123456789", "fee_amount": "3.20", "note": "refund of 12.50 pending"},
+    )
+    state, _ = rj.build_request(context)
+    sent = json.dumps(state)
+    assert not any(ch.isdigit() for ch in sent), sent
+    # the words survive; only the figures are folded away
+    assert "matches Stripe processing fee" in state["variance_explanation"]
+    assert "<NUM>" in state["variance_explanation"] and "fee_amount" not in state["evidence"]
+    # and the numeric judgment still reaches Jev, as a fact computed in code
+    assert state["facts"]["variance_matches_payout_fee"] is True

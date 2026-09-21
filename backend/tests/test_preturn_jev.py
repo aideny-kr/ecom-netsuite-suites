@@ -252,3 +252,36 @@ async def test_live_falls_back_when_deriving_the_route_breaks(monkeypatch, llm_r
 @pytest.mark.parametrize("edge", [0.2, 0.8])
 def test_the_uncertainty_band_includes_its_own_edges(edge):
     assert pj.to_route(_answers(kind="conversation", continuation=edge), floor=0.8) is None
+
+
+# ── gate round 3 ───────────────────────────────────────────────────────────
+
+_PERSISTED = [
+    {"role": "user", "content": "orders by day from Metabase"},
+    {
+        "role": "assistant",
+        "content": "Here they are.",
+        "structured_output": {"request_context": {"version": 1, "kind": "analytics", "sources": ["metabase"]}},
+    },
+]
+_LEGACY = [
+    {"role": "user", "content": "Use Metabase for this analysis"},
+    {"role": "assistant", "content": "Understood."},
+]
+
+
+async def test_live_defers_an_analytics_follow_up_whose_source_lives_only_in_prose(monkeypatch, llm_router):
+    """No persisted routing context: only the LLM router reads legacy_user_requests, so a
+    Jev shortcut would make the user re-pick a source they already named."""
+    monkeypatch.setattr(settings, "JEV_PRETURN_MODE", "live")
+    _patch_jev(monkeypatch, answers=_answers(kind="analytics", continuation=0.95, source_talk=0.01))
+    result, record = await _call(task="Break that down by status", history=_LEGACY)
+    assert len(llm_router) == 1 and record["decided_by"] == "llm"
+
+
+async def test_live_still_shortcuts_an_analytics_follow_up_with_a_persisted_context(monkeypatch, llm_router):
+    monkeypatch.setattr(settings, "JEV_PRETURN_MODE", "live")
+    _patch_jev(monkeypatch, answers=_answers(kind="analytics", continuation=0.95, source_talk=0.01))
+    result, record = await _call(task="Break that down by status", history=_PERSISTED)
+    assert llm_router == [] and record["decided_by"] == "jev"
+    assert result.route == RequestRoute(kind="analytics", continuation=True)

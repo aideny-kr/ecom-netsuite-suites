@@ -227,3 +227,30 @@ async def test_a_refused_tenant_never_runs_the_request_builder(enabled):
     built = []
     result = await jev.try_ask(uuid.uuid4(), build=lambda: built.append(1) or ({}, {}))
     assert result == (None, "tenant_not_allowed") and built == []
+
+
+# ── gate round 3 ───────────────────────────────────────────────────────────
+
+
+async def test_the_timeout_bounds_the_whole_request_not_each_read(enabled, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(settings, "JEV_TIMEOUT_SECONDS", 0.05)
+
+    async def trickle(request):
+        await asyncio.sleep(0.5)  # a slow body: no single read "times out", the whole call must
+        return httpx.Response(200, json=OK_BODY)
+
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=httpx.MockTransport(trickle))
+    assert exc.value.reason == "timeout"
+
+
+@pytest.mark.parametrize("probabilities", [{"a": float("nan"), "b": 0.1}, {"a": 1.4, "b": 0.1}, {"a": "0.9"}])
+async def test_every_probability_is_a_finite_number_in_range(enabled, probabilities):
+    answer = {"type": "choice", "choice": "a", "probabilities": probabilities, "confidence": 0.8}
+    body = json.dumps({**OK_BODY, "answers": {**OK_BODY["answers"], "kind": answer}})
+    transport, _ = _transport(lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"}))
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+    assert exc.value.reason == "invalid_response"

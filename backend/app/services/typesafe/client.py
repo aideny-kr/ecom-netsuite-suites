@@ -88,10 +88,17 @@ def _valid_answer(question: dict, answer: object) -> bool:
             answer.get("choice") in question["criteria"]
             and _number(answer.get("confidence"), 0.0, 1.0)
             and isinstance(answer.get("probabilities"), dict)
+            and all(_number(p, 0.0, 1.0) for p in answer["probabilities"].values())
         )
     if kind == "score":
         top = len(question["criteria"]) - 1  # a score is a position on the question's own levels
-        return _number(answer.get("score"), 0.0, top) and _number(answer.get("confidence"), 0.0, 1.0)
+        probabilities = answer.get("probabilities")
+        return (
+            _number(answer.get("score"), 0.0, top)
+            and _number(answer.get("confidence"), 0.0, 1.0)
+            and (probabilities is None or isinstance(probabilities, dict))
+            and all(_number(p, 0.0, 1.0) for p in (probabilities or {}).values())
+        )
     return False
 
 
@@ -133,8 +140,11 @@ async def ask(
 
     start = time.monotonic()
     try:
-        response = await _post({"state": state, "model": settings.JEV_MODEL, "questions": questions}, transport)
-    except httpx.TimeoutException as exc:
+        # httpx's timeout bounds each connect/read/write, not the request: a body that trickles
+        # in never trips it. JEV_TIMEOUT_SECONDS is a promise about the WHOLE call, so bound that.
+        async with asyncio.timeout(settings.JEV_TIMEOUT_SECONDS):
+            response = await _post({"state": state, "model": settings.JEV_MODEL, "questions": questions}, transport)
+    except (httpx.TimeoutException, TimeoutError) as exc:
         raise JevUnavailableError("timeout") from exc
     except httpx.HTTPError as exc:
         raise JevUnavailableError("connection_error") from exc

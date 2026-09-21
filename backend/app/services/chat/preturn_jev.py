@@ -113,7 +113,7 @@ def build_request(task: str, history: list[dict], available_sources: dict[str, s
     return state, questions
 
 
-def to_route(answers: dict, *, floor: float) -> RequestRoute | None:
+def to_route(answers: dict, *, floor: float, has_persisted_context: bool = True) -> RequestRoute | None:
     """A route Jev may decide alone, or None to leave it to the LLM router."""
     kind = answers["kind"]
     continuation = answers["continuation"]["noul"]
@@ -121,10 +121,17 @@ def to_route(answers: dict, *, floor: float) -> RequestRoute | None:
         return None
     if _DECISIVE_NO <= continuation <= _DECISIVE_YES:
         return None
-    if kind["choice"] == "analytics" and answers["source_talk"]["noul"] > _NO_SOURCE_TALK:
-        return None
-    # Non-analytics routes carry no source intent by contract; analytics with no
-    # source talk is "unchanged". Either way the default SourceIntent is exact.
+    if kind["choice"] == "analytics":
+        if answers["source_talk"]["noul"] > _NO_SOURCE_TALK:
+            return None
+        # "unchanged" is only exact when the prior selection is PERSISTED. With no routing
+        # context yet, a source the user named earlier lives only in prose, and only the LLM
+        # router reads it (legacy_user_requests). A shortcut here would re-ask the user for
+        # a source they already chose.
+        if continuation > _DECISIVE_YES and not has_persisted_context:
+            return None
+    # Non-analytics routes carry no source intent by contract; analytics with no source
+    # talk and a persisted (or no) prior selection is "unchanged".
     return RequestRoute(kind=kind["choice"], continuation=continuation > _DECISIVE_YES)
 
 
@@ -173,14 +180,16 @@ def _compare(record, answers, jev_route, task: str, llm: RoutingResult | None, l
     return record
 
 
-def _jev_side(record: dict, answers: dict | None, task: str, llm, llm_ms) -> tuple[RequestRoute | None, dict]:
+def _jev_side(record: dict, answers, task: str, llm, llm_ms, history=()) -> tuple[RequestRoute | None, dict]:
     """Everything DERIVED from Jev's answers — the route it may decide and the comparison
     record — computed inside one guard. The client already guarantees well-typed, finite,
     in-range answers; this is the second wall, so that a bug in to_route or _compare can
     only ever lose a measurement or a shortcut, never the turn. A recorded field that
     "drives nothing" must not be able to fail anything either."""
     try:
-        route = to_route(answers, floor=settings.JEV_ROUTE_MIN_CONFIDENCE) if answers else None
+        persisted = previous_request_context(list(history)) is not None
+        floor = settings.JEV_ROUTE_MIN_CONFIDENCE
+        route = to_route(answers, floor=floor, has_persisted_context=persisted) if answers else None
         return route, _compare(dict(record), answers, route, task, llm, llm_ms)
     except Exception as exc:
         failed = {**record, "jev_error": f"unexpected:{type(exc).__name__}", "would_short_circuit": False}
@@ -200,13 +209,13 @@ async def route_request(
         (answers, record), (llm, llm_ms) = await asyncio.gather(
             _jev(tenant_id, task, history, available_sources), _llm(**llm_kwargs)
         )
-        _, record = _jev_side(record, answers, task, llm, llm_ms)
+        _, record = _jev_side(record, answers, task, llm, llm_ms, history)
         return llm, {"mode": mode, "decided_by": "llm", **record}
 
     answers, record = await _jev(tenant_id, task, history, available_sources)
-    route, record = _jev_side(record, answers, task, None, None)
+    route, record = _jev_side(record, answers, task, None, None, history)
     if route is not None:
         return RoutingResult(route=route, usage=TokenUsage()), {"mode": mode, "decided_by": "jev", **record}
     llm, llm_ms = await _llm(**llm_kwargs)
-    _, record = _jev_side(record, answers if not record.get("jev_error") else None, task, llm, llm_ms)
+    _, record = _jev_side(record, answers if not record.get("jev_error") else None, task, llm, llm_ms, history)
     return llm, {"mode": mode, "decided_by": "llm", **record}
