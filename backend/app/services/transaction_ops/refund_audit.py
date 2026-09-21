@@ -24,6 +24,9 @@ FIELDS = (
     "adjustment_total",
     "price",
     "quantity",
+    "full_amount",
+    "confirmed_price",
+    "payment_state",
 )
 
 
@@ -51,6 +54,7 @@ def audit_query(order_reference, refund_id):
 ), candidates AS (
  SELECT v.id::text AS version_id, v.item_type, v.item_id::text AS item_id,
  v.event, v.created_at,
+ (SELECT jsonb_agg(k ORDER BY k) FROM jsonb_object_keys(v.object_changes) k) AS changed_keys,
  v.object->>'quantity' AS previous_quantity, v.object->>'order_id' AS previous_order_id,
  (SELECT jsonb_object_agg(k,value) FROM jsonb_each(v.object_changes) e(k,value)
   WHERE k IN ({keys})) AS changes
@@ -59,14 +63,16 @@ def audit_query(order_reference, refund_id):
    WHERE v.item_type='Spree::Order' AND v.item_id=t.order_id::bigint
    AND v.created_at BETWEEN t.refund_created_at-INTERVAL '5 minutes'
                         AND t.refund_created_at+INTERVAL '5 minutes'
-   AND v.object_changes ?| ARRAY[{keys}]
+   AND (v.object_changes - ARRAY['updated_at','admin_metadata','payment_state','payment_total']::text[])
+       <> '{{}}'::jsonb
    UNION ALL
    SELECT v.* FROM spree_line_items li JOIN versions v
      ON v.item_type='Spree::LineItem' AND v.item_id=li.id
    WHERE li.order_id=t.order_id::bigint
    AND v.created_at BETWEEN t.refund_created_at-INTERVAL '5 minutes'
                         AND t.refund_created_at+INTERVAL '5 minutes'
-   AND v.object_changes ?| ARRAY[{keys}]
+   AND (v.object_changes - ARRAY['updated_at','admin_metadata','payment_state','payment_total']::text[])
+       <> '{{}}'::jsonb
  ) v
  ORDER BY v.created_at,v.id LIMIT {MAX_EVENTS + 1}
 )
@@ -107,6 +113,51 @@ def pair(changes, key):
     if not isinstance(values, list) or len(values) != 2:
         raise ValueError("invalid_audit_pair")
     return tuple(money(value) for value in values)
+
+
+def parent_rollups(by_line, changes_by_id, source):
+    """Corroborate Framework's amount + direct children amount cache.
+
+    A parent cache update is not another refunded line. Only an otherwise
+    unchanged parent and the exact sum of already-proven child price changes
+    qualify; no rollup contributes to net/tax totals.
+    """
+    source_lines = source["line_items"]
+    indexed = {str(line["id"]): line for line in source_lines}
+    if len(indexed) != len(source_lines):
+        raise ValueError("ambiguous_source_lines")
+    rollups = []
+    for identifier in sorted(set(by_line) - set(changes_by_id)):
+        history = by_line[identifier]
+        parent = indexed[identifier]
+        if len(history) != 1 or set(history[0]["changes"]) != {"full_amount"}:
+            raise ValueError("unexplained_parent_history")
+        if money(parent["quantity"]) <= 0 or money(history[0]["previous_quantity"]) != money(parent["quantity"]):
+            raise ValueError("changed_parent_quantity")
+        children = [line for line in source_lines if str(line.get("parent_id")) == identifier]
+        changed = [changes_by_id[str(line["id"])] for line in children if str(line["id"]) in changes_by_id]
+        if not changed or any(str(line["id"]) == identifier for line in children):
+            raise ValueError("parent_children_unproven")
+        after = sum((money(line["price"]) * money(line["quantity"]) for line in [parent, *children]), Decimal(0))
+        reduction = sum(
+            (
+                (money(line["target_unit_price"]) - money(line["source_unit_price"])) * money(line["source_quantity"])
+                for line in changed
+            ),
+            Decimal(0),
+        )
+        before = after + reduction
+        if reduction <= 0 or pair(history[0]["changes"], "full_amount") != (before, after):
+            raise ValueError("parent_rollup_mismatch")
+        rollups.append(
+            {
+                "source_line_id": identifier,
+                "version_id": str(history[0]["version_id"]),
+                "before": str(before),
+                "after": str(after),
+            }
+        )
+    return rollups
 
 
 def review_allocation(audit, source, invoice, basis, line_changes, link):
@@ -151,15 +202,26 @@ def review_allocation(audit, source, invoice, basis, line_changes, link):
             refund_at = datetime.fromisoformat(row["refund_created_at"].replace("Z", "+00:00")).replace(tzinfo=None)
             for event in events:
                 at = datetime.fromisoformat(event["created_at"].replace("Z", "+00:00")).replace(tzinfo=None)
-                if event["event"] != "update" or not 0 <= (refund_at - at).total_seconds() <= 300:
+                if at > refund_at:
+                    return {**unavailable, "reason": "refund_audit_change_after_refund"}
+                if event["event"] != "update" or (refund_at - at).total_seconds() > 300:
                     return unavailable
                 changes = event["changes"]
                 allowed = (
-                    {"total", "item_total", "additional_tax_total", "adjustment_total"}
+                    {"total", "item_total", "additional_tax_total", "adjustment_total", "payment_state"}
                     if (event["item_type"] == "Spree::Order")
-                    else {"price", "additional_tax_total", "adjustment_total"}
+                    else {"price", "additional_tax_total", "adjustment_total", "full_amount", "confirmed_price"}
                 )
                 if not changes or not set(changes).issubset(allowed):
+                    return unavailable
+                changed_keys = event["changed_keys"]
+                if (
+                    not isinstance(changed_keys, list)
+                    or not set(changed_keys).issubset(allowed | {"updated_at", "admin_metadata"})
+                    or set(changed_keys) - {"updated_at", "admin_metadata"} != set(changes)
+                ):
+                    return unavailable
+                if "payment_state" in changes and changes["payment_state"] != ["paid", "credit_owed"]:
                     return unavailable
                 if any(key in changes for key in ("quantity", "included_tax_total", "shipment_total", "promo_total")):
                     return unavailable
@@ -185,6 +247,9 @@ def review_allocation(audit, source, invoice, basis, line_changes, link):
                     return unavailable
                 by_line.setdefault(str(event["item_id"]), []).append(event)
             changes_by_id = {str(c["source_line_id"]): c for c in line_changes}
+            rollups = parent_rollups(by_line, changes_by_id, source)
+            for rollup in rollups:
+                by_line.pop(rollup["source_line_id"])
             if not by_line or set(by_line) != set(changes_by_id) or len(changes_by_id) != len(line_changes):
                 return unavailable
             lines, sum_net, sum_tax = [], Decimal(0), Decimal(0)
@@ -200,6 +265,13 @@ def review_allocation(audit, source, invoice, basis, line_changes, link):
                     return unavailable
                 old_price, new_price = pair(prices[0]["changes"], "price")
                 old_tax, new_tax = pair(taxes[0]["changes"], "additional_tax_total")
+                for event in history:
+                    for key, multiplier in (("full_amount", qty), ("confirmed_price", Decimal(1))):
+                        if key in event["changes"] and pair(event["changes"], key) != (
+                            old_price * multiplier,
+                            new_price * multiplier,
+                        ):
+                            return unavailable
                 observation = change["tax_observation"]
                 if (
                     (old_price, new_price) != (money(change["target_unit_price"]), money(change["source_unit_price"]))
@@ -245,6 +317,7 @@ def review_allocation(audit, source, invoice, basis, line_changes, link):
                 "tax": str(tax),
                 "gross": str(gross),
                 "order_version_id": str(orders[0]["version_id"]),
+                "parent_rollups": rollups,
                 "lines": lines,
                 "authority": "Audit history corroborates the amounts; it has no explicit refund-to-line link. "
                 "Finance must confirm that these changes belong to this refund and approve the tax treatment.",

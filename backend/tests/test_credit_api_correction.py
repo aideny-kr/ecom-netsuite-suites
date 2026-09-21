@@ -142,7 +142,7 @@ async def test_preparation_preserves_exact_decimals_in_persistable_evidence(monk
     assert "taxTotal" not in p["support"]["credit"]
 
 
-@pytest.mark.parametrize("change", ["tax", "gl", "invoice", "refund", "application", "line", "book"])
+@pytest.mark.parametrize("change", ["tax", "gl", "invoice", "refund", "application", "line", "book", "refund_audit"])
 def test_wrong_amounts_or_changed_protected_records_never_report_success(change):
     p = proposed()
     support = applied(p)
@@ -156,6 +156,9 @@ def test_wrong_amounts_or_changed_protected_records_never_report_success(change)
         support["credit"]["application_evidence"]["lines"] = []
     elif change == "line":
         support["credit"]["line_evidence"]["lines"][0]["lineUniqueKey"] = "wrong"
+    elif change == "refund_audit":
+        p["support"]["refund_audit"] = {"row": {"refund_state": 2}}
+        support["refund_audit"] = {"row": {"refund_state": 3}}
     else:
         support["credit_gl"]["rows"][0]["accountingbook"] = "2"
     with pytest.raises(ValueError):

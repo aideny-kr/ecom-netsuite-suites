@@ -242,7 +242,8 @@ def build_intent(tenant_id, case_id, source, review, evidence, support, *, field
                     "No additional credit, refund, cash movement, item-policy change "
                     "or invoice reduction is authorized. "
                     "Verify the exact ledger allocation and unchanged related records after execution. "
-                    "Sales-order alignment remains a separately approved step.",
+                    "Sales-order alignment remains a separately approved step."
+                    + (" " + allocation["authority"] if allocation else ""),
                     "status": "intent_requires_schema_policy_and_preflight_validation",
                     "required_transport": "native_accounting_amendment_with_tax_preview",
                     "tax_only": net == 0,

@@ -179,7 +179,9 @@ def test_approval_input_binds_all_proposal_evidence(change):
         service.validate_binding("tenant", service.TOOL, params, p)
 
 
-@pytest.mark.parametrize("change", ["none", "ledger", "invoice", "refund", "application", "penny", "identity"])
+@pytest.mark.parametrize(
+    "change", ["none", "ledger", "invoice", "refund", "application", "penny", "identity", "refund_audit"]
+)
 async def test_posting_verification_requires_gl_related_records_and_exact_native_values(monkeypatch, change):
     p, fresh = prepared()
     source, review, evidence, support, configured = deepcopy(fresh)
@@ -203,6 +205,9 @@ async def test_posting_verification_requires_gl_related_records_and_exact_native
         support["credit"]["application_evidence"]["lines"][0]["amount"] = "400"
     if change == "penny":
         after["body"]["taxtotal"] = "40.01"
+    if change == "refund_audit":
+        p["support"]["refund_audit"] = {"row": {"refund_state": 2}}
+        support["refund_audit"] = {"row": {"refund_state": 3}}
     monkeypatch.setattr(service, "_fresh", AsyncMock(return_value=(source, review, evidence, support, configured)))
     reader = AsyncMock(
         return_value={

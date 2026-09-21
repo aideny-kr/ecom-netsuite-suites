@@ -71,6 +71,7 @@ export function NativeAccountingConfirmationCard({ data, proposal: p, onConfirm,
           <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Source amounts and audit versions</summary>
             <p className="mt-2">Order version #{p.refund_allocation.order_version_id}. Amounts are calculated from recorded changes; no model estimated the tax.</p>
             <ul className="mt-2 space-y-2">{p.refund_allocation.lines.map(line => <li key={line.source_line_id}>Line #{line.source_line_id}: unit price {creditAmount(line.price_before, currency)} → {creditAmount(line.price_after, currency)}; line tax {creditAmount(line.tax_before, currency)} → {creditAmount(line.tax_after, currency)}. Versions {line.version_ids.join(", ")}.</li>)}</ul>
+            {p.refund_allocation.parent_rollups?.map(rollup => <p className="mt-2" key={rollup.source_line_id}>Parent line #{rollup.source_line_id}: recorded total {creditAmount(rollup.before, currency)} → {creditAmount(rollup.after, currency)} agrees with its components. Version {rollup.version_id}; not an additional refund.</p>)}
           </details>
         </section>}
         <dl className="grid gap-3 rounded-lg border p-4 sm:grid-cols-2">

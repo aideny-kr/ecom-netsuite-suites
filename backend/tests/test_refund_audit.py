@@ -51,6 +51,8 @@ def audit_fixture():
             "changes": {"additional_tax_total": ["160", "120"], "adjustment_total": ["160", "120"]},
         },
     ]
+    for event in events:
+        event["changed_keys"] = sorted(event["changes"])
     audit = {
         "source_step_id": "step",
         "connection_id": "connection",
@@ -273,3 +275,113 @@ async def test_support_collection_attaches_current_audit_or_explicit_review_bloc
         audit.assert_awaited_once_with("db", "tenant", "step", source["number"], "500")
     intent = build_intent("tenant", "case", source, review, evidence, actual)
     assert bool(intent) == (condition == "valid")
+
+
+@pytest.mark.parametrize(
+    "key,values",
+    [
+        ("full_amount", ["1600", "1200"]),
+        ("confirmed_price", ["1600", "1200"]),
+        ("payment_state", ["paid", "credit_owed"]),
+    ],
+)
+def test_known_price_mirrors_and_payment_transition_are_validated(key, values):
+    source, review, evidence, support = audit_fixture()
+    event = support["refund_audit"]["row"]["events"][0 if key == "payment_state" else 1]
+    event["changes"][key] = values
+    event["changed_keys"].append(key)
+    assert allocation(source, evidence, support)["status"] == "ready_for_finance_review"
+    event["changes"][key] = ["canceled", "paid"] if key == "payment_state" else ["1601", "1201"]
+    assert build_intent("tenant", "case", source, review, evidence, support) is None
+
+
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_sql_preserves_identity_change_keys_without_exposing_their_values(db, standalone):
+    """Exercise the actual PostgreSQL projection, not a hand-filtered response."""
+    import json
+    from datetime import datetime
+
+    from sqlalchemy import text
+
+    definitions = {
+        "spree_orders": "id bigint,number text,currency text",
+        "spree_payments": "id bigint,order_id bigint,number text",
+        "spree_refunds": "id bigint,payment_id bigint,amount numeric,state integer,refund_reason_id bigint,"
+        "reimbursement_id bigint,transaction_id text,created_at timestamp",
+        "spree_line_items": "id bigint,order_id bigint",
+        "versions": "id bigint,item_type text,item_id bigint,event text,created_at timestamp,object jsonb,object_changes jsonb",
+    }
+    for name, columns in definitions.items():
+        await db.execute(text(f"CREATE TEMP TABLE {name} ({columns}) ON COMMIT DROP"))
+    await db.execute(text("INSERT INTO spree_orders VALUES (100,'R123456789','USD')"))
+    await db.execute(text("INSERT INTO spree_payments VALUES (10,100,'PAY100')"))
+    await db.execute(
+        text("INSERT INTO spree_refunds VALUES (500,10,440,2,38,NULL,'processor', '2026-09-08 12:00:00.123459')")
+    )
+    await db.execute(text("INSERT INTO spree_line_items VALUES (101,100)"))
+    source, _, evidence, support = audit_fixture()
+    source["number"] = evidence["sections"]["sales_order"]["tranId"] = "R123456789"
+    events = deepcopy(support["refund_audit"]["row"]["events"])
+    if standalone:
+        events.append({**deepcopy(events[1]), "version_id": "4", "changes": {"variant_id": [1, 2]}})
+    else:
+        events[1]["changes"]["variant_id"] = [1, 2]
+    for event in events:
+        await db.execute(
+            text(
+                "INSERT INTO versions VALUES (:id,:kind,:item,'update',CAST(:at AS timestamp),"
+                "CAST(:object AS jsonb),CAST(:changes AS jsonb))"
+            ),
+            {
+                "id": int(event["version_id"]),
+                "kind": event["item_type"],
+                "item": int(event["item_id"]),
+                "at": datetime.fromisoformat(event["created_at"]),
+                "object": json.dumps({"quantity": 1, "order_id": 100}),
+                "changes": json.dumps(event["changes"]),
+            },
+        )
+    rows = (await db.execute(text(audit_query("R123456789", "500")))).mappings().all()
+    assert len(rows) == 1
+    row = dict(rows[0])
+    selected = next(e for e in row["events"] if "variant_id" in e["changed_keys"])
+    assert "variant_id" not in (selected["changes"] or {})
+    support["refund_audit"]["row"] = row
+    assert allocation(source, evidence, support)["status"] == "needs_review"
+
+
+@pytest.mark.parametrize("change", [None, "amount", "quantity", "relationship", "extra_event"])
+def test_parent_cache_rollup_is_corroborated_without_double_counting(change):
+    source, _, evidence, support = audit_fixture()
+    source["line_items"][0]["parent_id"] = "102"
+    source["line_items"].append({"id": "102", "price": "0", "quantity": "1", "sku": "KIT", "adjustments": []})
+    for doc in [evidence["sections"]["sales_order"], *evidence["sections"]["posting_documents"]]:
+        line = deepcopy(doc["line_evidence"]["lines"][0])
+        line.update(
+            custcol_fw_solidus_line_id="102", custcol_fw_item_sku="KIT", rate="0", amount="0", custcol_fw_vat_amount="0"
+        )
+        doc["line_evidence"]["lines"].append(line)
+    events = support["refund_audit"]["row"]["events"]
+    rollup = {
+        **deepcopy(events[1]),
+        "version_id": "4",
+        "item_id": "102",
+        "changes": {"full_amount": ["1600", "1200"]},
+        "changed_keys": ["full_amount"],
+    }
+    events.append(rollup)
+    if change == "amount":
+        rollup["changes"]["full_amount"] = ["1601", "1201"]
+    elif change == "quantity":
+        rollup["previous_quantity"] = "2"
+    elif change == "relationship":
+        source["line_items"][0]["parent_id"] = "999"
+    elif change == "extra_event":
+        events.append({**deepcopy(rollup), "version_id": "5"})
+    result = allocation(source, evidence, support)
+    assert result["status"] == ("needs_review" if change else "ready_for_finance_review")
+    if change is None:
+        assert len(result["lines"]) == 1 and result["gross"] == "440"
+        assert result["parent_rollups"] == [
+            {"source_line_id": "102", "version_id": "4", "before": "1600", "after": "1200"}
+        ]

@@ -945,6 +945,7 @@ interface NativeAccountingReviewBase extends AccountingReviewBase {
     tax: string;
     gross: string;
     order_version_id: string;
+    parent_rollups?: Array<{ source_line_id: string; version_id: string; before: string; after: string }>;
     authority: string;
     lines: Array<{
       source_line_id: string;

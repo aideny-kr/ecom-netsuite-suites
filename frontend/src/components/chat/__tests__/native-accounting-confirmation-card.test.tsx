@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AccountingConfirmationCard } from "../accounting-confirmation-card";
+import { AccountingGroupCard } from "../accounting-group-card";
 import type { WriteConfirmationData } from "@/lib/types";
 
 const data = {
@@ -27,7 +28,7 @@ describe("native accounting approval",()=>{
       lines:[{source_line_id:"101",sku:"MEM64",quantity:"1",price_before:"1600",price_after:"1200",
         tax_before:"160",tax_after:"120",net:"400",tax:"40",gross:"440",version_ids:["2","3"]}],
     }}};
-    render(<AccountingConfirmationCard data={audited} onConfirm={approve} onReject={vi.fn()}/>);
+    const {unmount}=render(<AccountingConfirmationCard data={audited} onConfirm={approve} onReject={vi.fn()}/>);
     expect(screen.getByRole("table",{name:"Refunded lines"})).toHaveTextContent("MEM64");
     expect(screen.getByText(/Solidus refund #500/)).toHaveTextContent("PAY100");
     expect(screen.getByText(/no explicit refund-to-line link/)).toBeInTheDocument();
@@ -36,6 +37,17 @@ describe("native accounting approval",()=>{
     fireEvent.click(screen.getByRole("checkbox",{name:/I confirm these line changes belong to this refund/}));
     fireEvent.click(button);
     expect(approve).toHaveBeenCalledTimes(1);
+    unmount();
+    const grouped={...data,accounting_review:null,accounting_group:{group_id:"group",concurrency:1,members:[{
+      case_id:"case",order_reference:"R123",confirmation_id:"child",card:audited,
+    }]}};
+    render(<AccountingGroupCard data={grouped} onConfirm={approve} onReject={vi.fn()}/>);
+    expect(screen.getByText(/Audit history does not contain an explicit refund-to-line link/)).toBeInTheDocument();
+    const groupButton=screen.getByRole("button",{name:/Approve/});
+    expect(groupButton).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox",{name:/I confirm the audited line changes belong to each displayed refund/}));
+    fireEvent.click(groupButton);
+    expect(approve).toHaveBeenCalledTimes(2);
   });
   it("shows credit allocation accurately and requires explicit accounting acknowledgement",()=>{
     const approve=vi.fn(); render(<AccountingConfirmationCard data={data} onConfirm={approve} onReject={vi.fn()}/>);
