@@ -9,11 +9,13 @@ at call sites so a new caller cannot add a hole: no key, or a tenant outside
 callers sit on latency paths and already own a slower fallback, so a failure is
 reported once, with a reason, and the caller falls back.
 
-Two promises callers rely on, both made HERE so no call site has to remember them:
+Three promises callers rely on, both made HERE so no call site has to remember them:
 
 * A returned answer is well-typed. ``_valid`` checks values, not just keys — a
   200 carrying ``"noul": null`` once passed validation and would have raised a
   TypeError inside chat routing, costing the user their turn.
+* Every number in a returned answer is finite and inside its range (probabilities
+  and confidence in [0, 1], a score within its question's levels).
 * ``try_ask`` cannot raise. Jev always runs beside a primary path (the LLM
   router, the LLM classifier); anything going wrong on the Jev side — a vendor
   outage or a bug of ours — must degrade to "no Jev answer", never reach that
@@ -29,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -67,7 +70,9 @@ def tenant_allowed(tenant_id: uuid.UUID | str) -> bool:
 
 
 def _number(value, low: float | None = None, high: float | None = None) -> bool:
-    if isinstance(value, bool) or not isinstance(value, Real):
+    # json.loads accepts NaN / Infinity, and both are instances of Real: reject them here so
+    # no caller ever has to wonder whether round() or a comparison will blow up.
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
         return False
     return (low is None or value >= low) and (high is None or value <= high)
 
@@ -85,7 +90,8 @@ def _valid_answer(question: dict, answer: object) -> bool:
             and isinstance(answer.get("probabilities"), dict)
         )
     if kind == "score":
-        return _number(answer.get("score")) and _number(answer.get("confidence"), 0.0, 1.0)
+        top = len(question["criteria"]) - 1  # a score is a position on the question's own levels
+        return _number(answer.get("score"), 0.0, top) and _number(answer.get("confidence"), 0.0, 1.0)
     return False
 
 
@@ -159,6 +165,11 @@ async def try_ask(tenant_id, state=None, questions=None, *, build=None, **kwargs
     builder is a Jev-side failure too, and must not escape into the primary path.
     """
     try:
+        # Refuse before building: a disallowed tenant's data should not even be assembled.
+        if not settings.TYPESAFE_API_KEY:
+            return None, "disabled"
+        if not tenant_allowed(tenant_id):
+            return None, "tenant_not_allowed"
         if build is not None:
             state, questions = build()
         return await ask(tenant_id, state, questions, **kwargs), None

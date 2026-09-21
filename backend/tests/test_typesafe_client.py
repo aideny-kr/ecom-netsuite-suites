@@ -207,3 +207,23 @@ async def test_try_ask_contains_a_failing_request_builder(enabled):
         raise ValueError("bad state")
 
     assert await jev.try_ask(TENANT, build=broken_builder) == (None, "unexpected:ValueError")
+
+
+# ── gate round 2: no non-finite or out-of-range number can be returned ─────
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), -0.5, 1.5])
+async def test_score_must_be_finite_and_within_its_levels(enabled, score):
+    questions = {"sev": {"type": "score", "instructions": "How bad?", "criteria": ["low", "high"]}}
+    answer = {"type": "score", "score": score, "probabilities": {}, "confidence": 0.9}
+    body = json.dumps({**OK_BODY, "answers": {"sev": answer}})  # json.dumps emits NaN/Infinity, as a vendor bug would
+    transport, _ = _transport(lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"}))
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, questions, transport=transport)
+    assert exc.value.reason == "invalid_response"
+
+
+async def test_a_refused_tenant_never_runs_the_request_builder(enabled):
+    built = []
+    result = await jev.try_ask(uuid.uuid4(), build=lambda: built.append(1) or ({}, {}))
+    assert result == (None, "tenant_not_allowed") and built == []

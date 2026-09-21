@@ -278,3 +278,19 @@ async def test_out_of_sync_criteria_disable_jev_instead_of_crashing_the_worker(m
 
 def test_the_criteria_cover_exactly_the_allowed_actions():
     assert set(rj._CRITERIA) == rj.AGENT_ALLOWED_ACTIONS
+
+
+# ── gate round 2 ───────────────────────────────────────────────────────────
+
+
+async def test_live_falls_back_to_the_llm_when_building_jevs_proposal_breaks(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+    _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.99))
+
+    def broken(*a, **k):
+        raise KeyError("bug")
+
+    monkeypatch.setattr(rj, "template_narrative", broken)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert validated["action"] == "book_fee_line" and llm.calls == 1
+    assert record["decided_by"] == "llm" and record["jev_error"] == "unexpected:KeyError"

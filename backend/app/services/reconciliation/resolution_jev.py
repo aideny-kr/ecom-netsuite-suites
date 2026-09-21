@@ -193,17 +193,25 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
 
     confident = record["jev_action"] is not None and record["jev_confidence"] >= settings.JEV_RECON_MIN_CONFIDENCE
     if mode == "live" and confident:
-        facts = derive_facts(context)
-        out = {
-            "action": record["jev_action"],
-            "narrative": template_narrative(record["jev_action"], facts),
-            "key_evidence": [key for key in _BASIS if facts.get(key) is True],
-        }
-        validated = validate_output(out, context, materiality)
-        record["guard_veto"] = validated.get("contract_violation")
-        record["decided_by"] = "guard" if record["guard_veto"] else "jev"
-        record["applied_action"] = validated["action"]
-        return validated, record
+        # Building Jev's proposal is Jev-side work: if it breaks, the item goes to the LLM
+        # exactly as if Jev had been unsure. validate_output stays OUTSIDE this guard — a
+        # failure there is a failure of the shared safety net and must surface as before.
+        try:
+            facts = derive_facts(context)
+            out = {
+                "action": record["jev_action"],
+                "narrative": template_narrative(record["jev_action"], facts),
+                "key_evidence": [key for key in _BASIS if facts.get(key) is True],
+            }
+        except Exception as exc:
+            record["jev_error"] = f"unexpected:{type(exc).__name__}"
+            out = None
+        if out is not None:
+            validated = validate_output(out, context, materiality)
+            record["guard_veto"] = validated.get("contract_violation")
+            record["decided_by"] = "guard" if record["guard_veto"] else "jev"
+            record["applied_action"] = validated["action"]
+            return validated, record
 
     if llm_out is None:
         llm_out, record["llm_elapsed_ms"] = await _llm(adapter, model, context)

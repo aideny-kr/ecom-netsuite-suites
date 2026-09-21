@@ -119,13 +119,13 @@ def to_route(answers: dict, *, floor: float) -> RequestRoute | None:
     continuation = answers["continuation"]["noul"]
     if (kind.get("confidence") or 0) < floor:
         return None
-    if _DECISIVE_NO < continuation < _DECISIVE_YES:
+    if _DECISIVE_NO <= continuation <= _DECISIVE_YES:
         return None
     if kind["choice"] == "analytics" and answers["source_talk"]["noul"] > _NO_SOURCE_TALK:
         return None
     # Non-analytics routes carry no source intent by contract; analytics with no
     # source talk is "unchanged". Either way the default SourceIntent is exact.
-    return RequestRoute(kind=kind["choice"], continuation=continuation >= _DECISIVE_YES)
+    return RequestRoute(kind=kind["choice"], continuation=continuation > _DECISIVE_YES)
 
 
 async def _jev(tenant_id, task, history, available_sources) -> tuple[dict | None, dict]:
@@ -173,6 +173,20 @@ def _compare(record, answers, jev_route, task: str, llm: RoutingResult | None, l
     return record
 
 
+def _jev_side(record: dict, answers: dict | None, task: str, llm, llm_ms) -> tuple[RequestRoute | None, dict]:
+    """Everything DERIVED from Jev's answers — the route it may decide and the comparison
+    record — computed inside one guard. The client already guarantees well-typed, finite,
+    in-range answers; this is the second wall, so that a bug in to_route or _compare can
+    only ever lose a measurement or a shortcut, never the turn. A recorded field that
+    "drives nothing" must not be able to fail anything either."""
+    try:
+        route = to_route(answers, floor=settings.JEV_ROUTE_MIN_CONFIDENCE) if answers else None
+        return route, _compare(dict(record), answers, route, task, llm, llm_ms)
+    except Exception as exc:
+        failed = {**record, "jev_error": f"unexpected:{type(exc).__name__}", "would_short_circuit": False}
+        return None, failed
+
+
 async def route_request(
     *, tenant_id, task: str, history: list[dict], adapter, model: str, available_sources: dict[str, str] | None = None
 ) -> tuple[RoutingResult, dict | None]:
@@ -182,18 +196,17 @@ async def route_request(
     if mode not in {"shadow", "live"}:
         return await request_routing.classify_request(**llm_kwargs), None
 
-    floor = settings.JEV_ROUTE_MIN_CONFIDENCE
     if mode == "shadow":
         (answers, record), (llm, llm_ms) = await asyncio.gather(
             _jev(tenant_id, task, history, available_sources), _llm(**llm_kwargs)
         )
-        jev_route = to_route(answers, floor=floor) if answers else None
-        return llm, {"mode": mode, "decided_by": "llm", **_compare(record, answers, jev_route, task, llm, llm_ms)}
+        _, record = _jev_side(record, answers, task, llm, llm_ms)
+        return llm, {"mode": mode, "decided_by": "llm", **record}
 
     answers, record = await _jev(tenant_id, task, history, available_sources)
-    route = to_route(answers, floor=floor) if answers else None
+    route, record = _jev_side(record, answers, task, None, None)
     if route is not None:
-        record = _compare(record, answers, route, task, None, None)
         return RoutingResult(route=route, usage=TokenUsage()), {"mode": mode, "decided_by": "jev", **record}
     llm, llm_ms = await _llm(**llm_kwargs)
-    return llm, {"mode": mode, "decided_by": "llm", **_compare(record, answers, None, task, llm, llm_ms)}
+    _, record = _jev_side(record, answers if not record.get("jev_error") else None, task, llm, llm_ms)
+    return llm, {"mode": mode, "decided_by": "llm", **record}
