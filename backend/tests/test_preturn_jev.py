@@ -39,13 +39,15 @@ def _answers(kind="conversation", kind_conf=0.95, continuation=0.05, source_talk
 def _patch_jev(monkeypatch, answers=None, error=None):
     seen = {}
 
-    async def fake_ask(tenant_id, state, questions, **_):
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        if build is not None:
+            state, questions = build()
         seen.update(state=state, questions=questions)
         if error:
-            raise error
-        return JevResult(answers=answers, model="jev-1.13.0", input_tokens=900, elapsed_ms=105)
+            return None, error.reason
+        return JevResult(answers=answers, model="jev-1.13.0", input_tokens=900, elapsed_ms=105), None
 
-    monkeypatch.setattr(pj, "ask", fake_ask)
+    monkeypatch.setattr(pj, "try_ask", fake_try_ask)
     return seen
 
 
@@ -176,3 +178,43 @@ async def test_llm_router_failure_still_propagates(monkeypatch):
     monkeypatch.setattr(pj.request_routing, "classify_request", broken)
     with pytest.raises(RuntimeError):
         await _call()
+
+
+# ── gate round 1: nothing on the Jev side may reach the LLM router ─────────
+
+
+async def test_shadow_survives_a_bug_in_our_own_request_builder(monkeypatch, llm_router):
+    monkeypatch.setattr(settings, "JEV_PRETURN_MODE", "shadow")
+    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", "k")
+    monkeypatch.setattr(settings, "JEV_TENANT_ALLOWLIST", str(TENANT))
+
+    def broken(*_):
+        raise KeyError("bug")
+
+    monkeypatch.setattr(pj, "build_request", broken)
+    result, record = await _call()
+    assert result.route.kind == "analytics" and len(llm_router) == 1
+    assert record["jev_error"] == "unexpected:KeyError"
+
+
+async def test_live_survives_a_bug_in_our_own_request_builder(monkeypatch, llm_router):
+    monkeypatch.setattr(settings, "JEV_PRETURN_MODE", "live")
+    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", "k")
+    monkeypatch.setattr(settings, "JEV_TENANT_ALLOWLIST", str(TENANT))
+
+    def broken(*_):
+        raise KeyError("bug")
+
+    monkeypatch.setattr(pj, "build_request", broken)
+    result, record = await _call()
+    assert len(llm_router) == 1 and record["decided_by"] == "llm"
+
+
+async def test_the_recorded_short_circuit_is_the_route_that_was_taken(monkeypatch, llm_router):
+    monkeypatch.setattr(settings, "JEV_PRETURN_MODE", "live")
+    _patch_jev(monkeypatch, answers=_answers(kind="conversation", continuation=0.95))
+    calls = []
+    real = pj.to_route
+    monkeypatch.setattr(pj, "to_route", lambda *a, **k: calls.append(1) or real(*a, **k))
+    _, record = await _call()
+    assert record["would_short_circuit"] is True and len(calls) == 1

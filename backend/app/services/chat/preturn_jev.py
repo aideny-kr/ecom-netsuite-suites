@@ -30,7 +30,7 @@ from app.services.chat.llm_adapter import TokenUsage
 from app.services.chat.request_routing import RequestRoute, RoutingResult, _history_excerpt, previous_request_context
 from app.services.chat.skills import get_all_skills_metadata, match_skill
 from app.services.importance_classifier import classify_importance
-from app.services.typesafe.client import JevUnavailableError, ask
+from app.services.typesafe.client import try_ask
 
 _DECISIVE_NO, _DECISIVE_YES = 0.2, 0.8
 _NO_SOURCE_TALK = 0.1
@@ -129,11 +129,12 @@ def to_route(answers: dict, *, floor: float) -> RequestRoute | None:
 
 
 async def _jev(tenant_id, task, history, available_sources) -> tuple[dict | None, dict]:
+    """Jev's answers, or None with the reason recorded. Cannot raise: try_ask contains
+    vendor failures AND bugs in build_request, so the LLM router beside it is never harmed."""
     record = {"jev_error": None, "jev_elapsed_ms": None}
-    try:
-        result = await ask(tenant_id, *build_request(task, history, available_sources))
-    except JevUnavailableError as exc:
-        record["jev_error"] = exc.reason
+    result, reason = await try_ask(tenant_id, build=lambda: build_request(task, history, available_sources))
+    if result is None:
+        record["jev_error"] = reason
         return None, record
     record.update(jev_elapsed_ms=result.elapsed_ms, jev_model=result.model, jev_input_tokens=result.input_tokens)
     return result.answers, record
@@ -147,8 +148,9 @@ async def _llm(**kwargs) -> tuple[RoutingResult, int]:
     return result, int((time.monotonic() - start) * 1000)
 
 
-def _compare(record: dict, answers: dict | None, task: str, llm: RoutingResult | None, llm_ms: int | None) -> dict:
-    jev_route = to_route(answers, floor=settings.JEV_ROUTE_MIN_CONFIDENCE) if answers else None
+def _compare(record, answers, jev_route, task: str, llm: RoutingResult | None, llm_ms: int | None) -> dict:
+    """``jev_route`` is the route the caller already derived — computed once, so the record
+    describes the decision that was actually taken."""
     matched = match_skill(task)
     record.update(
         would_short_circuit=jev_route is not None,
@@ -180,16 +182,18 @@ async def route_request(
     if mode not in {"shadow", "live"}:
         return await request_routing.classify_request(**llm_kwargs), None
 
+    floor = settings.JEV_ROUTE_MIN_CONFIDENCE
     if mode == "shadow":
         (answers, record), (llm, llm_ms) = await asyncio.gather(
             _jev(tenant_id, task, history, available_sources), _llm(**llm_kwargs)
         )
-        return llm, {"mode": mode, "decided_by": "llm", **_compare(record, answers, task, llm, llm_ms)}
+        jev_route = to_route(answers, floor=floor) if answers else None
+        return llm, {"mode": mode, "decided_by": "llm", **_compare(record, answers, jev_route, task, llm, llm_ms)}
 
     answers, record = await _jev(tenant_id, task, history, available_sources)
-    route = to_route(answers, floor=settings.JEV_ROUTE_MIN_CONFIDENCE) if answers else None
+    route = to_route(answers, floor=floor) if answers else None
     if route is not None:
-        record = _compare(record, answers, task, None, None)
+        record = _compare(record, answers, route, task, None, None)
         return RoutingResult(route=route, usage=TokenUsage()), {"mode": mode, "decided_by": "jev", **record}
     llm, llm_ms = await _llm(**llm_kwargs)
-    return llm, {"mode": mode, "decided_by": "llm", **_compare(record, answers, task, llm, llm_ms)}
+    return llm, {"mode": mode, "decided_by": "llm", **_compare(record, answers, None, task, llm, llm_ms)}

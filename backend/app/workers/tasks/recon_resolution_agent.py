@@ -14,6 +14,7 @@ timed-out item degrades to ``needs_human`` and the run continues.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 
@@ -47,31 +48,6 @@ def _update_job_progress(tenant_id: str, job_id, processed: int, total: int) -> 
         logger.warning("resolution_agent.progress_update_failed", extra={"job_id": str(job_id)})
 
 
-async def _record_jev_comparison(db: AsyncSession, tenant_id, run_id, proposal_id, shadow: dict) -> None:
-    """Persist one Jev-vs-LLM comparison. Decisions and timings only — no tenant text.
-
-    Inside a savepoint: apply_agent_proposal commits this session once per item, and
-    a failed audit insert must not take the proposal down with it.
-    """
-    from app.services.audit_service import log_event
-
-    try:
-        async with db.begin_nested():
-            await log_event(
-                db=db,
-                tenant_id=tenant_id,
-                category="reconciliation",
-                action="recon.jev_comparison",
-                actor_type="system",
-                resource_type="recon_resolution_proposal",
-                resource_id=str(proposal_id),
-                correlation_id=str(run_id),
-                payload=shadow,
-            )
-    except Exception:
-        logger.warning("resolution_agent.jev_comparison_not_recorded", extra={"proposal_id": str(proposal_id)})
-
-
 async def run_resolution_agent(
     db: AsyncSession,
     tenant_id: str,
@@ -93,6 +69,8 @@ async def run_resolution_agent(
         gather_context,
     )
     from app.services.reconciliation.resolution_jev import decide_item
+    from app.services.typesafe import client as jev_client
+    from app.services.typesafe.audit import record_comparison
 
     tid = uuid.UUID(str(tenant_id))
     rid = uuid.UUID(str(run_id))
@@ -127,39 +105,55 @@ async def run_resolution_agent(
     kept_needs_human = 0
     contract_violations = 0
 
-    for item in items:
-        shadow = None
-        try:
-            context = await gather_context(db, tid, item)
-            # decide_item is the LLM path unchanged when JEV_RECON_RESOLUTION_MODE
-            # is off; both models' answers go through the same validate_output.
-            validated, shadow = await asyncio.wait_for(
-                decide_item(tid, adapter, model, context, materiality),
-                timeout=PER_ITEM_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            logger.warning("resolution_agent.item_classification_failed", extra={"proposal_id": str(item.id)})
-            validated = {
-                "action": "needs_human",
-                "narrative": "Agent classification failed; needs investigation.",
-                "key_evidence": [],
-                "contract_violation": "classification_error",
-            }
+    from app.core.config import settings
 
-        if validated.get("contract_violation"):
-            contract_violations += 1
-        if validated["action"] == "needs_human":
-            kept_needs_human += 1
-        else:
-            upgraded += 1
+    async with contextlib.AsyncExitStack() as stack:
+        # One HTTPS connection for the whole run instead of a TLS handshake per item.
+        # Entered only when Jev is actually on, so "off" creates no client at all.
+        if settings.JEV_RECON_RESOLUTION_MODE in {"shadow", "live"} and settings.TYPESAFE_API_KEY:
+            await stack.enter_async_context(jev_client.session())
+        for item in items:
+            shadow = None
+            try:
+                context = await gather_context(db, tid, item)
+                # decide_item is the LLM path unchanged when JEV_RECON_RESOLUTION_MODE
+                # is off; both models' answers go through the same validate_output.
+                validated, shadow = await asyncio.wait_for(
+                    decide_item(tid, adapter, model, context, materiality),
+                    timeout=PER_ITEM_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.warning("resolution_agent.item_classification_failed", extra={"proposal_id": str(item.id)})
+                validated = {
+                    "action": "needs_human",
+                    "narrative": "Agent classification failed; needs investigation.",
+                    "key_evidence": [],
+                    "contract_violation": "classification_error",
+                }
 
-        if shadow is not None:
-            await _record_jev_comparison(db, tid, rid, item.id, shadow)
-        await apply_agent_proposal(db, item, validated)
-        processed += 1
+            if validated.get("contract_violation"):
+                contract_violations += 1
+            if validated["action"] == "needs_human":
+                kept_needs_human += 1
+            else:
+                upgraded += 1
 
-        if job_id and processed % PROGRESS_UPDATE_EVERY == 0:
-            _update_job_progress(tenant_id, job_id, processed, total)
+            if shadow is not None:
+                await record_comparison(
+                    db,
+                    tenant_id=tid,
+                    category="reconciliation",
+                    action="recon.jev_comparison",
+                    payload=shadow,
+                    resource_type="recon_resolution_proposal",
+                    resource_id=str(item.id),
+                    correlation_id=str(rid),
+                )
+            await apply_agent_proposal(db, item, validated)
+            processed += 1
+
+            if job_id and processed % PROGRESS_UPDATE_EVERY == 0:
+                _update_job_progress(tenant_id, job_id, processed, total)
 
     if job_id:
         _update_job_progress(tenant_id, job_id, processed, total)

@@ -183,9 +183,7 @@ async def eval_preturn(repeat: int) -> dict:
     rows, latencies, tokens = [], [], []
     for task, history, gold_kind, gold_cont, source_talk in PRETURN:
         for _ in range(repeat):
-            result = await ask(
-                SYNTHETIC_TENANT, *pj.build_request(task, history, SOURCES)
-            )
+            result = await ask(SYNTHETIC_TENANT, *pj.build_request(task, history, SOURCES))
             latencies.append(result.elapsed_ms)
             tokens.append(result.input_tokens)
         a = result.answers
@@ -263,16 +261,17 @@ async def main() -> int:
     if not settings.TYPESAFE_API_KEY:
         print("TYPESAFE_API_KEY is not set; nothing was sent.", file=sys.stderr)
         return 2
-    settings.JEV_TENANT_ALLOWLIST = (
-        SYNTHETIC_TENANT  # synthetic cases only; see module docstring
-    )
+    settings.JEV_TENANT_ALLOWLIST = SYNTHETIC_TENANT  # synthetic cases only; see module docstring
+
+    from app.services.typesafe.client import session
 
     reports = []
     try:
-        if args.site in ("preturn", "all"):
-            reports.append(await eval_preturn(args.repeat))
-        if args.site in ("recon", "all"):
-            reports.append(await eval_recon(args.repeat))
+        async with session():  # one connection for the run, as the recon worker does
+            if args.site in ("preturn", "all"):
+                reports.append(await eval_preturn(args.repeat))
+            if args.site in ("recon", "all"):
+                reports.append(await eval_recon(args.repeat))
     except JevUnavailableError as exc:
         print(f"Jev unavailable: {exc.reason}", file=sys.stderr)
         return 2
