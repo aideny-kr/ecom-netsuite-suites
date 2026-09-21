@@ -199,6 +199,9 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, p):
 
 
 def verify_evidence(p, support):
+    for key in ("refund_audit", "refund_allocation"):
+        if _stable(support.get(key)) != _stable(p["support"].get(key)):
+            raise ValueError("credit_api_related_record_changed:" + key)
     credit = support["credit"]
     for key, expected in p["expected_after"].items():
         if credit.get(key) is None or Decimal(str(credit[key])) != Decimal(expected):

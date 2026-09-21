@@ -365,6 +365,9 @@ async def verify_after(db, tenant_id, proposal, receipt=None, *, _current=None):
             work_key=operation_identity(proposal),
         )
         before = proposal["support"]
+        for key in ("refund_audit", "refund_allocation"):
+            if _stable(support.get(key)) != _stable(before.get(key)):
+                raise ValueError("native_refund_audit_evidence_changed")
         for key in (
             "invoice",
             "refund",

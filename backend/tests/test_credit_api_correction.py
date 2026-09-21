@@ -142,7 +142,7 @@ async def test_preparation_preserves_exact_decimals_in_persistable_evidence(monk
     assert "taxTotal" not in p["support"]["credit"]
 
 
-@pytest.mark.parametrize("change", ["tax", "gl", "invoice", "refund", "application", "line", "book"])
+@pytest.mark.parametrize("change", ["tax", "gl", "invoice", "refund", "application", "line", "book", "refund_audit"])
 def test_wrong_amounts_or_changed_protected_records_never_report_success(change):
     p = proposed()
     support = applied(p)
@@ -156,6 +156,9 @@ def test_wrong_amounts_or_changed_protected_records_never_report_success(change)
         support["credit"]["application_evidence"]["lines"] = []
     elif change == "line":
         support["credit"]["line_evidence"]["lines"][0]["lineUniqueKey"] = "wrong"
+    elif change == "refund_audit":
+        p["support"]["refund_audit"] = {"row": {"refund_state": 2}}
+        support["refund_audit"] = {"row": {"refund_state": 3}}
     else:
         support["credit_gl"]["rows"][0]["accountingbook"] = "2"
     with pytest.raises(ValueError):
@@ -163,7 +166,8 @@ def test_wrong_amounts_or_changed_protected_records_never_report_success(change)
 
 
 @pytest.mark.parametrize(
-    "drift", [None, "connection", "source", "sales_order", "incomplete", "subledger", "treatment", "schema"]
+    "drift",
+    [None, "connection", "source", "sales_order", "incomplete", "subledger", "refund_audit", "treatment", "schema"],
 )
 async def test_actual_preflight_rejects_changed_evidence_before_dispatch(monkeypatch, drift):
     from contextlib import asynccontextmanager
@@ -195,6 +199,10 @@ async def test_actual_preflight_rejects_changed_evidence_before_dispatch(monkeyp
         support = None
     elif drift == "subledger":
         support["invoice"]["total"] = "1"
+    elif drift == "refund_audit":
+        p["support"]["refund_audit"] = {"row": {"events": [{"version_id": "1", "changes": {"price": ["2", "1"]}}]}}
+        support["refund_audit"] = deepcopy(p["support"]["refund_audit"])
+        support["refund_audit"]["row"]["events"][0]["version_id"] = "2"
     elif drift == "treatment":
         p["expected_after"]["taxTotal"] = "1"
     elif drift == "schema":
@@ -224,6 +232,7 @@ async def test_actual_preflight_rejects_changed_evidence_before_dispatch(monkeyp
             "sales_order": "protected_sales_order_changed",
             "incomplete": "subledger_incomplete",
             "subledger": "subledger_changed",
+            "refund_audit": "subledger_changed",
             "treatment": "treatment_changed",
             "schema": "schema_changed",
         }[drift]

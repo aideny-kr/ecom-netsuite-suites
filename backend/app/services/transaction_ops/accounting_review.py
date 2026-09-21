@@ -262,6 +262,7 @@ async def accounting_context(db, tenant_id, scope, report=None):
     context.update(
         configuration_status="scoped_configuration_found",
         config_id=str(config.id),
+        solidus_refund_step_id=mapping.get("solidus_refund_step_id"),
         sales_credit_profile=profile,
         netsuite_connection_id=str(config.netsuite_connection_id),
         query_scope_params={
