@@ -632,6 +632,13 @@ async def _gather_drive_knowledge(*, db, tenant_id, query_text: str) -> dict:
     When multiple chunks share a source_name, the first URL wins.
     """
     chunks = await retrieve_drive_chunks(db=db, tenant_id=tenant_id, query_text=query_text)
+    # No-op unless JEV_RERANK_MODE is shadow/live. No DB write here: this coroutine
+    # shares the turn's session with the other gathered retrievals.
+    from app.services.chat.rerank_jev import rerank
+
+    chunks, rerank_record = await rerank(tenant_id, query_text, chunks)
+    if rerank_record:
+        print(f"[JEV_RERANK] drive {rerank_record}", flush=True)
     sources: dict[str, str] = {}
     for c in chunks:
         name = c.get("source_name")
