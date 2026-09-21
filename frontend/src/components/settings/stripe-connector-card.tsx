@@ -1,4 +1,5 @@
 "use client";
+import { ConnectionUsage } from "./connection-usage";
 
 import { useState } from "react";
 import {
@@ -307,7 +308,7 @@ export function StripeConnectorCard() {
         </div>
         <AlertDialog>
           <AlertDialogTrigger asChild>
-            <Button variant="ghost" size="sm" className="text-red-500 hover:text-red-600">
+            <Button variant="ghost" size="sm" className="text-red-500 hover:text-red-600" aria-label="Disconnect Stripe">
               <Trash2 className="h-3.5 w-3.5" />
             </Button>
           </AlertDialogTrigger>
@@ -315,9 +316,10 @@ export function StripeConnectorCard() {
             <AlertDialogHeader>
               <AlertDialogTitle>Remove Stripe Connection</AlertDialogTitle>
               <AlertDialogDescription>
-                This will remove the Stripe API key. Synced payout data will be preserved.
+                This removes Stripe access for dependent workflows and skills. Synced payout data is preserved. Review dependencies before continuing.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {status.connection_id && <ConnectionUsage kind="api" id={status.connection_id} />}
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
               <AlertDialogAction

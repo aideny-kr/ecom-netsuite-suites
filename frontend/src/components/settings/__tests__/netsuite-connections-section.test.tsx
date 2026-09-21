@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { McpConnector } from "@/lib/types";
 
@@ -102,7 +102,7 @@ describe("NetSuiteConnectionsSection — MCP connector filtering", () => {
     ]);
 
     const { NetSuiteConnectionsSection } = await import("../netsuite-connections-section");
-    wrap(<NetSuiteConnectionsSection />);
+    wrap(<NetSuiteConnectionsSection netsuiteOnly />);
 
     expect(screen.queryByText("Celigo (agent access)")).not.toBeInTheDocument();
     expect(screen.getByText("NetSuite MCP")).toBeInTheDocument();
@@ -121,18 +121,14 @@ describe("NetSuiteConnectionsSection — MCP connector filtering", () => {
     ]);
 
     const { NetSuiteConnectionsSection } = await import("../netsuite-connections-section");
-    wrap(<NetSuiteConnectionsSection />);
+    wrap(<NetSuiteConnectionsSection netsuiteOnly />);
 
     expect(screen.getByText("NetSuite MCP")).toBeInTheDocument();
   });
 
   it("still shows shopify_mcp and stripe_mcp rows with their Test/Reauthorize/Delete controls -- this is their only UI", async () => {
-    // MAJOR 1 fix history: the allowlist that previously fixed the celigo leak
-    // (provider === "netsuite_mcp") also hid shopify_mcp/stripe_mcp entirely.
-    // add-mcp-connector-dialog.tsx is never mounted and ConnectionStatusSection
-    // is read-only, so this section is the ONLY place either provider can be
-    // tested, reauthorized, or deleted -- losing this row is a real regression,
-    // not a cosmetic one.
+    // Production keeps these generic methods in ConnectionOverview; this
+    // editor must only expose NetSuite-specific credentials and OAuth.
     mocks.connections.mockReturnValue([]);
     mocks.health.mockReturnValue(undefined);
     mocks.mcpConnectors.mockReturnValue([
@@ -142,11 +138,11 @@ describe("NetSuiteConnectionsSection — MCP connector filtering", () => {
     ]);
 
     const { NetSuiteConnectionsSection } = await import("../netsuite-connections-section");
-    wrap(<NetSuiteConnectionsSection />);
+    wrap(<NetSuiteConnectionsSection netsuiteOnly />);
 
     expect(screen.getByText("NetSuite MCP")).toBeInTheDocument();
-    expect(screen.getByText("Shopify MCP")).toBeInTheDocument();
-    expect(screen.getByText("Stripe MCP")).toBeInTheDocument();
+    expect(screen.queryByText("Shopify MCP")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stripe MCP")).not.toBeInTheDocument();
   });
 
   it("never sends a NetSuite Client ID PATCH to a celigo_mcp row, even when Celigo is the newest connector", async () => {
@@ -183,7 +179,7 @@ describe("NetSuiteConnectionsSection — MCP connector filtering", () => {
     ]);
 
     const { NetSuiteConnectionsSection } = await import("../netsuite-connections-section");
-    wrap(<NetSuiteConnectionsSection />);
+    wrap(<NetSuiteConnectionsSection netsuiteOnly />);
 
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     const input = screen.getByDisplayValue("ns-real-client-id");
@@ -196,4 +192,22 @@ describe("NetSuiteConnectionsSection — MCP connector filtering", () => {
       client_id: "new-ns-client-id",
     });
   });
+});
+
+it("edits the exact second NetSuite method rather than the first active one", async () => {
+  mocks.connections.mockReturnValue([]);
+  mocks.health.mockReturnValue(undefined);
+  mocks.updateMcpClientId.mockClear();
+  mocks.mcpConnectors.mockReturnValue([
+    mcpConnector({id:"first",label:"First account",metadata_json:{client_id:"first-client"}}),
+    mcpConnector({id:"second",label:"Second account",metadata_json:{client_id:"second-client"}}),
+  ]);
+  const { NetSuiteConnectionsSection } = await import("../netsuite-connections-section");
+  wrap(<NetSuiteConnectionsSection netsuiteOnly />);
+  const target = document.getElementById("connection-settings-mcp-second")!;
+  fireEvent.click(within(target).getByRole("button", { name: /edit/i }));
+  const input=within(target).getByDisplayValue("second-client");
+  fireEvent.change(input,{target:{value:"replacement-client"}});
+  fireEvent.keyDown(input,{key:"Enter"});
+  expect(mocks.updateMcpClientId.mock.calls[0][0]).toEqual({id:"second",client_id:"replacement-client"});
 });

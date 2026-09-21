@@ -1,5 +1,6 @@
 """Provider tests must perform bounded reads and preserve honest health state."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -77,6 +78,8 @@ async def test_native_google_routes_without_mcp_or_writes(db, admin_user, monkey
     monkeypatch.setattr("app.services.mcp_client_service.discover_tools", discovery)
     result = await mcp_connector_service.test_mcp_connector(db, row.id, user.tenant_id)
     assert result["status"] == expected
+    assert row.metadata_json["verification_status"] == expected
+    assert row.metadata_json["verification_at"] == row.last_health_check_at.isoformat()
     assert row.status == "active" and row.error_reason is None and row.last_health_check_at
     assert row.is_enabled is False and row.discovered_tools == []
     discovery.assert_not_awaited()
@@ -255,3 +258,38 @@ async def test_test_endpoint_requires_management_permission(client, admin_user, 
     assert (await client.post(endpoint, headers=readonly_user[1])).status_code == 403
     assert (await client.post(endpoint)).status_code == 401
     upstream.assert_not_awaited()
+
+
+async def test_stripe_reconnect_updates_identity_without_reusing_old_verification(client, db, admin_user, monkeypatch):
+    from app.models.connection import Connection
+    from app.services.connection_snapshot import connection_snapshot
+
+    user, headers = admin_user
+    row = Connection(
+        tenant_id=user.tenant_id,
+        provider="stripe",
+        label="Old account",
+        status="error",
+        auth_type="api_key",
+        encrypted_credentials=encrypt_credentials({"api_key": "old-synthetic"}),
+        metadata_json={
+            "account_id": "old-account",
+            "verification_status": "error",
+            "verification_at": "2026-09-01T00:00:00Z",
+        },
+    )
+    db.add(row)
+    await db.flush()
+    monkeypatch.setattr(
+        "stripe.Account.retrieve",
+        lambda: MagicMock(id="new-sandbox-account", country="US", business_profile=SimpleNamespace(name="Sandbox")),
+    )
+    response = await client.post(
+        "/api/v1/connector-status/stripe/connect",
+        json={"api_key": "sk_test_synthetic_replacement", "label": "New account"},
+        headers=headers,
+    )
+    assert response.status_code == 201
+    await db.refresh(row)
+    assert row.metadata_json["account_id"] == "new-sandbox-account"
+    assert connection_snapshot(row)["verification_status"] is None

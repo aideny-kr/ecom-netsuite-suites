@@ -43,6 +43,8 @@ export function useConnectStripe() {
       apiClient.post("/api/v1/connector-status/stripe/connect", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connector-status", "stripe"] });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
@@ -53,6 +55,8 @@ export function useDisconnectStripe() {
     mutationFn: () => apiClient.delete("/api/v1/connector-status/stripe"),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connector-status", "stripe"] });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
@@ -64,6 +68,8 @@ export function useTriggerStripeSync() {
       apiClient.post(`/api/v1/connections/${connectionId}/sync`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connector-status", "stripe"] });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }

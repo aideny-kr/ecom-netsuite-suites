@@ -42,6 +42,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { ConnectionUsage } from "./connection-usage";
+import { accessState } from "@/lib/connection-health";
 import { useToast } from "@/hooks/use-toast";
 import {
   MoreVertical,
@@ -178,7 +180,7 @@ function statusColor(status: string, tokenExpired: boolean) {
   // (access tokens expire hourly but auto-refresh on use)
   switch (status) {
     case "active":
-      return "bg-green-500";
+      return "bg-muted-foreground/40";
     case "needs_reauth":
       return "bg-yellow-500 animate-pulse";
     case "pending":
@@ -193,23 +195,11 @@ function statusColor(status: string, tokenExpired: boolean) {
 }
 
 function statusLabel(status: string, tokenExpired: boolean) {
-  switch (status) {
-    case "active":
-      return "Active";
-    case "needs_reauth":
-      return "Needs Re-auth";
-    case "pending":
-      return "Pending";
-    case "inactive":
-      return "Inactive";
-    case "error":
-      return "Error";
-    default:
-      return status;
-  }
+  return accessState({ status: tokenExpired && status === "active" ? "refresh_required" : status });
 }
 
 function ConnectionRow({
+  connectionId, kind,
   label,
   authType,
   status,
@@ -222,6 +212,7 @@ function ConnectionRow({
   isTesting,
   isDeleting,
 }: {
+  connectionId: string; kind: "api" | "mcp";
   label: string;
   authType: string | null;
   status: string;
@@ -310,10 +301,10 @@ function ConnectionRow({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete connection</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete &ldquo;{label}&rdquo;? This action
-              cannot be undone.
+              Delete &ldquo;{label}&rdquo;? Workflows and skills using this method will lose access. Saved evidence is retained; review dependencies first.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {showDeleteDialog && <ConnectionUsage kind={kind} id={connectionId} />}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
@@ -336,7 +327,7 @@ function ConnectionRow({
 // NetSuiteConnectionsSection — main exported component
 // ---------------------------------------------------------------------------
 
-export function NetSuiteConnectionsSection() {
+export function NetSuiteConnectionsSection({ netsuiteOnly = false }: { netsuiteOnly?: boolean }) {
   const { isAdmin } = usePermissions();
   const { toast } = useToast();
 
@@ -384,16 +375,11 @@ export function NetSuiteConnectionsSection() {
   const oauthConns = (connections ?? []).filter(
     (c) => c.provider === "netsuite" && c.status !== "revoked",
   );
-  // Denylist, not allowlist: Test/Reauthorize/Delete for shopify_mcp and
-  // stripe_mcp live ONLY here -- there is no add-mcp-connector-dialog mount
-  // point and ConnectionStatusSection is read-only status with no controls.
-  // Excluded are bigquery and celigo_mcp, which each already have their own
-  // dedicated card elsewhere (the table selector; CeligoConnectorCard) -- an
-  // allowlist ("netsuite_mcp" only) previously over-corrected the activeMcp
-  // bug below by also hiding shopify_mcp/stripe_mcp's only UI. Don't repeat
-  // that: broaden display here, and narrow only what actually needs it.
+  // Production groups other providers in ConnectionOverview. Keep this editor
+  // limited to NetSuite when mounted there; legacy callers may still opt into
+  // generic rows. NetSuite-only credential updates are always scoped below.
   const mcpConns = (mcpConnectors ?? []).filter(
-    (c) => c.status !== "revoked" && c.provider !== "bigquery" && c.provider !== "celigo_mcp",
+    (c) => c.status !== "revoked" && c.provider !== "bigquery" && c.provider !== "celigo_mcp" && (!netsuiteOnly || c.provider === "netsuite_mcp"),
   );
   // NetSuite-specific actions (the "Client ID" PATCH below) must never target
   // a non-NetSuite row just because it's present in the broader mcpConns list
@@ -408,17 +394,6 @@ export function NetSuiteConnectionsSection() {
   // Derive client IDs and restlet URL from first active connection metadata
   const activeOAuth = oauthConns.find((c) => c.status === "active") ?? oauthConns[0];
   const activeMcp = netsuiteMcpConns.find((c) => c.status === "active") ?? netsuiteMcpConns[0];
-
-  // Get Client IDs and RESTlet URL from health data (decrypted on server)
-  const oauthHealthItem = health?.connections.find((h) => h.id === activeOAuth?.id);
-  const mcpHealthItem = health?.mcp_connectors.find((h) => h.id === activeMcp?.id);
-
-  const oauthClientId =
-    oauthHealthItem?.client_id ?? (activeOAuth?.metadata_json?.client_id as string) ?? "";
-  const restletUrl =
-    oauthHealthItem?.restlet_url ?? (activeOAuth?.metadata_json?.restlet_url as string) ?? "";
-  const mcpClientId =
-    mcpHealthItem?.client_id ?? (activeMcp?.metadata_json?.client_id as string) ?? "";
 
   // ── Connect new OAuth connection ──
   async function handleConnectOAuth() {
@@ -639,10 +614,10 @@ export function NetSuiteConnectionsSection() {
     }
   }
 
-  function handleSaveOAuthClientId(val: string) {
-    if (!activeOAuth) return;
+  function handleSaveOAuthClientId(val: string, id = activeOAuth?.id) {
+    if (!id) return;
     updateClientId.mutate(
-      { id: activeOAuth.id, client_id: val },
+      { id, client_id: val },
       {
         onSuccess: () => toast({ title: "Client ID updated" }),
         onError: (err) =>
@@ -655,10 +630,10 @@ export function NetSuiteConnectionsSection() {
     );
   }
 
-  function handleSaveRestletUrl(val: string) {
-    if (!activeOAuth) return;
+  function handleSaveRestletUrl(val: string, id = activeOAuth?.id) {
+    if (!id) return;
     updateRestletUrl.mutate(
-      { id: activeOAuth.id, restlet_url: val },
+      { id, restlet_url: val },
       {
         onSuccess: () => toast({ title: "RESTlet URL updated" }),
         onError: (err) =>
@@ -671,10 +646,10 @@ export function NetSuiteConnectionsSection() {
     );
   }
 
-  function handleSaveMcpClientId(val: string) {
-    if (!activeMcp) return;
+  function handleSaveMcpClientId(val: string, id = activeMcp?.id) {
+    if (!id) return;
     updateMcpClientId.mutate(
-      { id: activeMcp.id, client_id: val },
+      { id, client_id: val },
       {
         onSuccess: () => toast({ title: "MCP Client ID updated" }),
         onError: (err) =>
@@ -704,31 +679,21 @@ export function NetSuiteConnectionsSection() {
           </h4>
           {oauthConns.length > 0 && (
             <div className="flex items-center gap-1.5">
-              <Wifi className="h-3.5 w-3.5 text-green-500" />
+              <Wifi className="h-3.5 w-3.5 text-muted-foreground" />
               <span className="text-[12px] text-muted-foreground">
-                {oauthConns.filter((c) => c.status === "active").length} active
+                {oauthConns.length} configured
               </span>
             </div>
           )}
         </div>
 
-        {/* Client ID */}
-        {activeOAuth && (
-          <EditableField
-            label="Client ID"
-            value={oauthClientId}
-            onSave={handleSaveOAuthClientId}
-            isSaving={updateClientId.isPending}
-            icon={Key}
-          />
-        )}
-
         {/* Connection rows */}
         {oauthConns.map((conn) => {
           const healthItem = health?.connections.find((h) => h.id === conn.id);
           return (
+            <div key={conn.id} id={`connection-settings-api-${conn.id}`} className="space-y-2" tabIndex={-1}>
             <ConnectionRow
-              key={conn.id}
+              connectionId={conn.id} kind="api"
               label={conn.label || "NetSuite OAuth"}
               authType={conn.auth_type}
               status={healthItem?.status ?? conn.status}
@@ -740,6 +705,9 @@ export function NetSuiteConnectionsSection() {
               isTesting={testConn.isPending}
               isDeleting={deleteConn.isPending}
             />
+            <EditableField label="Client ID" value={healthItem?.client_id ?? (conn.metadata_json?.client_id as string) ?? ""} onSave={(value) => handleSaveOAuthClientId(value, conn.id)} isSaving={updateClientId.isPending} icon={Key} />
+            <EditableField label="RESTlet URL" value={healthItem?.restlet_url ?? (conn.metadata_json?.restlet_url as string) ?? ""} onSave={(value) => handleSaveRestletUrl(value, conn.id)} isSaving={updateRestletUrl.isPending} icon={Globe} />
+            </div>
           );
         })}
 
@@ -750,17 +718,6 @@ export function NetSuiteConnectionsSection() {
               No OAuth API connections configured
             </p>
           </div>
-        )}
-
-        {/* RESTlet URL */}
-        {activeOAuth && (
-          <EditableField
-            label="RESTlet URL"
-            value={restletUrl}
-            onSave={handleSaveRestletUrl}
-            isSaving={updateRestletUrl.isPending}
-            icon={Globe}
-          />
         )}
 
         {/* Connect OAuth button + dialog */}
@@ -829,31 +786,21 @@ export function NetSuiteConnectionsSection() {
           </h4>
           {mcpConns.length > 0 && (
             <div className="flex items-center gap-1.5">
-              <Wifi className="h-3.5 w-3.5 text-green-500" />
+              <Wifi className="h-3.5 w-3.5 text-muted-foreground" />
               <span className="text-[12px] text-muted-foreground">
-                {mcpConns.filter((c) => c.status === "active").length} active
+                {mcpConns.length} configured
               </span>
             </div>
           )}
         </div>
 
-        {/* MCP Client ID */}
-        {activeMcp && (
-          <EditableField
-            label="Client ID"
-            value={mcpClientId}
-            onSave={handleSaveMcpClientId}
-            isSaving={updateMcpClientId.isPending}
-            icon={Key}
-          />
-        )}
-
         {/* MCP connection rows */}
         {mcpConns.map((mcp) => {
           const healthItem = health?.mcp_connectors.find((h) => h.id === mcp.id);
           return (
+            <div key={mcp.id} id={`connection-settings-mcp-${mcp.id}`} className="space-y-2" tabIndex={-1}>
             <ConnectionRow
-              key={mcp.id}
+              connectionId={mcp.id} kind="mcp"
               label={mcp.label || "MCP Connector"}
               authType={mcp.auth_type}
               status={healthItem?.status ?? mcp.status}
@@ -866,6 +813,8 @@ export function NetSuiteConnectionsSection() {
               isTesting={testMcp.isPending}
               isDeleting={deleteMcp.isPending}
             />
+            {mcp.provider === "netsuite_mcp" && <EditableField label="Client ID" value={healthItem?.client_id ?? (mcp.metadata_json?.client_id as string) ?? ""} onSave={(value) => handleSaveMcpClientId(value, mcp.id)} isSaving={updateMcpClientId.isPending} icon={Key} />}
+            </div>
           );
         })}
 

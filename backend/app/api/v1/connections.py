@@ -1,7 +1,5 @@
-import time
 import uuid
-from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -40,6 +38,12 @@ class ConnectionHealthItem(BaseModel):
     auth_type: str | None = None
     token_expired: bool = False
     last_health_check: str | None = None
+    verification_status: str | None = None
+    verification_at: str | None = None
+    account_identity: str | None = None
+    access_scope: str | None = None
+    role: str | None = None
+    error_reason: str | None = None
     tool_count: int | None = None  # MCP only
     client_id: str | None = None  # OAuth Client ID (public, not secret)
     restlet_url: str | None = None  # RESTlet URL (OAuth connections only)
@@ -56,6 +60,24 @@ class ClientIdUpdate(BaseModel):
 
 class RestletUrlUpdate(BaseModel):
     restlet_url: str = Field(min_length=1)
+
+
+@router.get("/usage/{kind}/{connection_id}")
+async def get_connection_usage(
+    kind: Literal["api", "mcp"],
+    connection_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    from app.services.connection_usage import connection_usage
+
+    model = Connection if kind == "api" else McpConnector
+    row = (
+        await db.execute(select(model).where(model.id == connection_id, model.tenant_id == user.tenant_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    return await connection_usage(db, user, kind, row)
 
 
 # ---------------------------------------------------------------------------
@@ -77,42 +99,9 @@ async def check_connection_health(
     )
     connections = result.scalars().all()
 
-    conn_items = []
-    now = time.time()
-    for conn in connections:
-        token_expired = False
-        client_id = None
-        decrypt_failed = False
-        if conn.auth_type == "oauth2" and conn.encrypted_credentials:
-            try:
-                creds = decrypt_credentials(conn.encrypted_credentials)
-                expires_at = creds.get("expires_at", 0)
-                client_id = creds.get("client_id")
-                if expires_at and now > expires_at:
-                    token_expired = True
-            except Exception:
-                decrypt_failed = True
-        # Report real status: if token is expired or credentials can't be decrypted,
-        # show "error" regardless of what the DB status field says.
-        reported_status = conn.status
-        if decrypt_failed:
-            reported_status = "error"
-        elif token_expired and conn.status == "active":
-            reported_status = "needs_reauth"
-        restlet_url = (conn.metadata_json or {}).get("restlet_url") if conn.metadata_json else None
-        conn_items.append(
-            ConnectionHealthItem(
-                id=str(conn.id),
-                label=conn.label or conn.provider,
-                provider=conn.provider,
-                status=reported_status,
-                auth_type=conn.auth_type,
-                token_expired=token_expired,
-                last_health_check=datetime.now(timezone.utc).isoformat(),
-                client_id=client_id,
-                restlet_url=restlet_url,
-            )
-        )
+    from app.services.connection_snapshot import connection_snapshot
+
+    conn_items = [ConnectionHealthItem(**connection_snapshot(conn)) for conn in connections]
 
     # Check MCP connectors
     mcp_result = await db.execute(
@@ -122,40 +111,7 @@ async def check_connection_health(
     )
     mcp_connectors = mcp_result.scalars().all()
 
-    mcp_items = []
-    for mcp in mcp_connectors:
-        token_expired = False
-        decrypt_failed = False
-        mcp_client_id = (mcp.metadata_json or {}).get("client_id")
-        if mcp.auth_type == "oauth2" and mcp.encrypted_credentials:
-            try:
-                creds = decrypt_credentials(mcp.encrypted_credentials)
-                expires_at = creds.get("expires_at", 0)
-                if not mcp_client_id:
-                    mcp_client_id = creds.get("client_id")
-                if expires_at and now > expires_at:
-                    token_expired = True
-            except Exception:
-                decrypt_failed = True
-        reported_status = mcp.status
-        if decrypt_failed:
-            reported_status = "error"
-        elif token_expired and mcp.status == "active":
-            reported_status = "needs_reauth"
-        tools = mcp.discovered_tools or []
-        mcp_items.append(
-            ConnectionHealthItem(
-                id=str(mcp.id),
-                label=mcp.label or mcp.provider,
-                provider=mcp.provider,
-                status=reported_status,
-                auth_type=mcp.auth_type,
-                token_expired=token_expired,
-                last_health_check=datetime.now(timezone.utc).isoformat(),
-                client_id=mcp_client_id,
-                tool_count=len(tools),
-            )
-        )
+    mcp_items = [ConnectionHealthItem(**connection_snapshot(mcp)) for mcp in mcp_connectors]
 
     # Read-only endpoint — do NOT commit (prevents accidental status corruption)
     return ConnectionHealthResponse(connections=conn_items, mcp_connectors=mcp_items)

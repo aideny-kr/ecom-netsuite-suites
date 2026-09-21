@@ -1,4 +1,5 @@
 "use client";
+import { ConnectionUsage } from "./connection-usage";
 
 import { useState, useCallback, useEffect } from "react";
 import {
@@ -820,6 +821,7 @@ export function BigQueryConnectionSection() {
               will no longer be able to query your data warehouse.
             </AlertDialogDescription>
           </AlertDialogHeader>
+            {deleteId && <ConnectionUsage kind="mcp" id={deleteId} />}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction

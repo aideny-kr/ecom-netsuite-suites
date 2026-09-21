@@ -131,6 +131,11 @@ async def test_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id:
         except Exception as exc:
             outcome = {"status": "error", "message": failure_message(connection.provider.title(), exc)}
         connection.last_health_check_at = datetime.now(timezone.utc)
+        connection.metadata_json = {
+            **(connection.metadata_json or {}),
+            "verification_status": outcome["status"],
+            "verification_at": connection.last_health_check_at.isoformat(),
+        }
         connection.status = "active" if outcome["status"] == "ok" else "error"
         connection.error_reason = None if outcome["status"] == "ok" else outcome["message"]
         await db.flush()
