@@ -321,7 +321,19 @@ async def _drain(db, tenant_id, parent_id, factory):
             None,
         )
         if trigger:
+            first_stop = not work.get("stopped_after")
             stop_queued(work, trigger, await clock(db))
+            if first_stop:
+                await log_event(
+                    db,
+                    tenant_id,
+                    "transaction_ops",
+                    "accounting_group.dispatch.stopped",
+                    actor_id=UUID(auth["actor_id"]),
+                    resource_type="chat_message",
+                    resource_id=str(parent_id),
+                    payload={"confirmation_id": trigger, "reason": "unconfirmed_outcome", "financial_writes": 0},
+                )
     work.update(status="running", next_at=((await clock(db)) + timedelta(minutes=1)).isoformat())
     parent.structured_output = {**parent.structured_output, "accounting_group_dispatch": work}
     await db.commit()
@@ -516,6 +528,8 @@ async def _drain(db, tenant_id, parent_id, factory):
                 "eligible": len(work["members"]),
                 "verified": sum(m["status"] == "verified" for m in work["members"].values()),
                 "rejected": sum(m["status"] == "rejected" for m in work["members"].values()),
+                "blocked": sum(m["status"] == "blocked" for m in work["members"].values()),
+                "stopped_after": work.get("stopped_after"),
                 "confirmation_ids": list(work["members"]),
             },
         )

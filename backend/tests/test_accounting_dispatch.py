@@ -400,3 +400,25 @@ async def test_unconfirmed_outcome_stops_queued_members_but_running_members_fini
         async with factory() as db:
             assert (await dispatch.run_slice(db, tenant, parent))["status"] == "not_pending"
         assert len(calls) == 3
+
+
+async def test_recovery_of_existing_unconfirmed_result_audits_stop_once(monkeypatch):
+    async with seeded_group(4) as (factory, tenant, parent, so):
+        first = so["accounting_group"]["members"][0]["confirmation_id"]
+        async with factory() as db:
+            message = await dispatch.message(db, tenant, parent)
+            value = deepcopy(message.structured_output)
+            value["accounting_group_dispatch"]["members"][first] = {"status": "verification_pending"}
+            message.structured_output = value
+            await db.commit()
+        calls = []
+        monkeypatch.setattr(dispatch, "invoke_child", simulated_executor(calls))
+        async with factory() as db:
+            assert (await dispatch.run_slice(db, tenant, parent))["status"] == "finished"
+            assert (await dispatch.run_slice(db, tenant, parent))["status"] == "not_pending"
+            events = list(await db.scalars(select(AuditEvent).where(AuditEvent.tenant_id == tenant)))
+            stops = [e for e in events if e.action == "accounting_group.dispatch.stopped"]
+            assert len(stops) == 1 and stops[0].payload["confirmation_id"] == first
+            completed = next(e for e in events if e.action == "accounting_group.completed")
+            assert completed.payload["blocked"] == 3 and completed.payload["stopped_after"] == first
+        assert not calls

@@ -195,6 +195,44 @@ async def test_resolved_review_ignores_late_and_interim_scans_but_reopens_new_di
     assert result["total"] == 1 and result["items"][0]["id"] == str(delayed.id)
 
 
+@pytest.mark.parametrize("old_status,new_status", [("difference", "matched"), ("matched", "difference")])
+async def test_legacy_late_save_cannot_outrank_newer_marked_reads(db, admin_user, monkeypatch, old_status, new_status):
+    actor = admin_user[0]
+    _, root = await review(db, actor, monkeypatch)
+    now = root.created_at
+    old = await evidence(db, actor, root, "R123456789", old_status, now + timedelta(minutes=30))
+    old.report_json = {
+        **old.report_json,
+        "source": {"record_id": "service-1", "observed_at": now.isoformat()},
+        "targets": [{"observed_at": (now + timedelta(seconds=1)).isoformat()}],
+    }
+    newer = await recheck(db, actor, root)
+    new = await evidence(db, actor, newer, "R123456789", new_status, now + timedelta(minutes=21))
+    new.report_json = {
+        **new.report_json,
+        "_observation": {"final": True, "observed_at": (now + timedelta(minutes=20)).isoformat()},
+    }
+    await db.flush()
+    result = await period_review.review_results(db, actor.tenant_id, root.id)
+    assert result["items"][0]["id"] == str(new.id)
+    assert result["items"][0]["balance"]["status"] == new_status
+
+
+@pytest.mark.parametrize("bad_time", [None, "2026-09-32T00:00:00Z", "not-a-timestamp", "2026-09-20T00:00:00"])
+async def test_malformed_legacy_time_uses_save_time_without_breaking_review(db, admin_user, monkeypatch, bad_time):
+    actor = admin_user[0]
+    _, root = await review(db, actor, monkeypatch)
+    old = await evidence(db, actor, root, "R123456789", "difference", root.created_at)
+    old.report_json = {
+        **old.report_json,
+        "source": {"record_id": "service-1", "observed_at": bad_time},
+        "targets": [],
+    }
+    await db.flush()
+    result = await period_review.review_results(db, actor.tenant_id, root.id)
+    assert result["items"][0]["id"] == str(old.id)
+
+
 @pytest.mark.parametrize(
     "mismatch",
     [
