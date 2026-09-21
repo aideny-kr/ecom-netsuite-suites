@@ -111,11 +111,10 @@ def simulated_executor(calls, *, fail=None, gate=None):
     return invoke
 
 
-async def test_all_55_orders_drain_across_slices_despite_one_failed_member_and_duplicate_delivery(monkeypatch):
+async def test_all_55_verified_orders_drain_across_slices_and_duplicate_delivery(monkeypatch):
     async with seeded_group(55) as (factory, tenant, parent, so):
         calls = []
-        failed = so["accounting_group"]["members"][1]["confirmation_id"]
-        monkeypatch.setattr(dispatch, "invoke_child", simulated_executor(calls, fail=failed))
+        monkeypatch.setattr(dispatch, "invoke_child", simulated_executor(calls))
         async with factory() as db:
             first = await dispatch.run_slice(db, tenant, parent)
             assert first == {"status": "queued", "remaining": 25, "orders": 55}
@@ -124,9 +123,9 @@ async def test_all_55_orders_drain_across_slices_despite_one_failed_member_and_d
             assert second == {"status": "finished", "remaining": 0, "orders": 55}
             value = (await dispatch.message(db, tenant, parent)).structured_output
             states = list(value["accounting_group_dispatch"]["members"].values())
-            assert sum(r["status"] == "verified" for r in states) == 54
-            assert sum(r["status"] == "needs_review" for r in states) == 1
-            assert value["status"] == "indeterminate"
+            assert sum(r["status"] == "verified" for r in states) == 55
+            assert sum(r["status"] == "needs_review" for r in states) == 0
+            assert value["status"] == "approved"
             events = list(
                 await db.scalars(
                     select(AuditEvent).where(
@@ -215,7 +214,7 @@ async def test_known_execution_is_not_retried_when_its_dispatch_receipt_was_lost
             await dispatch.run_slice(db, tenant, parent)
             value = (await dispatch.message(db, tenant, parent)).structured_output
             assert value["accounting_group_dispatch"]["members"][first]["status"] == "verification_pending"
-        assert first not in calls and len(calls) == 3
+        assert calls == []
 
 
 @pytest.mark.parametrize("verification", [{"status": "needs_review"}, {}, None])
@@ -237,7 +236,7 @@ async def test_group_rejection_drains_all_children_without_financial_execution(m
 
 
 @pytest.mark.parametrize("mode", ["after_reservation", "after_write"])
-async def test_real_process_kill_resumes_untouched_orders_without_replaying_a_reserved_write(
+async def test_real_process_kill_blocks_untouched_orders_without_replaying_a_reserved_write(
     monkeypatch, tmp_path, mode
 ):
     import json
@@ -292,7 +291,7 @@ async def test_real_process_kill_resumes_untouched_orders_without_replaying_a_re
                 )
             )
             assert len(writes) == (1 if mode == "after_write" else 0)
-        assert calls and len(calls) == len(set(calls))
+        assert calls == []
 
 
 async def test_capacity_defers_only_an_unchanged_unattempted_child_and_is_bounded(monkeypatch):
@@ -335,3 +334,69 @@ async def test_broker_outage_preserves_outbox_for_collector_and_database_clock(m
         async with factory() as db:
             assert await dispatch.candidates(db, tenant, datetime(2000, 1, 1, tzinfo=timezone.utc)) == [parent]
             assert await dispatch.candidates(db, uuid4()) == []
+
+
+@pytest.mark.parametrize("uncertain", ["verification_pending", "exception"])
+async def test_unconfirmed_outcome_stops_queued_members_but_running_members_finish(monkeypatch, uncertain):
+    async with seeded_group(35) as (factory, tenant, parent, so):
+        first = so["accounting_group"]["members"][0]["confirmation_id"]
+        calls, started, release = [], asyncio.Event(), asyncio.Event()
+
+        async def invoke(db, tenant_id, parent_id, auth, member):
+            identifier = member["confirmation_id"]
+            calls.append(identifier)
+            if len(calls) == 3:
+                started.set()
+            await asyncio.wait_for(started.wait(), 5)
+            if identifier == first:
+                if uncertain == "exception":
+                    raise RuntimeError("uncertain provider outcome")
+                child = await dispatch.message(db, tenant, UUID(identifier))
+                child.structured_output = {
+                    **child.structured_output,
+                    "status": "indeterminate",
+                    "accounting_execution": {"receipt": None},
+                }
+                await db.commit()
+            else:
+                await asyncio.wait_for(release.wait(), 5)
+                await simulated_executor([])(db, tenant_id, parent_id, auth, member)
+
+        monkeypatch.setattr(dispatch, "invoke_child", invoke)
+        async with factory() as db:
+            task = asyncio.create_task(dispatch.run_slice(db, tenant, parent))
+            try:
+                async with asyncio.timeout(5):
+                    while True:
+                        async with factory() as other:
+                            value = (await dispatch.message(other, tenant, parent)).structured_output
+                            if value["accounting_group_dispatch"].get("stopped_after"):
+                                break
+                        await asyncio.sleep(0.01)
+                states = value["accounting_group_dispatch"]["members"]
+                assert sum(v["status"] == "blocked" for v in states.values()) == 32
+                assert len(calls) == 3
+            finally:
+                release.set()
+                result = await task
+            assert result == {"status": "finished", "remaining": 0, "orders": 35}
+            value = (await dispatch.message(db, tenant, parent)).structured_output
+            states = value["accounting_group_dispatch"]["members"]
+            assert sum(v["status"] == "verified" for v in states.values()) == 2
+            assert value["status"] == "indeterminate"
+            assert not await dispatch.candidates(db, tenant)
+            events = list(await db.scalars(select(AuditEvent).where(AuditEvent.tenant_id == tenant)))
+            stopped = next(e for e in events if e.action == "accounting_group.dispatch.stopped")
+            assert all(e.timestamp <= stopped.timestamp for e in events if e.action.endswith("dispatch_reserved"))
+            # Even successful read-only verification later cannot resume the old
+            # group approval. This remains true after worker redelivery/restart.
+            child = await dispatch.message(db, tenant, UUID(first))
+            child.structured_output = {
+                **child.structured_output,
+                "status": "approved",
+                "accounting_verification": {"status": "verified"},
+            }
+            await db.commit()
+        async with factory() as db:
+            assert (await dispatch.run_slice(db, tenant, parent))["status"] == "not_pending"
+        assert len(calls) == 3
