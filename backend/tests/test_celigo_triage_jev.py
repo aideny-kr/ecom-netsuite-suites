@@ -32,13 +32,15 @@ def _choice(option, confidence):
 def _patch(monkeypatch, answers=None, error=None):
     calls = []
 
-    async def fake_ask(tenant_id, state, questions, **_):
+    async def fake_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        if build is not None:
+            state, questions = build()
         calls.append({"state": state, "questions": questions})
         if error:
-            raise error
-        return JevResult(answers=answers, model="jev-1.13.0", input_tokens=600, elapsed_ms=130)
+            return None, error.reason
+        return JevResult(answers=answers, model="jev-1.13.0", input_tokens=600, elapsed_ms=130), None
 
-    monkeypatch.setattr(tj, "ask", fake_ask)
+    monkeypatch.setattr(tj, "try_ask", fake_ask)
     return calls
 
 

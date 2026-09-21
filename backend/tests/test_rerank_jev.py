@@ -30,13 +30,15 @@ def _scores(*pairs):
 def _patch(monkeypatch, answers=None, error=None):
     seen = {}
 
-    async def fake_ask(tenant_id, state, questions, **_):
+    async def fake_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        if build is not None:
+            state, questions = build()
         seen.update(state=state, questions=questions)
         if error:
-            raise error
-        return JevResult(answers=answers, model="jev-1.13.0", input_tokens=700, elapsed_ms=140)
+            return None, error.reason
+        return JevResult(answers=answers, model="jev-1.13.0", input_tokens=700, elapsed_ms=140), None
 
-    monkeypatch.setattr(rr, "ask", fake_ask)
+    monkeypatch.setattr(rr, "try_ask", fake_ask)
     return seen
 
 

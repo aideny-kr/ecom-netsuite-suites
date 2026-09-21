@@ -19,7 +19,7 @@ recorded) · live. Records hold scores and counts, never passage text.
 from __future__ import annotations
 
 from app.core.config import settings
-from app.services.typesafe.client import JevUnavailableError, ask
+from app.services.typesafe.client import try_ask
 
 _LEVELS = [
     "Unrelated to the question; it would not help answer it.",
@@ -36,25 +36,28 @@ async def rerank(tenant_id, query: str, passages: list[dict], *, text_key: str =
     if mode not in {"shadow", "live"} or len(passages) < 2:
         return passages, None
 
-    state = {"query": query, "passages": [(p.get(text_key) or "")[:_MAX_PASSAGE_CHARS] for p in passages]}
-    questions = {
-        f"p{i}": {
-            "type": "score",
-            "instructions": f"How useful is `passages[{i}]` for answering `query`?",
-            "criteria": _LEVELS,
+    def build():
+        state = {"query": query, "passages": [(p.get(text_key) or "")[:_MAX_PASSAGE_CHARS] for p in passages]}
+        questions = {
+            f"p{i}": {
+                "type": "score",
+                "instructions": f"How useful is `passages[{i}]` for answering `query`?",
+                "criteria": _LEVELS,
+            }
+            for i in range(len(passages))
         }
-        for i in range(len(passages))
-    }
+        return state, questions
+
     record = {"mode": mode, "decided_by": "retriever", "passages": len(passages), "jev_error": None}
-    try:
-        result = await ask(tenant_id, state, questions)
-    except JevUnavailableError as exc:
-        record["jev_error"] = exc.reason
+    # try_ask cannot raise, and builds the request inside its guard: retrieval must never
+    # fail because of the reranker.
+    result, reason = await try_ask(tenant_id, build=build)
+    if result is None:
+        record["jev_error"] = reason
         return passages, record
 
     scored = [
-        (result.answers[f"p{i}"]["score"], result.answers[f"p{i}"].get("confidence") or 0.0, i)
-        for i in range(len(passages))
+        (result.answers[f"p{i}"]["score"], result.answers[f"p{i}"]["confidence"], i) for i in range(len(passages))
     ]
     keep = [(s, i) for s, c, i in scored if not (s < _DROP_BELOW and c >= _DROP_CONFIDENCE)]
     order = [i for _, i in sorted(keep, key=lambda pair: (-pair[0], pair[1]))]

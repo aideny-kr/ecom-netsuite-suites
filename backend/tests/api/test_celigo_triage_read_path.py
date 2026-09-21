@@ -11,15 +11,17 @@ async def _groups(db, admin_user, monkeypatch, mode):
     world = await _seed_world(db, user.tenant_id)
     sent = []
 
-    async def fake_ask(tenant_id, state, questions, **_):
+    async def fake_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        if build is not None:
+            state, questions = build()
         sent.append(state)
         answers = {
             q: {"type": "choice", "choice": "invalid_data", "confidence": 0.9, "probabilities": {}} for q in questions
         }
-        return JevResult(answers=answers, model="jev-1.13.0", input_tokens=300, elapsed_ms=100)
+        return JevResult(answers=answers, model="jev-1.13.0", input_tokens=300, elapsed_ms=100), None
 
     triage_jev.clear_cache()
-    monkeypatch.setattr(triage_jev, "ask", fake_ask)
+    monkeypatch.setattr(triage_jev, "try_ask", fake_ask)
     monkeypatch.setattr(settings, "JEV_CELIGO_TRIAGE_MODE", mode)
     out = await read_queries.flow_error_groups(db, tenant_id=user.tenant_id, flow_id=world["flow"].id, status="open")
     triage_jev.clear_cache()

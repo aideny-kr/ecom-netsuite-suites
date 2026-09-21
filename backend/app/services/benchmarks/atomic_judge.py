@@ -19,7 +19,7 @@ the Jev client's tenant allowlist like any other.
 from __future__ import annotations
 
 from app.services.benchmarks.scorer import ScoreResult
-from app.services.typesafe.client import JevUnavailableError, ask
+from app.services.typesafe.client import try_ask
 
 # Weights for an answer that does not decline. They sum to 1.0.
 W_ADDRESSES, W_PRESENTS, W_TERMS = 0.5, 0.3, 0.2
@@ -101,10 +101,10 @@ async def atomic_judge_score(
         "expected_terms": expected_contains,
         "result_table_displayed": result_table_displayed,
     }
-    try:
-        answers = (await ask(tenant_id, state, _QUESTIONS)).answers
-    except JevUnavailableError:
+    result, _reason = await try_ask(tenant_id, state, _QUESTIONS)
+    if result is None:
         return None
+    answers = result.answers
     parts = (
         f"declines={answers['declines']['noul']:.2f} addresses={answers['addresses']['score']:.2f}/2 "
         f"presents={answers['presents_result']['noul']:.2f} hedging={answers['hedging']['score']:.2f}/2 "

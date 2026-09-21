@@ -27,7 +27,7 @@ from collections import Counter
 
 from app.core.config import settings
 from app.services.celigo.errors import normalize_message
-from app.services.typesafe.client import JevUnavailableError, ask
+from app.services.typesafe.client import try_ask
 
 CATEGORIES = {
     "authentication": "Credentials, tokens, permissions or access were refused or expired.",
@@ -51,10 +51,10 @@ def clear_cache() -> None:
 
 
 def _label(answer: dict) -> dict:
-    confident = (answer.get("confidence") or 0.0) >= _MIN_CONFIDENCE
+    confident = answer["confidence"] >= _MIN_CONFIDENCE
     return {
         "category": answer["choice"] if confident else "unclear",
-        "confidence": answer.get("confidence"),
+        "confidence": answer["confidence"],
         "advisory": True,
     }
 
@@ -74,28 +74,32 @@ async def triage_signatures(tenant_id, signatures: list[dict]) -> tuple[dict[str
     }  # fmt: skip
 
     if todo:
-        state = {
-            "errors": [
-                {
-                    "source": s.get("source") or "",
-                    "code": s.get("code") or "",
-                    "message": normalize_message(s.get("sample_message"))[:_MAX_MESSAGE_CHARS],
-                }
-                for s in todo
-            ]
-        }
-        questions = {
-            f"s{i}": {
-                "type": "choice",
-                "instructions": f"What kind of integration failure does `errors[{i}]` describe?",
-                "criteria": CATEGORIES,
+
+        def build():
+            state = {
+                "errors": [
+                    {
+                        "source": s.get("source") or "",
+                        "code": s.get("code") or "",
+                        "message": normalize_message(s.get("sample_message"))[:_MAX_MESSAGE_CHARS],
+                    }
+                    for s in todo
+                ]
             }
-            for i in range(len(todo))
-        }
-        try:
-            result = await ask(tenant_id, state, questions)
-        except JevUnavailableError as exc:
-            record["jev_error"] = exc.reason
+            questions = {
+                f"s{i}": {
+                    "type": "choice",
+                    "instructions": f"What kind of integration failure does `errors[{i}]` describe?",
+                    "criteria": CATEGORIES,
+                }
+                for i in range(len(todo))
+            }
+            return state, questions
+
+        # try_ask cannot raise: the grouped-errors read path must never fail because of triage.
+        result, reason = await try_ask(tenant_id, build=build)
+        if result is None:
+            record["jev_error"] = reason
             return ({} if mode == "shadow" else labels), record
         record.update(jev_elapsed_ms=result.elapsed_ms, jev_input_tokens=result.input_tokens)
         for i, s in enumerate(todo):
