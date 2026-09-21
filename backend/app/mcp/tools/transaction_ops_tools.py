@@ -551,6 +551,12 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                     )
                     from app.services.transaction_ops.posting_balance import repriced_credit_balance
 
+                    if support and support.get("refund_allocation"):
+                        allocation = support["refund_allocation"]
+                        evidence["refund_allocation"] = allocation
+                        if allocation["status"] != "ready_for_finance_review":
+                            evidence["blockers"].append("refund_allocation:" + allocation["reason"])
+
                     evidence["posting_balance"] = repriced_credit_balance(
                         evidence["source_refresh"],
                         review,

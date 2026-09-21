@@ -936,6 +936,30 @@ interface NativeAccountingReviewBase extends AccountingReviewBase {
   sales_adjustment_account: string;
   tax_account: string;
   expected_after: { total: string; subtotal: string; taxTotal: string };
+  refund_allocation?: {
+    status: "ready_for_finance_review";
+    source_refund_id: string;
+    payment_number: string;
+    currency: string;
+    net: string;
+    tax: string;
+    gross: string;
+    order_version_id: string;
+    authority: string;
+    lines: Array<{
+      source_line_id: string;
+      sku: string;
+      quantity: string;
+      price_before: string;
+      price_after: string;
+      tax_before: string;
+      tax_after: string;
+      net: string;
+      tax: string;
+      gross: string;
+      version_ids: string[];
+    }>;
+  };
 }
 
 export type NativeAccountingReview =
