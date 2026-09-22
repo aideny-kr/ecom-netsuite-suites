@@ -3,6 +3,8 @@
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from app.core.config import settings
 from app.services.chat.adapters import anthropic_adapter as aa
 
@@ -38,11 +40,6 @@ def test_one_hour_ttl_goes_only_on_the_stable_prefix(monkeypatch):
     assert "cache_control" not in k["system"][1]  # the dynamic block is never cached
     assert k["extra_body"] == {"cache_control": {"type": "ephemeral"}}
     assert "category" not in k["tools"][0]  # allowlisting still applies
-
-
-def test_unknown_ttl_falls_back_to_the_default(monkeypatch):
-    monkeypatch.setattr(settings, "PROMPT_CACHE_STABLE_TTL", "2d")
-    assert _kwargs()["system"][0]["cache_control"] == {"type": "ephemeral"}
 
 
 async def test_every_call_logs_its_usage_with_the_four_token_fields(monkeypatch, caplog):
@@ -104,9 +101,10 @@ async def test_usage_line_carries_purpose_duration_prefix_and_ttl_split(monkeypa
     prefix = re.search(r"prefix=([0-9a-f]{12})", msg)
     assert prefix, msg
     # same tools + same static system → same fingerprint; different system → different
-    assert aa._prefix_fingerprint("stable system", TOOLS) == prefix.group(1)
-    assert aa._prefix_fingerprint("other system", TOOLS) != prefix.group(1)
-    assert aa._prefix_fingerprint("stable system", None) != prefix.group(1)
+    sent = _kwargs(system="stable system", system_dynamic="", messages=[{"role": "user", "content": "q"}])
+    assert aa._prefix_fingerprint(sent) == prefix.group(1)
+    assert aa._prefix_fingerprint(_kwargs(system="other system")) != prefix.group(1)
+    assert aa._prefix_fingerprint(_kwargs(system="stable system", tools=None)) != prefix.group(1)
 
 
 def test_purpose_defaults_to_unlabelled_and_nests():
@@ -131,3 +129,93 @@ async def test_purpose_decorator_handles_async_generators():
 
     assert [e async for e in events()] == ["stream_label", "stream_label"]
     assert current_purpose() == "unlabelled"
+
+
+# ── gate round 1 on #287 ───────────────────────────────────────────────────
+
+
+async def test_a_generators_purpose_never_leaks_into_the_caller_between_yields():
+    from app.services.chat.llm_purpose import current_purpose, with_llm_purpose
+
+    @with_llm_purpose("agent_turn_stream")
+    async def events():
+        for _ in range(3):
+            yield current_purpose()
+
+    seen_inside, seen_between = [], []
+    async for purpose in events():
+        seen_inside.append(purpose)
+        seen_between.append(current_purpose())
+    assert seen_inside == ["agent_turn_stream"] * 3
+    assert seen_between == ["unlabelled"] * 3
+
+
+async def test_breaking_out_early_leaves_no_label_behind():
+    from app.services.chat.llm_purpose import current_purpose, with_llm_purpose
+
+    @with_llm_purpose("agent_turn_stream")
+    async def events():
+        yield 1
+        yield 2
+
+    gen = events()
+    async for _ in gen:
+        break
+    assert current_purpose() == "unlabelled"
+    await gen.aclose()
+    assert current_purpose() == "unlabelled"
+
+
+async def test_closing_an_abandoned_generator_from_another_task_does_not_raise():
+    import asyncio
+
+    from app.services.chat.llm_purpose import with_llm_purpose
+
+    @with_llm_purpose("agent_turn_stream")
+    async def events():
+        yield 1
+        yield 2
+
+    gen = events()
+    await gen.__anext__()
+    await asyncio.create_task(gen.aclose())  # a different Context from the one that started it
+
+
+async def test_stream_timing_excludes_retry_backoff(monkeypatch, caplog):
+    """ms= is the successful attempt's wall time, not the jittered overload sleep."""
+    from tests.test_llm_adapters import _install_stream, _make_api_error
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(aa.time, "monotonic", lambda: clock["t"])
+
+    async def fake_sleep(seconds):
+        clock["t"] += 45.0  # a long overload backoff
+
+    monkeypatch.setattr(aa.asyncio, "sleep", fake_sleep)
+    adapter = aa.AnthropicAdapter(api_key="sk-test")
+    _install_stream(adapter, _make_api_error("overloaded_error"))
+    with caplog.at_level(logging.INFO, logger=aa.__name__):
+        async for _ in adapter.stream_message(
+            model="claude-sonnet-5", max_tokens=10, system="s", messages=[{"role": "user", "content": "q"}]
+        ):
+            pass
+    msg = next(r for r in caplog.records if r.getMessage().startswith("llm.usage")).getMessage()
+    assert " ms=0 " in msg and "retries=1" in msg, msg
+
+
+def test_fingerprint_is_computed_from_the_payload_actually_sent(monkeypatch):
+    monkeypatch.setattr(settings, "PROMPT_CACHE_STABLE_TTL", "5m")
+    k = _kwargs()
+    assert aa._prefix_fingerprint(k) == aa._prefix_fingerprint(_kwargs())
+    monkeypatch.setattr(settings, "PROMPT_CACHE_STABLE_TTL", "1h")
+    assert aa._prefix_fingerprint(_kwargs()) != aa._prefix_fingerprint(k)  # a different TTL is a different prefix
+
+
+def test_an_invalid_ttl_fails_at_startup():
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    with pytest.raises(ValidationError, match="PROMPT_CACHE_STABLE_TTL"):
+        Settings(PROMPT_CACHE_STABLE_TTL="60m")
+    assert Settings(PROMPT_CACHE_STABLE_TTL="1h").PROMPT_CACHE_STABLE_TTL == "1h"

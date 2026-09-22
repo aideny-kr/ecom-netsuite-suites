@@ -259,12 +259,18 @@ def _usage_from(raw) -> TokenUsage:
     )
 
 
-def _prefix_fingerprint(system: str, tools: list[dict] | None) -> str:
-    """12 hex chars identifying the STABLE prefix (tool definitions + static system text).
+def _prefix_fingerprint(kwargs: dict) -> str:
+    """12 hex chars identifying the STABLE prefix of the request actually sent: model,
+    tool definitions and the cache-marked system block(s), cache_control included.
 
     Two calls with the same fingerprint should read the prefix from cache; a fresh
     write on a repeated fingerprint is the invalidator we are hunting."""
-    body = json.dumps([_to_api_tool(t) for t in tools or []], sort_keys=True, default=str) + "\x00" + system
+    stable_system = [b for b in kwargs.get("system") or [] if "cache_control" in b]
+    body = json.dumps(
+        {"model": kwargs.get("model"), "tools": kwargs.get("tools") or [], "system": stable_system},
+        sort_keys=True,
+        default=str,
+    )
     return hashlib.sha1(body.encode()).hexdigest()[:12]
 
 
@@ -278,14 +284,22 @@ def _ttl_split(raw) -> tuple[int, int]:
     )
 
 
-def _log_usage(model: str, raw, usage: TokenUsage, *, stream: bool, elapsed_ms: int, prefix: str) -> None:
+def _log_usage(
+    model: str, raw, usage: TokenUsage, *, stream: bool, elapsed_ms: int, kwargs: dict, retries: int = 0
+) -> None:
     """One line per provider call, with enough to attribute a turn's cost to its calls:
     the caller's purpose label, wall time, the stable-prefix fingerprint (repeated
-    fingerprint + fresh write = invalidation) and the 5m/1h cache-write split."""
+    fingerprint + fresh write = invalidation) and the 5m/1h cache-write split.
+
+    ``ms`` is the attempt that answered, SDK connection retries included; this
+    adapter's own overload retries (stream path) are counted in ``retries`` and their
+    backoff is excluded, so ``ms`` stays comparable across calls."""
+    if not logger.isEnabledFor(logging.INFO):
+        return
     write_5m, write_1h = _ttl_split(raw)
     logger.info(
         "llm.usage purpose=%s model=%s in=%d cache_write=%d cache_write_5m=%d cache_write_1h=%d cache_read=%d "
-        "out=%d ms=%d prefix=%s stream=%s",
+        "out=%d ms=%d retries=%d prefix=%s stream=%s",
         current_purpose(),
         model,
         usage.input_tokens,
@@ -295,7 +309,8 @@ def _log_usage(model: str, raw, usage: TokenUsage, *, stream: bool, elapsed_ms: 
         usage.cache_read_input_tokens,
         usage.output_tokens,
         elapsed_ms,
-        prefix,
+        retries,
+        _prefix_fingerprint(kwargs),
         "true" if stream else "false",
     )
 
@@ -356,9 +371,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                 tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
         usage = _usage_from(response.usage)
-        _log_usage(
-            model, response.usage, usage, stream=False, elapsed_ms=elapsed_ms, prefix=_prefix_fingerprint(system, tools)
-        )
+        _log_usage(model, response.usage, usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
 
         return LLMResponse(
             text_blocks=text_blocks,
@@ -393,11 +406,11 @@ class AnthropicAdapter(BaseLLMAdapter):
         # Retry the stream open (and the first chunk) on transient overloads.
         # Once any text has been yielded we do NOT retry — partial output
         # cannot be rewound without confusing the caller.
-        started = time.monotonic()
-        deadline = started + _STREAM_TIMEOUT_SECONDS
+        deadline = time.monotonic() + _STREAM_TIMEOUT_SECONDS
         attempt = 0
         first_chunk_received = False
         while True:
+            attempt_started = time.monotonic()
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
                     async for text in stream.text_stream:
@@ -464,8 +477,9 @@ class AnthropicAdapter(BaseLLMAdapter):
             final_message.usage,
             usage,
             stream=True,
-            elapsed_ms=int((time.monotonic() - started) * 1000),
-            prefix=_prefix_fingerprint(system, tools),
+            elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
+            kwargs=kwargs,
+            retries=attempt,
         )
 
         response = LLMResponse(

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
+import inspect
 
 _purpose: contextvars.ContextVar[str] = contextvars.ContextVar("llm_purpose", default="unlabelled")
 
@@ -33,18 +35,31 @@ def llm_purpose(label: str):
 
 
 def with_llm_purpose(label: str):
-    """Decorator form for async functions or async generators whose whole body is one purpose."""
-    import functools
-    import inspect
+    """Decorator form for async functions or async generators whose whole body is one purpose.
+
+    For a generator the label is set around each step and reset before the value is
+    yielded: a ``with`` spanning the ``async for`` would leak the label into the caller
+    between yields, stay set if the caller broke out early, and raise on reset when an
+    abandoned generator is closed from another task's context."""
 
     def wrap(fn):
         if inspect.isasyncgenfunction(fn):
 
             @functools.wraps(fn)
             async def gen(*args, **kwargs):
-                with llm_purpose(label):
-                    async for item in fn(*args, **kwargs):
+                agen = fn(*args, **kwargs)
+                try:
+                    while True:
+                        token = _purpose.set(label)
+                        try:
+                            item = await agen.__anext__()
+                        except StopAsyncIteration:
+                            return
+                        finally:
+                            _purpose.reset(token)
                         yield item
+                finally:
+                    await agen.aclose()
 
             return gen
 
