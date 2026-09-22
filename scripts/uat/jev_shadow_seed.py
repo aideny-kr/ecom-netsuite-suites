@@ -16,15 +16,16 @@ runs after plan-resolutions returns, and the comparison rows are the whole point
 ``cleanup`` removes everything this script created (seed rows by dedupe prefix,
 the run and its cascade, audit rows by correlation id) and asserts zero residue.
 
-Safety: identical guard to the smoke — refuses any tenant whose slug != uat-smoke,
-and refuses to run against a database URL that is not the one the backend uses.
+Safety: the smoke's slug guard (refuses any tenant whose slug != uat-smoke), and LOGIN
+ONLY — this script never registers a tenant, because registration seeds soul.md.
+Flags and materiality it changes are snapshotted and restored by cleanup.
 
     export UAT_SMOKE_EMAIL=... UAT_SMOKE_PASSWORD=...        # ~/.hermes/.env
     backend/.venv/bin/python scripts/uat/jev_shadow_seed.py seed \\
         --backend-url https://api-staging.suitestudio.ai --database-url "$DATABASE_URL_DIRECT"
     # ... wait a minute for the agent tail, then:
     backend/.venv/bin/python scripts/uat/jev_shadow_seed.py report  --database-url ...
-    backend/.venv/bin/python scripts/uat/jev_shadow_seed.py cleanup --run-id <id> --database-url ...
+    backend/.venv/bin/python scripts/uat/jev_shadow_seed.py cleanup --run-id <id> --prefix <p> --restore-json '<restore>' --database-url ...
 """
 
 from __future__ import annotations
@@ -50,9 +51,6 @@ from recon_live_smoke import (  # noqa: E402
     _dedupe_prefix,
     _eprint,
     assert_uat_tenant,
-    ensure_reconciliation_flag,
-    pin_materiality,
-    provision_and_auth,
     resolve_tenant,
 )
 
@@ -64,6 +62,80 @@ FAILED_REF, MISMATCH_REF = "R900000011", "R900000012"
 FAILED_AMOUNT = Decimal("77.00")
 MISMATCH_CHARGE, MISMATCH_DEPOSIT = Decimal("5000.00"), Decimal("4925.00")
 AGENT_FLAG = "recon_resolution_agent"
+
+
+async def _login_only(client: httpx.AsyncClient, email: str, password: str) -> str:
+    """Log in to the EXISTING uat-smoke tenant. Never register: the smoke's
+    provision_and_auth may register a fresh tenant, and registration seeds
+    /tmp/workspace_storage/{tenant}/soul.md — a file this repo never writes without
+    explicit operator consent. A missing tenant is a setup failure, not something
+    this script repairs."""
+    resp = await client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    if resp.status_code != 200:
+        raise SmokeFailure(
+            f"login failed: HTTP {resp.status_code} {resp.text[:200]} — the uat-smoke tenant must already exist"
+        )
+    return resp.json()["access_token"]
+
+
+async def _snapshot(conn, tenant_id: str) -> dict:
+    """What seed changes besides its own rows, so cleanup can put it back."""
+    tid = uuid.UUID(tenant_id)
+    flags = await conn.fetch(
+        "SELECT flag_key, enabled FROM tenant_feature_flags WHERE tenant_id = $1 AND flag_key = ANY($2::text[])",
+        tid,
+        ["reconciliation", AGENT_FLAG],
+    )
+    cfg = await conn.fetchrow(
+        "SELECT recon_materiality_abs, recon_materiality_pct FROM tenant_configs WHERE tenant_id = $1",
+        tid,
+    )
+    return {
+        "flags": {
+            r["flag_key"]: r["enabled"] for r in flags
+        },  # absent key = flag row did not exist
+        "materiality": [
+            str(cfg["recon_materiality_abs"]),
+            str(cfg["recon_materiality_pct"]),
+        ]
+        if cfg
+        else None,
+    }
+
+
+async def _restore(conn, tenant_id: str, snap: dict) -> None:
+    tid = uuid.UUID(tenant_id)
+    for flag in ("reconciliation", AGENT_FLAG):
+        if flag in snap["flags"]:
+            await conn.execute(
+                "UPDATE tenant_feature_flags SET enabled = $3, updated_at = now() WHERE tenant_id = $1 AND flag_key = $2",
+                tid, flag, snap["flags"][flag],
+            )  # fmt: skip
+        else:
+            await conn.execute(
+                "DELETE FROM tenant_feature_flags WHERE tenant_id = $1 AND flag_key = $2",
+                tid,
+                flag,
+            )
+    if snap["materiality"]:
+        await conn.execute(
+            "UPDATE tenant_configs SET recon_materiality_abs = $2, recon_materiality_pct = $3, updated_at = now() WHERE tenant_id = $1",
+            tid, Decimal(snap["materiality"][0]) if snap["materiality"][0] != "None" else None,
+            Decimal(snap["materiality"][1]) if snap["materiality"][1] != "None" else None,
+        )  # fmt: skip
+
+
+async def _pin_materiality(conn, tenant_id: str) -> None:
+    n = await conn.execute(
+        "UPDATE tenant_configs SET recon_materiality_abs = $2, recon_materiality_pct = $3, updated_at = now() WHERE tenant_id = $1",
+        uuid.UUID(tenant_id), Decimal("50.00"), Decimal("0.0100"),
+    )  # fmt: skip
+    if not n.endswith(" 1"):
+        raise SmokeFailure(
+            "uat-smoke has no tenant_configs row; provisioning incomplete"
+        )
 
 
 def _prefix(stamp: str) -> str:
@@ -133,14 +205,15 @@ async def seed(args) -> int:
     stamp = time.strftime("%Y%m%d%H%M%S")
     prefix = _prefix(stamp)
     async with httpx.AsyncClient(base_url=args.backend_url, timeout=60) as client:
-        token = await provision_and_auth(client, STANDARD_UAT_SLUG, email, password)
+        token = await _login_only(client, email, password)
         tenant_id = await resolve_tenant(client, token)
         conn = await _connect(args.database_url)
         try:
             await assert_uat_tenant(conn, tenant_id, STANDARD_UAT_SLUG)
-            await ensure_reconciliation_flag(conn, tenant_id)
+            snapshot = await _snapshot(conn, tenant_id)
+            await _ensure_flag(conn, tenant_id, "reconciliation")
             await _ensure_flag(conn, tenant_id, AGENT_FLAG)
-            await pin_materiality(conn, tenant_id)
+            await _pin_materiality(conn, tenant_id)
             tid = uuid.UUID(tenant_id)
             failed = await _payout(
                 conn, tid, prefix, stamp, "failed", FAILED_AMOUNT, "failed"
@@ -194,7 +267,16 @@ async def seed(args) -> int:
                 f"plan-resolutions: HTTP {resp.status_code} {resp.text[:300]}"
             )
         _eprint(f"[plan] {json.dumps(resp.json())[:300]}")
-    print(json.dumps({"tenant_id": tenant_id, "run_id": run_id, "prefix": prefix}))
+    print(
+        json.dumps(
+            {
+                "tenant_id": tenant_id,
+                "run_id": run_id,
+                "prefix": prefix,
+                "restore": snapshot,
+            }
+        )
+    )
     _eprint("The agent tail runs asynchronously; give it a minute, then run `report`.")
     return 0
 
@@ -231,7 +313,9 @@ async def report(args) -> int:
 
 async def cleanup(args) -> int:
     if not args.run_id or not args.prefix:
-        _eprint("cleanup needs --run-id and --prefix (both printed by `seed`)")
+        _eprint(
+            "cleanup needs --run-id and --prefix (both printed by `seed`); --restore-json puts flags/materiality back"
+        )
         return 2
     conn = await _connect(args.database_url)
     try:
@@ -295,6 +379,10 @@ def main() -> int:
     p.add_argument("--backend-url", default="https://api-staging.suitestudio.ai")
     p.add_argument("--run-id")
     p.add_argument("--prefix")
+    p.add_argument(
+        "--restore-json",
+        help="the `restore` object printed by seed; puts flags and materiality back",
+    )
     args = p.parse_args()
     try:
         return asyncio.run(
