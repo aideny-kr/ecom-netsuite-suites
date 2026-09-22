@@ -50,3 +50,36 @@ describe("SkillCard", () => {
     );
   });
 });
+
+it("shows conservative readiness and provenance without disabling discussion", () => {
+  const skill: AgentSkillMetadata = {
+    ...fluxSkill,
+    kind: "expertise",
+    version: "a".repeat(64),
+    owner: "Suite Studio",
+    provenance: "product/skills/flux/SKILL.md",
+    inputs: ["Period and source"],
+    outputs: ["Evidence-backed analysis"],
+    requirements: [{ key: "financial_permission", label: "Financial reports permission", satisfied: false }],
+    execution_surfaces: [
+      { surface: "chat", status: "blocked", blockers: [{ code: "permission_required", message: "Financial reports permission is unavailable.", action: "Ask your administrator." }] },
+      { surface: "scheduled", status: "unsupported", blockers: [{ code: "no_execution_binding", message: "No scheduled execution binding.", action: "Use supported workflow steps." }] },
+    ],
+    readiness_note: "Current inventory, not a live source check.",
+  };
+  render(<SkillCard skill={skill} />);
+  expect(screen.getByText("Expertise")).toBeInTheDocument();
+  expect(screen.getByText("Setup needed")).toBeInTheDocument();
+  expect(screen.getByText("Not directly schedulable")).toBeInTheDocument();
+  expect(screen.getByText(/Financial reports permission is unavailable/)).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Requirements and provenance"));
+  expect(screen.getByText("product/skills/flux/SKILL.md")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /use in chat/i }));
+  expect(pushMock).toHaveBeenCalledWith("/chat?compose=%2Fflux%20&new_session=true");
+});
+
+it("does not infer readiness for old server responses", () => {
+  render(<SkillCard skill={fluxSkill} />);
+  expect(screen.getByText("Readiness not checked")).toBeInTheDocument();
+  expect(screen.queryByText("Chat tools available")).not.toBeInTheDocument();
+});

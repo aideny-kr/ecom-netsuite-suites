@@ -817,6 +817,20 @@ export interface AgentSkillMetadata {
   description: string;
   triggers: string[];
   slug: string;
+  // Optional during rolling upgrades; missing metadata never implies readiness.
+  kind?: "expertise" | "playbook" | "company_instructions";
+  version?: string;
+  owner?: string;
+  provenance?: string;
+  inputs?: string[];
+  outputs?: string[];
+  requirements?: { key: string; label: string; satisfied: boolean }[];
+  execution_surfaces?: {
+    surface: "chat" | "scheduled";
+    status: "available" | "blocked" | "unsupported";
+    blockers: { code: string; message: string; action: string }[];
+  }[];
+  readiness_note?: string;
 }
 
 // ---------------------------------------------------------------------------
