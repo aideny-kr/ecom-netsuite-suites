@@ -28,7 +28,7 @@ from app.core.config import settings
 from app.services.reconciliation import resolution_agent
 from app.services.reconciliation.narrative_contract import _NUM_RE
 from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, validate_output
-from app.services.reconciliation.resolution_planner import FEE_EXPLAIN_TOLERANCE
+from app.services.reconciliation.resolution_planner import FEE_EXPLAIN_TOLERANCE, RECENT_PAYOUT_LAG_DAYS
 from app.services.typesafe.client import try_ask
 
 _NUMERIC = re.compile(r"^[\s$€£-]*\d[\d,]*(\.\d+)?\s*$")
@@ -51,15 +51,21 @@ _CRITERIA = {
         "`facts.above_materiality` is false."
     ),
     "carry_forward": (
-        "A timing item that needs no booking: a recent payout still syncing, or refunds that cancel the charge out."
+        "A timing item that needs no booking: `facts.variance_type` is timing (amounts agree, dates "
+        "differ), or `facts.washout` is true (same-order refunds cancel the charge out), or the charge is "
+        "missing from NetSuite while `facts.payout_recent` is true and `facts.payout_status` is a healthy "
+        "status such as paid, pending or in_transit."
     ),
     "needs_human": (
-        "None of the other options clearly applies, the evidence conflicts, funds never settled, or a "
-        "chargeback, dispute or refund is involved."
+        "None of the other options clearly applies, the evidence conflicts, `facts.currency_consistent` is "
+        "false, `facts.payout_status` is failed or canceled (funds never settled), or a chargeback, dispute "
+        "or refund is involved."
     ),
 }
 
 _BASIS = {
+    "washout": "same-order refunds cancel the charge out",
+    "payout_recent": "the payout is recent",
     "variance_matches_payout_fee": "the variance matches the payout fee",
     "netsuite_lower_than_stripe": "NetSuite is lower than Stripe",
     "candidate_with_exact_stripe_amount": "a candidate posting carries the exact Stripe amount",
@@ -78,30 +84,50 @@ def _dec(value) -> Decimal | None:
 
 
 def derive_facts(context: dict) -> dict:
-    """Every numeric judgment, computed here. ``None`` means unknown, never guessed."""
+    """Every numeric, date and currency judgment, computed here. ``None`` = unknown, never guessed.
+
+    Amounts are only ever compared within ONE currency: the matching engine refuses a
+    cross-currency pair, and so does this. A EUR posting whose nominal amount equals
+    the USD charge is not a match, however the digits look.
+    """
     variance = _dec(context.get("variance_amount"))
     stripe = _dec(context.get("stripe_amount"))
     netsuite = _dec(context.get("netsuite_amount"))
-    fee = _dec((context.get("payout_line") or {}).get("fee"))
+    currency = context.get("currency")
+    line = context.get("payout_line") or {}
+    fee = _dec(line.get("fee"))
+    fee_same_currency = line.get("currency") in (None, currency)
     postings = context.get("candidate_postings") or []
+    same_currency_postings = [p for p in postings if p.get("currency") in (None, currency)]
     order_reference = (context.get("evidence") or {}).get("order_reference") or ""
+    payout = context.get("payout") or {}
+    days = _dec(payout.get("days_since_arrival"))
+    evidence = context.get("evidence") or {}
 
     return {
         "root_cause": context.get("root_cause"),
         "variance_type": context.get("variance_type"),
         "above_materiality": str(context.get("above_materiality")) == "True",
         "has_order_reference": bool(order_reference),
+        "currency_consistent": fee_same_currency and len(same_currency_postings) == len(postings),
         "variance_matches_payout_fee": (
-            None if variance is None or fee is None else abs(abs(variance) - abs(fee)) <= FEE_EXPLAIN_TOLERANCE
+            None
+            if variance is None or fee is None or not fee_same_currency
+            else abs(abs(variance) - abs(fee)) <= FEE_EXPLAIN_TOLERANCE
         ),
         "netsuite_lower_than_stripe": None if stripe is None or netsuite is None else netsuite < stripe,
         "candidate_count": "none" if not postings else "one" if len(postings) == 1 else "several",
         "candidate_with_exact_stripe_amount": (
-            None if stripe is None else any(_dec(p.get("amount")) == stripe for p in postings)
+            None if stripe is None else any(_dec(p.get("amount")) == stripe for p in same_currency_postings)
         ),
         "candidate_memo_mentions_order_reference": bool(order_reference)
         and any(order_reference.lower() in (p.get("memo") or "").lower() for p in postings),
-        "payout_line_type": (context.get("payout_line") or {}).get("line_type"),
+        "payout_line_type": line.get("line_type"),
+        # The planner's own recency rule (RECENT_PAYOUT_LAG_DAYS) and washout evidence,
+        # so the carry_forward criterion rests on facts rather than on dates Jev cannot read.
+        "payout_status": payout.get("status"),
+        "payout_recent": None if days is None else days <= RECENT_PAYOUT_LAG_DAYS,
+        "washout": context.get("root_cause") == "washout" or str(evidence.get("washout")) == "True",
     }
 
 

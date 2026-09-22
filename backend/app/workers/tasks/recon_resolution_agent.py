@@ -138,7 +138,10 @@ async def run_resolution_agent(
             else:
                 upgraded += 1
 
+            await apply_agent_proposal(db, item, validated)
             if shadow is not None:
+                # AFTER apply, and committed here: apply_agent_proposal commits only when it
+                # actually applied, and a comparison row must not ride on that commit.
                 await record_comparison(
                     db,
                     tenant_id=tid,
@@ -149,7 +152,7 @@ async def run_resolution_agent(
                     resource_id=str(item.id),
                     correlation_id=str(rid),
                 )
-            await apply_agent_proposal(db, item, validated)
+                await db.commit()
             processed += 1
 
             if job_id and processed % PROGRESS_UPDATE_EVERY == 0:

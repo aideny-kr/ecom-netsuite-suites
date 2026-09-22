@@ -319,3 +319,45 @@ def test_no_digit_of_any_kind_leaves_in_any_field():
     assert "<NUM>" in state["variance_explanation"] and "fee_amount" not in state["evidence"]
     # and the numeric judgment still reaches Jev, as a fact computed in code
     assert state["facts"]["variance_matches_payout_fee"] is True
+
+
+# ── gate round 1 on #285 ───────────────────────────────────────────────────
+
+
+def test_a_candidate_in_another_currency_never_counts_as_an_amount_match():
+    context = _context(
+        candidate_postings=[{"record_type": "customerdeposit", "amount": "100.00", "currency": "EUR", "memo": "x"}]
+    )
+    facts = rj.derive_facts(context)
+    assert facts["candidate_with_exact_stripe_amount"] is False
+    assert facts["currency_consistent"] is False
+
+
+def test_a_fee_in_another_currency_cannot_explain_the_variance():
+    context = _context(payout_line={**_context()["payout_line"], "currency": "EUR"})
+    facts = rj.derive_facts(context)
+    assert facts["variance_matches_payout_fee"] is None
+    assert facts["currency_consistent"] is False
+
+
+def test_same_currency_everywhere_is_consistent():
+    assert rj.derive_facts(_context())["currency_consistent"] is True
+
+
+def test_payout_recency_and_washout_are_facts_computed_in_code():
+    recent = rj.derive_facts(_context(payout={"status": "in_transit", "days_since_arrival": 2}))
+    assert recent["payout_recent"] is True and recent["payout_status"] == "in_transit"
+    stale = rj.derive_facts(_context(payout={"status": "paid", "days_since_arrival": 40}))
+    assert stale["payout_recent"] is False
+    unknown = rj.derive_facts(_context())
+    assert unknown["payout_recent"] is None and unknown["payout_status"] is None
+    washed = rj.derive_facts(_context(root_cause="washout", evidence={"order_reference": "R1", "washout": "True"}))
+    assert washed["washout"] is True
+    assert rj.derive_facts(_context())["washout"] is False
+
+
+def test_carry_forward_criterion_names_only_facts_that_exist():
+    text = rj._CRITERIA["carry_forward"]
+    for name in ("payout_recent", "washout"):
+        assert f"facts.{name}" in text
+    assert "recent payout still syncing" not in text

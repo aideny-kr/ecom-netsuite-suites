@@ -93,3 +93,71 @@ async def test_off_records_nothing(db, tenant_a, monkeypatch):
     _, rows, events = await _run(db, tenant_a, monkeypatch, mode="off", jev_action="carry_forward", jev_confidence=0.97)
     assert [r.action for r in rows] == ["book_fee_line"]
     assert events == []
+
+
+async def test_the_comparison_survives_when_the_proposal_cannot_be_applied(db, tenant_a, monkeypatch):
+    """apply_agent_proposal returns early (no commit) when the planner row was already
+    decided; the comparison row must not ride on that commit."""
+    from sqlalchemy import update
+
+    await enable_feature_flag(db, tenant_a.id, "reconciliation")
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_agent")
+    run, _ = await _seed_planned_run(db, tenant_a.id)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        return _jev_answer("carry_forward", 0.9), None
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+
+    from app.services.reconciliation import resolution_agent as ra
+
+    original_apply = ra.apply_agent_proposal
+
+    async def supersede_then_apply(db_, item, validated):
+        # a human decides the planner row between planning and the agent tail
+        await db_.execute(
+            update(ReconResolutionProposal).where(ReconResolutionProposal.id == item.id).values(status="superseded")
+        )
+        return await original_apply(db_, item, validated)
+
+    monkeypatch.setattr(ra, "apply_agent_proposal", supersede_then_apply)
+
+    # The test session sees its own uncommitted rows, so presence alone proves nothing.
+    # Spy on the order: the comparison must be followed by a commit the worker owns.
+    from app.services.typesafe import audit as jev_audit
+
+    order = []
+    real_record, real_commit = jev_audit.record_comparison, db.commit
+
+    async def spy_record(*a, **k):
+        order.append("record")
+        return await real_record(*a, **k)
+
+    async def spy_commit():
+        order.append("commit")
+        return await real_commit()
+
+    monkeypatch.setattr(jev_audit, "record_comparison", spy_record)
+    monkeypatch.setattr(db, "commit", spy_commit)
+    await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+    assert "record" in order and order[order.index("record") + 1] == "commit", order
+
+    events = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.tenant_id == tenant_a.id, AuditEvent.action == "recon.jev_comparison"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(events) == 1 and events[0].payload["jev_action"] == "carry_forward"
