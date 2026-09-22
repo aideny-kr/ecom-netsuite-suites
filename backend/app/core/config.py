@@ -81,7 +81,9 @@ class Settings(BaseSettings):
     # off | shadow (current path decides; Jev is recorded beside it) | live (Jev
     # decides when confident, current path otherwise).
     JEV_RECON_RESOLUTION_MODE: str = "off"
+    JEV_PRETURN_MODE: str = "off"
     JEV_RECON_MIN_CONFIDENCE: float = 0.8
+    JEV_ROUTE_MIN_CONFIDENCE: float = 0.8
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).
     OPENROUTER_API_KEY: str = ""
     DEFAULT_AI_PROVIDER: str = "anthropic"
