@@ -55,6 +55,28 @@ async def test_budget_continuation_keeps_scope_cursor_and_human_provenance(db, a
     assert "continuation_run_id" not in prior.progress_json  # Terminal evidence remains immutable.
 
 
+async def test_retry_exhaustion_preserves_finite_cycle_and_cannot_loop_without_progress(db, admin_user):
+    user = admin_user[0]
+    prior, _ = await budget_run(
+        db,
+        user,
+        progress={
+            "read_retry_count": 3,
+            "read_stop_reason": "retry_limit",
+            "last_read_failure": {"code": "netsuite_read_transport_failed", "retryable": True, "resolved": False},
+        },
+    )
+    child = await continuation.continue_budget_run(db, user.tenant_id, prior.id)
+    assert child.progress_json["read_retry_count"] == 3
+    assert child.progress_json["pending_refs"] == prior.progress_json["pending_refs"]
+    assert child.progress_json["continuation_root_id"] == str(prior.id)
+    child.status, child.termination_reason = "finished", "budget"
+    child.finished_at = datetime.now(timezone.utc)
+    await db.flush()
+    assert await continuation.continue_budget_run(db, user.tenant_id, child.id) is None
+    assert (await continuation.continuation_result(db, user.tenant_id, child.id))[1]["reason"] == "no_progress"
+
+
 @pytest.mark.parametrize("reason", ["error", "stall", "done"])
 async def test_failures_and_complete_runs_do_not_reset_their_budget(db, admin_user, reason):
     user, _ = admin_user

@@ -279,6 +279,16 @@ class _Reader:
                 )
         except NetSuiteEvidenceError:
             raise
+        except (
+            httpx.TimeoutException,
+            httpx.ConnectError,
+            httpx.ReadError,
+            httpx.WriteError,
+            httpx.RemoteProtocolError,
+        ):
+            # Keep retryable wire failures distinct from invalid JSON/identity.
+            # Exception strings can contain URLs, headers or bodies; use a code.
+            raise NetSuiteEvidenceError("read_transport_failed") from None
         except (httpx.HTTPError, ValueError, TypeError, RecursionError, UnicodeError, DecimalException):
             raise NetSuiteEvidenceError("invalid_upstream_response") from None
         if not isinstance(parsed, dict) or parsed.get("error") or parsed.get("o:errorDetails"):

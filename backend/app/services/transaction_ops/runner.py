@@ -374,9 +374,10 @@ async def run_investigation(
             db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, hold=hold, now=clock()
         )
 
-    async def bounded_read(factory, *, retry_calls=0, reserve_retry=None):
+    async def bounded_read(stage, factory, *, retry_calls=0, reserve_retry=None):
         return await read_with_recovery(
             factory,
+            stage=stage,
             retry_calls=retry_calls,
             progress=progress,
             reserve=reserve_retry or reserve,
@@ -384,7 +385,7 @@ async def run_investigation(
             remaining=lambda: (run.deadline_at - clock()).total_seconds(),
         )
 
-    async def metered_read(factory, *, held, data_calls, **options):
+    async def metered_read(stage, factory, *, held, data_calls, **options):
         """A bounded read charged for what it sent rather than the worst case reserved.
 
         ``held`` is the reservation made with ``hold=True`` just before this read, and
@@ -415,7 +416,7 @@ async def run_investigation(
 
         with metered() as meter:
             try:
-                result = await bounded_read(factory, reserve_retry=reserve_retry, **options)
+                result = await bounded_read(stage, factory, reserve_retry=reserve_retry, **options)
             except asyncio.CancelledError:
                 # Cancelled from outside: no more awaits here. Finishing charges the hold.
                 raise
@@ -484,6 +485,7 @@ async def run_investigation(
                             else _refund_page_reader or read_refund_order_page
                         )
                         refund_page = await bounded_read(
+                            "refund_page",
                             lambda: refund_scan(
                                 db,
                                 tenant_id,
@@ -535,6 +537,7 @@ async def run_investigation(
                         if not await reserve(4):
                             return await finish("budget")
                         page = await bounded_read(
+                            "destination_page",
                             lambda: (_destination_page_reader or read_changed_orders)(
                                 db,
                                 tenant_id,
@@ -593,6 +596,7 @@ async def run_investigation(
                     if not await reserve(6):
                         return await finish("budget")
                     page = await bounded_read(
+                        "source_page",
                         lambda: metabase_reader.read_order_page(
                             db,
                             tenant_id,
@@ -626,6 +630,7 @@ async def run_investigation(
                 if not await reserve(2):
                     return await finish("budget")
                 page = await bounded_read(
+                    "source_page",
                     lambda: page_reader(
                         db,
                         tenant_id,
@@ -646,6 +651,7 @@ async def run_investigation(
                 return await finish("budget")
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
             source = await bounded_read(
+                "source_order",
                 lambda: source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source),
                 retry_calls=2,
             )
@@ -679,6 +685,7 @@ async def run_investigation(
             if not await reserve(10, hold=True):  # NETSUITE_READ_CALLS data reads plus OAuth maintenance.
                 return await finish("budget")
             targets = await metered_read(
+                "netsuite_order",
                 lambda: target_reader(
                     db,
                     tenant_id,
@@ -709,9 +716,11 @@ async def run_investigation(
                     )
                     return await finish("budget")
                 commercial = await metered_read(
+                    "commercial_credit",
                     lambda: read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report),
                     held=20,
                     data_calls=MAX_INVOICE_READS + MAX_CREDIT_READS,
+                    retry_calls=20,
                 )
                 if commercial:
                     targets["commercial_credit_evidence"] = commercial
@@ -728,11 +737,13 @@ async def run_investigation(
                     return await finish("budget")
                 try:
                     refunds["source"] = await bounded_read(
+                        "source_refunds",
                         lambda: (_source_refunds_reader or read_solidus_refunds)(
                             db, tenant_id, mapping.solidus_refund_step_id, reference
-                        )
+                        ),
+                        retry_calls=2,
                     )
-                except (state_service.StateError, FeatureRevokedError):
+                except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                     raise
                 except Exception:
                     refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
@@ -741,6 +752,7 @@ async def run_investigation(
                         return await finish("budget")
                     try:
                         refunds["target"] = await metered_read(
+                            "netsuite_refunds",
                             lambda: (_target_refunds_reader or read_netsuite_refunds)(
                                 db,
                                 tenant_id,
@@ -757,8 +769,9 @@ async def run_investigation(
                             ),
                             held=MAX_REFUND_CALLS + 3,
                             data_calls=MAX_REFUND_CALLS,
+                            retry_calls=MAX_REFUND_CALLS + 3,
                         )
-                    except (state_service.StateError, FeatureRevokedError):
+                    except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                         raise
                     except Exception:
                         refunds["target"] = {"complete": False, "reason": "target_refunds_unavailable"}
@@ -788,9 +801,10 @@ async def run_investigation(
                         if not await reserve(MAX_GUARD_READ_CALLS):
                             return await finish("budget")
                         guard = await bounded_read(
+                            "create_preview",
                             lambda: (_guard_reader or read_guard_snapshot)(
                                 db, tenant_id, current_config, targets["orders"][0]["record_id"]
-                            )
+                            ),
                         )
                     elif action == "propose_missing_sync":
                         creation = prepare_create_input(
@@ -803,17 +817,19 @@ async def run_investigation(
                         if not await reserve(MAX_GUARD_READ_CALLS):
                             return await finish("budget")
                         guard = await bounded_read(
+                            "guard_snapshot",
                             lambda: (_create_reader or read_create_preview)(
                                 db, tenant_id, current_config, creation.payload_json
-                            )
+                            ),
                         )
                     elif action == "no_action" and current_config.target_step_id:
                         if not await reserve(MAX_READ_CALLS):
                             return await finish("budget")
                         celigo = await bounded_read(
+                            "celigo_error",
                             lambda: (_celigo_reader or read_celigo_error_evidence)(
                                 db, tenant_id, current_config.target_step_id, reference
-                            )
+                            ),
                         )
                     request = plan_proposal(
                         report, targets, current_config, now=clock(), guard=guard, celigo=celigo, creation=creation
