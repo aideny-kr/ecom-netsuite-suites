@@ -13,6 +13,22 @@ from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.source_eligibility import eligible_reports, excluded_report
 
 
+def observation_time(report, fallback):
+    """Order evidence by its reads, not by when a slow job saved the result.
+
+    Use the oldest read in the comparison. Legacy diagnostic reports without
+    snapshot timestamps keep their existing persistence-time ordering.
+    """
+    try:
+        snapshots = [report["source"], *report["targets"]]
+        times = [datetime.fromisoformat(snapshot["observed_at"]) for snapshot in snapshots]
+        if all(value.utcoffset() is not None and value <= fallback for value in times):
+            return min(times)
+    except (KeyError, TypeError, ValueError):
+        pass
+    return fallback
+
+
 def _cleared(report, now):
     if excluded_report(report):
         return False
@@ -129,6 +145,10 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
     observation_id = result.scalar_one_or_none()
     if observation_id is None:
         return case
+    observed = observation_time(report, now)
+    became_current = now >= case.last_observed_at and observed >= observation_time(
+        case.latest_report_json, case.last_observed_at
+    )
     await _audit(
         db,
         tenant_id,
@@ -141,10 +161,11 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
             "source_eligible": not excluded,
             "observed_at": now.isoformat(),
             "verification_scope": "order_total_tax_refunds",
-            "became_current": now >= case.last_observed_at,
+            "evidence_observed_at": observed.isoformat(),
+            "became_current": became_current,
         },
     )
-    if now >= case.last_observed_at:
+    if became_current:
         prior = case.status
         case.status = "reconciled" if cleared else "open"
         case.last_observed_at = now

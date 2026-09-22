@@ -2,7 +2,7 @@
 
 The database is the outbox; broker delivery conveys no authority. Every child is
 reserved before invocation. Interrupted reservations are inspected, never resent.
-Independent members drain even when a sibling needs review. No model is spawned.
+An unconfirmed outcome durably stops untouched members. No model is spawned.
 """
 
 import asyncio
@@ -24,6 +24,22 @@ from app.services.transaction_ops.accounting_group import GROUP_TOOL, bounded_ma
 
 ACCEPTED = "accounting_group.dispatch.accepted"
 SLICE_SIZE = 30
+
+
+def stop_queued(work, trigger, now):
+    """Called under the parent row lock, atomically with the uncertain outcome.
+
+    The stop survives recovery of the triggering child. Untouched approvals need
+    fresh human review; already reserved children are inspected, never replayed.
+    """
+    work.setdefault("stopped_after", trigger)
+    for member in work["members"].values():
+        if member["status"] == "queued":
+            member.update(
+                status="blocked",
+                reason="Not submitted after an unconfirmed group outcome. Prepare a fresh approval after review.",
+                finished_at=now.isoformat(),
+            )
 
 
 async def clock(db):
@@ -241,7 +257,7 @@ async def run_slice(db, tenant_id, parent_id, *, session_factory=None):
     """One durable group leader, up to three independent child sessions, 30 per slice.
 
     The advisory lock dies with the process/connection. A new leader can inspect
-    interrupted child reservations and continue untouched members without replay.
+    interrupted child reservations before deciding whether untouched members can run.
     """
     factory = session_factory or async_sessionmaker(db.bind, expire_on_commit=False)
     key = int.from_bytes(
@@ -295,6 +311,29 @@ async def _drain(db, tenant_id, parent_id, factory):
     # Row-locked updates merge current UI/verification changes, never overwrite them.
     parent = await message(db, tenant_id, parent_id, lock=True)
     work = deepcopy(parent.structured_output["accounting_group_dispatch"])
+    if auth["action"] == "approve":
+        trigger = work.get("stopped_after") or next(
+            (
+                key
+                for key, member in work["members"].items()
+                if member["status"] in {"verification_pending", "needs_review"}
+            ),
+            None,
+        )
+        if trigger:
+            first_stop = not work.get("stopped_after")
+            stop_queued(work, trigger, await clock(db))
+            if first_stop:
+                await log_event(
+                    db,
+                    tenant_id,
+                    "transaction_ops",
+                    "accounting_group.dispatch.stopped",
+                    actor_id=UUID(auth["actor_id"]),
+                    resource_type="chat_message",
+                    resource_id=str(parent_id),
+                    payload={"confirmation_id": trigger, "reason": "unconfirmed_outcome", "financial_writes": 0},
+                )
     work.update(status="running", next_at=((await clock(db)) + timedelta(minutes=1)).isoformat())
     parent.structured_output = {**parent.structured_output, "accounting_group_dispatch": work}
     await db.commit()
@@ -381,6 +420,22 @@ async def _drain(db, tenant_id, parent_id, factory):
                 **result,
                 "finished_at": (await clock(child_db)).isoformat(),
             }
+            if auth["action"] == "approve" and (
+                current.get("stopped_after") or result["status"] in {"verification_pending", "needs_review"}
+            ):
+                first_stop = not current.get("stopped_after")
+                stop_queued(current, identifier, await clock(child_db))
+                if first_stop:
+                    await log_event(
+                        child_db,
+                        tenant_id,
+                        "transaction_ops",
+                        "accounting_group.dispatch.stopped",
+                        actor_id=UUID(auth["actor_id"]),
+                        resource_type="chat_message",
+                        resource_id=str(parent_id),
+                        payload={"confirmation_id": identifier, "reason": "unconfirmed_outcome", "financial_writes": 0},
+                    )
             parent.structured_output = {**parent.structured_output, "accounting_group_dispatch": current}
             await log_event(
                 child_db,
@@ -400,7 +455,12 @@ async def _drain(db, tenant_id, parent_id, factory):
             )
             await child_db.commit()
 
-    await bounded_map(remaining[:SLICE_SIZE], process)
+    # On restart, a lost dispatch receipt must be classified before any new
+    # reservation. Sorting by attempts did the opposite and admitted new writes.
+    interrupted = [m for m in remaining if work["members"][m["confirmation_id"]]["status"] == "dispatching"]
+    for member in interrupted:
+        await process(member)
+    await bounded_map([m for m in remaining if m not in interrupted][:SLICE_SIZE], process)
     parent = await message(db, tenant_id, parent_id, lock=True)
     work = deepcopy(parent.structured_output["accounting_group_dispatch"])
     pending = sum(m["status"] in {"queued", "dispatching"} for m in work["members"].values())
@@ -468,6 +528,8 @@ async def _drain(db, tenant_id, parent_id, factory):
                 "eligible": len(work["members"]),
                 "verified": sum(m["status"] == "verified" for m in work["members"].values()),
                 "rejected": sum(m["status"] == "rejected" for m in work["members"].values()),
+                "blocked": sum(m["status"] == "blocked" for m in work["members"].values()),
+                "stopped_after": work.get("stopped_after"),
                 "confirmation_ids": list(work["members"]),
             },
         )

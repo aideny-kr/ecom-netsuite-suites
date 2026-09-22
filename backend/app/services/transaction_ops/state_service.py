@@ -782,7 +782,7 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     if request.report_json.get("order_reference", order_reference) != order_reference:
         raise StateError("finding_order_mismatch", 422)
     request = request.model_copy(
-        update={"report_json": {k: v for k, v in request.report_json.items() if k != "case_id"}}
+        update={"report_json": {k: v for k, v in request.report_json.items() if k not in {"case_id", "_observation"}}}
     )
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
@@ -796,6 +796,20 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
                 "report_json": await bound_report(
                     db, tenant_id, run, request.report_json, now=now, subledger_recheck=final
                 )
+            }
+        )
+    from app.services.transaction_ops.case_service import observation_time
+
+    if isinstance(request.report_json.get("balance"), dict) or isinstance(request.report_json.get("comparison"), dict):
+        request = request.model_copy(
+            update={
+                "report_json": {
+                    **request.report_json,
+                    "_observation": {
+                        "final": final,
+                        "observed_at": observation_time(request.report_json, now).isoformat(),
+                    },
+                }
             }
         )
     row = (

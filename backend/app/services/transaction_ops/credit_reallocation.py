@@ -53,6 +53,19 @@ def build_intent(tenant_id, case_id, source, review, evidence, support, *, field
             if net > 0 and -sum((_money(c["tax_observation"]["delta"]) for c in changes), Decimal(0)) != tax:
                 return None
             graph = support["refund_graph"]
+            allocation = None
+            if review.get("solidus_refund_step_id"):
+                from app.services.transaction_ops.refund_audit import review_allocation
+
+                audit = support.get("refund_audit") or {}
+                if (
+                    str(audit.get("source_step_id")) != str(review["solidus_refund_step_id"])
+                    or len(graph.get("request_links") or []) != 1
+                ):
+                    return None
+                allocation = review_allocation(audit, source, invoice, basis, changes, graph["request_links"][0])
+                if allocation["status"] != "ready_for_finance_review":
+                    return None
             tax_item, item, period = (support[k] for k in ("tax_item", "item", "period"))
             ar, offset, tax_account, book = (
                 str(support[k]) for k in ("ar_account", "offset_account", "tax_account", "book")
@@ -190,6 +203,7 @@ def build_intent(tenant_id, case_id, source, review, evidence, support, *, field
                     "before": credit,
                     "support": support,
                     "source_revision_basis": basis,
+                    **({"refund_allocation": allocation} if allocation else {}),
                     "observed_at": support["observed_at"],
                     "accounting_book": book,
                     "ar_account": ar,
@@ -228,7 +242,8 @@ def build_intent(tenant_id, case_id, source, review, evidence, support, *, field
                     "No additional credit, refund, cash movement, item-policy change "
                     "or invoice reduction is authorized. "
                     "Verify the exact ledger allocation and unchanged related records after execution. "
-                    "Sales-order alignment remains a separately approved step.",
+                    "Sales-order alignment remains a separately approved step."
+                    + (" " + allocation["authority"] if allocation else ""),
                     "status": "intent_requires_schema_policy_and_preflight_validation",
                     "required_transport": "native_accounting_amendment_with_tax_preview",
                     "tax_only": net == 0,
@@ -316,7 +331,7 @@ async def collect_support(db, tenant_id, source, review, evidence, *, field_map=
         period = await reader.request("GET", f"/record/v1/accountingPeriod/{identifiers['period']}")
     # collect_refunds raises on incomplete ownership/allocation. Do not mark a
     # historical lead complete merely because its credit has the same gross.
-    return {
+    support = {
         "invoice": invoice,
         "credit": credit,
         "refund": refund,
@@ -333,6 +348,28 @@ async def collect_support(db, tenant_id, source, review, evidence, *, field_map=
         "invoice_gl": invoice_gl,
         "observed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if review.get("solidus_refund_step_id"):
+        from app.services.transaction_ops.refund_audit import read_audit, review_allocation
+        from app.services.transaction_ops.source_reader import SourceReadError
+
+        links = graph.get("request_links") or []
+        allocation = {"status": "needs_review", "reason": "refund_audit_refund_identity_unproven"}
+        if len(links) == 1 and links[0].get("source_refund_id") and links[0].get("payment_number"):
+            try:
+                audit = await read_audit(
+                    db, tenant_id, review["solidus_refund_step_id"], source["number"], links[0]["source_refund_id"]
+                )
+                support["refund_audit"] = audit
+                changes = [
+                    c
+                    for c in compare_source_lines(source, evidence, field_map=field_map)["changes"]
+                    if str(c["target_record_id"]) == str(invoice["id"])
+                ]
+                allocation = review_allocation(audit, source, invoice, basis, changes, links[0])
+            except SourceReadError as exc:
+                allocation = {"status": "needs_review", "reason": exc.code}
+        support["refund_allocation"] = allocation
+    return support
 
 
 def solution_summary(intent):
@@ -352,6 +389,7 @@ def solution_summary(intent):
         "expected_after": intent["expected_after"],
         "expected_ledger": intent["expected_ledger"],
         "approval_basis": intent["approval_basis"],
+        **({"refund_allocation": intent["refund_allocation"]} if intent.get("refund_allocation") else {}),
         "remaining_requirements": [
             "Verify account tax treatment and source authority.",
             "Validate the connected MCP update schema and exact keyed-line payload."
