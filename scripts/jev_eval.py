@@ -151,7 +151,7 @@ def _line(fee, description="Charge", line_type="charge"):
 _DEPOSIT = {"record_type": "customerdeposit", "amount": "100.00", "currency": "USD", "memo": "Order R100200300", "netsuite_internal_id": "9"}  # fmt: skip
 
 RECON = [
-    _recon("book_fee_line", payout_line=_line("3.20"), variance_explanation="NetSuite deposit is lower than the Stripe charge."),
+    _recon("book_fee_line", payout_line=_line("3.20"), variance_explanation="Variance of $3.20 matches Stripe processing fee (fee_amount=3.20). NetSuite may have recorded gross amount."),
     _recon("book_fee_line", payout_line=_line("3.20", "Charge for R100200300"), variance_explanation="Deposit booked net of processing fee."),
     _recon("book_fee_line", variance_amount="-2.90", netsuite_amount="97.10", payout_line=_line("3.20"), variance_explanation="Difference is close to the processor fee."),
     _recon("apply_deposit", variance_type="missing_in_netsuite", variance_amount="0.00", netsuite_amount="100.00", candidate_postings=[_DEPOSIT], evidence={"order_reference": "R100200300", "deposit_unapplied": "true"}, variance_explanation="A customer deposit exists for this order but is not applied to the invoice."),
@@ -182,33 +182,42 @@ async def eval_preturn(repeat: int) -> dict:
 
     rows, latencies, tokens = [], [], []
     for task, history, gold_kind, gold_cont, source_talk in PRETURN:
+        persisted = pj.previous_request_context(history) is not None
         for _ in range(repeat):
-            result = await ask(SYNTHETIC_TENANT, *pj.build_request(task, history, SOURCES))
+            result = await ask(
+                SYNTHETIC_TENANT, *pj.build_request(task, history, SOURCES)
+            )
             latencies.append(result.elapsed_ms)
             tokens.append(result.input_tokens)
-        a = result.answers
-        route = pj.to_route(a, floor=settings.JEV_ROUTE_MIN_CONFIDENCE)
-        rows.append(
-            {
-                "task": task,
-                "gold": gold_kind,
-                "jev": a["kind"]["choice"],
-                "conf": round(a["kind"]["confidence"], 2),
-                "cont": round(a["continuation"]["noul"], 2),
-                "gold_cont": gold_cont,
-                "source_talk_p": round(a["source_talk"]["noul"], 2),
-                "gold_source_talk": source_talk,
-                "short_circuit": route is not None,
-                "route_correct": None
-                if route is None
-                else (route.kind == gold_kind and route.continuation == gold_cont),
-            }  # fmt: skip
-        )
+            # Every repeat is scored. Keeping only the last one would hide an unsafe or wrong
+            # answer that appeared on an earlier repeat of the same request.
+            a = result.answers
+            route = pj.to_route(
+                a,
+                floor=settings.JEV_ROUTE_MIN_CONFIDENCE,
+                has_persisted_context=persisted,
+            )
+            rows.append(
+                {
+                    "task": task,
+                    "gold": gold_kind,
+                    "jev": a["kind"]["choice"],
+                    "conf": round(a["kind"]["confidence"], 2),
+                    "cont": round(a["continuation"]["noul"], 2),
+                    "gold_cont": gold_cont,
+                    "source_talk_p": round(a["source_talk"]["noul"], 2),
+                    "gold_source_talk": source_talk,
+                    "short_circuit": route is not None,
+                    "route_correct": None
+                    if route is None
+                    else (route.kind == gold_kind and route.continuation == gold_cont),
+                }  # fmt: skip
+            )
     fired = [r for r in rows if r["short_circuit"]]
     # The harmful error: Jev skips the LLM router on a request whose source choice the router had to read.
     unsafe = [r for r in fired if r["gold_source_talk"]]
     return {
-        "site": "preturn", "cases": len(rows),
+        "site": "preturn", "cases": len(PRETURN), "judged_calls": len(rows),
         "kind_accuracy": round(sum(r["gold"] == r["jev"] for r in rows) / len(rows), 3),
         "short_circuit_rate": round(len(fired) / len(rows), 3),
         "short_circuit_precision": round(sum(bool(r["route_correct"]) for r in fired) / len(fired), 3) if fired else None,
@@ -230,12 +239,12 @@ async def eval_recon(repeat: int) -> dict:
         for _ in range(repeat):
             result = await ask(SYNTHETIC_TENANT, *rj.build_request(context))
             latencies.append(result.elapsed_ms)
-        a = result.answers["action"]
-        rows.append({"gold": gold, "jev": a["choice"], "conf": round(a["confidence"], 2),
-                     "explanation": context["variance_explanation"]})  # fmt: skip
+            a = result.answers["action"]  # every repeat is scored, as in eval_preturn
+            rows.append({"gold": gold, "jev": a["choice"], "conf": round(a["confidence"], 2),
+                         "explanation": context["variance_explanation"]})  # fmt: skip
     confident = [r for r in rows if r["conf"] >= settings.JEV_RECON_MIN_CONFIDENCE]
     return {
-        "site": "recon", "cases": len(rows),
+        "site": "recon", "cases": len(RECON), "judged_calls": len(rows),
         "accuracy_all": round(sum(r["gold"] == r["jev"] for r in rows) / len(rows), 3),
         "coverage_at_floor": round(len(confident) / len(rows), 3),
         "accuracy_at_floor": round(sum(r["gold"] == r["jev"] for r in confident) / len(confident), 3) if confident else None,
@@ -261,7 +270,9 @@ async def main() -> int:
     if not settings.TYPESAFE_API_KEY:
         print("TYPESAFE_API_KEY is not set; nothing was sent.", file=sys.stderr)
         return 2
-    settings.JEV_TENANT_ALLOWLIST = SYNTHETIC_TENANT  # synthetic cases only; see module docstring
+    settings.JEV_TENANT_ALLOWLIST = (
+        SYNTHETIC_TENANT  # synthetic cases only; see module docstring
+    )
 
     from app.services.typesafe.client import session
 

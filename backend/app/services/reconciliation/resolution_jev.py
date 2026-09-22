@@ -4,7 +4,8 @@ Jev (services/typesafe/client.py) picks one of AGENT_ALLOWED_ACTIONS in roughly
 a tenth of a second, but its vendor documents it as unreliable with numbers,
 dates and accounting periods. So the split is strict: ``derive_facts`` does all
 arithmetic in Decimal and names the result ("variance_matches_payout_fee"); Jev
-sees only those names plus free text, never an amount. Its answer then passes
+sees those names plus free text with every number folded to <NUM> (``_scrub``) —
+no figure leaves, in any field. Its answer then passes
 through the SAME ``validate_output`` as the LLM's, so the chargeback pin and the
 write-off materiality guard hold whichever model decided.
 
@@ -25,6 +26,7 @@ from decimal import Decimal, InvalidOperation
 
 from app.core.config import settings
 from app.services.reconciliation import resolution_agent
+from app.services.reconciliation.narrative_contract import _NUM_RE
 from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, validate_output
 from app.services.reconciliation.resolution_planner import FEE_EXPLAIN_TOLERANCE
 from app.services.typesafe.client import try_ask
@@ -103,19 +105,42 @@ def derive_facts(context: dict) -> dict:
     }
 
 
+def _scrub(value):
+    """Fold every number token in every string to <NUM>, recursively.
+
+    The contract is "no figure leaves", and a contract enforced by picking which fields to
+    filter is only as good as the list: free text such as "Variance of $3.20 matches Stripe
+    processing fee (fee_amount=3.20)" sailed past a filter that looked only at evidence
+    values. So this runs over the WHOLE outgoing state as the last step of build_request,
+    using the recon package's own number tokenizer, and the test asserts that no digit of
+    any kind survives. Jev loses nothing it can use: it is unreliable with numbers, and
+    every numeric judgment already reaches it as a named fact from derive_facts.
+    """
+    if isinstance(value, str):
+        return _NUM_RE.sub("<NUM>", value)
+    if isinstance(value, dict):
+        return {_scrub(k): _scrub(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    return value
+
+
 def build_request(context: dict) -> tuple[dict, dict]:
+    # A value that is nothing but a figure carries no meaning once folded, so drop the key.
     evidence = {k: v for k, v in (context.get("evidence") or {}).items() if not _NUMERIC.match(str(v))}
-    state = {
-        "facts": derive_facts(context),
-        "planner_narrative": context.get("planner_narrative") or "",
-        "variance_explanation": context.get("variance_explanation") or "",
-        "evidence": evidence,
-        "candidate_postings": [
-            {"record_type": p.get("record_type"), "memo": p.get("memo") or ""}
-            for p in context.get("candidate_postings") or []
-        ],
-        "payout_line_description": (context.get("payout_line") or {}).get("description") or "",
-    }
+    state = _scrub(
+        {
+            "facts": derive_facts(context),
+            "planner_narrative": context.get("planner_narrative") or "",
+            "variance_explanation": context.get("variance_explanation") or "",
+            "evidence": evidence,
+            "candidate_postings": [
+                {"record_type": p.get("record_type"), "memo": p.get("memo") or ""}
+                for p in context.get("candidate_postings") or []
+            ],
+            "payout_line_description": (context.get("payout_line") or {}).get("description") or "",
+        }
+    )
     questions = {
         "action": {
             "type": "choice",
@@ -193,17 +218,25 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
 
     confident = record["jev_action"] is not None and record["jev_confidence"] >= settings.JEV_RECON_MIN_CONFIDENCE
     if mode == "live" and confident:
-        facts = derive_facts(context)
-        out = {
-            "action": record["jev_action"],
-            "narrative": template_narrative(record["jev_action"], facts),
-            "key_evidence": [key for key in _BASIS if facts.get(key) is True],
-        }
-        validated = validate_output(out, context, materiality)
-        record["guard_veto"] = validated.get("contract_violation")
-        record["decided_by"] = "guard" if record["guard_veto"] else "jev"
-        record["applied_action"] = validated["action"]
-        return validated, record
+        # Building Jev's proposal is Jev-side work: if it breaks, the item goes to the LLM
+        # exactly as if Jev had been unsure. validate_output stays OUTSIDE this guard — a
+        # failure there is a failure of the shared safety net and must surface as before.
+        try:
+            facts = derive_facts(context)
+            out = {
+                "action": record["jev_action"],
+                "narrative": template_narrative(record["jev_action"], facts),
+                "key_evidence": [key for key in _BASIS if facts.get(key) is True],
+            }
+        except Exception as exc:
+            record["jev_error"] = f"unexpected:{type(exc).__name__}"
+            out = None
+        if out is not None:
+            validated = validate_output(out, context, materiality)
+            record["guard_veto"] = validated.get("contract_violation")
+            record["decided_by"] = "guard" if record["guard_veto"] else "jev"
+            record["applied_action"] = validated["action"]
+            return validated, record
 
     if llm_out is None:
         llm_out, record["llm_elapsed_ms"] = await _llm(adapter, model, context)

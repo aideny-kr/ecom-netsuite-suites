@@ -207,3 +207,50 @@ async def test_try_ask_contains_a_failing_request_builder(enabled):
         raise ValueError("bad state")
 
     assert await jev.try_ask(TENANT, build=broken_builder) == (None, "unexpected:ValueError")
+
+
+# ── gate round 2: no non-finite or out-of-range number can be returned ─────
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), -0.5, 1.5])
+async def test_score_must_be_finite_and_within_its_levels(enabled, score):
+    questions = {"sev": {"type": "score", "instructions": "How bad?", "criteria": ["low", "high"]}}
+    answer = {"type": "score", "score": score, "probabilities": {}, "confidence": 0.9}
+    body = json.dumps({**OK_BODY, "answers": {"sev": answer}})  # json.dumps emits NaN/Infinity, as a vendor bug would
+    transport, _ = _transport(lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"}))
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, questions, transport=transport)
+    assert exc.value.reason == "invalid_response"
+
+
+async def test_a_refused_tenant_never_runs_the_request_builder(enabled):
+    built = []
+    result = await jev.try_ask(uuid.uuid4(), build=lambda: built.append(1) or ({}, {}))
+    assert result == (None, "tenant_not_allowed") and built == []
+
+
+# ── gate round 3 ───────────────────────────────────────────────────────────
+
+
+async def test_the_timeout_bounds_the_whole_request_not_each_read(enabled, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(settings, "JEV_TIMEOUT_SECONDS", 0.05)
+
+    async def trickle(request):
+        await asyncio.sleep(0.5)  # a slow body: no single read "times out", the whole call must
+        return httpx.Response(200, json=OK_BODY)
+
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=httpx.MockTransport(trickle))
+    assert exc.value.reason == "timeout"
+
+
+@pytest.mark.parametrize("probabilities", [{"a": float("nan"), "b": 0.1}, {"a": 1.4, "b": 0.1}, {"a": "0.9"}])
+async def test_every_probability_is_a_finite_number_in_range(enabled, probabilities):
+    answer = {"type": "choice", "choice": "a", "probabilities": probabilities, "confidence": 0.8}
+    body = json.dumps({**OK_BODY, "answers": {**OK_BODY["answers"], "kind": answer}})
+    transport, _ = _transport(lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"}))
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+    assert exc.value.reason == "invalid_response"
