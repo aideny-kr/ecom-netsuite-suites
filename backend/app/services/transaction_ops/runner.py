@@ -140,6 +140,9 @@ def _page_progress(page, progress, params, config=None):
             raise ScanChangedError("source_scan_incomplete")
         progress["scan_complete"] = True
     progress["pending_refs"], progress["next_page"] = refs, next_page
+    progress["pending_source_versions"] = {
+        order["number"]: order["updated_at"] for order in page["orders"] if order["number"] in refs
+    }
 
 
 def _replica_page_progress(page, progress, params, config):
@@ -701,9 +704,14 @@ async def run_investigation(
                     continue
                 if progress.get("phase") != "destination":
                     raise SourceScopeError
-            if direct_source and not source_reused:
+            if direct_source:
                 await (_order_mirror or save_observed_order)(
-                    db, tenant_id, direct_source["source_connection_id"], orders[0], _time(source["read_at"])
+                    db,
+                    tenant_id,
+                    direct_source["source_connection_id"],
+                    orders[0],
+                    _time(source["read_at"]),
+                    **({"reused": True} if source_reused else {}),
                 )
             if payment_failed(orders[0]):
                 await state.record_finding(
