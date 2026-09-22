@@ -36,6 +36,7 @@ async def invoke(factory, *, progress=None, reserve=None, remaining=None, retry_
         NetSuiteEvidenceError("upstream_http_429"),
         NetSuiteEvidenceError("upstream_http_503"),
         httpx.ReadTimeout("private response must not be stored"),
+        TimeoutError("private local read timeout"),
     ],
 )
 async def test_transient_read_reserves_again_and_preserves_checkpoint(error):
@@ -130,6 +131,20 @@ async def test_expired_deadline_never_starts_provider_read():
     with pytest.raises(TimeoutError):
         await invoke(factory, remaining=lambda: 0)
     factory.assert_not_awaited()
+
+
+async def test_deadline_reached_during_read_never_reserves_a_retry():
+    expired = False
+
+    async def read():
+        nonlocal expired
+        expired = True
+        raise TimeoutError
+
+    reserve = AsyncMock()
+    with pytest.raises(TimeoutError):
+        await invoke(read, reserve=reserve, remaining=lambda: 0 if expired else 60)
+    reserve.assert_not_awaited()
 
 
 async def test_lost_lease_is_not_retried_or_followed_by_a_progress_write():

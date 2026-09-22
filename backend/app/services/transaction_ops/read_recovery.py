@@ -18,6 +18,8 @@ class ReadBudgetExhaustedError(Exception):
 
 
 def transient_read_code(exc):
+    if isinstance(exc, TimeoutError):
+        return "provider_read_timeout"
     if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)):
         return "provider_transport_failed"
     if isinstance(exc, SourceReadError) and exc.code in {"source_transport_failed", "source_rate_limited"}:

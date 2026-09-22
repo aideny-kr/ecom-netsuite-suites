@@ -367,7 +367,8 @@ async def test_header_match_with_unknown_refunds_does_not_increment_matched_coun
 
 
 @pytest.mark.parametrize("stage", ["source_refunds", "netsuite_refunds"])
-async def test_refund_retry_limit_yields_without_consuming_unread_order(stage):
+@pytest.mark.parametrize("failure", ["transport", "local_timeout", "deadline"])
+async def test_refund_read_limit_yields_without_consuming_unread_order(stage, failure):
     from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
     from app.services.transaction_ops.source_reader import SourceReadError
     from tests.test_transaction_balance_report import evidence
@@ -380,16 +381,30 @@ async def test_refund_retry_limit_yields_without_consuming_unread_order(stage):
     refund = {"order_reference": REF, "currency": "USD", "complete": True, "amount": "100.00"}
     source_refunds = AsyncMock(return_value=refund)
     native_refunds = AsyncMock(return_value=refund)
-    if stage == "source_refunds":
-        source_refunds.side_effect = SourceReadError("source_transport_failed")
+    current_time = NOW
+    failed_reader = source_refunds if stage == "source_refunds" else native_refunds
+    if failure == "deadline":
+
+        async def expire(*args, **kwargs):
+            nonlocal current_time
+            current_time = state.run.deadline_at
+            raise TimeoutError
+
+        failed_reader.side_effect = expire
+    elif failure == "local_timeout":
+        failed_reader.side_effect = TimeoutError
     else:
-        native_refunds.side_effect = NetSuiteEvidenceError("read_transport_failed")
+        failed_reader.side_effect = (
+            SourceReadError("source_transport_failed")
+            if stage == "source_refunds"
+            else NetSuiteEvidenceError("read_transport_failed")
+        )
     result = await run_investigation(
         None,
         state.tenant,
         state.run_id,
         _state=state,
-        _clock=lambda: NOW,
+        _clock=lambda: current_time,
         _enabled=AsyncMock(return_value=True),
         _order_mirror=AsyncMock(),
         _source_reader=AsyncMock(return_value=source),
@@ -400,7 +415,9 @@ async def test_refund_retry_limit_yields_without_consuming_unread_order(stage):
     assert result["termination_reason"] == "budget"
     assert state.run.progress_json["pending_refs"] == [REF]
     assert state.run.progress_json["processed"] == 0
-    assert state.run.progress_json["last_read_failure"]["stage"] == stage
+    if failure != "deadline":
+        assert state.run.progress_json["last_read_failure"]["stage"] == stage
+    failed_reader.assert_awaited_once()
 
 
 @pytest.mark.parametrize("mode", ["match", "difference", "unavailable", "budget"])

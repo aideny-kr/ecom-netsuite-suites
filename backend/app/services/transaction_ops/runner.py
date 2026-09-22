@@ -743,7 +743,7 @@ async def run_investigation(
                         ),
                         retry_calls=2,
                     )
-                except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError):
+                except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                     raise
                 except Exception:
                     refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
@@ -771,7 +771,7 @@ async def run_investigation(
                             data_calls=MAX_REFUND_CALLS,
                             retry_calls=MAX_REFUND_CALLS + 3,
                         )
-                    except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError):
+                    except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                         raise
                     except Exception:
                         refunds["target"] = {"complete": False, "reason": "target_refunds_unavailable"}
