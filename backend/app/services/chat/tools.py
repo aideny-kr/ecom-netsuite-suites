@@ -641,7 +641,7 @@ async def _execute_tool_call_once(
 
         result = await audited_external_call(
             execute=lambda: _execute_external_tool(
-                connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=human_approved
+                connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=human_approved, actor_id=actor_id
             ),
             tenant_id=tenant_id,
             actor_id=actor_id,
@@ -745,8 +745,11 @@ async def _execute_external_tool(
     tenant_id: uuid.UUID,
     db: "AsyncSession",
     human_approved: bool = False,
+    actor_id: uuid.UUID | None = None,
 ) -> dict:
-    """Execute a tool on an external MCP connector."""
+    """Execute a tool on an external MCP connector.
+
+    ``actor_id`` scopes the metadata cache; without it nothing is cached."""
     try:
         from app.services.mcp_connector_service import get_mcp_connector
 
@@ -838,7 +841,22 @@ async def _execute_external_tool(
 
         from app.services.mcp_client_service import call_external_mcp_tool
 
-        result = await call_external_mcp_tool(connector, raw_tool_name, tool_input, db=db)
+        # Model-issued metadata reads are pure lookups the write validator already caches
+        # for an hour (record_metadata_service); give them the same scoped cache here so
+        # the model does not pay the 16 s round trip on every turn. Cached results flow
+        # through the same post-processing below as a live one.
+        cacheable = raw_tool_name == "ns_getRecordTypeMetadata" and is_netsuite_provider(connector.provider)
+        result = None
+        if cacheable:
+            from app.services.chat.record_metadata_service import cached_raw_metadata
+
+            result = cached_raw_metadata(connector, tenant_id, actor_id, tool_input)
+        if result is None:
+            result = await call_external_mcp_tool(connector, raw_tool_name, tool_input, db=db)
+            if cacheable:
+                from app.services.chat.record_metadata_service import remember_raw_metadata
+
+                remember_raw_metadata(connector, tenant_id, actor_id, tool_input, result)
         if isinstance(result, dict):
             # Binding metadata belongs to this dispatcher, never the remote server.
             result.pop("metabase_source", None)

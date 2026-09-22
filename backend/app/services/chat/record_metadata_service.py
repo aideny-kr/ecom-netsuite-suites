@@ -7,6 +7,7 @@ rather than assuming the payload is complete.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -21,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 _TTL_SECONDS = 3600
 _cache: dict[tuple[str, ...], tuple[float, "RecordMetadata"]] = {}
+# The RAW ns_getRecordTypeMetadata response, for model-issued calls that never reach
+# get_record_metadata. Same key dimensions (tenant, actor, connector, credential
+# revision) plus the canonical tool input; same TTL and bound. Staging showed the
+# bypassing calls at 16.5 s p50 in 42 turns.
+_raw_cache: dict[tuple[str, ...], tuple[float, dict]] = {}
 
 
 def _scoped_cache_key(connector, tenant_id, actor_id, record_type):
@@ -153,8 +159,38 @@ class RecordMetadata(BaseModel):
         return next((f for f in self.fields if f.name == name), None)
 
 
+def _raw_key(connector, tenant_id, actor_id, tool_input: dict) -> tuple[str, ...] | None:
+    if actor_id is None:  # never let two actors share an entry by collapsing the key
+        return None
+    scoped = _scoped_cache_key(connector, tenant_id, actor_id, json.dumps(tool_input, sort_keys=True, default=str))
+    return (*scoped, "raw") if scoped else None
+
+
+def cached_raw_metadata(connector, tenant_id, actor_id, tool_input: dict) -> dict | None:
+    """A COPY of a fresh raw metadata response for this exact scope, or None."""
+    key = _raw_key(connector, tenant_id, actor_id, tool_input)
+    hit = _raw_cache.get(key) if key else None
+    if hit and (time.monotonic() - hit[0]) < _TTL_SECONDS:
+        return copy.deepcopy(hit[1])
+    return None
+
+
+def remember_raw_metadata(connector, tenant_id, actor_id, tool_input: dict, result: dict) -> None:
+    """Store a successful raw response; errors are never remembered."""
+    key = _raw_key(connector, tenant_id, actor_id, tool_input)
+    if key is None or not isinstance(result, dict) or result.get("error"):
+        return
+    now = time.monotonic()
+    for expired in [k for k, (at, _) in _raw_cache.items() if now - at >= _TTL_SECONDS]:
+        _raw_cache.pop(expired, None)
+    if len(_raw_cache) >= 512:
+        _raw_cache.pop(min(_raw_cache, key=lambda k: _raw_cache[k][0]))
+    _raw_cache[key] = (now, copy.deepcopy(result))
+
+
 def clear_metadata_cache() -> None:
     _cache.clear()
+    _raw_cache.clear()
 
 
 async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, correlation_id):
