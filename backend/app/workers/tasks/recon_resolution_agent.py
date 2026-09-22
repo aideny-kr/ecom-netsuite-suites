@@ -14,6 +14,7 @@ timed-out item degrades to ``needs_human`` and the run continues.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 
@@ -64,11 +65,12 @@ async def run_resolution_agent(
     from app.services.reconciliation.resolution_agent import (
         PER_ITEM_TIMEOUT_SECONDS,
         apply_agent_proposal,
-        classify_item,
         fetch_agent_eligible,
         gather_context,
-        validate_output,
     )
+    from app.services.reconciliation.resolution_jev import decide_item
+    from app.services.typesafe import client as jev_client
+    from app.services.typesafe.audit import record_comparison
 
     tid = uuid.UUID(str(tenant_id))
     rid = uuid.UUID(str(run_id))
@@ -103,35 +105,55 @@ async def run_resolution_agent(
     kept_needs_human = 0
     contract_violations = 0
 
-    for item in items:
-        try:
-            context = await gather_context(db, tid, item)
-            out = await asyncio.wait_for(
-                classify_item(adapter, model, context),
-                timeout=PER_ITEM_TIMEOUT_SECONDS,
-            )
-            validated = validate_output(out, context, materiality)
-        except Exception:
-            logger.warning("resolution_agent.item_classification_failed", extra={"proposal_id": str(item.id)})
-            validated = {
-                "action": "needs_human",
-                "narrative": "Agent classification failed; needs investigation.",
-                "key_evidence": [],
-                "contract_violation": "classification_error",
-            }
+    from app.core.config import settings
 
-        if validated.get("contract_violation"):
-            contract_violations += 1
-        if validated["action"] == "needs_human":
-            kept_needs_human += 1
-        else:
-            upgraded += 1
+    async with contextlib.AsyncExitStack() as stack:
+        # One HTTPS connection for the whole run instead of a TLS handshake per item.
+        # Entered only when Jev is actually on, so "off" creates no client at all.
+        if settings.JEV_RECON_RESOLUTION_MODE in {"shadow", "live"} and settings.TYPESAFE_API_KEY:
+            await stack.enter_async_context(jev_client.session())
+        for item in items:
+            shadow = None
+            try:
+                context = await gather_context(db, tid, item)
+                # decide_item is the LLM path unchanged when JEV_RECON_RESOLUTION_MODE
+                # is off; both models' answers go through the same validate_output.
+                validated, shadow = await asyncio.wait_for(
+                    decide_item(tid, adapter, model, context, materiality),
+                    timeout=PER_ITEM_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.warning("resolution_agent.item_classification_failed", extra={"proposal_id": str(item.id)})
+                validated = {
+                    "action": "needs_human",
+                    "narrative": "Agent classification failed; needs investigation.",
+                    "key_evidence": [],
+                    "contract_violation": "classification_error",
+                }
 
-        await apply_agent_proposal(db, item, validated)
-        processed += 1
+            if validated.get("contract_violation"):
+                contract_violations += 1
+            if validated["action"] == "needs_human":
+                kept_needs_human += 1
+            else:
+                upgraded += 1
 
-        if job_id and processed % PROGRESS_UPDATE_EVERY == 0:
-            _update_job_progress(tenant_id, job_id, processed, total)
+            if shadow is not None:
+                await record_comparison(
+                    db,
+                    tenant_id=tid,
+                    category="reconciliation",
+                    action="recon.jev_comparison",
+                    payload=shadow,
+                    resource_type="recon_resolution_proposal",
+                    resource_id=str(item.id),
+                    correlation_id=str(rid),
+                )
+            await apply_agent_proposal(db, item, validated)
+            processed += 1
+
+            if job_id and processed % PROGRESS_UPDATE_EVERY == 0:
+                _update_job_progress(tenant_id, job_id, processed, total)
 
     if job_id:
         _update_job_progress(tenant_id, job_id, processed, total)
