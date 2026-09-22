@@ -56,11 +56,21 @@ async def read_changed_orders(
     ):
         raise NetSuiteEvidenceError("invalid_change_scope")
     modified = "SYS_EXTRACT_UTC(t.lastmodifieddate)"
+    # Keep the indexed DATE column bare in a conservative candidate filter.
+    # Applying SYS_EXTRACT_UTC alone to every transaction timed out on the
+    # Framework Inc REST role (2026-09-22). Two days on either side cover local
+    # date/UTC offsets and discarded fractional seconds. The existing exact
+    # UTC predicates below still decide inclusion; this is not a wider scan.
+    candidate_dates = (
+        f"t.lastmodifieddate>=TO_DATE('{lower[:19]}','YYYY-MM-DD HH24:MI:SS')-2 "
+        f"AND t.lastmodifieddate<TO_DATE('{upper[:19]}','YYYY-MM-DD HH24:MI:SS')+2 "
+    )
     query = (
         f"SELECT t.id,t.{reference_field} AS order_reference,t.type,l.subsidiary,"
         f'TO_CHAR({modified},\'YYYY-MM-DD"T"HH24:MI:SS.FF6"Z"\') AS modified_utc '
         "FROM transaction t JOIN transactionline l ON l.transaction=t.id AND l.mainline='T' "
         f"WHERE t.type='SalesOrd' AND l.subsidiary={int(subsidiary_id)} AND t.id>{after_id} "
+        f"AND {candidate_dates}"
         f"AND REGEXP_INSTR(t.{reference_field},'^R[0-9]{{9}}(-[A-Z0-9]+)?$')=1 "
         f"AND {modified}>=TO_TIMESTAMP('{lower}','YYYY-MM-DD HH24:MI:SS.FF6') "
         f"AND {modified}<TO_TIMESTAMP('{upper}','YYYY-MM-DD HH24:MI:SS.FF6') ORDER BY t.id"

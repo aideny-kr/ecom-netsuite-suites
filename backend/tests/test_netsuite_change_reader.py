@@ -61,6 +61,32 @@ async def test_native_changed_order_page_uses_utc_half_open_window_and_sentinel(
 
 
 @pytest.mark.asyncio
+async def test_candidate_date_filter_keeps_exact_window_subsidiary_and_cursor(transport):
+    transport.return_value = response([])
+    start = datetime(2026, 9, 6, 0, 0, 0, 123456, tzinfo=timezone(timedelta(hours=14)))
+    end = start + timedelta(days=1)
+    page = await reader.read_changed_orders(
+        None, uuid4(), uuid4(), "6738075", "2", "custbody_order_ref", start, end, after_id=123
+    )
+    query = transport.call_args.kwargs["body"]["q"]
+    assert "t.lastmodifieddate>=TO_DATE('2026-09-05 10:00:00','YYYY-MM-DD HH24:MI:SS')-2" in query
+    assert "t.lastmodifieddate<TO_DATE('2026-09-06 10:00:00','YYYY-MM-DD HH24:MI:SS')+2" in query
+    assert "SYS_EXTRACT_UTC(t.lastmodifieddate)>=TO_TIMESTAMP('2026-09-05 10:00:00.123456'" in query
+    assert "SYS_EXTRACT_UTC(t.lastmodifieddate)<TO_TIMESTAMP('2026-09-06 10:00:00.123456'" in query
+    assert "l.subsidiary=2 AND t.id>123" in query
+    assert "REGEXP_INSTR(t.custbody_order_ref," in query
+    assert page["scan_complete"] and page["next_after_id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instant", [START - timedelta(microseconds=1), END])
+async def test_candidate_envelope_never_admits_rows_outside_exact_window(transport, instant):
+    transport.return_value = response([{**row(1), "modified_utc": instant.isoformat()}])
+    with pytest.raises(reader.NetSuiteEvidenceError, match="destination_change_page_incomplete"):
+        await read(transport)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", [{"hasMore": True}, {"count": 0}, {"totalResults": 0}])
 async def test_short_or_inconsistent_page_never_claims_complete(transport, change):
     transport.return_value = {**response([row(1)]), **change}
