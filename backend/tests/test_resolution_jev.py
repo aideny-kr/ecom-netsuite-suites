@@ -512,3 +512,13 @@ async def test_an_ineligible_pick_goes_through_the_same_validator(monkeypatch, l
     monkeypatch.setattr(rj, "validate_output", spy)
     validated, _ = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
     assert validated["action"] == "needs_human" and calls == ["needs_human"]
+
+
+def test_number_folding_uses_the_contracts_public_helper():
+    from app.services.reconciliation.narrative_contract import fold_numbers
+
+    assert (
+        fold_numbers("Variance of $3.20 (fee_amount=3.20) on 1,284.55")
+        == "Variance of $<NUM> (fee_amount=<NUM>) on <NUM>"
+    )
+    assert fold_numbers("") == "" and fold_numbers(None) == ""

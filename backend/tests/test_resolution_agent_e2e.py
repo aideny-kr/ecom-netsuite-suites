@@ -141,6 +141,7 @@ async def test_agent_tail_e2e_through_summary_and_approve(db, tenant_a, monkeypa
         # the chargeback policy pin, which counts as a contract_violation.
         "contract_violations": 1,
         "persist_failures": 0,
+        "comparison_failures": 0,
     }
     assert len(fake_adapter.calls) == 2
 

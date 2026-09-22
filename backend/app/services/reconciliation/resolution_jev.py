@@ -26,7 +26,7 @@ from decimal import Decimal, InvalidOperation
 
 from app.core.config import settings
 from app.services.reconciliation import resolution_agent
-from app.services.reconciliation.narrative_contract import _NUM_RE
+from app.services.reconciliation.narrative_contract import fold_numbers
 from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, validate_output
 from app.services.reconciliation.resolution_planner import (
     FEE_EXPLAIN_TOLERANCE,
@@ -164,7 +164,7 @@ def _scrub(value):
     every numeric judgment already reaches it as a named fact from derive_facts.
     """
     if isinstance(value, str):
-        return _NUM_RE.sub("<NUM>", value)
+        return fold_numbers(value)
     if isinstance(value, dict):
         return {_scrub(k): _scrub(v) for k, v in value.items()}
     if isinstance(value, list):

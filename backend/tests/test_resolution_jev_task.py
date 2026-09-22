@@ -197,3 +197,94 @@ async def test_a_persistence_failure_on_one_item_does_not_abort_the_run(db, tena
     monkeypatch.setattr(db, "commit", failing_commit)
     summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))  # must not raise
     assert summary["persist_failures"] == 1 and summary["processed"] == 1
+
+
+async def test_a_failed_comparison_commit_after_a_successful_apply_counts_the_item_as_applied(
+    db, tenant_a, monkeypatch
+):
+    """apply_agent_proposal commits its own write; a later failure recording the
+    comparison must not turn a durably applied item into a 'persist failure'."""
+    await enable_feature_flag(db, tenant_a.id, "reconciliation")
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_agent")
+    run, _ = await _seed_planned_run(db, tenant_a.id)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        return _jev_answer("carry_forward", 0.9), None
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+
+    real_commit = db.commit
+    calls = {"n": 0}
+
+    async def second_commit_fails():
+        calls["n"] += 1
+        if calls["n"] == 2:  # 1st = apply's own commit, 2nd = the comparison's
+            raise RuntimeError("connection reset")
+        return await real_commit()
+
+    monkeypatch.setattr(db, "commit", second_commit_fails)
+    run_id, tenant_id = run.id, tenant_a.id  # the worker's rollback expires these instances
+    summary = await agent_task.run_resolution_agent(db, str(tenant_id), str(run_id))
+    assert summary["upgraded"] == 1 and summary["persist_failures"] == 0 and summary["comparison_failures"] == 1
+    rows = (
+        (
+            await db.execute(
+                select(ReconResolutionProposal).where(
+                    ReconResolutionProposal.run_id == run_id, ReconResolutionProposal.source == "agent"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [r.action for r in rows] == ["book_fee_line"]
+
+
+async def test_a_rollback_on_one_item_does_not_cascade_into_the_next(db, tenant_a, monkeypatch):
+    """Rollback expires every loaded instance; the second item must still be classified
+    and applied, not degraded by lazy IO on an expired object."""
+    from decimal import Decimal
+
+    from app.services.reconciliation.resolution_planner import plan_run
+    from tests.conftest import create_test_recon_result, create_test_recon_run
+
+    await enable_feature_flag(db, tenant_a.id, "reconciliation")
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_agent")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    for i in range(2):
+        await create_test_recon_result(
+            db, tenant_a.id, run.id, status="pending", bucket="needs_review", match_type="deterministic",
+            variance_type="manual_adjustment", variance_amount=Decimal("77.10"), stripe_amount=Decimal("500.00"),
+            netsuite_amount=Decimal("422.90"), evidence={"charge_source_id": f"ch_{i}", "order_reference": f"R62848927{i}"},
+        )  # fmt: skip
+    await db.flush()
+    await plan_run(db, tenant_a.id, run.id)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "off")
+
+    real_commit = db.commit
+    state = {"raised": False}
+
+    async def first_commit_fails():
+        if not state["raised"]:
+            state["raised"] = True
+            raise RuntimeError("connection reset")
+        return await real_commit()
+
+    monkeypatch.setattr(db, "commit", first_commit_fails)
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+    assert summary["processed"] == 2 and summary["persist_failures"] == 1
+    assert summary["upgraded"] == 1 and len(adapter.calls) == 2

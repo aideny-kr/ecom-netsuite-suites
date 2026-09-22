@@ -94,6 +94,7 @@ async def test_task_processes_seeded_run_end_to_end(db, tenant_a, monkeypatch):
         "kept_needs_human": 0,
         "contract_violations": 0,
         "persist_failures": 0,
+        "comparison_failures": 0,
     }
 
     props = (
@@ -219,6 +220,7 @@ async def test_task_processes_two_eligible_items_both_applied(db, tenant_a, monk
         "kept_needs_human": 0,
         "contract_violations": 0,
         "persist_failures": 0,
+        "comparison_failures": 0,
     }
     assert len(fake_adapter.calls) == 2
 

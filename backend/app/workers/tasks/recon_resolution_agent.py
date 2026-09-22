@@ -94,7 +94,14 @@ async def run_resolution_agent(
     items = await fetch_agent_eligible(db, tid, rid)
     total = len(items)
     if total == 0:
-        return {"processed": 0, "upgraded": 0, "kept_needs_human": 0, "contract_violations": 0, "persist_failures": 0}
+        return {
+            "processed": 0,
+            "upgraded": 0,
+            "kept_needs_human": 0,
+            "contract_violations": 0,
+            "persist_failures": 0,
+            "comparison_failures": 0,
+        }
 
     provider, model, api_key, _is_byok = await get_tenant_ai_config(db, tid)
     adapter = get_adapter(provider, api_key)
@@ -105,6 +112,7 @@ async def run_resolution_agent(
     kept_needs_human = 0
     contract_violations = 0
     persist_failures = 0
+    comparison_failures = 0
 
     from app.core.config import settings
 
@@ -117,8 +125,23 @@ async def run_resolution_agent(
             except Exception:
                 logger.warning("resolution_agent.jev_session_unavailable", exc_info=True)
 
-        for item in items:
+        # A rollback expires EVERY loaded instance (expire_on_commit=False does not cover
+        # rollback), and touching an expired attribute on an async session is lazy IO that
+        # raises MissingGreenlet — which would cascade one item's failure into every item
+        # after it. So ids are snapshotted up front, and after any rollback each item is
+        # reloaded with an awaited refresh before it is used.
+        item_ids = [item.id for item in items]
+        expired = False
+        for item, item_id in zip(items, item_ids, strict=True):
             shadow = None
+            if expired:
+                try:
+                    await db.refresh(item)
+                except Exception:
+                    logger.exception("resolution_agent.item_reload_failed", extra={"proposal_id": str(item_id)})
+                    persist_failures += 1
+                    processed += 1
+                    continue
             try:
                 context = await gather_context(db, tid, item)
                 # decide_item is the LLM path unchanged when JEV_RECON_RESOLUTION_MODE
@@ -128,7 +151,7 @@ async def run_resolution_agent(
                     timeout=PER_ITEM_TIMEOUT_SECONDS,
                 )
             except Exception:
-                logger.warning("resolution_agent.item_classification_failed", extra={"proposal_id": str(item.id)})
+                logger.warning("resolution_agent.item_classification_failed", extra={"proposal_id": str(item_id)})
                 validated = {
                     "action": "needs_human",
                     "narrative": "Agent classification failed; needs investigation.",
@@ -136,14 +159,26 @@ async def run_resolution_agent(
                     "contract_violation": "classification_error",
                 }
 
-            # Persistence is isolated per item too: a commit that fails on one item must
-            # degrade THAT item, never abort the run and strand the rest.
+            # Persistence is isolated per item: a commit that fails on one item must degrade
+            # THAT item, never abort the run and strand the rest. The proposal and the
+            # comparison are separate writes with separate outcomes — apply_agent_proposal
+            # commits its own write, so a later failure recording the comparison must not
+            # recount a durably applied item as a persist failure.
+            persisted = True
             try:
                 applied = await apply_agent_proposal(db, item, validated)
-                if shadow is not None:
-                    shadow["applied"] = bool(applied)  # False = the row was already decided; nothing was written
-                    # AFTER apply, and committed here: apply_agent_proposal commits only when it
-                    # actually applied, and a comparison row must not ride on that commit.
+            except Exception:
+                logger.exception("resolution_agent.item_persist_failed", extra={"proposal_id": str(item_id)})
+                persist_failures += 1
+                persisted = False
+                applied = False
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+                expired = True
+
+            if shadow is not None:
+                shadow["applied"] = bool(applied)  # False = nothing was written for this item
+                try:
                     await record_comparison(
                         db,
                         tenant_id=tid,
@@ -151,25 +186,27 @@ async def run_resolution_agent(
                         action="recon.jev_comparison",
                         payload=shadow,
                         resource_type="recon_resolution_proposal",
-                        resource_id=str(item.id),
+                        resource_id=str(item_id),
                         correlation_id=str(rid),
                     )
                     await db.commit()
-            except Exception:
-                logger.exception("resolution_agent.item_persist_failed", extra={"proposal_id": str(item.id)})
-                persist_failures += 1
-                with contextlib.suppress(Exception):
-                    await db.rollback()
-                processed += 1
-                continue
+                except Exception:
+                    logger.exception(
+                        "resolution_agent.jev_comparison_commit_failed", extra={"proposal_id": str(item_id)}
+                    )
+                    comparison_failures += 1
+                    with contextlib.suppress(Exception):
+                        await db.rollback()
+                    expired = True
 
-            if validated.get("contract_violation"):
-                contract_violations += 1
-            if validated["action"] == "needs_human":
-                kept_needs_human += 1
-            else:
-                upgraded += 1
             processed += 1
+            if persisted:
+                if validated.get("contract_violation"):
+                    contract_violations += 1
+                if validated["action"] == "needs_human":
+                    kept_needs_human += 1
+                else:
+                    upgraded += 1
 
             if job_id and processed % PROGRESS_UPDATE_EVERY == 0:
                 _update_job_progress(tenant_id, job_id, processed, total)
@@ -183,6 +220,7 @@ async def run_resolution_agent(
         "kept_needs_human": kept_needs_human,
         "contract_violations": contract_violations,
         "persist_failures": persist_failures,
+        "comparison_failures": comparison_failures,
     }
 
 
