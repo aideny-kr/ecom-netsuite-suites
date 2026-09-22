@@ -219,3 +219,60 @@ def test_an_invalid_ttl_fails_at_startup():
     with pytest.raises(ValidationError, match="PROMPT_CACHE_STABLE_TTL"):
         Settings(PROMPT_CACHE_STABLE_TTL="60m")
     assert Settings(PROMPT_CACHE_STABLE_TTL="1h").PROMPT_CACHE_STABLE_TTL == "1h"
+
+
+# ── gate round 2 on #287 ───────────────────────────────────────────────────
+
+
+async def test_a_nested_purpose_inside_a_decorated_generator_survives_its_yields():
+    from app.services.chat.llm_purpose import current_purpose, llm_purpose, with_llm_purpose
+
+    cleanup_saw = []
+
+    @with_llm_purpose("agent_turn_stream")
+    async def events():
+        try:
+            with llm_purpose("completion_review"):
+                yield current_purpose()
+                yield current_purpose()
+            yield current_purpose()
+        finally:
+            cleanup_saw.append(current_purpose())
+
+    seen, between = [], []
+    async for purpose in events():
+        seen.append(purpose)
+        between.append(current_purpose())
+    assert seen == ["completion_review", "completion_review", "agent_turn_stream"]
+    assert between == ["unlabelled"] * 3
+    assert cleanup_saw == ["agent_turn_stream"]
+
+
+async def test_an_abandoned_generators_cleanup_runs_under_its_own_label():
+    from app.services.chat.llm_purpose import current_purpose, with_llm_purpose
+
+    cleanup_saw = []
+
+    @with_llm_purpose("agent_turn_stream")
+    async def events():
+        try:
+            yield 1
+            yield 2
+        finally:
+            cleanup_saw.append(current_purpose())
+
+    gen = events()
+    await gen.__anext__()
+    await gen.aclose()
+    assert cleanup_saw == ["agent_turn_stream"]
+    assert current_purpose() == "unlabelled"
+
+
+def test_only_the_last_tool_carries_a_cache_breakpoint(monkeypatch):
+    """A caller-supplied 5m marker on an earlier tool would precede the 1h stable
+    breakpoint, which the API rejects; the adapter owns tool breakpoints."""
+    monkeypatch.setattr(settings, "PROMPT_CACHE_STABLE_TTL", "1h")
+    tools = [{**TOOLS[0], "cache_control": {"type": "ephemeral"}}, TOOLS[1]]
+    k = _kwargs(tools=tools)
+    assert "cache_control" not in k["tools"][0]
+    assert k["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}

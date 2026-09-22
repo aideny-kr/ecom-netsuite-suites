@@ -240,7 +240,9 @@ def _build_request_kwargs(
     }
     if tools:
         # Cache tool definitions — they're large and identical every step
-        cached_tools = [_to_api_tool(t) for t in tools]
+        # The adapter owns tool breakpoints: a caller's marker on an earlier tool could
+        # put a 5m entry ahead of the 1h stable one, which the API rejects.
+        cached_tools = [{k: v for k, v in _to_api_tool(t).items() if k != "cache_control"} for t in tools]
         if cached_tools:
             cached_tools[-1] = {**cached_tools[-1], "cache_control": stable}
         kwargs["tools"] = cached_tools
@@ -263,8 +265,10 @@ def _prefix_fingerprint(kwargs: dict) -> str:
     """12 hex chars identifying the STABLE prefix of the request actually sent: model,
     tool definitions and the cache-marked system block(s), cache_control included.
 
-    Two calls with the same fingerprint should read the prefix from cache; a fresh
-    write on a repeated fingerprint is the invalidator we are hunting."""
+    Within the TTL, every call on a repeated fingerprint should show ``cache_read``
+    of at least the prefix. ``cache_read=0`` on a fingerprint seen minutes earlier is
+    the invalidator we are hunting; a fresh ``cache_write`` alone is not, because the
+    growing conversation is written on every turn."""
     stable_system = [b for b in kwargs.get("system") or [] if "cache_control" in b]
     body = json.dumps(
         {"model": kwargs.get("model"), "tools": kwargs.get("tools") or [], "system": stable_system},
@@ -284,18 +288,19 @@ def _ttl_split(raw) -> tuple[int, int]:
     )
 
 
-def _log_usage(
-    model: str, raw, usage: TokenUsage, *, stream: bool, elapsed_ms: int, kwargs: dict, retries: int = 0
-) -> None:
+def _log_usage(model: str, raw, *, stream: bool, elapsed_ms: int, kwargs: dict, retries: int = 0) -> None:
     """One line per provider call, with enough to attribute a turn's cost to its calls:
     the caller's purpose label, wall time, the stable-prefix fingerprint (repeated
     fingerprint + fresh write = invalidation) and the 5m/1h cache-write split.
 
     ``ms`` is the attempt that answered, SDK connection retries included; this
     adapter's own overload retries (stream path) are counted in ``retries`` and their
-    backoff is excluded, so ``ms`` stays comparable across calls."""
+    backoff is excluded. On the stream path ``ms`` runs to the final message, so it
+    includes time the caller spent between chunks. A stream that ends without a final
+    message (deadline, cancellation) has no usage to report and emits no line."""
     if not logger.isEnabledFor(logging.INFO):
         return
+    usage = _usage_from(raw)
     write_5m, write_1h = _ttl_split(raw)
     logger.info(
         "llm.usage purpose=%s model=%s in=%d cache_write=%d cache_write_5m=%d cache_write_1h=%d cache_read=%d "
@@ -371,7 +376,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                 tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
         usage = _usage_from(response.usage)
-        _log_usage(model, response.usage, usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
+        _log_usage(model, response.usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
 
         return LLMResponse(
             text_blocks=text_blocks,
@@ -478,7 +483,6 @@ class AnthropicAdapter(BaseLLMAdapter):
         _log_usage(
             model,
             final_message.usage,
-            usage,
             stream=True,
             elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
             kwargs=kwargs,

@@ -37,10 +37,12 @@ def llm_purpose(label: str):
 def with_llm_purpose(label: str):
     """Decorator form for async functions or async generators whose whole body is one purpose.
 
-    For a generator the label is set around each step and reset before the value is
-    yielded: a ``with`` spanning the ``async for`` would leak the label into the caller
-    between yields, stay set if the caller broke out early, and raise on reset when an
-    abandoned generator is closed from another task's context."""
+    A generator's body sees its own purpose (the label, or a nested ``llm_purpose``
+    it opened) while it runs, cleanup included; the caller sees its own between
+    yields. A ``with`` spanning the ``async for`` would leak the label into the caller,
+    stay set after an early break, and raise on reset when an abandoned generator is
+    closed from another task's context. So each step sets the body's purpose, records
+    what the body left, and resets before the value is yielded."""
 
     def wrap(fn):
         if inspect.isasyncgenfunction(fn):
@@ -48,18 +50,24 @@ def with_llm_purpose(label: str):
             @functools.wraps(fn)
             async def gen(*args, **kwargs):
                 agen = fn(*args, **kwargs)
+                inside = label
                 try:
                     while True:
-                        token = _purpose.set(label)
+                        token = _purpose.set(inside)
                         try:
                             item = await agen.__anext__()
                         except StopAsyncIteration:
                             return
                         finally:
+                            inside = _purpose.get()
                             _purpose.reset(token)
                         yield item
                 finally:
-                    await agen.aclose()
+                    token = _purpose.set(inside)
+                    try:
+                        await agen.aclose()
+                    finally:
+                        _purpose.reset(token)
 
             return gen
 
