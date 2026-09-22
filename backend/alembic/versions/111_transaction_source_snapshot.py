@@ -12,6 +12,7 @@ depends_on = None
 
 
 def upgrade():
+    op.create_index("ix_orders_source_reference", "orders", ["tenant_id", "source_connection_id", "order_number"])
     op.create_table(
         "transaction_source_snapshots",
         sa.Column("id", pg.UUID(as_uuid=True), primary_key=True),
@@ -39,3 +40,4 @@ def upgrade():
 
 def downgrade():
     op.drop_table("transaction_source_snapshots")
+    op.drop_index("ix_orders_source_reference", table_name="orders")
