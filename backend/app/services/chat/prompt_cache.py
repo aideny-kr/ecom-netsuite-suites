@@ -28,7 +28,8 @@ from dataclasses import dataclass
 # up to once per minute. tenant_memory is per-turn for the same reason.
 # See test_prompt_cache.py.
 _DYNAMIC_BLOCK_RE = re.compile(
-    r"<(tenant_vernacular|domain_knowledge|proven_patterns|financial_context|learned_rules|tenant_memory|current_datetime)>"
+    r"<(tenant_vernacular|domain_knowledge|proven_patterns|financial_context|learned_rules|tenant_memory|current_datetime"
+    r"|drive_knowledge)>"
     r".*?"
     r"</\1>",
     re.DOTALL,

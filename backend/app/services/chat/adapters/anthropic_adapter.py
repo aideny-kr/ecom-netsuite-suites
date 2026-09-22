@@ -8,6 +8,7 @@ import time
 import anthropic
 import httpx
 
+from app.core.config import settings
 from app.services.chat import thinking as _thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage, ToolUseBlock
 
@@ -194,6 +195,81 @@ def _compute_retry_delay(kind: str, attempt: int, exc: anthropic.APIStatusError)
     return None
 
 
+def _stable_cache_control() -> dict:
+    """cache_control for the STABLE prefix (tool definitions + static system block).
+
+    PROMPT_CACHE_STABLE_TTL="1h" keeps a tenant's prefix warm across the gaps staging
+    shows (72% of turns are the first of a session and pay cold-cache prices). The
+    growing conversation keeps the 5-minute auto-cache: the API requires 1h entries to
+    precede 5m ones, and tools -> system -> messages is exactly that order. A write at
+    1h costs 2x instead of 1.25x, so this is a measured switch, default off.
+    """
+    if settings.PROMPT_CACHE_STABLE_TTL == "1h":
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
+
+
+def _build_request_kwargs(
+    *,
+    model: str,
+    max_tokens: int,
+    system: str,
+    system_dynamic: str = "",
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    tool_choice: dict | str | None = None,
+    thinking_level: str | None = None,
+) -> dict:
+    """The one place the request is assembled, for both the blocking and streaming paths."""
+    stable = _stable_cache_control()
+    system_blocks = [{"type": "text", "text": system, "cache_control": stable}]
+    if system_dynamic:
+        system_blocks.append({"type": "text", "text": system_dynamic})
+    kwargs: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system_blocks,
+        "messages": messages,
+        # Cache the growing conversation too, including dynamic context and tool results.
+        # Tool + static-system breakpoints use two of the four available slots.
+        # The pinned SDK predates this top-level option; extra_body passes it to the API.
+        "extra_body": {"cache_control": {"type": "ephemeral"}},
+    }
+    if tools:
+        # Cache tool definitions — they're large and identical every step
+        cached_tools = [_to_api_tool(t) for t in tools]
+        if cached_tools:
+            cached_tools[-1] = {**cached_tools[-1], "cache_control": stable}
+        kwargs["tools"] = cached_tools
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
+    _apply_thinking(kwargs, model, max_tokens, thinking_level, tool_choice)
+    return kwargs
+
+
+def _usage_from(raw) -> TokenUsage:
+    return TokenUsage(
+        input_tokens=raw.input_tokens,
+        output_tokens=raw.output_tokens,
+        cache_creation_input_tokens=getattr(raw, "cache_creation_input_tokens", 0) or 0,
+        cache_read_input_tokens=getattr(raw, "cache_read_input_tokens", 0) or 0,
+    )
+
+
+def _log_usage(model: str, usage: TokenUsage, *, stream: bool) -> None:
+    """One line per provider call. Per-TURN totals in chat_messages cannot say WHICH call
+    in a turn paid 93K fresh tokens; this can, by correlating on time within a request."""
+    logger.info(
+        "llm.usage model=%s in=%d cache_write=%d cache_read=%d out=%d stream=%s",
+        model,
+        usage.input_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_read_input_tokens,
+        usage.output_tokens,
+        "true" if stream else "false",
+    )
+
+
 class AnthropicAdapter(BaseLLMAdapter):
     def __init__(self, api_key: str):
         self._client = anthropic.AsyncAnthropic(
@@ -225,36 +301,16 @@ class AnthropicAdapter(BaseLLMAdapter):
         tool_choice: dict | str | None = None,
         thinking_level: str | None = None,
     ) -> LLMResponse:
-        system_blocks = [
-            {
-                "type": "text",
-                "text": system,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-        if system_dynamic:
-            system_blocks.append({"type": "text", "text": system_dynamic})
-
-        kwargs: dict = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "system": system_blocks,
-            "messages": messages,
-            # Cache the growing conversation too, including dynamic context and tool results.
-            # Tool + static-system breakpoints use two of the four available slots.
-            # The pinned SDK predates this top-level option; extra_body passes it to the API.
-            "extra_body": {"cache_control": {"type": "ephemeral"}},
-        }
-        if tools:
-            # Cache tool definitions — they're large and identical every step
-            cached_tools = [_to_api_tool(t) for t in tools]
-            if cached_tools:
-                cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
-            kwargs["tools"] = cached_tools
-        if tool_choice is not None:
-            kwargs["tool_choice"] = tool_choice
-
-        _apply_thinking(kwargs, model, max_tokens, thinking_level, tool_choice)
+        kwargs = _build_request_kwargs(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            system_dynamic=system_dynamic,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            thinking_level=thinking_level,
+        )
 
         response = await self._client.messages.create(**kwargs)
 
@@ -267,12 +323,8 @@ class AnthropicAdapter(BaseLLMAdapter):
             elif block.type == "tool_use":
                 tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
-        usage = TokenUsage(
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            cache_creation_input_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
-            cache_read_input_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-        )
+        usage = _usage_from(response.usage)
+        _log_usage(model, usage, stream=False)
 
         return LLMResponse(
             text_blocks=text_blocks,
@@ -293,35 +345,16 @@ class AnthropicAdapter(BaseLLMAdapter):
         tool_choice: dict | str | None = None,
         thinking_level: str | None = None,
     ):
-        system_blocks = [
-            {
-                "type": "text",
-                "text": system,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-        if system_dynamic:
-            system_blocks.append({"type": "text", "text": system_dynamic})
-
-        kwargs: dict = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "system": system_blocks,
-            "messages": messages,
-            # Cache the growing conversation too, including dynamic context and tool results.
-            # Tool + static-system breakpoints use two of the four available slots.
-            # The pinned SDK predates this top-level option; extra_body passes it to the API.
-            "extra_body": {"cache_control": {"type": "ephemeral"}},
-        }
-        if tools:
-            cached_tools = [_to_api_tool(t) for t in tools]
-            if cached_tools:
-                cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
-            kwargs["tools"] = cached_tools
-        if tool_choice is not None:
-            kwargs["tool_choice"] = tool_choice
-
-        _apply_thinking(kwargs, model, max_tokens, thinking_level, tool_choice)
+        kwargs = _build_request_kwargs(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            system_dynamic=system_dynamic,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            thinking_level=thinking_level,
+        )
 
         # Retry the stream open (and the first chunk) on transient overloads.
         # Once any text has been yielded we do NOT retry — partial output
@@ -390,12 +423,8 @@ class AnthropicAdapter(BaseLLMAdapter):
             elif block.type == "tool_use":
                 tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
-        usage = TokenUsage(
-            input_tokens=final_message.usage.input_tokens,
-            output_tokens=final_message.usage.output_tokens,
-            cache_creation_input_tokens=getattr(final_message.usage, "cache_creation_input_tokens", 0) or 0,
-            cache_read_input_tokens=getattr(final_message.usage, "cache_read_input_tokens", 0) or 0,
-        )
+        usage = _usage_from(final_message.usage)
+        _log_usage(model, usage, stream=True)
 
         response = LLMResponse(
             text_blocks=text_blocks,
