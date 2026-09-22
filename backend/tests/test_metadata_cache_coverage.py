@@ -207,3 +207,36 @@ async def test_a_remote_server_cannot_claim_its_answer_came_from_our_cache(remot
     remote.return_value = {**META, "served_from_cache": {"age_seconds": 999}}
     first = await _meta()
     assert "served_from_cache" not in first
+
+
+# ── gate round 2 on #288 ───────────────────────────────────────────────────
+
+
+async def test_a_response_carrying_any_error_key_is_never_cached(remote):
+    remote.return_value = {"error": "", **META}
+    await _meta()
+    await _meta()
+    assert remote.await_count == 2
+
+
+async def test_the_audit_hash_is_the_same_for_a_live_answer_and_its_cached_copy(remote, monkeypatch):
+    """The age marker is provenance, not content: identical NetSuite metadata must hash
+    identically whether it came live or from the cache, and across cache hits."""
+    from app.services.chat import external_tool_audit
+
+    events = []
+
+    async def capture(**kw):
+        events.append(kw)
+
+    monkeypatch.setattr(external_tool_audit, "append_event", capture)
+    common = dict(
+        tenant_id=TENANT, actor_id=ACTOR, actor_type="user", correlation_id="c", session_id="s",
+        connector_id=CONN, tool_name="ns_getRecordTypeMetadata", params={}, human_approved=False,
+    )  # fmt: skip
+    await external_tool_audit.audited_external_call(execute=_meta, **common)
+    await external_tool_audit.audited_external_call(execute=_meta, **common)
+    live, cached = (e["payload"] for e in events if e["action"] == "tool.executed")
+    assert cached["served_from_cache"] is not None and live["served_from_cache"] is None
+    assert cached["result_sha256"] == live["result_sha256"]
+    assert cached["result_bytes"] == live["result_bytes"]

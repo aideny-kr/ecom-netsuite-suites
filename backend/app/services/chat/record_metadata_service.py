@@ -207,7 +207,7 @@ def remember_raw_metadata(connector, tenant_id, actor_id, tool_input: dict, resu
     of any shape is fetched again next time, never served for an hour."""
     if _validator_fetch.get() or not isinstance(result, dict):
         return
-    if result.get("error") or result.get("isError") is True or result.get("success") is False:
+    if "error" in result or result.get("isError") is True or result.get("success") is False:
         return
     try:
         usable = _parse_metadata(result, str(tool_input.get("recordType") or "")) is not None
