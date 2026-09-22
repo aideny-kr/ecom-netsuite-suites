@@ -149,20 +149,32 @@ def test_request_carries_only_code_derived_facts():
 
 
 @pytest.mark.parametrize(
-    "value,sent",
+    "field,value,sent",
     [
-        ("missing_in_netsuite", "missing_in_netsuite"),
-        ("paid", "paid"),
-        (None, None),
-        ("Jane Doe <jane@acme.example>", "other"),
-        ("po_1AbC", "other"),
-        ("x" * 41, "other"),
+        ("root_cause", "missing_in_netsuite", "missing_in_netsuite"),
+        ("variance_type", "timing", "timing"),
+        ("payout_status", "in_transit", "in_transit"),
+        ("root_cause", None, None),
+        # token-shaped private values: a name, an id, a trailing newline
+        ("root_cause", "jane_doe", "other"),
+        ("variance_type", "ch_privatecustomer", "other"),
+        ("payout_status", "secret\n", "other"),
+        # a real value in the wrong field is still not that field's vocabulary
+        ("payout_status", "missing_in_netsuite", "other"),
+        ("root_cause", "Jane Doe <jane@acme.example>", "other"),
     ],
 )
-def test_a_categorical_fact_leaves_only_as_a_plain_token(value, sent):
-    context = _context(root_cause=value, payout={"status": value})
-    facts = rj.build_request(context)[0]["facts"]
-    assert facts["root_cause"] == sent and facts["payout_status"] == sent
+def test_a_categorical_fact_leaves_only_as_a_value_of_its_own_vocabulary(field, value, sent):
+    context = _context(**({"payout": {"status": value}} if field == "payout_status" else {field: value}))
+    assert rj.build_request(context)[0]["facts"][field] == sent
+
+
+def test_a_string_fact_without_a_vocabulary_is_never_sent_verbatim():
+    assert rj._outgoing_facts({"new_fact": "anything_at_all", "flag": True, "unknown": None}) == {
+        "new_fact": "other",
+        "flag": True,
+        "unknown": None,
+    }
 
 
 def test_every_criterion_names_only_facts_jev_is_sent():

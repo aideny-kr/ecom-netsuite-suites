@@ -353,9 +353,12 @@ def test_a_run_with_an_unpersisted_item_fails_its_job(monkeypatch):
 
     import app.core.database as database
 
+    disposed = []
+
     @contextlib.asynccontextmanager
     async def fake_session():
         yield object()
+        disposed.append(True)  # like worker_async_session: skipped when an exception unwinds through it
 
     async def no_context(_db, _tenant_id):
         return None
@@ -375,3 +378,60 @@ def test_a_run_with_an_unpersisted_item_fails_its_job(monkeypatch):
     monkeypatch.setattr(agent_task, "run_resolution_agent", summary_with(1))
     with pytest.raises(agent_task.ResolutionItemsNotPersistedError, match="1 of 3"):
         agent_task.recon_resolution_agent.run(str(uuid.uuid4()), str(uuid.uuid4()))
+    assert disposed == [True, True]  # the per-task engine is disposed on the failing run too
+
+
+async def test_a_failed_reload_recovers_the_session_for_the_items_after_it(db, tenant_a, monkeypatch):
+    """A reload that fails with a database error leaves the transaction aborted; without
+    recovery every later item would fail on it and run without tenant context."""
+    from decimal import Decimal
+
+    from sqlalchemy import text
+
+    from app.core.database import set_tenant_context_session
+    from app.services.reconciliation import resolution_agent
+    from app.services.reconciliation.resolution_planner import plan_run
+    from tests.conftest import create_test_recon_result, create_test_recon_run
+
+    await enable_feature_flag(db, tenant_a.id, "reconciliation")
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_agent")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    for i in range(3):
+        await create_test_recon_result(
+            db, tenant_a.id, run.id, status="pending", bucket="needs_review", match_type="deterministic",
+            variance_type="manual_adjustment", variance_amount=Decimal("77.10"), stripe_amount=Decimal("500.00"),
+            netsuite_amount=Decimal("422.90"), evidence={"charge_source_id": f"ch_{i}", "order_reference": f"R62848927{i}"},
+        )  # fmt: skip
+    await db.flush()
+    await plan_run(db, tenant_a.id, run.id)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "off")
+
+    tenant_id = str(tenant_a.id)
+    await set_tenant_context_session(db, tenant_id)
+    seen, real_apply, real_refresh = [], resolution_agent.apply_agent_proposal, db.refresh
+    refreshes = []
+
+    async def first_apply_fails(session, item, validated):
+        seen.append((await session.execute(text("SELECT current_setting('app.current_tenant_id', true)"))).scalar())
+        if len(seen) == 1:
+            raise RuntimeError("connection reset")
+        return await real_apply(session, item, validated)
+
+    async def first_reload_breaks_the_transaction(item, *args, **kwargs):
+        refreshes.append(item)
+        if len(refreshes) == 1:
+            await db.execute(text("SELECT 1/0"))  # a real database error: the transaction is now aborted
+        return await real_refresh(item, *args, **kwargs)
+
+    monkeypatch.setattr(resolution_agent, "apply_agent_proposal", first_apply_fails)
+    monkeypatch.setattr(db, "refresh", first_reload_breaks_the_transaction)
+    summary = await agent_task.run_resolution_agent(db, tenant_id, str(run.id))
+    assert summary["processed"] == 3 and summary["persist_failures"] == 2
+    assert seen == [tenant_id, tenant_id]  # the third item was applied, under the tenant's context

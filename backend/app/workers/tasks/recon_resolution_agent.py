@@ -50,7 +50,11 @@ async def _recover_after_failed_write(db: AsyncSession, tenant_id: str) -> None:
     """Roll back, then re-apply the tenant context. The worker's context is a plain SET,
     which a rollback undoes when nothing has committed since it ran, so without this a
     failure on the first item would leave every later item with no tenant context. A
-    failure to re-apply it is not swallowed: the run stops rather than go on unscoped."""
+    failure to re-apply it is not swallowed: the run stops rather than go on unscoped.
+
+    This restores the context on the session's current connection. A connection the
+    pool replaces mid-run (recycle, failed pre-ping) starts without it; that gap is older
+    than this helper and shared by every worker that uses set_tenant_context_session."""
     from app.core.database import set_tenant_context_session
 
     with contextlib.suppress(Exception):
@@ -167,6 +171,8 @@ async def run_resolution_agent(
                     logger.exception("resolution_agent.item_reload_failed", extra={"proposal_id": str(item_id)})
                     persist_failures += 1
                     processed += 1
+                    # a database error here leaves the transaction aborted for every later item
+                    await _recover_after_failed_write(db, str(tid))
                     continue
             try:
                 context = await gather_context(db, tid, item)
@@ -279,6 +285,9 @@ def recon_resolution_agent(self, tenant_id: str, run_id: str, **kwargs) -> dict:
     async def _run() -> dict:
         async with worker_async_session() as db:
             await set_tenant_context_session(db, tenant_id)
-            return _require_every_item_persisted(await run_resolution_agent(db, tenant_id, run_id, job_id=self._job_id))
+            summary = await run_resolution_agent(db, tenant_id, run_id, job_id=self._job_id)
+        # Raised outside the session: worker_async_session disposes its engine only on a
+        # normal exit, so an exception unwinding through it would skip the cleanup.
+        return _require_every_item_persisted(summary)
 
     return asyncio.run(_run())

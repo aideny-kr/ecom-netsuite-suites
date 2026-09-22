@@ -21,7 +21,6 @@ beside it) · live (Jev decides at or above JEV_RECON_MIN_CONFIDENCE, else LLM).
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from decimal import Decimal, InvalidOperation
 
@@ -35,9 +34,27 @@ from app.services.reconciliation.resolution_planner import (
 )
 from app.services.typesafe.client import try_ask
 
-# A fact leaves as a boolean, null, or a plain lowercase token such as "missing_in_netsuite".
-# Anything else (a name, an email, an id with digits) is sent as "other".
-_TOKEN = re.compile(r"^[a-z_]{1,40}$")
+# The only string values a fact may carry to the external API, per field: the variance
+# kinds our matchers and planner produce, and Stripe's own enums. Any other value, and
+# any string fact without a vocabulary here, is sent as "other" (default deny).
+_VARIANCE_KINDS = frozenset(
+    {
+        "amount_mismatch", "chargeback", "duplicate", "fee_variance", "fees", "fx_rounding",
+        "manual_adjustment", "missing", "missing_in_netsuite", "not_verified", "timing", "washout",
+    }
+)  # fmt: skip
+_FACT_VOCABULARY = {
+    "root_cause": _VARIANCE_KINDS,
+    "variance_type": _VARIANCE_KINDS,
+    "candidate_count": frozenset({"none", "one", "several"}),
+    "payout_status": frozenset({"paid", "pending", "in_transit", "canceled", "failed"}),
+    "payout_line_type": frozenset(
+        {
+            "adjustment", "application_fee", "application_fee_refund", "charge", "dispute", "payment",
+            "payment_refund", "payout", "refund", "stripe_fee", "transfer",
+        }
+    ),
+}  # fmt: skip
 
 _CRITERIA = {
     "book_fee_line": (
@@ -156,17 +173,18 @@ def derive_facts(context: dict) -> dict:
 
 
 def _outgoing_facts(facts: dict) -> dict:
-    """The facts as they may leave for the external API: booleans, nulls and plain
-    tokens only. Everything Jev needs is already a named fact computed in code, so
-    free text is not sent at all rather than filtered: a filter is only as good as its
-    list, and a scrub for digits let names, emails and ids through."""
+    """The facts as they may leave for the external API: booleans, nulls, and strings
+    from that field's own vocabulary. Everything Jev needs is already a named fact
+    computed in code, so free text is not sent at all rather than filtered: a scrub for
+    digits let names, emails and ids through, and so would any pattern that a
+    lowercase name like "jane_doe" can match."""
 
-    def safe(value):
+    def safe(name, value):
         if value is None or isinstance(value, bool):
             return value
-        return value if isinstance(value, str) and _TOKEN.match(value) else "other"
+        return value if value in _FACT_VOCABULARY.get(name, ()) else "other"
 
-    return {name: safe(value) for name, value in facts.items()}
+    return {name: safe(name, value) for name, value in facts.items()}
 
 
 def build_request(context: dict) -> tuple[dict, dict]:
