@@ -1,4 +1,4 @@
-"""Request-local coalescing of reference reads during group preparation only.
+"""Bounded coalescing of reference reads during preparation and scan collection.
 
 Never cache transactions, queries, credentials, failures, or write preflights.
 Every reader still authenticates and verifies its tenant/connection/account.
@@ -33,8 +33,8 @@ class ReferenceReads:
 
 
 @contextmanager
-def reference_read_batch():
-    batch = ReferenceReads()
+def reference_read_batch(batch=None):
+    batch = batch if batch is not None else ReferenceReads()
     token = _batch.set(batch)
     try:
         yield batch

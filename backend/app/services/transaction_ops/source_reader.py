@@ -9,6 +9,7 @@ No request/response body, headers or upstream exception text leaves this module.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import uuid
@@ -157,12 +158,15 @@ async def _load_source(db: AsyncSession, tenant_id: uuid.UUID, step_id: uuid.UUI
     return step, connection, token, region
 
 
-async def _direct_read(db, tenant_id, connection_id, relative_uri, *, client):
-    from app.services.http_connector_service import ConnectorReadError, read_json, validate_credentials
+async def direct_connection(db, tenant_id, connection_id):
+    """Validate the same tenant/provider/profile boundary for live and saved reads."""
+    from app.services.http_connector_service import validate_credentials
 
     connection = (
         await db.execute(
-            select(Connection).where(
+            select(Connection)
+            .execution_options(populate_existing=True)
+            .where(
                 Connection.id == connection_id,
                 Connection.tenant_id == tenant_id,
                 Connection.provider == "solidus",
@@ -176,9 +180,17 @@ async def _direct_read(db, tenant_id, connection_id, relative_uri, *, client):
         credentials = validate_credentials("solidus", decrypt_credentials(connection.encrypted_credentials))
         if credentials.get("api_profile") != "framework_sync" or credentials["base_url"] != _FRAMEWORK_BASE:
             raise SourceReadError("unsupported_source", 422)
-        body = await read_json(credentials, relative_uri, client=client)
     except (InvalidToken, ValueError, TypeError, AttributeError):
         raise SourceReadError("source_credentials_unavailable") from None
+    return connection, credentials
+
+
+async def _direct_read(db, tenant_id, connection_id, relative_uri, *, client):
+    from app.services.http_connector_service import ConnectorReadError, read_json
+
+    connection, credentials = await direct_connection(db, tenant_id, connection_id)
+    try:
+        body = await read_json(credentials, relative_uri, client=client)
     except ConnectorReadError as exc:
         raise SourceReadError("source_" + exc.code, 429 if exc.code == "rate_limited" else 502) from None
     _check_envelope(body)
@@ -186,6 +198,7 @@ async def _direct_read(db, tenant_id, connection_id, relative_uri, *, client):
         "source": "framework",
         "source_transport": "solidus_direct",
         "connection_id": str(connection.id),
+        "_connection_fingerprint": hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest(),
         "read_at": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -183,6 +183,9 @@ def _replica_page_progress(page, progress, params, config):
     progress["scan_complete"] = complete
     progress["pending_refs"] = references
     progress["unscoped_replica_refs"] = unscoped
+    progress["pending_source_versions"] = {
+        order["number"]: order["updated_at"] for order in orders if order["number"] in references
+    }
 
 
 def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
@@ -317,7 +320,7 @@ async def run_investigation(
     _clock=None,
 ):
     from app.services.ingestion.solidus_sync import save_observed_order
-    from app.services.transaction_ops import metabase_reader
+    from app.services.transaction_ops import metabase_reader, source_snapshot
     from app.services.transaction_ops.call_meter import metered
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
@@ -332,6 +335,7 @@ async def run_investigation(
         read_guard_snapshot,
     )
     from app.services.transaction_ops.planner import PlanningError, plan_proposal
+    from app.services.transaction_ops.read_batch import ReferenceReads, reference_read_batch
     from app.services.transaction_ops.refund_reader import read_refund_order_page, read_solidus_refunds
     from app.services.transaction_ops.source_reader import read_framework_order, read_framework_orders_page
 
@@ -350,8 +354,11 @@ async def run_investigation(
     if token is None:
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
     progress = _initial_progress(run)
+    reference_reads = ReferenceReads()
+    previous_reference_hits = progress.get("reference_cache_hits", 0)
 
     async def save():
+        progress["reference_cache_hits"] = previous_reference_hits + reference_reads.hits
         await state.update_progress(
             db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
         )
@@ -414,7 +421,7 @@ async def run_investigation(
                 db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
             )
 
-        with metered() as meter:
+        with metered() as meter, reference_read_batch(reference_reads):
             try:
                 result = await bounded_read(stage, factory, reserve_retry=reserve_retry, **options)
             except asyncio.CancelledError:
@@ -447,6 +454,9 @@ async def run_investigation(
             {"source_connection_id": UUID(config["source_connection_id"])} if config.get("source_connection_id") else {}
         )
         mapping = TransactionMapping.model_validate(config["mapping_json"])
+        snapshot_floor = source_snapshot.scan_floor(run, clock()) if direct_source and not settlement else None
+        if mapping.line_identity_mode == "inventory_units":
+            snapshot_floor = None  # Create-input projections are deliberately not shared.
         if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
             return await finish("stall")
         if run.params_json.get("review"):
@@ -647,14 +657,35 @@ async def run_investigation(
                 await save()
                 continue
             reference = progress["pending_refs"][0]
-            if not await reserve(2, 1):
-                return await finish("budget")
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
-            source = await bounded_read(
-                "source_order",
-                lambda: source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source),
-                retry_calls=2,
-            )
+            can_reuse = snapshot_floor is not None and progress.get("phase") == "orders"
+            source = None
+            if can_reuse:
+                source = await source_snapshot.load(
+                    db,
+                    tenant_id,
+                    direct_source["source_connection_id"],
+                    reference,
+                    since=snapshot_floor,
+                    now=clock(),
+                    minimum_version=_time(progress.get("pending_source_versions", {}).get(reference)),
+                )
+            source_reused = source is not None
+            if not await reserve(0 if source_reused else 2, 1):
+                return await finish("budget")
+            if source_reused:
+                progress["source_snapshot_hits"] = progress.get("source_snapshot_hits", 0) + 1
+            else:
+                source = await bounded_read(
+                    "source_order",
+                    lambda: source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source),
+                    retry_calls=2,
+                )
+                progress["source_detail_reads"] = progress.get("source_detail_reads", 0) + 1
+                if can_reuse:
+                    await source_snapshot.save(
+                        db, tenant_id, direct_source["source_connection_id"], reference, source, now=clock()
+                    )
             orders = source.get("orders") or []
             if len(orders) != 1 or orders[0].get("number") != reference:
                 raise ValueError("source_reference_mismatch")
@@ -670,7 +701,7 @@ async def run_investigation(
                     continue
                 if progress.get("phase") != "destination":
                     raise SourceScopeError
-            if direct_source:
+            if direct_source and not source_reused:
                 await (_order_mirror or save_observed_order)(
                     db, tenant_id, direct_source["source_connection_id"], orders[0], _time(source["read_at"])
                 )
@@ -783,6 +814,7 @@ async def run_investigation(
             action = report["comparison"]["recommended_action"]
             if (
                 not settlement
+                and not source_reused
                 and mapping.action_mode == "propose_actions"
                 and action
                 in {
