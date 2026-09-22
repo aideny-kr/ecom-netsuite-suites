@@ -845,21 +845,24 @@ async def _execute_external_tool(
         # for an hour (record_metadata_service); give them the same scoped cache here so
         # the model does not pay the 16 s round trip on every turn. Cached results flow
         # through the same post-processing below as a live one.
+        # A hit is marked ``served_from_cache`` (after post-processing, below) so the
+        # model and the external-tool audit can tell it from a live round trip.
         cacheable = raw_tool_name == "ns_getRecordTypeMetadata" and is_netsuite_provider(connector.provider)
-        result = None
+        result, cache_age = None, None
         if cacheable:
-            from app.services.chat.record_metadata_service import cached_raw_metadata
+            from app.services.chat.record_metadata_service import cached_raw_metadata, remember_raw_metadata
 
-            result = cached_raw_metadata(connector, tenant_id, actor_id, tool_input)
+            hit = cached_raw_metadata(connector, tenant_id, actor_id, tool_input)
+            if hit is not None:
+                result, cache_age = hit
         if result is None:
             result = await call_external_mcp_tool(connector, raw_tool_name, tool_input, db=db)
             if cacheable:
-                from app.services.chat.record_metadata_service import remember_raw_metadata
-
                 remember_raw_metadata(connector, tenant_id, actor_id, tool_input, result)
         if isinstance(result, dict):
-            # Binding metadata belongs to this dispatcher, never the remote server.
+            # Binding and cache provenance belong to this dispatcher, never the remote server.
             result.pop("metabase_source", None)
+            result.pop("served_from_cache", None)
             from app.services.chat.metabase_tool_policy import is_read_only_metabase_tool
 
             if raw_tool_name in {"query", "execute_query", "execute_question"} and is_read_only_metabase_tool(
@@ -889,6 +892,8 @@ async def _execute_external_tool(
                         "basis": "configured_netsuite_mcp_endpoint",
                     },
                 }
+        if cache_age is not None and isinstance(result, dict):
+            result = {**result, "served_from_cache": {"age_seconds": cache_age}}
         return result
     except Exception as exc:
         logger.warning(

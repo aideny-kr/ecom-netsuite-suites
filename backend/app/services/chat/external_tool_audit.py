@@ -100,6 +100,8 @@ async def audited_external_call(
         "result_sha256": hashlib.sha256(encoded).hexdigest(),
         "result_bytes": len(encoded),
         "connection_scope": body.get("verified_connection_scope"),
+        # Set only by the dispatcher's metadata cache: no round trip reached the provider.
+        "served_from_cache": body.get("served_from_cache"),
     }
     try:
         await append_event(

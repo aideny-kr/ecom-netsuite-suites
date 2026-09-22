@@ -17,7 +17,11 @@ from app.services.chat import record_metadata_service as rms
 from app.services.chat.tools import _execute_external_tool
 
 TENANT, ACTOR, CONN = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-META = {"fields": [{"id": "tranid", "label": "Number", "type": "text"}], "sublists": {}}
+# The live ns_getRecordTypeMetadata shape (record_metadata_service._parse_properties_shape).
+META = {
+    "success": True,
+    "metadata": {"type": "object", "properties": {"tranid": {"title": "Number", "type": "string"}}},
+}
 
 
 def _connector(**over):
@@ -53,7 +57,7 @@ async def test_second_identical_lookup_is_served_from_cache(remote):
     first = await _meta()
     second = await _meta()
     assert remote.await_count == 1
-    assert first["fields"] == META["fields"] and second["fields"] == META["fields"]
+    assert first["metadata"] == META["metadata"] and second["metadata"] == META["metadata"]
     assert first is not second  # a copy each time: post-processing mutates results
 
 
@@ -87,7 +91,7 @@ async def test_errors_are_never_cached(remote):
     await _meta()
     remote.return_value = dict(META)
     result = await _meta()
-    assert remote.await_count == 2 and result["fields"] == META["fields"]
+    assert remote.await_count == 2 and result["metadata"] == META["metadata"]
 
 
 async def test_without_an_actor_nothing_is_cached(remote):
@@ -107,3 +111,99 @@ async def test_clear_metadata_cache_clears_the_raw_cache_too(remote):
     rms.clear_metadata_cache()
     await _meta()
     assert remote.await_count == 2
+
+
+# ── gate round 1 on #288 ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"success": False, "message": "Temporary upstream failure"},
+        {"isError": True, "content": [{"type": "text", "text": "boom"}]},
+        {},
+        {"success": True, "metadata": {"properties": "not a mapping"}},
+        {"success": False, "metadata": META["metadata"]},
+        {"fields": [{"id": "tranid"}], "sublists": {}},  # malformed legacy shape
+    ],
+)
+async def test_only_a_response_the_validator_can_parse_is_cached(remote, failure):
+    """Caching is an allow-list: what the write validator's own parser accepts as
+    metadata, from a response that does not declare itself failed. Anything else is
+    fetched again next time, however it is shaped."""
+    remote.return_value = failure
+    await _meta()
+    await _meta()
+    assert remote.await_count == 2
+
+
+async def _validate(record_type="invoice"):
+    from app.services.chat.tools import _make_ext_tool_name
+
+    return await rms.get_record_metadata(
+        record_type=record_type,
+        mutation_tool_name=_make_ext_tool_name(CONN, "ns_updateRecord"),
+        tenant_id=TENANT,
+        actor_id=ACTOR,
+        correlation_id="c",
+        db=AsyncMock(),
+        session_id="s",
+    )
+
+
+@pytest.fixture
+def validator_dispatch(monkeypatch):
+    """get_record_metadata's execute_tool_call, reduced to the dispatcher it reaches."""
+    import json
+
+    async def dispatch(*, tool_name, tool_input, tenant_id, actor_id, **_):
+        return json.dumps(
+            await _execute_external_tool(
+                CONN, "ns_getRecordTypeMetadata", tool_input, tenant_id, AsyncMock(), actor_id=actor_id
+            )
+        )
+
+    monkeypatch.setattr(rms, "execute_tool_call", dispatch)
+
+
+async def test_the_write_validator_fetches_live_even_after_a_model_lookup(remote, validator_dispatch):
+    """Its own 1h cache is stamped when it fetches; a hit on the model's cache would
+    restamp an hour-old response as new and stretch staleness towards two hours."""
+    await _meta()
+    meta = await _validate()
+    assert meta is not None and meta.spec_for("tranid")
+    assert remote.await_count == 2
+
+
+async def test_the_write_validator_does_not_seed_the_model_cache(remote, validator_dispatch):
+    await _validate()
+    await _meta()
+    assert remote.await_count == 2
+
+
+async def test_a_cache_hit_says_so_and_the_audit_records_it(remote, monkeypatch):
+    from app.services.chat import external_tool_audit
+
+    first = await _meta()
+    second = await _meta()
+    assert "served_from_cache" not in first
+    assert second["served_from_cache"]["age_seconds"] >= 0
+
+    events = []
+
+    async def capture(**kw):
+        events.append(kw)
+
+    monkeypatch.setattr(external_tool_audit, "append_event", capture)
+    await external_tool_audit.audited_external_call(
+        execute=_meta, tenant_id=TENANT, actor_id=ACTOR, actor_type="user", correlation_id="c", session_id="s",
+        connector_id=CONN, tool_name="ns_getRecordTypeMetadata", params={}, human_approved=False,
+    )  # fmt: skip
+    assert events[-1]["action"] == "tool.executed"
+    assert set(events[-1]["payload"]["served_from_cache"]) == {"age_seconds"}
+
+
+async def test_a_remote_server_cannot_claim_its_answer_came_from_our_cache(remote):
+    remote.return_value = {**META, "served_from_cache": {"age_seconds": 999}}
+    first = await _meta()
+    assert "served_from_cache" not in first
