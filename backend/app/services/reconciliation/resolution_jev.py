@@ -98,7 +98,15 @@ def derive_facts(context: dict) -> dict:
     fee = _dec(line.get("fee"))
     fee_same_currency = line.get("currency") in (None, currency)
     postings = context.get("candidate_postings") or []
-    same_currency_postings = [p for p in postings if p.get("currency") in (None, currency)]
+
+    def _comparable_amount(p: dict) -> Decimal | None:
+        """The posting amount in the CHARGE's currency, or None when no such value exists."""
+        if p.get("transaction_currency"):
+            return _dec(p.get("foreign_amount")) if p.get("transaction_currency") == currency else None
+        return _dec(p.get("amount")) if p.get("currency") in (None, currency) else None
+
+    comparable = [_comparable_amount(p) for p in postings]
+    same_currency_postings = [p for p, a in zip(postings, comparable, strict=True) if a is not None]
     order_reference = (context.get("evidence") or {}).get("order_reference") or ""
     payout = context.get("payout") or {}
     days = _dec(payout.get("days_since_arrival"))
@@ -118,8 +126,14 @@ def derive_facts(context: dict) -> dict:
         "netsuite_lower_than_stripe": None if stripe is None or netsuite is None else netsuite < stripe,
         "candidate_count": "none" if not postings else "one" if len(postings) == 1 else "several",
         "candidate_with_exact_stripe_amount": (
-            None if stripe is None else any(_dec(p.get("amount")) == stripe for p in same_currency_postings)
+            None if stripe is None else any(a == stripe for a in comparable if a is not None)
         ),
+        "candidate_search_complete": (
+            None
+            if context.get("candidate_search_complete") is None
+            else str(context["candidate_search_complete"]) == "True"
+        ),
+        "deposit_unapplied_evidence": str(evidence.get("deposit_unapplied")) == "True",
         "candidate_memo_mentions_order_reference": bool(order_reference)
         and any(order_reference.lower() in (p.get("memo") or "").lower() for p in postings),
         "payout_line_type": line.get("line_type"),
@@ -180,6 +194,37 @@ def build_request(context: dict) -> tuple[dict, dict]:
     return state, questions
 
 
+_HEALTHY_PAYOUT = {"paid", "pending", "in_transit"}
+
+
+def eligible(action: str, facts: dict) -> bool:
+    """Facts are not advice Jev may ignore: an action is only acceptable when the facts
+    that justify it hold. Absence of evidence never qualifies: apply_deposit needs the
+    planner's own unapplied-deposit evidence (which no producer writes today, so Jev
+    abstains), and create_and_apply_deposit needs verified SOURCE coverage, which local
+    completeness cannot establish — so it is never Jev-eligible until such a fact exists.
+    """
+    if action == "needs_human":
+        return True
+    if action == "book_fee_line":
+        return bool(
+            facts["variance_matches_payout_fee"]
+            and facts["netsuite_lower_than_stripe"]
+            and facts["currency_consistent"]
+        )
+    if action == "writeoff_je":
+        return not facts["above_materiality"] and facts["variance_type"] in {"fx_rounding", "amount_mismatch"}
+    if action == "carry_forward":
+        return bool(
+            facts["washout"]
+            or facts["variance_type"] == "timing"
+            or (facts["payout_recent"] and facts["payout_status"] in _HEALTHY_PAYOUT)
+        )
+    if action == "apply_deposit":
+        return bool(facts["deposit_unapplied_evidence"] and facts["currency_consistent"])
+    return False  # create_and_apply_deposit, and anything unknown
+
+
 def template_narrative(action: str, facts: dict) -> str:
     basis = [text for key, text in _BASIS.items() if facts.get(key) is True]
     reason = "; ".join(basis) if basis else "no single fact was decisive"
@@ -227,47 +272,69 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
         return validate_output(out, context, materiality), None
 
     record = {
-        "mode": mode, "jev_action": None, "jev_confidence": None, "jev_probabilities": None,
-        "jev_elapsed_ms": None, "jev_error": None, "llm_action": None, "llm_elapsed_ms": None,
-        "agree": None, "decided_by": "llm", "guard_veto": None, "applied_action": None,
+        "mode": mode, "jev_action": None, "jev_confidence": None, "jev_probabilities": None, "jev_elapsed_ms": None,
+        "jev_error": None, "jev_validated_action": None, "jev_veto": None, "eligibility_veto": None,
+        "llm_action": None, "llm_elapsed_ms": None, "llm_error": None, "agree": None, "decided_by": "llm",
+        "guard_veto": None, "applied_action": None,
     }  # fmt: skip
+    facts = derive_facts(context)
 
-    llm_out = None
+    def _jev_proposal(action: str) -> tuple[dict, str | None]:
+        """Jev's pick as a validated proposal, plus the veto that stopped it (or None)."""
+        if not eligible(action, facts):
+            return {"action": "needs_human", "narrative": template_narrative("needs_human", facts), "key_evidence": [],
+                    "contract_violation": f"jev_ineligible:{action}"}, action  # fmt: skip
+        out = {
+            "action": action,
+            "narrative": template_narrative(action, facts),
+            "key_evidence": [key for key in _BASIS if facts.get(key) is True],
+        }
+        validated = validate_output(out, context, materiality)
+        return validated, None
+
+    async def _llm_guarded():
+        try:
+            return await _llm(adapter, model, context), None
+        except Exception as exc:  # the primary path failed; record it, never lose the item
+            return None, type(exc).__name__
+
     if mode == "shadow":
-        # Concurrent: shadow must cost the item no extra time inside its timeout budget.
-        jev_fields, (llm_out, record["llm_elapsed_ms"]) = await asyncio.gather(
-            _jev(tenant_id, context), _llm(adapter, model, context)
-        )
+        jev_fields, (llm_result, llm_error) = await asyncio.gather(_jev(tenant_id, context), _llm_guarded())
     else:
-        jev_fields = await _jev(tenant_id, context)
+        jev_fields, llm_result, llm_error = await _jev(tenant_id, context), None, None
     record.update(jev_fields)
+
+    if record["jev_action"] is not None:
+        try:
+            jev_validated, ineligible = _jev_proposal(record["jev_action"])
+            record["eligibility_veto"] = ineligible
+            record["jev_veto"] = ineligible or jev_validated.get("contract_violation")
+            record["jev_validated_action"] = jev_validated["action"]
+        except Exception as exc:
+            record["jev_error"] = f"unexpected:{type(exc).__name__}"
+            record["jev_action"] = None
 
     confident = record["jev_action"] is not None and record["jev_confidence"] >= settings.JEV_RECON_MIN_CONFIDENCE
     if mode == "live" and confident:
-        # Building Jev's proposal is Jev-side work: if it breaks, the item goes to the LLM
-        # exactly as if Jev had been unsure. validate_output stays OUTSIDE this guard — a
-        # failure there is a failure of the shared safety net and must surface as before.
-        try:
-            facts = derive_facts(context)
-            out = {
-                "action": record["jev_action"],
-                "narrative": template_narrative(record["jev_action"], facts),
-                "key_evidence": [key for key in _BASIS if facts.get(key) is True],
-            }
-        except Exception as exc:
-            record["jev_error"] = f"unexpected:{type(exc).__name__}"
-            out = None
-        if out is not None:
-            validated = validate_output(out, context, materiality)
-            record["guard_veto"] = validated.get("contract_violation")
-            record["decided_by"] = "guard" if record["guard_veto"] else "jev"
-            record["applied_action"] = validated["action"]
-            return validated, record
+        record["guard_veto"] = record["jev_veto"]
+        record["decided_by"] = "guard" if record["jev_veto"] else "jev"
+        record["applied_action"] = jev_validated["action"]
+        return jev_validated, record
 
-    if llm_out is None:
-        llm_out, record["llm_elapsed_ms"] = await _llm(adapter, model, context)
-    validated = validate_output(llm_out, context, materiality)
+    if llm_result is None and llm_error is None:
+        llm_result, llm_error = await _llm_guarded()
+    if llm_result is None:
+        record["llm_error"] = llm_error
+        validated = {
+            "action": "needs_human",
+            "narrative": "Agent classification failed; needs investigation.",
+            "key_evidence": [],
+            "contract_violation": "classification_error",
+        }
+    else:
+        llm_out, record["llm_elapsed_ms"] = llm_result
+        validated = validate_output(llm_out, context, materiality)
     record["llm_action"] = record["applied_action"] = validated["action"]
     if record["jev_action"] is not None:
-        record["agree"] = record["jev_action"] == validated["action"]
+        record["agree"] = record["jev_validated_action"] == validated["action"]
     return validated, record

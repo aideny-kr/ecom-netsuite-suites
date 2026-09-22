@@ -361,3 +361,99 @@ def test_carry_forward_criterion_names_only_facts_that_exist():
     for name in ("payout_recent", "washout"):
         assert f"facts.{name}" in text
     assert "recent payout still syncing" not in text
+
+
+# ── codex cross-examination (2026-09-22) ───────────────────────────────────
+
+
+def _eur_candidate(foreign="96.80", base="105.10"):
+    return {
+        "record_type": "customerdeposit", "amount": base, "currency": "USD",
+        "transaction_currency": "EUR", "foreign_amount": foreign, "memo": "Order R123456789", "netsuite_internal_id": "9",
+    }  # fmt: skip
+
+
+def test_amounts_compare_in_the_transaction_currency_when_the_posting_carries_one():
+    # charge is EUR 96.80; the posting is a EUR 96.80 deposit booked into a USD subsidiary
+    line = {**_context()["payout_line"], "currency": "EUR"}
+    ctx = _context(currency="EUR", stripe_amount="96.80", payout_line=line, candidate_postings=[_eur_candidate()])
+    facts = rj.derive_facts(ctx)
+    assert facts["candidate_with_exact_stripe_amount"] is True and facts["currency_consistent"] is True
+
+
+def test_base_currency_amount_is_never_compared_to_a_foreign_charge():
+    ctx = _context(
+        currency="EUR", stripe_amount="105.10", candidate_postings=[_eur_candidate(foreign="96.80", base="105.10")]
+    )
+    assert rj.derive_facts(ctx)["candidate_with_exact_stripe_amount"] is False
+
+
+def test_search_completeness_is_a_fact_and_only_local_completeness():
+    assert rj.derive_facts(_context(candidate_search_complete="True"))["candidate_search_complete"] is True
+    assert rj.derive_facts(_context())["candidate_search_complete"] is None
+
+
+@pytest.mark.parametrize(
+    "action, ctx_over, eligible",
+    [
+        ("book_fee_line", {}, True),
+        ("book_fee_line", {"variance_amount": "-41.00", "netsuite_amount": "59.00"}, False),  # fee does not explain it
+        ("writeoff_je", {"variance_type": "fx_rounding", "variance_amount": "-0.03", "netsuite_amount": "99.97"}, True),
+        ("writeoff_je", {"above_materiality": "True"}, False),
+        ("carry_forward", {"variance_type": "timing"}, True),
+        (
+            "carry_forward",
+            {"payout": {"status": "in_transit", "days_since_arrival": "2"}, "variance_type": "missing_in_netsuite"},
+            True,
+        ),
+        (
+            "carry_forward",
+            {"payout": {"status": "failed", "days_since_arrival": "2"}, "variance_type": "missing_in_netsuite"},
+            False,
+        ),
+        ("carry_forward", {}, False),
+        ("apply_deposit", {}, False),  # no applicability evidence exists anywhere in the product today
+        ("apply_deposit", {"evidence": {"order_reference": "R1", "deposit_unapplied": "True"}}, True),
+        (
+            "create_and_apply_deposit",
+            {"candidate_search_complete": "True", "candidate_postings": []},
+            False,
+        ),  # local ≠ source coverage
+        ("needs_human", {}, True),
+    ],
+)
+def test_action_eligibility_is_decided_by_facts_in_code(action, ctx_over, eligible):
+    facts = rj.derive_facts(_context(**ctx_over))
+    assert rj.eligible(action, facts) is eligible, (action, facts)
+
+
+async def test_live_ineligible_pick_abstains_and_records_the_reason(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+    _patch_jev(monkeypatch, result=_jev("apply_deposit", 0.99))
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert validated["action"] == "needs_human"
+    assert record["decided_by"] == "guard" and record["eligibility_veto"] == "apply_deposit"
+    assert llm.calls == 0
+
+
+async def test_shadow_validates_jevs_pick_too_so_the_veto_rate_is_measurable(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+    _patch_jev(monkeypatch, result=_jev("writeoff_je", 0.99))
+    context = _context(variance_amount="-41.00", netsuite_amount="59.00")  # above the $10 materiality
+    _, record = await rj.decide_item(TENANT, llm, "m", context, MATERIALITY)
+    assert record["jev_action"] == "writeoff_je"
+    assert record["jev_validated_action"] == "needs_human" and record["jev_veto"] == "writeoff_je above materiality"
+    assert record["llm_action"] == "book_fee_line" and record["agree"] is False
+
+
+async def test_shadow_records_the_item_even_when_the_llm_raises(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+    _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.95))
+
+    async def broken(adapter_, model, context):
+        raise TimeoutError("provider down")
+
+    monkeypatch.setattr(rj.resolution_agent, "classify_item", broken)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert validated["action"] == "needs_human" and validated["contract_violation"] == "classification_error"
+    assert record["llm_error"] == "TimeoutError" and record["jev_action"] == "book_fee_line"

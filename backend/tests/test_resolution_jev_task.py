@@ -76,16 +76,21 @@ async def test_shadow_applies_the_llm_decision_and_records_the_comparison(db, te
     assert set(payload) <= {
         "mode", "jev_action", "jev_confidence", "jev_probabilities", "jev_elapsed_ms", "jev_error",
         "jev_model", "llm_action", "llm_elapsed_ms", "agree", "decided_by", "guard_veto", "applied_action",
+        "jev_validated_action", "jev_veto", "eligibility_veto", "llm_error", "applied",
     }  # fmt: skip
 
 
-async def test_live_confident_jev_is_applied_without_an_llm_call(db, tenant_a, monkeypatch):
+async def test_live_confident_but_ineligible_jev_pick_abstains_without_an_llm_call(db, tenant_a, monkeypatch):
+    """The seeded item is a manual_adjustment with no fee, timing, washout or recency fact,
+    so carry_forward has no factual basis; the gate abstains and records why."""
     adapter, rows, events = await _run(
         db, tenant_a, monkeypatch, mode="live", jev_action="carry_forward", jev_confidence=0.97
     )
-    assert [r.action for r in rows] == ["carry_forward"]
+    assert [r.action for r in rows] == ["needs_human"]
     assert adapter.calls == []
-    assert events[0].payload["decided_by"] == "jev"
+    payload = events[0].payload
+    assert payload["decided_by"] == "guard" and payload["eligibility_veto"] == "carry_forward"
+    assert payload["applied"] is True
     assert not any(ch.isdigit() for ch in rows[0].narrative)
 
 

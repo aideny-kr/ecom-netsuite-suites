@@ -138,8 +138,9 @@ async def run_resolution_agent(
             else:
                 upgraded += 1
 
-            await apply_agent_proposal(db, item, validated)
+            applied = await apply_agent_proposal(db, item, validated)
             if shadow is not None:
+                shadow["applied"] = bool(applied)  # False = the row was already decided; nothing was written
                 # AFTER apply, and committed here: apply_agent_proposal commits only when it
                 # actually applied, and a comparison row must not ride on that commit.
                 await record_comparison(

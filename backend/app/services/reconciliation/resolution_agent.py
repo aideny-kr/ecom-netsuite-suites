@@ -148,13 +148,20 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
         candidate_postings = [
             {
                 "record_type": p.record_type,
+                # amount/currency are the SUBSIDIARY BASE values; the transaction-currency
+                # pair is what a Stripe charge must be compared to (canonical.py, Phase A).
                 "amount": str(p.amount),
                 "currency": p.currency,
+                "transaction_currency": p.transaction_currency or "",
+                "foreign_amount": str(p.foreign_amount) if p.foreign_amount is not None else "",
                 "memo": p.memo or "",
                 "netsuite_internal_id": p.netsuite_internal_id or "",
             }
             for p in rows
         ]
+        # Only LOCAL completeness: fewer rows than the cap means the local predicate is
+        # exhausted, not that NetSuite holds nothing — ingestion is date-bounded and capped.
+        context["candidate_search_complete"] = str(len(rows) < _CANDIDATE_POSTING_LIMIT)
     context["candidate_postings"] = candidate_postings
 
     payout_line_id = evidence.get("charge_payout_line_id")
