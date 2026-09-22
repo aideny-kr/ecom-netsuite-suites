@@ -406,11 +406,13 @@ class AnthropicAdapter(BaseLLMAdapter):
         # Retry the stream open (and the first chunk) on transient overloads.
         # Once any text has been yielded we do NOT retry — partial output
         # cannot be rewound without confusing the caller.
-        deadline = time.monotonic() + _STREAM_TIMEOUT_SECONDS
+        # One clock reading starts both the overall deadline and the first attempt; a
+        # retry restarts only the attempt clock, after its backoff.
+        attempt_started = time.monotonic()
+        deadline = attempt_started + _STREAM_TIMEOUT_SECONDS
         attempt = 0
         first_chunk_received = False
         while True:
-            attempt_started = time.monotonic()
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
                     async for text in stream.text_stream:
@@ -461,6 +463,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     getattr(exc, "request_id", "?"),
                 )
                 await asyncio.sleep(delay)
+                attempt_started = time.monotonic()
 
         text_blocks: list[str] = []
         tool_use_blocks: list[ToolUseBlock] = []
