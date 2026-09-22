@@ -152,3 +152,63 @@ async def test_real_inventory_filters_foreign_disabled_and_inactive_connectors(c
     own.status = "revoked"
     await db.flush()
     assert await state() == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_active_company_policy_blocks_catalog_readiness(client, db, admin_user):
+    from app.models.policy_profile import PolicyProfile
+
+    user, headers = admin_user
+    policy = PolicyProfile(
+        tenant_id=user.tenant_id, name="Restricted tools", tool_allowlist=["workspace_list_files"], is_active=True
+    )
+    db.add(policy)
+    await db.flush()
+    with patch(
+        "app.services.chat.tools.build_all_tool_definitions",
+        new_callable=AsyncMock,
+        return_value=local("netsuite_suiteql"),
+    ):
+        response = await client.get("/api/v1/skills/catalog", headers=headers)
+        assert response.status_code == 200
+        card = next(s for s in response.json() if s["slug"] == "inventory_check")
+        assert card["execution_surfaces"][0]["status"] == "blocked"
+        assert card["execution_surfaces"][0]["blockers"][0]["code"] == "policy_denied"
+        assert "Restricted tools" not in response.text
+        policy.tool_allowlist = ["netsuite_suiteql"]
+        await db.flush()
+        response = await client.get("/api/v1/skills/catalog", headers=headers)
+        assert (
+            next(s for s in response.json() if s["slug"] == "inventory_check")["execution_surfaces"][0]["status"]
+            == "available"
+        )
+
+
+@pytest.mark.asyncio
+async def test_disabled_feature_blocks_accounting_even_with_tools_and_permission(client, db, admin_user):
+    from sqlalchemy import update
+
+    from app.models.feature_flag import TenantFeatureFlag
+    from app.services.feature_flag_service import clear_cache
+
+    user, headers = admin_user
+    await db.execute(
+        update(TenantFeatureFlag)
+        .where(TenantFeatureFlag.tenant_id == user.tenant_id, TenantFeatureFlag.flag_key == "reconciliation")
+        .values(enabled=False)
+    )
+    clear_cache()
+    with (
+        patch(
+            "app.services.chat.tools.build_all_tool_definitions",
+            new_callable=AsyncMock,
+            return_value=local("transaction_ops_accounting_evidence"),
+        ),
+        patch("app.core.dependencies.has_permission", new_callable=AsyncMock, return_value=True),
+    ):
+        response = await client.get("/api/v1/skills/catalog", headers=headers)
+        assert response.status_code == 200
+        card = next(s for s in response.json() if s["slug"] == "accounting_operations")
+        assert card["execution_surfaces"][0]["status"] == "blocked"
+        assert card["execution_surfaces"][0]["blockers"][0]["code"] == "feature_disabled"
+    clear_cache()

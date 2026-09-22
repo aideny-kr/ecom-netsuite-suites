@@ -123,8 +123,15 @@ def _capabilities(tools: list[dict], permissions: set[str]) -> dict[str, bool]:
     }
 
 
-def resolve_catalog(skills: list[dict], tools: list[dict], permissions: set[str]) -> list[AgentSkillMetadata]:
+def resolve_catalog(
+    skills: list[dict],
+    tools: list[dict],
+    permissions: set[str],
+    *,
+    blocked_requirements: dict[str, SkillBlocker] | None = None,
+) -> list[AgentSkillMetadata]:
     capabilities = _capabilities(tools, permissions)
+    blocked_requirements = blocked_requirements or {}
     catalog = []
     for skill in skills:
         binding = _BINDINGS.get(skill["slug"])
@@ -132,7 +139,8 @@ def resolve_catalog(skills: list[dict], tools: list[dict], permissions: set[str]
             SkillRequirement(key=key, label=_LABELS[key], satisfied=capabilities[key]) for key in binding or ()
         ]
         blockers = [
-            SkillBlocker(
+            blocked_requirements.get(r.key)
+            or SkillBlocker(
                 code="permission_required" if r.key.endswith("permission") else "tool_unavailable",
                 message=f"{r.label} is unavailable.",
                 action=(
@@ -160,7 +168,7 @@ def resolve_catalog(skills: list[dict], tools: list[dict], permissions: set[str]
                 kind="expertise",
                 version=version,
                 owner="Suite Studio",
-                provenance=f"product/skills/{skill['slug']}/SKILL.md",
+                provenance=f"backend/app/services/chat/skills/{skill['slug']}/SKILL.md",
                 inputs=[
                     "User request, selected source and scope",
                     "Current source evidence and applicable company policy",
@@ -199,6 +207,7 @@ async def get_catalog(db, user) -> list[AgentSkillMetadata]:
     from app.services.chat.skills import get_all_skills_metadata
     from app.services.chat.tools import build_all_tool_definitions
     from app.services.feature_flag_service import is_enabled
+    from app.services.policy_service import evaluate_tool_call, get_active_policy
 
     permissions = {
         p
@@ -207,6 +216,23 @@ async def get_catalog(db, user) -> list[AgentSkillMetadata]:
     }
     tools = await build_all_tool_definitions(db, user.tenant_id)
     tools = _filter_tools_for_dead_connections(tools, await _check_connection_health(db, user.tenant_id))
+    blocked = {}
+    policy = await get_active_policy(db, user.tenant_id)
+    permitted_tools = [t for t in tools if evaluate_tool_call(policy, t["name"], {})["allowed"]]
+    before, after = _capabilities(tools, permissions), _capabilities(permitted_tools, permissions)
+    for key in before:
+        if before[key] and not after[key]:
+            blocked[key] = SkillBlocker(
+                code="policy_denied",
+                message=f"{_LABELS[key]} is blocked by company tool policy.",
+                action="Ask a company administrator to review the active tool policy.",
+            )
+    tools = permitted_tools
     if not (await is_enabled(db, user.tenant_id, "celigo") and await is_enabled(db, user.tenant_id, "reconciliation")):
         tools = [t for t in tools if not t["name"].startswith("transaction_ops_")]
-    return resolve_catalog(get_all_skills_metadata(), tools, permissions)
+        blocked["transaction_evidence"] = SkillBlocker(
+            code="feature_disabled",
+            message="Transaction investigation requires Celigo and reconciliation features.",
+            action="Ask a company administrator to review the enabled features.",
+        )
+    return resolve_catalog(get_all_skills_metadata(), tools, permissions, blocked_requirements=blocked)
