@@ -34,8 +34,8 @@ export default function SkillsPage() {
           <p className="orbital-eyebrow">Expertise to reuse</p>
           <h1 className="mt-2 text-2xl font-medium text-foreground">Skills</h1>
           <p className="mt-2 text-[13px] text-muted-foreground">
-            Slash commands you can run in chat. Search, then send one straight to the
-            composer.
+            Reusable expertise for chat, with current tool requirements. Search, then
+            open a command in the composer.
           </p>
         </div>
       </div>

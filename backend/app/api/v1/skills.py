@@ -14,6 +14,7 @@ from app.models.connection import Connection
 from app.models.saved_query import SavedSuiteQLQuery
 from app.models.user import User
 from app.services import audit_service
+from app.services.skill_catalog import AgentSkillMetadata, get_catalog
 from app.services.skills_service import delete_saved_query, get_saved_query, inject_fetch_limit, update_saved_query
 
 router = APIRouter(prefix="/skills", tags=["skills"])
@@ -115,13 +116,6 @@ async def execute_suiteql_for_tenant(*, db: AsyncSession, tenant_id: uuid.UUID, 
 # ---------------------------------------------------------------------------
 
 
-class AgentSkillMetadata(BaseModel):
-    name: str
-    description: str
-    triggers: list[str]
-    slug: str
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -130,20 +124,10 @@ class AgentSkillMetadata(BaseModel):
 @router.get("/catalog", response_model=list[AgentSkillMetadata])
 async def list_agent_skills(
     user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Return lean metadata for all available agent skills (slash commands)."""
-    from app.services.chat.skills import get_all_skills_metadata
-
-    skills = get_all_skills_metadata()
-    return [
-        AgentSkillMetadata(
-            name=s["name"],
-            description=s["description"],
-            triggers=s["triggers"],
-            slug=s["slug"],
-        )
-        for s in skills
-    ]
+    """Product skill metadata and read-only readiness for the current user."""
+    return await get_catalog(db, user)
 
 
 @router.get("", response_model=list[SavedQueryResponse])
