@@ -254,3 +254,29 @@ async def test_every_probability_is_a_finite_number_in_range(enabled, probabilit
     with pytest.raises(jev.JevUnavailableError) as exc:
         await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
     assert exc.value.reason == "invalid_response"
+
+
+# ── codex cross-examination: a choice's distribution must be coherent ──────
+
+
+@pytest.mark.parametrize(
+    "probabilities",
+    [{}, {"a": 1.0}, {"a": 0.9, "b": 0.1, "zzz": 0.0}, {"a": 0.9, "b": 0.5}],
+)
+async def test_choice_probabilities_must_cover_exactly_the_criteria_and_sum_to_one(enabled, probabilities):
+    answer = {"type": "choice", "choice": "a", "probabilities": probabilities, "confidence": 0.8}
+    transport, _ = _transport(
+        lambda r: httpx.Response(200, json={**OK_BODY, "answers": {**OK_BODY["answers"], "kind": answer}})
+    )
+    with pytest.raises(jev.JevUnavailableError) as exc:
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+    assert exc.value.reason == "invalid_response"
+
+
+async def test_the_chosen_option_must_be_the_most_probable(enabled):
+    answer = {"type": "choice", "choice": "a", "probabilities": {"a": 0.2, "b": 0.8}, "confidence": 0.6}
+    transport, _ = _transport(
+        lambda r: httpx.Response(200, json={**OK_BODY, "answers": {**OK_BODY["answers"], "kind": answer}})
+    )
+    with pytest.raises(jev.JevUnavailableError):
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)

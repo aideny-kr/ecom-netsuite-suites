@@ -107,3 +107,14 @@ async def test_drive_knowledge_uses_the_reranked_chunks_and_rebuilds_sources(mon
     out = await orchestrator._gather_drive_knowledge(db=None, tenant_id=TENANT, query_text="q")
     assert [c["source_name"] for c in out["chunks"]] == ["Policy", "SOP"]
     assert out["sources"] == {"Policy": "u2", "SOP": "u3"}
+
+
+async def test_a_passage_jev_only_saw_part_of_is_never_dropped(monkeypatch):
+    """Codex: judging 1,500 characters and then discarding the whole passage is unsafe.
+    A truncated passage may be demoted, never dropped."""
+    monkeypatch.setattr(settings, "JEV_RERANK_MODE", "live")
+    long_irrelevant = {**CHUNKS[0], "content": "x" * (rr._MAX_PASSAGE_CHARS + 200)}
+    _patch(monkeypatch, answers=_scores((0.0, 0.99), (1.9, 0.9), (1.1, 0.8)))
+    kept, record = await rr.rerank(TENANT, "q", [long_irrelevant, CHUNKS[1], CHUNKS[2]])
+    assert len(kept) == 3 and kept[-1] is long_irrelevant
+    assert record["dropped"] == 0 and record["truncated"] == 1

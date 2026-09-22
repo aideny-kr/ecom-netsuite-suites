@@ -59,13 +59,17 @@ async def rerank(tenant_id, query: str, passages: list[dict], *, text_key: str =
     scored = [
         (result.answers[f"p{i}"]["score"], result.answers[f"p{i}"]["confidence"], i) for i in range(len(passages))
     ]
-    keep = [(s, i) for s, c, i in scored if not (s < _DROP_BELOW and c >= _DROP_CONFIDENCE)]
+    # Only a passage Jev saw IN FULL may be dropped; a truncated one is demoted at most,
+    # since confidence about the visible prefix says nothing about the unseen suffix.
+    seen_in_full = [len(p.get(text_key) or "") <= _MAX_PASSAGE_CHARS for p in passages]
+    keep = [(s, i) for s, c, i in scored if not (seen_in_full[i] and s < _DROP_BELOW and c >= _DROP_CONFIDENCE)]
     order = [i for _, i in sorted(keep, key=lambda pair: (-pair[0], pair[1]))]
     record.update(
         jev_elapsed_ms=result.elapsed_ms,
         jev_input_tokens=result.input_tokens,
         scores=[round(s, 2) for s, _, _ in scored],
         dropped=len(passages) - len(order),
+        truncated=sum(1 for full in seen_in_full if not full),
         order_changed=order != list(range(len(passages))),
     )
     if mode == "shadow":

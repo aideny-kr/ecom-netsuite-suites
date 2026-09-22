@@ -11,7 +11,7 @@ The agent NEVER writes to NetSuite and NEVER touches human/decided proposals.
 from __future__ import annotations
 
 import uuid as _uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import or_, select, update
@@ -148,13 +148,20 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
         candidate_postings = [
             {
                 "record_type": p.record_type,
+                # amount/currency are the SUBSIDIARY BASE values; the transaction-currency
+                # pair is what a Stripe charge must be compared to (canonical.py, Phase A).
                 "amount": str(p.amount),
                 "currency": p.currency,
+                "transaction_currency": p.transaction_currency or "",
+                "foreign_amount": str(p.foreign_amount) if p.foreign_amount is not None else "",
                 "memo": p.memo or "",
                 "netsuite_internal_id": p.netsuite_internal_id or "",
             }
             for p in rows
         ]
+        # Only LOCAL completeness: fewer rows than the cap means the local predicate is
+        # exhausted, not that NetSuite holds nothing — ingestion is date-bounded and capped.
+        context["candidate_search_complete"] = str(len(rows) < _CANDIDATE_POSTING_LIMIT)
     context["candidate_postings"] = candidate_postings
 
     payout_line_id = evidence.get("charge_payout_line_id")
@@ -176,6 +183,25 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
                     "currency": pl.currency,
                     "description": pl.description or "",
                 }
+                # The planner decides recency and failed-payout cases from the PAYOUT row
+                # (status, arrival date); give the classifiers the same facts, with the
+                # day count computed here so no model has to compare dates.
+                from app.models.canonical import Payout
+
+                payout = (
+                    await db.execute(select(Payout).where(Payout.id == pl.payout_id, Payout.tenant_id == tenant_id))
+                ).scalar_one_or_none()
+                if payout is not None:
+                    arrival = payout.arrival_date
+                    days = None
+                    if arrival is not None:
+                        arrival_day = arrival if isinstance(arrival, date) else arrival.date()
+                        days = max(0, (datetime.now(timezone.utc).date() - arrival_day).days)
+                    context["payout"] = {
+                        "status": payout.status,
+                        "arrival_date": str(arrival) if arrival is not None else None,
+                        "days_since_arrival": str(days) if days is not None else None,
+                    }
 
     return context
 
