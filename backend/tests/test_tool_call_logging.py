@@ -84,10 +84,12 @@ async def test_external_tool_success_survives_info_logging(monkeypatch, _mock_ex
     (this branch has no try/except — a logging TypeError propagates)."""
 
     # Signature must track the real _execute_external_tool, which gained
-    # `human_approved` when the HITL guard moved to the dispatcher. A double
-    # that drifts from the function it stands in for fails on the call, not
-    # on the behaviour under test.
-    async def fake_external(connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=False):
+    # `human_approved` when the HITL guard moved to the dispatcher and
+    # `actor_id` when the metadata cache did. A double that drifts from the
+    # function it stands in for fails on the call, not on the behaviour under test.
+    async def fake_external(
+        connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=False, actor_id=None
+    ):
         return {"data": [{"amount": 42}]}
 
     monkeypatch.setattr(tools_mod, "_execute_external_tool", fake_external)
