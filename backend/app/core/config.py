@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -80,8 +81,8 @@ class Settings(BaseSettings):
     JEV_TIMEOUT_SECONDS: float = 1.5
     # off | shadow (current path decides; Jev is recorded beside it) | live (Jev
     # decides when confident, current path otherwise).
-    JEV_RECON_RESOLUTION_MODE: str = "off"
-    JEV_PRETURN_MODE: str = "off"
+    JEV_RECON_RESOLUTION_MODE: Literal["off", "shadow", "live"] = "off"
+    JEV_PRETURN_MODE: Literal["off", "shadow", "live"] = "off"
     JEV_RECON_MIN_CONFIDENCE: float = 0.8
     JEV_ROUTE_MIN_CONFIDENCE: float = 0.8
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).

@@ -84,11 +84,18 @@ def _valid_answer(question: dict, answer: object) -> bool:
     if kind == "noul":
         return _number(answer.get("noul"), 0.0, 1.0)
     if kind == "choice":
+        probabilities = answer.get("probabilities")
+        # A coherent distribution: exactly the criteria as keys, mass summing to ~1, and
+        # the chosen option the most probable. confidence=1.0 over an empty or foreign
+        # distribution is not a decision anyone should threshold on.
         return (
-            answer.get("choice") in question["criteria"]
+            isinstance(probabilities, dict)
+            and set(probabilities) == set(question["criteria"])
+            and all(_number(p, 0.0, 1.0) for p in probabilities.values())
+            and abs(sum(probabilities.values()) - 1.0) <= 0.02
+            and answer.get("choice") in probabilities
+            and probabilities[answer["choice"]] >= max(probabilities.values()) - 1e-9
             and _number(answer.get("confidence"), 0.0, 1.0)
-            and isinstance(answer.get("probabilities"), dict)
-            and all(_number(p, 0.0, 1.0) for p in answer["probabilities"].values())
         )
     if kind == "score":
         top = len(question["criteria"]) - 1  # a score is a position on the question's own levels
