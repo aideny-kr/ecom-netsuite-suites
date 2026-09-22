@@ -166,3 +166,34 @@ async def test_the_comparison_survives_when_the_proposal_cannot_be_applied(db, t
         .all()
     )
     assert len(events) == 1 and events[0].payload["jev_action"] == "carry_forward"
+
+
+async def test_a_persistence_failure_on_one_item_does_not_abort_the_run(db, tenant_a, monkeypatch):
+    await enable_feature_flag(db, tenant_a.id, "reconciliation")
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_agent")
+    run, _ = await _seed_planned_run(db, tenant_a.id)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, **_):
+        return _jev_answer("carry_forward", 0.9), None
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+
+    real_commit = db.commit
+    state = {"raised": False}
+
+    async def failing_commit():
+        if not state["raised"]:
+            state["raised"] = True
+            raise RuntimeError("connection reset")
+        return await real_commit()
+
+    monkeypatch.setattr(db, "commit", failing_commit)
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))  # must not raise
+    assert summary["persist_failures"] == 1 and summary["processed"] == 1

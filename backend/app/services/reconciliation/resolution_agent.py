@@ -80,6 +80,16 @@ def _flatten_values(obj) -> list[str]:
     return values
 
 
+def _days_since(arrival: date | datetime | None) -> int | None:
+    """Whole days since *arrival*, today inclusive; None when unknown.
+
+    datetime is a SUBCLASS of date, so the datetime check has to come first."""
+    if arrival is None:
+        return None
+    arrival_day = arrival.date() if isinstance(arrival, datetime) else arrival
+    return max(0, (datetime.now(timezone.utc).date() - arrival_day).days)
+
+
 async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionProposal) -> dict:
     """Deterministic, read-only, tenant-scoped context for one proposal.
 
@@ -193,10 +203,7 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
                 ).scalar_one_or_none()
                 if payout is not None:
                     arrival = payout.arrival_date
-                    days = None
-                    if arrival is not None:
-                        arrival_day = arrival if isinstance(arrival, date) else arrival.date()
-                        days = max(0, (datetime.now(timezone.utc).date() - arrival_day).days)
+                    days = _days_since(arrival)
                     context["payout"] = {
                         "status": payout.status,
                         "arrival_date": str(arrival) if arrival is not None else None,

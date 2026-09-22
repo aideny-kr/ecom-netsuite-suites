@@ -457,3 +457,58 @@ async def test_shadow_records_the_item_even_when_the_llm_raises(monkeypatch, llm
     validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
     assert validated["action"] == "needs_human" and validated["contract_violation"] == "classification_error"
     assert record["llm_error"] == "TimeoutError" and record["jev_action"] == "book_fee_line"
+
+
+# ── gate round 2 on #285 ───────────────────────────────────────────────────
+
+
+def test_a_zero_fee_explains_nothing():
+    ctx = _context(
+        variance_amount="-0.25", netsuite_amount="99.75", payout_line={**_context()["payout_line"], "fee": "0.00"}
+    )
+    facts = rj.derive_facts(ctx)
+    assert facts["variance_matches_payout_fee"] is False
+    assert rj.eligible("book_fee_line", facts) is False
+
+
+def test_recency_carry_forward_is_only_for_missing_counterparts():
+    """The planner's recency hold applies to missing / missing_in_netsuite only; a real
+    amount mismatch on a recent payout is not a timing item."""
+    recent = {"status": "paid", "days_since_arrival": "2"}
+    mismatch = rj.derive_facts(_context(variance_type="amount_mismatch", payout=recent))
+    assert rj.eligible("carry_forward", mismatch) is False
+    missing = rj.derive_facts(_context(variance_type="missing_in_netsuite", netsuite_amount=None, payout=recent))
+    assert rj.eligible("carry_forward", missing) is True
+
+
+def test_non_finite_numbers_are_unknown_not_crashes():
+    facts = rj.derive_facts(_context(variance_amount="NaN", stripe_amount="Infinity"))
+    assert facts["variance_matches_payout_fee"] is None and facts["netsuite_lower_than_stripe"] is None
+
+
+async def test_a_malformed_context_still_reaches_the_llm(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+    _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.95))
+
+    def broken(_context):
+        raise ArithmeticError("bad decimal")
+
+    monkeypatch.setattr(rj, "derive_facts", broken)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert validated["action"] == "book_fee_line" and llm.calls == 1
+    assert record["jev_error"].startswith("unexpected:")
+
+
+async def test_an_ineligible_pick_goes_through_the_same_validator(monkeypatch, llm):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+    _patch_jev(monkeypatch, result=_jev("apply_deposit", 0.99))
+    calls = []
+    real = rj.validate_output
+
+    def spy(out, context, materiality):
+        calls.append(out["action"])
+        return real(out, context, materiality)
+
+    monkeypatch.setattr(rj, "validate_output", spy)
+    validated, _ = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    assert validated["action"] == "needs_human" and calls == ["needs_human"]

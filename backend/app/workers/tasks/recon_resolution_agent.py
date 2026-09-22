@@ -94,7 +94,7 @@ async def run_resolution_agent(
     items = await fetch_agent_eligible(db, tid, rid)
     total = len(items)
     if total == 0:
-        return {"processed": 0, "upgraded": 0, "kept_needs_human": 0, "contract_violations": 0}
+        return {"processed": 0, "upgraded": 0, "kept_needs_human": 0, "contract_violations": 0, "persist_failures": 0}
 
     provider, model, api_key, _is_byok = await get_tenant_ai_config(db, tid)
     adapter = get_adapter(provider, api_key)
@@ -104,14 +104,19 @@ async def run_resolution_agent(
     upgraded = 0
     kept_needs_human = 0
     contract_violations = 0
+    persist_failures = 0
 
     from app.core.config import settings
 
     async with contextlib.AsyncExitStack() as stack:
         # One HTTPS connection for the whole run instead of a TLS handshake per item.
-        # Entered only when Jev is actually on, so "off" creates no client at all.
+        # Entered only when Jev is actually on; if entering fails, items run without it.
         if settings.JEV_RECON_RESOLUTION_MODE in {"shadow", "live"} and settings.TYPESAFE_API_KEY:
-            await stack.enter_async_context(jev_client.session())
+            try:
+                await stack.enter_async_context(jev_client.session())
+            except Exception:
+                logger.warning("resolution_agent.jev_session_unavailable", exc_info=True)
+
         for item in items:
             shadow = None
             try:
@@ -131,29 +136,39 @@ async def run_resolution_agent(
                     "contract_violation": "classification_error",
                 }
 
+            # Persistence is isolated per item too: a commit that fails on one item must
+            # degrade THAT item, never abort the run and strand the rest.
+            try:
+                applied = await apply_agent_proposal(db, item, validated)
+                if shadow is not None:
+                    shadow["applied"] = bool(applied)  # False = the row was already decided; nothing was written
+                    # AFTER apply, and committed here: apply_agent_proposal commits only when it
+                    # actually applied, and a comparison row must not ride on that commit.
+                    await record_comparison(
+                        db,
+                        tenant_id=tid,
+                        category="reconciliation",
+                        action="recon.jev_comparison",
+                        payload=shadow,
+                        resource_type="recon_resolution_proposal",
+                        resource_id=str(item.id),
+                        correlation_id=str(rid),
+                    )
+                    await db.commit()
+            except Exception:
+                logger.exception("resolution_agent.item_persist_failed", extra={"proposal_id": str(item.id)})
+                persist_failures += 1
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+                processed += 1
+                continue
+
             if validated.get("contract_violation"):
                 contract_violations += 1
             if validated["action"] == "needs_human":
                 kept_needs_human += 1
             else:
                 upgraded += 1
-
-            applied = await apply_agent_proposal(db, item, validated)
-            if shadow is not None:
-                shadow["applied"] = bool(applied)  # False = the row was already decided; nothing was written
-                # AFTER apply, and committed here: apply_agent_proposal commits only when it
-                # actually applied, and a comparison row must not ride on that commit.
-                await record_comparison(
-                    db,
-                    tenant_id=tid,
-                    category="reconciliation",
-                    action="recon.jev_comparison",
-                    payload=shadow,
-                    resource_type="recon_resolution_proposal",
-                    resource_id=str(item.id),
-                    correlation_id=str(rid),
-                )
-                await db.commit()
             processed += 1
 
             if job_id and processed % PROGRESS_UPDATE_EVERY == 0:
@@ -167,6 +182,7 @@ async def run_resolution_agent(
         "upgraded": upgraded,
         "kept_needs_human": kept_needs_human,
         "contract_violations": contract_violations,
+        "persist_failures": persist_failures,
     }
 
 

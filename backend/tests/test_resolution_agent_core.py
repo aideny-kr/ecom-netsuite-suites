@@ -341,3 +341,15 @@ async def test_validate_output_pins_chargeback_to_needs_human_regardless_of_acti
 
     assert validated["action"] == "needs_human"
     assert validated["contract_violation"] == "chargeback_policy"
+
+
+def test_payout_age_handles_a_datetime_arrival():
+    """datetime is a subclass of date, so an isinstance(date) branch is inverted."""
+    from datetime import datetime, timezone
+
+    from app.services.reconciliation.resolution_agent import _days_since
+
+    today = datetime.now(timezone.utc).date()
+    assert _days_since(datetime.now(timezone.utc)) == 0
+    assert _days_since(today) == 0
+    assert _days_since(None) is None

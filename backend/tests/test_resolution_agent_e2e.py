@@ -140,6 +140,7 @@ async def test_agent_tail_e2e_through_summary_and_approve(db, tenant_a, monkeypa
         # The chargeback item's book_fee_line is degraded to needs_human by
         # the chargeback policy pin, which counts as a contract_violation.
         "contract_violations": 1,
+        "persist_failures": 0,
     }
     assert len(fake_adapter.calls) == 2
 

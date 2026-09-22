@@ -28,7 +28,11 @@ from app.core.config import settings
 from app.services.reconciliation import resolution_agent
 from app.services.reconciliation.narrative_contract import _NUM_RE
 from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, validate_output
-from app.services.reconciliation.resolution_planner import FEE_EXPLAIN_TOLERANCE, RECENT_PAYOUT_LAG_DAYS
+from app.services.reconciliation.resolution_planner import (
+    FEE_EXPLAIN_TOLERANCE,
+    RECENCY_HOLD_ROOT_CAUSES,
+    RECENT_PAYOUT_LAG_DAYS,
+)
 from app.services.typesafe.client import try_ask
 
 _NUMERIC = re.compile(r"^[\s$€£-]*\d[\d,]*(\.\d+)?\s*$")
@@ -78,9 +82,11 @@ def _dec(value) -> Decimal | None:
     if value is None:
         return None
     try:
-        return Decimal(str(value))
+        number = Decimal(str(value))
     except InvalidOperation:
         return None
+    # NaN / Infinity parse fine and then RAISE on comparison; treat them as unknown.
+    return number if number.is_finite() else None
 
 
 def derive_facts(context: dict) -> dict:
@@ -118,10 +124,11 @@ def derive_facts(context: dict) -> dict:
         "above_materiality": str(context.get("above_materiality")) == "True",
         "has_order_reference": bool(order_reference),
         "currency_consistent": fee_same_currency and len(same_currency_postings) == len(postings),
+        # A zero fee explains nothing, however small the variance (planner rule 7b: fee > 0).
         "variance_matches_payout_fee": (
             None
             if variance is None or fee is None or not fee_same_currency
-            else abs(abs(variance) - abs(fee)) <= FEE_EXPLAIN_TOLERANCE
+            else fee > 0 and abs(abs(variance) - abs(fee)) <= FEE_EXPLAIN_TOLERANCE
         ),
         "netsuite_lower_than_stripe": None if stripe is None or netsuite is None else netsuite < stripe,
         "candidate_count": "none" if not postings else "one" if len(postings) == 1 else "several",
@@ -215,10 +222,13 @@ def eligible(action: str, facts: dict) -> bool:
     if action == "writeoff_je":
         return not facts["above_materiality"] and facts["variance_type"] in {"fx_rounding", "amount_mismatch"}
     if action == "carry_forward":
+        # The recency hold is the planner's rule 7 and applies to MISSING counterparts only;
+        # a real amount mismatch on a recent payout is not a timing item.
+        missing = facts["variance_type"] in RECENCY_HOLD_ROOT_CAUSES or facts["root_cause"] in RECENCY_HOLD_ROOT_CAUSES
         return bool(
             facts["washout"]
             or facts["variance_type"] == "timing"
-            or (facts["payout_recent"] and facts["payout_status"] in _HEALTHY_PAYOUT)
+            or (missing and facts["payout_recent"] and facts["payout_status"] in _HEALTHY_PAYOUT)
         )
     if action == "apply_deposit":
         return bool(facts["deposit_unapplied_evidence"] and facts["currency_consistent"])
@@ -277,13 +287,26 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
         "llm_action": None, "llm_elapsed_ms": None, "llm_error": None, "agree": None, "decided_by": "llm",
         "guard_veto": None, "applied_action": None,
     }  # fmt: skip
-    facts = derive_facts(context)
+    # Deriving facts is Jev-side work: if the context is malformed, Jev is skipped and the
+    # LLM path runs untouched, exactly as for any other Jev-side failure.
+    try:
+        facts = derive_facts(context)
+    except Exception as exc:
+        facts = None
+        record["jev_error"] = f"unexpected:{type(exc).__name__}"
+    jev_validated: dict | None = None
 
     def _jev_proposal(action: str) -> tuple[dict, str | None]:
         """Jev's pick as a validated proposal, plus the veto that stopped it (or None)."""
         if not eligible(action, facts):
-            return {"action": "needs_human", "narrative": template_narrative("needs_human", facts), "key_evidence": [],
-                    "contract_violation": f"jev_ineligible:{action}"}, action  # fmt: skip
+            out = {
+                "action": "needs_human",
+                "narrative": template_narrative("needs_human", facts),
+                "key_evidence": [],
+            }
+            validated = validate_output(out, context, materiality)  # the one validator, for every path
+            validated["contract_violation"] = f"jev_ineligible:{action}"
+            return validated, action
         out = {
             "action": action,
             "narrative": template_narrative(action, facts),
@@ -298,7 +321,10 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
         except Exception as exc:  # the primary path failed; record it, never lose the item
             return None, type(exc).__name__
 
-    if mode == "shadow":
+    if facts is None:
+        jev_fields = {}
+        llm_result, llm_error = (await _llm_guarded()) if mode == "shadow" else (None, None)
+    elif mode == "shadow":
         jev_fields, (llm_result, llm_error) = await asyncio.gather(_jev(tenant_id, context), _llm_guarded())
     else:
         jev_fields, llm_result, llm_error = await _jev(tenant_id, context), None, None
@@ -315,7 +341,7 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
             record["jev_action"] = None
 
     confident = record["jev_action"] is not None and record["jev_confidence"] >= settings.JEV_RECON_MIN_CONFIDENCE
-    if mode == "live" and confident:
+    if mode == "live" and confident and jev_validated is not None:
         record["guard_veto"] = record["jev_veto"]
         record["decided_by"] = "guard" if record["jev_veto"] else "jev"
         record["applied_action"] = jev_validated["action"]
