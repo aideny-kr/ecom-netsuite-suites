@@ -26,13 +26,6 @@ def _normalize(num: str) -> str:
     return num.replace(",", "")
 
 
-def fold_numbers(text: str | None) -> str:
-    """*text* with every number token replaced by ``<NUM>`` — for sending prose to a
-    model that must never see a figure. Uses the same tokenizer as the contract, so
-    what is folded is exactly what the contract would count as a number."""
-    return _NUM_RE.sub("<NUM>", text or "")
-
-
 def numeric_tokens(text: str) -> set[str]:
     return {_normalize(m.group(0)) for m in _NUM_RE.finditer(text or "")}
 

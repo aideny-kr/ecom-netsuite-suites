@@ -121,14 +121,56 @@ def test_missing_amounts_yield_unknown_not_a_guess():
     assert facts["candidate_count"] == "none"
 
 
-def test_request_carries_facts_and_text_but_no_raw_amounts():
-    state, questions = rj.build_request(_context())
-    flat = str(state)
-    for amount in ("100.00", "96.80", "3.20"):
-        assert amount not in flat
+def test_request_carries_only_code_derived_facts():
+    """Only named facts leave for the external API: no memo, narrative, description,
+    evidence value or identifier, whatever it contains."""
+    import json
+
+    context = _context(
+        planner_narrative="Planner could not explain ACME Wholesale's difference.",
+        variance_explanation="Jane Doe (jane@acme.example) disputes it.",
+        evidence={"order_reference": "ACME-WHOLESALE", "charge_source_id": "ch_AbCdEfGh"},
+        candidate_postings=[
+            {"record_type": "customerdeposit", "amount": "96.80", "currency": "USD", "memo": "ACME Wholesale / jane@acme.example"}
+        ],
+        payout_line={"line_type": "charge", "amount": "100.00", "fee": "3.20", "net": "96.80", "currency": "USD",
+                     "description": "Charge for ACME Wholesale"},
+    )  # fmt: skip
+    state, questions = rj.build_request(context)
+    assert set(state) == {"facts"}
+    assert set(state["facts"]) == set(rj.derive_facts(context))
+    sent = json.dumps(state)
+    for private in ("ACME", "Wholesale", "jane", "acme.example", "ch_Ab", "Planner", "Charge for", "Jane"):
+        assert private not in sent, private
+    assert not any(ch.isdigit() for ch in sent), sent
     assert state["facts"]["variance_matches_payout_fee"] is True
     assert set(questions["action"]["criteria"]) == set(AGENT_ALLOWED_ACTIONS)
     assert questions["action"]["type"] == "choice"
+
+
+@pytest.mark.parametrize(
+    "value,sent",
+    [
+        ("missing_in_netsuite", "missing_in_netsuite"),
+        ("paid", "paid"),
+        (None, None),
+        ("Jane Doe <jane@acme.example>", "other"),
+        ("po_1AbC", "other"),
+        ("x" * 41, "other"),
+    ],
+)
+def test_a_categorical_fact_leaves_only_as_a_plain_token(value, sent):
+    context = _context(root_cause=value, payout={"status": value})
+    facts = rj.build_request(context)[0]["facts"]
+    assert facts["root_cause"] == sent and facts["payout_status"] == sent
+
+
+def test_every_criterion_names_only_facts_jev_is_sent():
+    import re
+
+    names = {n for text in rj._CRITERIA.values() for n in re.findall(r"`([^`]+)`", text)}
+    assert names and all(n.startswith("facts.") for n in names), names
+    assert {n.removeprefix("facts.") for n in names} <= set(rj.derive_facts(_context()))
 
 
 @pytest.mark.parametrize("action", sorted(AGENT_ALLOWED_ACTIONS))
@@ -314,10 +356,7 @@ def test_no_digit_of_any_kind_leaves_in_any_field():
     state, _ = rj.build_request(context)
     sent = json.dumps(state)
     assert not any(ch.isdigit() for ch in sent), sent
-    # the words survive; only the figures are folded away
-    assert "matches Stripe processing fee" in state["variance_explanation"]
-    assert "<NUM>" in state["variance_explanation"] and "fee_amount" not in state["evidence"]
-    # and the numeric judgment still reaches Jev, as a fact computed in code
+    # the numeric judgment still reaches Jev, as a fact computed in code
     assert state["facts"]["variance_matches_payout_fee"] is True
 
 
@@ -512,13 +551,3 @@ async def test_an_ineligible_pick_goes_through_the_same_validator(monkeypatch, l
     monkeypatch.setattr(rj, "validate_output", spy)
     validated, _ = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
     assert validated["action"] == "needs_human" and calls == ["needs_human"]
-
-
-def test_number_folding_uses_the_contracts_public_helper():
-    from app.services.reconciliation.narrative_contract import fold_numbers
-
-    assert (
-        fold_numbers("Variance of $3.20 (fee_amount=3.20) on 1,284.55")
-        == "Variance of $<NUM> (fee_amount=<NUM>) on <NUM>"
-    )
-    assert fold_numbers("") == "" and fold_numbers(None) == ""

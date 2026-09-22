@@ -3,9 +3,10 @@
 Jev (services/typesafe/client.py) picks one of AGENT_ALLOWED_ACTIONS in roughly
 a tenth of a second, but its vendor documents it as unreliable with numbers,
 dates and accounting periods. So the split is strict: ``derive_facts`` does all
-arithmetic in Decimal and names the result ("variance_matches_payout_fee"); Jev
-sees those names plus free text with every number folded to <NUM> (``_scrub``) —
-no figure leaves, in any field. Its answer then passes
+arithmetic in Decimal and names the result ("variance_matches_payout_fee"). Jev is
+an external API, so it is sent those facts and nothing else (``_outgoing_facts``):
+no memo, narrative, description, evidence value or identifier, and no figure. Its
+answer then passes
 through the SAME ``validate_output`` as the LLM's, so the chargeback pin and the
 write-off materiality guard hold whichever model decided.
 
@@ -26,7 +27,6 @@ from decimal import Decimal, InvalidOperation
 
 from app.core.config import settings
 from app.services.reconciliation import resolution_agent
-from app.services.reconciliation.narrative_contract import fold_numbers
 from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, validate_output
 from app.services.reconciliation.resolution_planner import (
     FEE_EXPLAIN_TOLERANCE,
@@ -35,7 +35,9 @@ from app.services.reconciliation.resolution_planner import (
 )
 from app.services.typesafe.client import try_ask
 
-_NUMERIC = re.compile(r"^[\s$€£-]*\d[\d,]*(\.\d+)?\s*$")
+# A fact leaves as a boolean, null, or a plain lowercase token such as "missing_in_netsuite".
+# Anything else (a name, an email, an id with digits) is sent as "other".
+_TOKEN = re.compile(r"^[a-z_]{1,40}$")
 
 _CRITERIA = {
     "book_fee_line": (
@@ -43,12 +45,13 @@ _CRITERIA = {
         "and `facts.netsuite_lower_than_stripe` is true."
     ),
     "apply_deposit": (
-        "A customer deposit for this order already exists in NetSuite among `candidate_postings` but has "
-        "not been applied. Nothing new needs to be created."
+        "A customer deposit for this order already exists in NetSuite but has not been applied: "
+        "`facts.deposit_unapplied_evidence` is true and `facts.candidate_memo_mentions_order_reference` is "
+        "true. Nothing new needs to be created."
     ),
     "create_and_apply_deposit": (
-        "The charge settled and `facts.has_order_reference` is true, but no posting in `candidate_postings` "
-        "corresponds to it, so a deposit must be created and applied."
+        "The charge settled and `facts.has_order_reference` is true, but `facts.candidate_count` is none and "
+        "`facts.candidate_search_complete` is true, so a deposit must be created and applied."
     ),
     "writeoff_je": (
         "A small rounding or currency-conversion difference with no other explanation, and "
@@ -152,42 +155,22 @@ def derive_facts(context: dict) -> dict:
     }
 
 
-def _scrub(value):
-    """Fold every number token in every string to <NUM>, recursively.
+def _outgoing_facts(facts: dict) -> dict:
+    """The facts as they may leave for the external API: booleans, nulls and plain
+    tokens only. Everything Jev needs is already a named fact computed in code, so
+    free text is not sent at all rather than filtered: a filter is only as good as its
+    list, and a scrub for digits let names, emails and ids through."""
 
-    The contract is "no figure leaves", and a contract enforced by picking which fields to
-    filter is only as good as the list: free text such as "Variance of $3.20 matches Stripe
-    processing fee (fee_amount=3.20)" sailed past a filter that looked only at evidence
-    values. So this runs over the WHOLE outgoing state as the last step of build_request,
-    using the recon package's own number tokenizer, and the test asserts that no digit of
-    any kind survives. Jev loses nothing it can use: it is unreliable with numbers, and
-    every numeric judgment already reaches it as a named fact from derive_facts.
-    """
-    if isinstance(value, str):
-        return fold_numbers(value)
-    if isinstance(value, dict):
-        return {_scrub(k): _scrub(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_scrub(v) for v in value]
-    return value
+    def safe(value):
+        if value is None or isinstance(value, bool):
+            return value
+        return value if isinstance(value, str) and _TOKEN.match(value) else "other"
+
+    return {name: safe(value) for name, value in facts.items()}
 
 
 def build_request(context: dict) -> tuple[dict, dict]:
-    # A value that is nothing but a figure carries no meaning once folded, so drop the key.
-    evidence = {k: v for k, v in (context.get("evidence") or {}).items() if not _NUMERIC.match(str(v))}
-    state = _scrub(
-        {
-            "facts": derive_facts(context),
-            "planner_narrative": context.get("planner_narrative") or "",
-            "variance_explanation": context.get("variance_explanation") or "",
-            "evidence": evidence,
-            "candidate_postings": [
-                {"record_type": p.get("record_type"), "memo": p.get("memo") or ""}
-                for p in context.get("candidate_postings") or []
-            ],
-            "payout_line_description": (context.get("payout_line") or {}).get("description") or "",
-        }
-    )
+    state = {"facts": _outgoing_facts(derive_facts(context))}
     questions = {
         "action": {
             "type": "choice",

@@ -1,5 +1,8 @@
 """Worker-level proof for A1: the comparison is recorded, and who decided is honoured."""
 
+import uuid
+
+import pytest
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -288,3 +291,87 @@ async def test_a_rollback_on_one_item_does_not_cascade_into_the_next(db, tenant_
     summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
     assert summary["processed"] == 2 and summary["persist_failures"] == 1
     assert summary["upgraded"] == 1 and len(adapter.calls) == 2
+
+
+# ── gate round 4 on #285 ───────────────────────────────────────────────────
+
+
+async def test_tenant_context_survives_a_rollback_before_any_commit(db, tenant_a, monkeypatch):
+    """A plain SET is undone when the transaction it ran in rolls back. If the first
+    item fails before anything has committed, every later item must still run under
+    the tenant's context."""
+    from decimal import Decimal
+
+    from sqlalchemy import text
+
+    from app.core.database import set_tenant_context_session
+    from app.services.reconciliation.resolution_planner import plan_run
+    from tests.conftest import create_test_recon_result, create_test_recon_run
+
+    await enable_feature_flag(db, tenant_a.id, "reconciliation")
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_agent")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    for i in range(2):
+        await create_test_recon_result(
+            db, tenant_a.id, run.id, status="pending", bucket="needs_review", match_type="deterministic",
+            variance_type="manual_adjustment", variance_amount=Decimal("77.10"), stripe_amount=Decimal("500.00"),
+            netsuite_amount=Decimal("422.90"), evidence={"charge_source_id": f"ch_{i}", "order_reference": f"R62848927{i}"},
+        )  # fmt: skip
+    await db.flush()
+    await plan_run(db, tenant_a.id, run.id)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "off")
+
+    from app.services.reconciliation import resolution_agent
+
+    tenant_id = str(tenant_a.id)
+    await set_tenant_context_session(db, tenant_id)
+    seen, real_apply = [], resolution_agent.apply_agent_proposal
+
+    async def first_apply_fails(session, item, validated):
+        seen.append((await session.execute(text("SELECT current_setting('app.current_tenant_id', true)"))).scalar())
+        if len(seen) == 1:
+            raise RuntimeError("connection reset")
+        return await real_apply(session, item, validated)
+
+    monkeypatch.setattr(resolution_agent, "apply_agent_proposal", first_apply_fails)
+    summary = await agent_task.run_resolution_agent(db, tenant_id, str(run.id))
+    assert summary["persist_failures"] == 1 and summary["upgraded"] == 1
+    assert seen == [tenant_id, tenant_id]
+
+
+def test_a_run_with_an_unpersisted_item_fails_its_job(monkeypatch):
+    """Every item is still tried, but the job must read `failed`, not `completed`, when
+    any proposal was not written: absence is not success."""
+    import contextlib
+
+    import app.core.database as database
+
+    @contextlib.asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    async def no_context(_db, _tenant_id):
+        return None
+
+    def summary_with(failures):
+        async def fake_run(_db, _tenant_id, _run_id, job_id=None):
+            return {"processed": 3, "upgraded": 3 - failures, "persist_failures": failures, "comparison_failures": 0}
+
+        return fake_run
+
+    monkeypatch.setattr(database, "worker_async_session", fake_session)
+    monkeypatch.setattr(database, "set_tenant_context_session", no_context)
+
+    monkeypatch.setattr(agent_task, "run_resolution_agent", summary_with(0))
+    assert agent_task.recon_resolution_agent.run(str(uuid.uuid4()), str(uuid.uuid4()))["upgraded"] == 3
+
+    monkeypatch.setattr(agent_task, "run_resolution_agent", summary_with(1))
+    with pytest.raises(agent_task.ResolutionItemsNotPersistedError, match="1 of 3"):
+        agent_task.recon_resolution_agent.run(str(uuid.uuid4()), str(uuid.uuid4()))

@@ -32,6 +32,32 @@ AGENT_FLAG = "recon_resolution_agent"
 PROGRESS_UPDATE_EVERY = 10
 
 
+class ResolutionItemsNotPersistedError(RuntimeError):
+    """Raised after every item was tried, when some proposals were not written, so the
+    job reads ``failed`` rather than ``completed`` with the count buried in its summary."""
+
+
+def _require_every_item_persisted(summary: dict) -> dict:
+    failures = summary.get("persist_failures") or 0
+    if failures:
+        raise ResolutionItemsNotPersistedError(
+            f"{failures} of {summary.get('processed')} items were not persisted; summary={summary}"
+        )
+    return summary
+
+
+async def _recover_after_failed_write(db: AsyncSession, tenant_id: str) -> None:
+    """Roll back, then re-apply the tenant context. The worker's context is a plain SET,
+    which a rollback undoes when nothing has committed since it ran, so without this a
+    failure on the first item would leave every later item with no tenant context. A
+    failure to re-apply it is not swallowed: the run stops rather than go on unscoped."""
+    from app.core.database import set_tenant_context_session
+
+    with contextlib.suppress(Exception):
+        await db.rollback()
+    await set_tenant_context_session(db, tenant_id)
+
+
 def _update_job_progress(tenant_id: str, job_id, processed: int, total: int) -> None:
     """Best-effort progress update on the Job row via a short separate sync
     session — matches the session pattern InstrumentedTask itself uses."""
@@ -172,8 +198,7 @@ async def run_resolution_agent(
                 persist_failures += 1
                 persisted = False
                 applied = False
-                with contextlib.suppress(Exception):
-                    await db.rollback()
+                await _recover_after_failed_write(db, str(tid))
                 expired = True
 
             if shadow is not None:
@@ -195,8 +220,7 @@ async def run_resolution_agent(
                         "resolution_agent.jev_comparison_commit_failed", extra={"proposal_id": str(item_id)}
                     )
                     comparison_failures += 1
-                    with contextlib.suppress(Exception):
-                        await db.rollback()
+                    await _recover_after_failed_write(db, str(tid))
                     expired = True
 
             processed += 1
@@ -255,6 +279,6 @@ def recon_resolution_agent(self, tenant_id: str, run_id: str, **kwargs) -> dict:
     async def _run() -> dict:
         async with worker_async_session() as db:
             await set_tenant_context_session(db, tenant_id)
-            return await run_resolution_agent(db, tenant_id, run_id, job_id=self._job_id)
+            return _require_every_item_persisted(await run_resolution_agent(db, tenant_id, run_id, job_id=self._job_id))
 
     return asyncio.run(_run())
