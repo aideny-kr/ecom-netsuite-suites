@@ -65,3 +65,69 @@ async def test_every_call_logs_its_usage_with_the_four_token_fields(monkeypatch,
     msg = line.getMessage()
     for field in ("model=claude-sonnet-5", "in=17", "cache_write=2357", "cache_read=0", "out=104", "stream=false"):
         assert field in msg, msg
+
+
+# ── attribution: the line must be able to explain WHICH call paid what ─────
+
+
+async def test_usage_line_carries_purpose_duration_prefix_and_ttl_split(monkeypatch, caplog):
+    from app.services.chat.llm_purpose import llm_purpose
+
+    usage = SimpleNamespace(
+        input_tokens=17,
+        output_tokens=104,
+        cache_creation_input_tokens=2357,
+        cache_read_input_tokens=0,
+        cache_creation=SimpleNamespace(ephemeral_5m_input_tokens=2000, ephemeral_1h_input_tokens=357),
+    )
+    response = SimpleNamespace(content=[SimpleNamespace(type="text", text="hi")], usage=usage, stop_reason="end_turn")
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            return response
+
+    adapter = aa.AnthropicAdapter.__new__(aa.AnthropicAdapter)
+    adapter._client = SimpleNamespace(messages=FakeMessages())
+    with caplog.at_level(logging.INFO, logger=aa.__name__), llm_purpose("request_routing"):
+        await adapter.create_message(
+            model="claude-sonnet-5",
+            max_tokens=10,
+            system="stable system",
+            messages=[{"role": "user", "content": "q"}],
+            tools=TOOLS,
+        )
+    msg = next(r for r in caplog.records if r.getMessage().startswith("llm.usage")).getMessage()
+    for field in ("purpose=request_routing", "cache_write_5m=2000", "cache_write_1h=357", "ms="):
+        assert field in msg, msg
+    import re
+
+    prefix = re.search(r"prefix=([0-9a-f]{12})", msg)
+    assert prefix, msg
+    # same tools + same static system → same fingerprint; different system → different
+    assert aa._prefix_fingerprint("stable system", TOOLS) == prefix.group(1)
+    assert aa._prefix_fingerprint("other system", TOOLS) != prefix.group(1)
+    assert aa._prefix_fingerprint("stable system", None) != prefix.group(1)
+
+
+def test_purpose_defaults_to_unlabelled_and_nests():
+    from app.services.chat.llm_purpose import current_purpose, llm_purpose
+
+    assert current_purpose() == "unlabelled"
+    with llm_purpose("agent_step"):
+        assert current_purpose() == "agent_step"
+        with llm_purpose("completion_review"):
+            assert current_purpose() == "completion_review"
+        assert current_purpose() == "agent_step"
+    assert current_purpose() == "unlabelled"
+
+
+async def test_purpose_decorator_handles_async_generators():
+    from app.services.chat.llm_purpose import current_purpose, with_llm_purpose
+
+    @with_llm_purpose("stream_label")
+    async def events():
+        yield current_purpose()
+        yield current_purpose()
+
+    assert [e async for e in events()] == ["stream_label", "stream_label"]
+    assert current_purpose() == "unlabelled"

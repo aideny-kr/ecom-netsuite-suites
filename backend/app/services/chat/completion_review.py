@@ -18,6 +18,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.services.chat.llm_adapter import TokenUsage
+from app.services.chat.llm_purpose import with_llm_purpose
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,7 @@ def review_packet(task, answer, observations, history, prior_results, card_emitt
     }
 
 
+@with_llm_purpose("completion_review")
 async def review_answer(*, adapter, model, packet):
     start = time.monotonic()
     usage = TokenUsage()

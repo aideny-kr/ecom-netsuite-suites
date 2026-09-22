@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from app.services.chat.llm_adapter import TokenUsage
+from app.services.chat.llm_purpose import with_llm_purpose
 
 RequestKind = Literal["analytics", "transaction", "operations", "conversation"]
 DataSource = Literal["metabase", "netsuite", "bigquery", "shopify", "stripe", "drive"]
@@ -175,6 +176,7 @@ def _history_excerpt(history: list[dict]) -> list[dict]:
     return result
 
 
+@with_llm_purpose("request_routing")
 async def classify_request(
     *, task: str, history: list[dict], adapter, model: str, available_sources: dict[str, str] | None = None
 ) -> RoutingResult:

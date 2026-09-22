@@ -1,6 +1,8 @@
 """Anthropic (Claude) adapter — identity mapping since tools are already in Anthropic format."""
 
 import asyncio
+import hashlib
+import json
 import logging
 import random
 import time
@@ -11,6 +13,7 @@ import httpx
 from app.core.config import settings
 from app.services.chat import thinking as _thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage, ToolUseBlock
+from app.services.chat.llm_purpose import current_purpose
 
 logger = logging.getLogger(__name__)
 
@@ -256,16 +259,43 @@ def _usage_from(raw) -> TokenUsage:
     )
 
 
-def _log_usage(model: str, usage: TokenUsage, *, stream: bool) -> None:
-    """One line per provider call. Per-TURN totals in chat_messages cannot say WHICH call
-    in a turn paid 93K fresh tokens; this can, by correlating on time within a request."""
+def _prefix_fingerprint(system: str, tools: list[dict] | None) -> str:
+    """12 hex chars identifying the STABLE prefix (tool definitions + static system text).
+
+    Two calls with the same fingerprint should read the prefix from cache; a fresh
+    write on a repeated fingerprint is the invalidator we are hunting."""
+    body = json.dumps([_to_api_tool(t) for t in tools or []], sort_keys=True, default=str) + "\x00" + system
+    return hashlib.sha1(body.encode()).hexdigest()[:12]
+
+
+def _ttl_split(raw) -> tuple[int, int]:
+    breakdown = getattr(raw, "cache_creation", None)
+    if breakdown is None:
+        return 0, 0
+    return (
+        int(getattr(breakdown, "ephemeral_5m_input_tokens", 0) or 0),
+        int(getattr(breakdown, "ephemeral_1h_input_tokens", 0) or 0),
+    )
+
+
+def _log_usage(model: str, raw, usage: TokenUsage, *, stream: bool, elapsed_ms: int, prefix: str) -> None:
+    """One line per provider call, with enough to attribute a turn's cost to its calls:
+    the caller's purpose label, wall time, the stable-prefix fingerprint (repeated
+    fingerprint + fresh write = invalidation) and the 5m/1h cache-write split."""
+    write_5m, write_1h = _ttl_split(raw)
     logger.info(
-        "llm.usage model=%s in=%d cache_write=%d cache_read=%d out=%d stream=%s",
+        "llm.usage purpose=%s model=%s in=%d cache_write=%d cache_write_5m=%d cache_write_1h=%d cache_read=%d "
+        "out=%d ms=%d prefix=%s stream=%s",
+        current_purpose(),
         model,
         usage.input_tokens,
         usage.cache_creation_input_tokens,
+        write_5m,
+        write_1h,
         usage.cache_read_input_tokens,
         usage.output_tokens,
+        elapsed_ms,
+        prefix,
         "true" if stream else "false",
     )
 
@@ -312,7 +342,9 @@ class AnthropicAdapter(BaseLLMAdapter):
             thinking_level=thinking_level,
         )
 
+        started = time.monotonic()
         response = await self._client.messages.create(**kwargs)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
 
         text_blocks: list[str] = []
         tool_use_blocks: list[ToolUseBlock] = []
@@ -324,7 +356,9 @@ class AnthropicAdapter(BaseLLMAdapter):
                 tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
         usage = _usage_from(response.usage)
-        _log_usage(model, usage, stream=False)
+        _log_usage(
+            model, response.usage, usage, stream=False, elapsed_ms=elapsed_ms, prefix=_prefix_fingerprint(system, tools)
+        )
 
         return LLMResponse(
             text_blocks=text_blocks,
@@ -359,7 +393,8 @@ class AnthropicAdapter(BaseLLMAdapter):
         # Retry the stream open (and the first chunk) on transient overloads.
         # Once any text has been yielded we do NOT retry — partial output
         # cannot be rewound without confusing the caller.
-        deadline = time.monotonic() + _STREAM_TIMEOUT_SECONDS
+        started = time.monotonic()
+        deadline = started + _STREAM_TIMEOUT_SECONDS
         attempt = 0
         first_chunk_received = False
         while True:
@@ -424,7 +459,14 @@ class AnthropicAdapter(BaseLLMAdapter):
                 tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
         usage = _usage_from(final_message.usage)
-        _log_usage(model, usage, stream=True)
+        _log_usage(
+            model,
+            final_message.usage,
+            usage,
+            stream=True,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            prefix=_prefix_fingerprint(system, tools),
+        )
 
         response = LLMResponse(
             text_blocks=text_blocks,
