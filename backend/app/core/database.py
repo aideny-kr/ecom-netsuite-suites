@@ -54,18 +54,25 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 # set_config(..., is_local => true) is SET LOCAL that accepts a bind parameter.
 _SET_TENANT_LOCAL = text("SELECT set_config('app.current_tenant_id', :tenant_id, true)")
+_TENANT_CONTEXT_KEY = "tenant_context"
+_TENANT_APPLIED_KEY = "tenant_context_applied"
+
+
+def _refuse_another_tenant(session: AsyncSession, tenant_id: str) -> None:
+    scoped = session.sync_session.info.get(_TENANT_CONTEXT_KEY)
+    if isinstance(scoped, str) and scoped != tenant_id:  # only ever a str when scoped
+        raise ValueError("a worker session is scoped to one tenant; open another session for another tenant")
 
 
 async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """Set RLS tenant context for the current transaction (SET LOCAL semantics).
 
     The UUID is still validated, so a bad id fails here, not as an empty RLS scope.
+    On a session scoped by set_tenant_context_session, only that same tenant is allowed.
     """
     validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
+    _refuse_another_tenant(session, validated)
     await session.execute(_SET_TENANT_LOCAL, {"tenant_id": validated})
-
-
-_TENANT_CONTEXT_KEY = "tenant_context"
 
 
 def _apply_tenant_context(session, transaction, connection) -> None:
@@ -73,6 +80,7 @@ def _apply_tenant_context(session, transaction, connection) -> None:
     tenant_id = session.info.get(_TENANT_CONTEXT_KEY)
     if tenant_id:
         connection.execute(_SET_TENANT_LOCAL, {"tenant_id": tenant_id})
+        session.info[_TENANT_APPLIED_KEY] = True
 
 
 async def set_tenant_context_session(session: AsyncSession, tenant_id: str) -> None:
@@ -84,19 +92,26 @@ async def set_tenant_context_session(session: AsyncSession, tenant_id: str) -> N
     a connection the pool replaces mid-run (pool_recycle, failed pre-ping), and stays
     on a pooled connection handed to the next user. So the tenant is recorded on the
     session and applied as SET LOCAL at the start of each transaction by an after_begin
-    listener. Calling it again switches the tenant; the listener is registered once per
-    session.
+    listener, registered once per session.
+
+    A session is scoped to ONE tenant: the same tenant again re-applies it, another
+    raises. A switch made inside a savepoint that later rolled back would leave the
+    recorded tenant and the real GUC disagreeing, so switching is not offered at all.
     """
     validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
+    _refuse_another_tenant(session, validated)
     sync_session = session.sync_session
     if _TENANT_CONTEXT_KEY not in sync_session.info:
         event.listen(sync_session, "after_begin", _apply_tenant_context)
     sync_session.info[_TENANT_CONTEXT_KEY] = validated
-    if session.in_transaction():
-        # after_begin already ran for this transaction, before the tenant was known
+    # Begin physically if no connection is held yet: the listener then applies the
+    # tenant and marks it. If a transaction was already running (a connection held,
+    # after_begin fired before the tenant was known), apply it explicitly. in_transaction()
+    # cannot tell these apart: session.add() starts a transaction with no connection.
+    sync_session.info.pop(_TENANT_APPLIED_KEY, None)
+    await session.connection()
+    if not sync_session.info.pop(_TENANT_APPLIED_KEY, False):
         await session.execute(_SET_TENANT_LOCAL, {"tenant_id": validated})
-    else:
-        await session.connection()  # begins a transaction; the listener applies it
 
 
 def worker_async_session():

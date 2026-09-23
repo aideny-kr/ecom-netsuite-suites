@@ -90,17 +90,41 @@ def _count_tenant_sets(engine) -> list:
     return statements
 
 
-async def test_calling_it_again_switches_tenant_without_stacking_listeners(one_connection_engine):
-    """One listener per session: each new transaction issues exactly one set_config."""
+async def test_a_session_is_scoped_to_one_tenant(one_connection_engine):
+    """Switching tenant on a session is refused: a switch inside a savepoint that later
+    rolls back would leave the recorded tenant and the real GUC disagreeing. The same
+    tenant again is a re-apply, and the listener is registered once."""
+    from app.core.database import set_tenant_context
+
     statements = _count_tenant_sets(one_connection_engine)
-    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    tenant = str(uuid.uuid4())
     async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
-        await set_tenant_context_session(session, first)
-        await set_tenant_context_session(session, second)
+        await set_tenant_context_session(session, tenant)
+        await set_tenant_context_session(session, tenant)
+        with pytest.raises(ValueError, match="one tenant"):
+            await set_tenant_context_session(session, str(uuid.uuid4()))
+        with pytest.raises(ValueError, match="one tenant"):
+            await set_tenant_context(session, str(uuid.uuid4()))
         await session.commit()
         statements.clear()
-        assert await _current(session) == second  # a new transaction
+        assert await _current(session) == tenant  # a new transaction
         assert len(statements) == 1
+
+
+async def test_a_logically_begun_transaction_sets_the_tenant_once(one_connection_engine):
+    """session.add() autobegins a transaction without a connection: in_transaction() is
+    true before the physical BEGIN that fires the listener."""
+    from app.models.job import Job
+
+    statements = _count_tenant_sets(one_connection_engine)
+    tenant = str(uuid.uuid4())
+    async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
+        session.add(Job(tenant_id=uuid.UUID(tenant), job_type="probe", status="pending"))
+        assert session.in_transaction()
+        await set_tenant_context_session(session, tenant)
+        assert len(statements) == 1
+        assert await _current(session) == tenant
+        await session.rollback()
 
 
 async def test_a_fresh_session_sets_the_tenant_once(one_connection_engine):
