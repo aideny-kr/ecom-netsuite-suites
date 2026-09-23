@@ -94,13 +94,18 @@ async def set_tenant_context_session(session: AsyncSession, tenant_id: str) -> N
     session and applied as SET LOCAL at the start of each transaction by an after_begin
     listener, registered once per session.
 
-    A session is scoped to ONE tenant: the same tenant again re-applies it, another
-    raises. A switch made inside a savepoint that later rolled back would leave the
-    recorded tenant and the real GUC disagreeing, so switching is not offered at all.
+    A session is scoped to ONE tenant, set outside any savepoint: the same tenant again
+    re-applies it, another tenant raises, and a call inside a savepoint raises. A tenant
+    set inside a savepoint that later rolled back would leave the recorded tenant and
+    the real GUC disagreeing, so neither switching nor savepoint scoping is offered.
     """
     validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
     _refuse_another_tenant(session, validated)
     sync_session = session.sync_session
+    if sync_session.in_nested_transaction():
+        # Applied inside a savepoint, the tenant would be reverted by that savepoint's
+        # rollback while the session still recorded it.
+        raise ValueError("set the worker session's tenant before opening a savepoint")
     if _TENANT_CONTEXT_KEY not in sync_session.info:
         event.listen(sync_session, "after_begin", _apply_tenant_context)
     sync_session.info[_TENANT_CONTEXT_KEY] = validated

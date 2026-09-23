@@ -141,3 +141,13 @@ def test_an_invalid_tenant_id_is_refused():
 
     with pytest.raises(ValueError):
         asyncio.run(set_tenant_context_session(None, "not-a-uuid"))
+
+
+async def test_the_tenant_cannot_be_set_inside_a_savepoint(one_connection_engine):
+    """Set inside a savepoint, the tenant would be reverted by that savepoint's rollback
+    while the session still recorded it. It must be set before any savepoint opens."""
+    async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
+        await session.begin_nested()
+        with pytest.raises(ValueError, match="savepoint"):
+            await set_tenant_context_session(session, str(uuid.uuid4()))
+        await session.rollback()

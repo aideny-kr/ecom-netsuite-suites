@@ -166,12 +166,17 @@ def _reschedule_busy(tenant_id: str, run_id: str, busy_attempt: int) -> dict:
     return {"skipped": "already_running", "rescheduled_attempt": attempt}
 
 
-async def _recover_after_failed_write(db: AsyncSession, tenant_id: str) -> None:
-    """Roll back after a failed write. The tenant context needs no re-applying:
-    set_tenant_context_session applies it at the start of every transaction, so the
-    rollback cannot lose it."""
+async def _recover_after_failed_write(db: AsyncSession) -> None:
+    """Roll back after a failed write, then begin the next transaction HERE.
+
+    set_tenant_context_session's after_begin listener re-applies the tenant context as
+    that transaction begins. Beginning it here, from inside the caller's except block,
+    means a failure to re-apply stops the run loudly. Otherwise it would surface at the
+    next statement, possibly inside another except (the shadow comparison's) that
+    would count it and carry on."""
     with contextlib.suppress(Exception):
         await db.rollback()
+    await db.connection()
 
 
 def _update_job_progress(tenant_id: str, job_id, processed: int, total: int) -> None:
@@ -297,7 +302,7 @@ async def run_resolution_agent(
                         persist_failures += 1
                         processed += 1
                         # a database error here leaves the transaction aborted for every later item
-                        await _recover_after_failed_write(db, str(tid))
+                        await _recover_after_failed_write(db)
                         continue
                 try:
                     context = await gather_context(db, tid, item)
@@ -336,7 +341,7 @@ async def run_resolution_agent(
                     persist_failures += 1
                     persisted = False
                     applied = False
-                    await _recover_after_failed_write(db, str(tid))
+                    await _recover_after_failed_write(db)
                     expired = True
 
                 if shadow is not None:
@@ -358,7 +363,7 @@ async def run_resolution_agent(
                             "resolution_agent.jev_comparison_commit_failed", extra={"proposal_id": str(item_id)}
                         )
                         comparison_failures += 1
-                        await _recover_after_failed_write(db, str(tid))
+                        await _recover_after_failed_write(db)
                         expired = True
 
                 processed += 1
