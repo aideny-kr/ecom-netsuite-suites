@@ -86,6 +86,14 @@ async def _recovery_ids(db, tenant_id, now):
                     run.params_json["review"].astext.is_not(None),
                     run.progress_json["scan_complete"].astext == "true",
                     run.progress_json["refund_scan_complete"].astext == "true",
+                    or_(
+                        run.params_json["window_basis"].astext == "completed_at",
+                        run.progress_json["destination_scan_complete"].astext == "true",
+                    ),
+                    or_(
+                        run.progress_json["review_coverage_complete"].astext.is_(None),
+                        run.progress_json["review_coverage_complete"].astext != "true",
+                    ),
                     cast(run.params_json["window_end"].astext, DateTime(timezone=True))
                     < cast(run.params_json["review"]["end"].astext, DateTime(timezone=True)),
                     ~has_review_child,

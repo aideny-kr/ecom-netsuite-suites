@@ -66,7 +66,12 @@ async def test_existing_review_action_resumes_error_and_retries_idempotently(cli
     assert summary["completed_slices"] == 1 and summary["status"] == "running"
     assert summary["slices"][-1]["run_id"] == data["id"]
     resumed = await state.get_run(db, actor.tenant_id, UUID(data["id"]))
-    resumed.progress_json = {**resumed.progress_json, "scan_complete": True, "refund_scan_complete": True}
+    resumed.progress_json = {
+        **resumed.progress_json,
+        "scan_complete": True,
+        "refund_scan_complete": True,
+        "destination_scan_complete": True,
+    }
     resumed.status, resumed.termination_reason = "finished", "done"
     resumed.finished_at = datetime.now(timezone.utc)
     await db.flush()

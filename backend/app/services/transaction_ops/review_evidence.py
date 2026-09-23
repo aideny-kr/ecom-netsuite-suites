@@ -69,6 +69,10 @@ def current_review_evidence(cohort, tenant_id, snapshot, *, name="review_identit
     ]
     account = str(snapshot["netsuite_account_id"]).replace("_", "-").lower()
     scope.append(func.lower(func.replace(Run.config_snapshot["netsuite_account_id"].astext, "_", "-")) == account)
+    scope.append(
+        func.coalesce(Run.config_snapshot["evidence_contract_version"].astext, "1")
+        == str(snapshot.get("evidence_contract_version", 1))
+    )
     # Materialize only identity and winner keys. A per-order correlated lookup
     # otherwise rescans the tenant's finding history thousands of times.
     # The CTE is named explicitly: an anonymous alias takes its number from the
@@ -145,7 +149,7 @@ async def period_evidence(db, tenant_id, run_id):
     if not root.params_json.get("review"):
         raise state.StateError("not_a_period_review", 422)
     span = ReviewSpan.model_validate(root.params_json["review"])
-    from app.services.transaction_ops.daily_evidence import compatible_daily_runs
+    from app.services.transaction_ops.daily_evidence import compatible_observation_runs
 
     f, r = TransactionFinding, TransactionRun
     cohort = (
@@ -158,7 +162,7 @@ async def period_evidence(db, tenant_id, run_id):
             final_evidence(f.report_json),
             or_(
                 r.params_json["review"] == span.model_dump(mode="json"),
-                and_(*compatible_daily_runs(root, span)),
+                and_(*compatible_observation_runs(root, span)),
             ),
         )
         .distinct(f.order_reference)

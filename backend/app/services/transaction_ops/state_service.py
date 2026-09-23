@@ -401,6 +401,12 @@ async def control_config(db, tenant_id, config_id, request: ConfigControl, *, ac
     return row
 
 
+def _config_snapshot(config):
+    from app.services.transaction_ops.evidence_contract import VERSION
+
+    return {**ConfigOut.model_validate(config).model_dump(mode="json"), "evidence_contract_version": VERSION}
+
+
 async def create_run(
     db,
     tenant_id,
@@ -526,7 +532,7 @@ async def create_run(
         work_key=key,
         origin=request.origin,
         params_json=params,
-        config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),
+        config_snapshot=_config_snapshot(config),
         max_api_calls=config.max_api_calls,
         max_orders=config.max_orders,
         deadline_at=now + timedelta(seconds=config.deadline_seconds),
@@ -1702,7 +1708,7 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
             "order_references": [order_reference],
             **({"manual_recheck": True, "evaluation_key": str(evaluation_key)} if manual else {}),
         },
-        config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),
+        config_snapshot=_config_snapshot(config),
         max_api_calls=32,
         max_orders=1,
         deadline_at=now + timedelta(seconds=300),

@@ -464,18 +464,25 @@ async def run_investigation(
             return await finish("stall")
         if run.params_json.get("review"):
             from app.schemas.transaction_runs import ReviewSpan
-            from app.services.transaction_ops.daily_evidence import completed_daily_windows, covered_until
+            from app.services.transaction_ops.daily_evidence import (
+                completed_daily_windows,
+                completed_observation_windows,
+                covered_until,
+            )
 
             span = ReviewSpan.model_validate(run.params_json["review"])
-            daily = await completed_daily_windows(db, run, span)
+            saved = await completed_observation_windows(db, run, span)
             start, end = (_time(run.params_json[k]) for k in ("window_start", "window_end"))
-            if covered_until(start, end, daily) == end:
+            if covered_until(start, end, saved) == end:
+                daily = await completed_daily_windows(db, run, span)
                 progress.update(
                     scan_complete=True,
                     refund_scan_complete=True,
                     destination_scan_complete=True,
                     pending_refs=[],
                     reused_daily_run_ids=[row[2] for row in daily],
+                    reused_observation_run_ids=[row[2] for row in saved],
+                    review_coverage_complete=covered_until(span.start, span.end, saved) == span.end,
                 )
                 await save()
                 return await finish("done")
