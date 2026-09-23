@@ -24,6 +24,7 @@ async def finish(db, run, reason="done"):
         "refund_scan_complete": True,
         "destination_scan_complete": True,
         "dependency_scan_complete": True,
+        "dependency_index_seed": {"complete": True},
         "processed": 2,
         "matched": 2,
     }
@@ -188,6 +189,7 @@ async def test_coverage_prefers_final_continuation_over_query_order(monkeypatch)
             "refund_scan_complete": True,
             "destination_scan_complete": True,
             "dependency_scan_complete": True,
+            "dependency_index_seed": {"complete": True},
         },
         **base,
     )

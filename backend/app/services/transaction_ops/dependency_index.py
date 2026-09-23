@@ -101,6 +101,29 @@ def observed_dependencies(report, snapshot, reference):
         ):
             return roots
         manifest = refund.get("dependency_manifest")
+        if manifest is None and len(roots) == 1:
+            # Pre-manifest reports retained positive refund/custom-link IDs.
+            # They can nominate old owners after deletion, without pretending
+            # the old report recorded every node of the native graph.
+            records, links = refund.get("record_ids", []), refund.get("request_links", [])
+            if (
+                not isinstance(records, list)
+                or not isinstance(links, list)
+                or len(roots) + len(records) + 4 * len(links) > MAX_DEPENDENCIES
+            ):
+                return roots
+            try:
+                legacy = {_key("transaction", identifier) for identifier in records}
+                for link in links:
+                    legacy.add(_key("customrecord_fw_refund_requests", link["request_id"]))
+                    legacy.update(
+                        _key("transaction", link[field])
+                        for field in ("credit_memo_id", "refund_id", "deposit_id")
+                        if link.get(field) is not None
+                    )
+                return roots | legacy
+            except (KeyError, TypeError, ValueError, AttributeError):
+                return roots
         if not isinstance(manifest, dict) or type(manifest.get("version")) is not int or manifest["version"] != 1:
             return roots  # Legacy evidence has no full graph inventory.
         transactions, requests = manifest.get("transaction_ids"), manifest.get("refund_requests")
