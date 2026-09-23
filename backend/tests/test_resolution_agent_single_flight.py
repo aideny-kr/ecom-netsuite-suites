@@ -1,10 +1,14 @@
-"""One recon run gets one resolution agent, however many times it is dispatched.
+"""One recon run gets one resolution agent at a time, however often it is dispatched.
 
 The agent is dispatched both when a run completes (order_recon_job) and from the
 plan-resolutions endpoint, so one run routinely got two concurrent tasks classifying
 the same proposals: double model spend, duplicate shadow comparisons, and a summary
 counting writes the compare-and-set in apply_agent_proposal had already refused.
 Observed on staging 2026-09-22 (run 1ce568fd on uat-smoke).
+
+Dispatches are SERIALIZED, not dropped: a dispatch that finds the run busy reschedules
+itself, so work a re-plan created is processed by that re-plan's own dispatch once the
+current task is done — never stranded, never classified twice.
 """
 
 import asyncio
@@ -99,7 +103,7 @@ async def test_a_dispatch_for_a_run_another_task_holds_classifies_nothing(db, te
 async def test_the_lock_is_free_after_a_run(db, tenant_a, monkeypatch):
     run, _, _ = await _setup(db, tenant_a.id, monkeypatch)
     summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
-    assert summary["upgraded"] == 1 and summary["stopped"] == "drained"
+    assert summary["upgraded"] == 1 and summary["stopped"] == "done"
     assert await _lock_is_free(db, agent_task._run_lock_key(tenant_a.id, run.id))
 
 
@@ -117,10 +121,12 @@ async def test_the_lock_is_free_after_a_cancelled_run(db, tenant_a, monkeypatch)
     assert await _lock_is_free(db, agent_task._run_lock_key(tenant_a.id, run.id))
 
 
-async def test_a_re_plan_during_the_run_is_drained_with_one_agent_row_per_result(db, tenant_a, monkeypatch):
-    """A re-plan supersedes the proposals the task already fetched and creates new ones.
-    The first writes are refused by the compare-and-set; the leader must go on to the new
-    proposals itself, because the re-plan's own dispatch now finds the run taken."""
+async def test_a_re_plan_during_the_run_leaves_its_proposals_for_its_own_dispatch(db, tenant_a, monkeypatch):
+    """This task's batch is superseded mid-run: the compare-and-set refuses its writes,
+    and the re-plan's fresh proposals stay eligible for the re-plan's own dispatch,
+    which was rescheduled because this task held the run."""
+    from app.services.reconciliation.resolution_agent import fetch_agent_eligible
+
     state = {"replanned": False}
 
     class ReplanOnFirstCall(FakeAdapter):
@@ -131,41 +137,27 @@ async def test_a_re_plan_during_the_run_is_drained_with_one_agent_row_per_result
             return await super().create_message(**kwargs)
 
     adapter = ReplanOnFirstCall(action="book_fee_line", narrative="Fee.")
-    run, results, _ = await _setup(db, tenant_a.id, monkeypatch, n=2, adapter=adapter)
+    run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=2, adapter=adapter)
     summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
-
-    agent_rows = await _proposals(db, tenant_a.id, run.id, source="agent", status="proposed")
-    assert sorted(str(r.result_id) for r in agent_rows) == sorted(str(r.id) for r in results)
-    assert summary["not_applied"] == 2 and summary["upgraded"] == 2
-    assert summary["stopped"] == "drained"
-    assert len(adapter.calls) == 4
+    assert summary["not_applied"] == 2 and summary["upgraded"] == 0 and len(adapter.calls) == 2
+    assert len(await fetch_agent_eligible(db, tenant_a.id, run.id)) == 2
+    assert await _proposals(db, tenant_a.id, run.id, source="agent") == []
 
 
-async def test_proposals_arriving_after_the_last_fetch_but_before_the_unlock_are_picked_up(db, tenant_a, monkeypatch):
-    """The gap between the leader's last empty fetch and its unlock: a dispatch landing
-    there finds the lock held and skips, so the leader re-checks after unlocking."""
-    run, _, adapter = await _setup(db, tenant_a.id, monkeypatch)
-    real_leader, state = agent_task._run_leader, {"exits": 0, "late": None}
+async def test_proposals_of_terminal_results_are_not_eligible(db, tenant_a, monkeypatch):
+    """apply_agent_proposal refuses them, so fetching them only burned classifications
+    and, oldest first under the 50-item cap, could starve every newer proposal."""
+    from app.models.reconciliation import ReconciliationResult
+    from app.services.reconciliation.resolution_agent import fetch_agent_eligible
 
-    @contextlib.asynccontextmanager
-    async def leader_with_late_arrival(session, key):
-        async with real_leader(session, key) as leading:
-            yield leading
-            state["exits"] += 1
-            if leading and state["exits"] == 1:  # drained, lock still held
-                state["late"] = await _result(db, tenant_a.id, run.id, 9)
-                await db.flush()
-                await plan_run(db, tenant_a.id, run.id)
-
-    monkeypatch.setattr(agent_task, "_run_leader", leader_with_late_arrival)
-    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
-
-    late = await _proposals(db, tenant_a.id, run.id, source="agent", result_id=state["late"].id)
-    assert len(late) == 1, "the late proposal was stranded"
-    assert summary["stopped"] == "drained" and state["exits"] == 2
+    run, results, _ = await _setup(db, tenant_a.id, monkeypatch, n=2)
+    (await db.get(ReconciliationResult, results[0].id)).status = "locked"
+    await db.commit()
+    eligible = await fetch_agent_eligible(db, tenant_a.id, run.id)
+    assert [p.result_id for p in eligible] == [results[1].id]
 
 
-async def test_a_failed_write_is_never_retried_in_the_drain(db, tenant_a, monkeypatch):
+async def test_a_failed_write_is_counted_not_retried(db, tenant_a, monkeypatch):
     from app.services.reconciliation import resolution_agent
 
     run, _, adapter = await _setup(db, tenant_a.id, monkeypatch, n=2)
@@ -176,32 +168,9 @@ async def test_a_failed_write_is_never_retried_in_the_drain(db, tenant_a, monkey
     monkeypatch.setattr(resolution_agent, "apply_agent_proposal", always_fails)
     summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
     assert summary["persist_failures"] == 2 and len(adapter.calls) == 2
-    assert summary["stopped"] == "drained"
 
 
-async def test_one_task_classifies_at_most_the_per_run_budget(db, tenant_a, monkeypatch):
-    """Draining must not raise the cost bound: a task makes at most MAX_ITEMS_PER_RUN
-    classifications across all its rounds, however many new proposals keep arriving."""
-    from app.services.reconciliation import resolution_agent
-
-    monkeypatch.setattr(resolution_agent, "MAX_ITEMS_PER_RUN", 3)
-
-    class ReplanEveryCall(FakeAdapter):
-        async def create_message(self, **kwargs):
-            await plan_run(db, tenant_a.id, run.id)
-            return await super().create_message(**kwargs)
-
-    adapter = ReplanEveryCall(action="book_fee_line", narrative="Fee.")
-    run, _, _ = await _setup(db, tenant_a.id, monkeypatch, adapter=adapter)
-    dispatched = []
-    monkeypatch.setattr(agent_task, "dispatch_resolution_agent", lambda *args: dispatched.append(args))
-    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
-    assert summary["stopped"] == "budget"
-    assert len(adapter.calls) == 3
-    assert await _lock_is_free(db, agent_task._run_lock_key(tenant_a.id, run.id))
-
-
-async def test_a_run_closed_mid_drain_gets_no_more_agent_proposals(db, tenant_a, monkeypatch):
+async def test_a_run_closed_mid_batch_gets_no_more_agent_proposals(db, tenant_a, monkeypatch):
     """Close is a hard freeze, and close_period leaves needs-review results unlocked, so
     the result-status guard alone cannot stop the agent writing into a closed run."""
     from app.models.reconciliation import ReconciliationRun
@@ -216,11 +185,8 @@ async def test_a_run_closed_mid_drain_gets_no_more_agent_proposals(db, tenant_a,
     adapter = CloseOnFirstCall(action="book_fee_line", narrative="Fee.")
     run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=3, adapter=adapter)
     run_id = run.id
-    progress = []
-    monkeypatch.setattr(agent_task, "_update_job_progress", lambda *args: progress.append(args[2:]))
-    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run_id), job_id="job")
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run_id))
     assert summary["stopped"] == "run_closed"
-    assert progress[-1] == (1, 1)  # only the item actually processed counts as attempted
     assert len(adapter.calls) == 1  # nothing classified after the close
     assert summary["not_applied"] == 1 and summary["upgraded"] == 0
     assert await _proposals(db, tenant_a.id, run_id, source="agent") == []
@@ -245,7 +211,7 @@ async def test_apply_refuses_to_write_into_a_closed_run(db, tenant_a, monkeypatc
 async def test_a_refused_apply_ends_its_transaction(db, tenant_a, monkeypatch, refusal):
     """apply_agent_proposal reads the run FOR SHARE. Every way it can refuse must end
     the transaction too, or the lock outlives the call and a concurrent close_period
-    waits behind the rest of the drain, LLM calls included."""
+    waits behind the rest of the batch, LLM calls included."""
     from app.models.reconciliation import ReconciliationResult, ReconciliationRun
     from app.services.reconciliation.resolution_agent import apply_agent_proposal, fetch_agent_eligible
 
@@ -264,41 +230,9 @@ async def test_a_refused_apply_ends_its_transaction(db, tenant_a, monkeypatch, r
     assert not db.in_transaction(), "the refusal left its FOR SHARE transaction open"
 
 
-async def test_a_budget_stop_after_progress_hands_the_rest_to_a_fresh_task(db, tenant_a, monkeypatch):
-    """A dispatch that arrived while this task led was skipped; if this task then stops
-    at its budget, the rest must not wait for an unrelated trigger."""
-    from app.services.reconciliation import resolution_agent
-
-    monkeypatch.setattr(resolution_agent, "MAX_ITEMS_PER_RUN", 2)
-    run, _, adapter = await _setup(db, tenant_a.id, monkeypatch, n=3)
-    dispatched = []
-    monkeypatch.setattr(agent_task, "dispatch_resolution_agent", lambda *args: dispatched.append(args))
-    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
-    assert summary["stopped"] == "budget" and summary["upgraded"] == 2 and summary["continued"] is True
-    assert dispatched == [(str(tenant_a.id), str(run.id))]
-
-
-async def test_a_budget_stop_without_progress_never_chains(db, tenant_a, monkeypatch):
-    """Proposals whose writes keep failing must not be handed on forever."""
-    from app.services.reconciliation import resolution_agent
-
-    monkeypatch.setattr(resolution_agent, "MAX_ITEMS_PER_RUN", 2)
-    run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=3)
-
-    async def always_fails(*_args, **_kwargs):
-        raise RuntimeError("connection reset")
-
-    monkeypatch.setattr(resolution_agent, "apply_agent_proposal", always_fails)
-    dispatched = []
-    monkeypatch.setattr(agent_task, "dispatch_resolution_agent", lambda *args: dispatched.append(args))
-    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
-    assert summary["stopped"] == "budget" and summary["persist_failures"] == 2
-    assert summary["continued"] is False and dispatched == []
-
-
-async def test_a_leader_whose_lock_connection_dies_stops_draining(db, tenant_a, monkeypatch):
+async def test_a_leader_whose_lock_connection_dies_stops(db, tenant_a, monkeypatch):
     """The session-level lock goes with its connection. A leader that lost it must stop,
-    or a second task could take the run and classify alongside it."""
+    or a rescheduled dispatch could take the run and classify alongside it."""
     real_leader, leader_pid = agent_task._run_leader, {}
 
     @contextlib.asynccontextmanager
@@ -321,3 +255,71 @@ async def test_a_leader_whose_lock_connection_dies_stops_draining(db, tenant_a, 
     assert summary["stopped"] == "leadership_lost"
     assert len(adapter.calls) == 1
     assert await _lock_is_free(db, agent_task._run_lock_key(tenant_a.id, run.id))
+
+
+# ── the Celery task: a busy run is rescheduled, never dropped ─────────────
+
+
+@pytest.fixture
+def task_run(monkeypatch):
+    """recon_resolution_agent.run with the session and core stubbed; returns (run, sent)."""
+    import uuid
+
+    import app.core.database as database
+
+    @contextlib.asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    async def no_context(_db, _tenant_id):
+        return None
+
+    monkeypatch.setattr(database, "worker_async_session", fake_session)
+    monkeypatch.setattr(database, "set_tenant_context_session", no_context)
+    sent = []
+    monkeypatch.setattr(agent_task.celery_app, "send_task", lambda name, **kw: sent.append((name, kw)))
+    ids = (str(uuid.uuid4()), str(uuid.uuid4()))
+
+    def run(summary, **kwargs):
+        async def fake_run(_db, _tenant_id, _run_id, job_id=None):
+            return summary
+
+        monkeypatch.setattr(agent_task, "run_resolution_agent", fake_run)
+        return agent_task.recon_resolution_agent.run(*ids, **kwargs)
+
+    return run, sent, ids
+
+
+def test_a_busy_run_reschedules_the_dispatch_instead_of_dropping_it(task_run):
+    run, sent, (tenant_id, run_id) = task_run
+    result = run({"skipped": "already_running"})
+    assert result == {"skipped": "already_running", "rescheduled_attempt": 1}
+    ((name, kw),) = sent
+    assert name == "tasks.recon_resolution_agent" and kw["queue"] == "recon"
+    assert kw["countdown"] == agent_task.BUSY_RETRY_SECONDS
+    assert kw["kwargs"] == {"tenant_id": tenant_id, "run_id": run_id, "busy_attempt": 1}
+
+
+def test_a_run_busy_for_too_long_fails_the_job_visibly(task_run):
+    run, sent, _ = task_run
+    with pytest.raises(agent_task.ResolutionRunBusyError):
+        run({"skipped": "already_running"}, busy_attempt=agent_task.MAX_BUSY_ATTEMPTS)
+    assert sent == []
+
+
+def test_a_reschedule_that_cannot_be_published_fails_the_job(task_run, monkeypatch):
+    run, _, _ = task_run
+
+    def broker_down(*_args, **_kwargs):
+        raise ConnectionError("broker unavailable")
+
+    monkeypatch.setattr(agent_task.celery_app, "send_task", broker_down)
+    with pytest.raises(ConnectionError):
+        run({"skipped": "already_running"})
+
+
+def test_a_lost_leadership_fails_the_job(task_run):
+    run, _, _ = task_run
+    summary = {"processed": 1, "upgraded": 1, "persist_failures": 0, "stopped": "leadership_lost"}
+    with pytest.raises(agent_task.ResolutionLeadershipLostError):
+        run(summary)

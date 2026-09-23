@@ -40,22 +40,28 @@ async def fetch_agent_eligible(
     tenant_id,
     run_id,
     limit: int = MAX_ITEMS_PER_RUN,
-    *,
-    exclude_ids=(),
 ) -> list[ReconResolutionProposal]:
-    """Planner abstentions the agent may investigate, oldest first, capped. Ids in
-    *exclude_ids* (the ones this task already attempted) are skipped."""
-    P = ReconResolutionProposal
-    stmt = select(P).where(
-        P.tenant_id == tenant_id,
-        P.run_id == run_id,
-        P.source == "planner",
-        P.action == "needs_human",
-        P.status == "proposed",
+    """Planner abstentions the agent may investigate, oldest first, capped.
+
+    A proposal whose result is already terminal is not eligible: apply_agent_proposal
+    refuses it, so fetching it only spent a classification, and oldest-first under the
+    cap, a run's refused proposals could starve every newer one."""
+    P, R = ReconResolutionProposal, ReconciliationResult
+    stmt = (
+        select(P)
+        .join(R, (R.id == P.result_id) & (R.tenant_id == P.tenant_id))
+        .where(
+            P.tenant_id == tenant_id,
+            P.run_id == run_id,
+            P.source == "planner",
+            P.action == "needs_human",
+            P.status == "proposed",
+            R.status.not_in(TERMINAL_RESULT_STATUSES),
+        )
+        .order_by(P.created_at.asc())
+        .limit(limit)
     )
-    if exclude_ids:
-        stmt = stmt.where(P.id.not_in(list(exclude_ids)))
-    return list((await db.execute(stmt.order_by(P.created_at.asc()).limit(limit))).scalars().all())
+    return list((await db.execute(stmt)).scalars().all())
 
 
 # ---------------------------------------------------------------------------
