@@ -706,3 +706,31 @@ async def test_a_busy_retry_stub_does_not_hide_the_running_agent_job(db, tenant_
     out = await get_resolution_summary(str(run.id), user=user, db=db)
     assert out.agent_job is not None
     assert (out.agent_job.status, out.agent_job.processed, out.agent_job.total) == ("running", 3, 10)
+
+
+async def test_a_newer_failed_dispatch_does_not_hide_the_running_agent_job(db, tenant_a):
+    """A busy dispatch whose reschedule could not be published fails with no summary.
+    While an agent is running, the summary must show it: the UI stops polling otherwise."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.job import Job
+
+    user, run = await _seed(db, tenant_a)
+    now = datetime.now(timezone.utc)
+    db.add(
+        Job(
+            tenant_id=tenant_a.id, job_type="tasks.recon_resolution_agent", status="running",
+            started_at=now - timedelta(minutes=2), parameters={"run_id": str(run.id)},
+            result_summary={"processed": 3, "total": 10},
+        )
+    )  # fmt: skip
+    db.add(
+        Job(
+            tenant_id=tenant_a.id, job_type="tasks.recon_resolution_agent", status="failed",
+            started_at=now, parameters={"run_id": str(run.id)}, result_summary=None,
+        )
+    )  # fmt: skip
+    await db.flush()
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    assert (out.agent_job.status, out.agent_job.processed) == ("running", 3)

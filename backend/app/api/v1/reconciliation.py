@@ -1002,7 +1002,9 @@ async def get_resolution_summary(
                 # itself; its row is not the agent the operator is waiting on.
                 Job.result_summary["skipped"].astext.is_distinct_from("already_running"),
             )
-            .order_by(Job.started_at.desc())
+            # A running agent wins over any newer row (e.g. a busy dispatch whose
+            # reschedule failed): the UI polls only while the job it shows is running.
+            .order_by((Job.status == "running").desc(), Job.started_at.desc())
             .limit(1)
         )
     ).scalar_one_or_none()

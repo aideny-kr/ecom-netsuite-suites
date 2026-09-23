@@ -328,3 +328,39 @@ def test_a_lost_leadership_fails_the_job(task_run):
     summary = {"processed": 1, "upgraded": 1, "persist_failures": 0, "stopped": "leadership_lost"}
     with pytest.raises(agent_task.ResolutionLeadershipLostError):
         run(summary)
+
+
+async def test_a_lock_lost_during_a_shadow_classification_records_no_comparison(db, tenant_a, monkeypatch):
+    """In shadow mode the item's Jev comparison is recorded after the write; a task that
+    lost its lock during classification must record neither."""
+    from app.services.reconciliation import resolution_jev
+    from app.services.typesafe import audit
+
+    real_leader, leader_pid = agent_task._run_leader, {}
+
+    @contextlib.asynccontextmanager
+    async def recording_leader(session, key):
+        async with real_leader(session, key) as leading:
+            if leading:
+                leader_pid["pid"] = await leading.backend_pid()
+            yield leading
+
+    async def shadow_decision(*_args, **_kwargs):
+        await db.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": leader_pid["pid"]})
+        validated = {"action": "book_fee_line", "narrative": "Fee.", "key_evidence": []}
+        return validated, {"llm_action": "book_fee_line", "jev_action": "book_fee_line"}
+
+    recorded = []
+
+    async def spy(*args, **kwargs):
+        recorded.append(kwargs)
+
+    run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=2)
+    run_id = run.id
+    monkeypatch.setattr(agent_task, "_run_leader", recording_leader)
+    monkeypatch.setattr(resolution_jev, "decide_item", shadow_decision)
+    monkeypatch.setattr(audit, "record_comparison", spy)
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run_id))
+    assert summary["stopped"] == "leadership_lost" and summary["processed"] == 0
+    assert recorded == []
+    assert await _proposals(db, tenant_a.id, run_id, source="agent") == []
