@@ -32,10 +32,20 @@ logger = logging.getLogger(__name__)
 MASTER_RECON_FLAG = "reconciliation"
 AGENT_FLAG = "recon_resolution_agent"
 PROGRESS_UPDATE_EVERY = 10
-# A run's agent drains proposals in rounds (each re-fetch picks up what a re-plan
-# created meanwhile). A run whose proposals keep being replaced faster than they are
-# classified stops here with stopped="round_cap"; the next dispatch resumes it.
-MAX_DRAIN_ROUNDS = 5
+
+
+async def _run_is_closed(db: AsyncSession, tid: uuid.UUID, rid: uuid.UUID) -> bool:
+    from sqlalchemy import select
+
+    from app.models.reconciliation import ReconciliationRun
+    from app.services.reconciliation.four_bucket_classifier import CLOSED_RUN_STATUSES
+
+    status = (
+        await db.execute(
+            select(ReconciliationRun.status).where(ReconciliationRun.id == rid, ReconciliationRun.tenant_id == tid)
+        )
+    ).scalar_one_or_none()
+    return status in CLOSED_RUN_STATUSES
 
 
 def _run_lock_key(tenant_id, run_id) -> int:
@@ -130,6 +140,7 @@ async def run_resolution_agent(
 
     from app.models.reconciliation import ReconciliationRun
     from app.services import feature_flag_service
+    from app.services.reconciliation import resolution_agent
     from app.services.reconciliation.four_bucket_classifier import CLOSED_RUN_STATUSES
     from app.services.reconciliation.materiality import load_materiality
     from app.services.reconciliation.resolution_agent import (
@@ -165,7 +176,7 @@ async def run_resolution_agent(
     processed = upgraded = kept_needs_human = not_applied = 0
     contract_violations = persist_failures = comparison_failures = 0
     attempted: set[uuid.UUID] = set()
-    rounds, stopped, led = 0, "drained", False
+    stopped, led = "drained", False
     adapter = model = materiality = None
 
     from app.core.config import settings
@@ -179,14 +190,18 @@ async def run_resolution_agent(
                         return {"skipped": "already_running"}
                     break  # another task took the run over after our unlock
                 led = True
-                while True:
-                    items = await fetch_agent_eligible(db, tid, rid, exclude_ids=attempted)
+                while stopped == "drained":
+                    # The drain re-fetches what a re-plan created meanwhile, but one task
+                    # still classifies at most MAX_ITEMS_PER_RUN proposals in total — the
+                    # same cost bound as before draining; the rest waits for the next dispatch.
+                    budget = resolution_agent.MAX_ITEMS_PER_RUN - len(attempted)
+                    if budget <= 0:
+                        if await fetch_agent_eligible(db, tid, rid, limit=1, exclude_ids=attempted):
+                            stopped = "budget"
+                        break
+                    items = await fetch_agent_eligible(db, tid, rid, limit=budget, exclude_ids=attempted)
                     if not items:
                         break
-                    if rounds >= MAX_DRAIN_ROUNDS:
-                        stopped = "round_cap"
-                        break
-                    rounds += 1
                     # A proposal is attempted once per task, whatever happened to it, so a
                     # write that keeps failing can never loop.
                     attempted.update(item.id for item in items)
@@ -211,6 +226,11 @@ async def run_resolution_agent(
                     item_ids = [item.id for item in items]
                     expired = False
                     for item, item_id in zip(items, item_ids, strict=True):
+                        # Close is a hard freeze: stop spending on a run closed mid-drain.
+                        # apply_agent_proposal refuses the write regardless.
+                        if await _run_is_closed(db, tid, rid):
+                            stopped = "run_closed"
+                            break
                         shadow = None
                         if expired:
                             try:

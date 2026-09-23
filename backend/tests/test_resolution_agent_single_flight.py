@@ -171,7 +171,13 @@ async def test_a_failed_write_is_never_retried_in_the_drain(db, tenant_a, monkey
     assert summary["stopped"] == "drained"
 
 
-async def test_an_endless_supply_of_new_proposals_stops_at_the_round_cap(db, tenant_a, monkeypatch):
+async def test_one_task_classifies_at_most_the_per_run_budget(db, tenant_a, monkeypatch):
+    """Draining must not raise the cost bound: a task makes at most MAX_ITEMS_PER_RUN
+    classifications across all its rounds, however many new proposals keep arriving."""
+    from app.services.reconciliation import resolution_agent
+
+    monkeypatch.setattr(resolution_agent, "MAX_ITEMS_PER_RUN", 3)
+
     class ReplanEveryCall(FakeAdapter):
         async def create_message(self, **kwargs):
             await plan_run(db, tenant_a.id, run.id)
@@ -180,6 +186,43 @@ async def test_an_endless_supply_of_new_proposals_stops_at_the_round_cap(db, ten
     adapter = ReplanEveryCall(action="book_fee_line", narrative="Fee.")
     run, _, _ = await _setup(db, tenant_a.id, monkeypatch, adapter=adapter)
     summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
-    assert summary["stopped"] == "round_cap"
-    assert len(adapter.calls) == agent_task.MAX_DRAIN_ROUNDS
+    assert summary["stopped"] == "budget"
+    assert len(adapter.calls) == 3
     assert await _lock_is_free(db, agent_task._run_lock_key(tenant_a.id, run.id))
+
+
+async def test_a_run_closed_mid_drain_gets_no_more_agent_proposals(db, tenant_a, monkeypatch):
+    """Close is a hard freeze, and close_period leaves needs-review results unlocked, so
+    the result-status guard alone cannot stop the agent writing into a closed run."""
+    from app.models.reconciliation import ReconciliationRun
+
+    class CloseOnFirstCall(FakeAdapter):
+        async def create_message(self, **kwargs):
+            if not self.calls:
+                (await db.get(ReconciliationRun, run.id)).status = "closed"
+                await db.commit()
+            return await super().create_message(**kwargs)
+
+    adapter = CloseOnFirstCall(action="book_fee_line", narrative="Fee.")
+    run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=3, adapter=adapter)
+    run_id = run.id
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run_id))
+    assert summary["stopped"] == "run_closed"
+    assert len(adapter.calls) == 1  # nothing classified after the close
+    assert summary["not_applied"] == 1 and summary["upgraded"] == 0
+    assert await _proposals(db, tenant_a.id, run_id, source="agent") == []
+
+
+@pytest.mark.parametrize("status", ["closed", "locked"])
+async def test_apply_refuses_to_write_into_a_closed_run(db, tenant_a, monkeypatch, status):
+    from app.models.reconciliation import ReconciliationRun
+    from app.services.reconciliation.resolution_agent import apply_agent_proposal, fetch_agent_eligible
+
+    run, _, _ = await _setup(db, tenant_a.id, monkeypatch)
+    (proposal,) = await fetch_agent_eligible(db, tenant_a.id, run.id)
+    (await db.get(ReconciliationRun, run.id)).status = status
+    await db.commit()
+    out = {"action": "book_fee_line", "narrative": "Fee.", "key_evidence": []}
+    assert await apply_agent_proposal(db, proposal, out) is False
+    assert await _proposals(db, tenant_a.id, run.id, source="agent") == []
+    assert (await db.get(ReconResolutionProposal, proposal.id)).status == "proposed"
