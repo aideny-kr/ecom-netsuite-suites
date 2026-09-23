@@ -17,9 +17,13 @@ from decimal import Decimal
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
+from app.models.reconciliation import ReconciliationResult, ReconciliationRun, ReconResolutionProposal
 from app.services.chat.llm_purpose import with_llm_purpose
-from app.services.reconciliation.four_bucket_classifier import TERMINAL_RESULT_STATUSES, is_material
+from app.services.reconciliation.four_bucket_classifier import (
+    CLOSED_RUN_STATUSES,
+    TERMINAL_RESULT_STATUSES,
+    is_material,
+)
 from app.services.reconciliation.narrative_contract import narrative_respects_evidence
 from app.services.reconciliation.resolution_planner import VEHICLE_BY_ACTION, group_key_for
 
@@ -37,26 +41,27 @@ async def fetch_agent_eligible(
     run_id,
     limit: int = MAX_ITEMS_PER_RUN,
 ) -> list[ReconResolutionProposal]:
-    """Planner abstentions the agent may investigate, oldest first, capped."""
-    P = ReconResolutionProposal
-    return list(
-        (
-            await db.execute(
-                select(P)
-                .where(
-                    P.tenant_id == tenant_id,
-                    P.run_id == run_id,
-                    P.source == "planner",
-                    P.action == "needs_human",
-                    P.status == "proposed",
-                )
-                .order_by(P.created_at.asc())
-                .limit(limit)
-            )
+    """Planner abstentions the agent may investigate, oldest first, capped.
+
+    A proposal whose result is already terminal is not eligible: apply_agent_proposal
+    refuses it, so fetching it only spent a classification, and oldest-first under the
+    cap, a run's refused proposals could starve every newer one."""
+    P, R = ReconResolutionProposal, ReconciliationResult
+    stmt = (
+        select(P)
+        .join(R, (R.id == P.result_id) & (R.tenant_id == P.tenant_id))
+        .where(
+            P.tenant_id == tenant_id,
+            P.run_id == run_id,
+            P.source == "planner",
+            P.action == "needs_human",
+            P.status == "proposed",
+            R.status.not_in(TERMINAL_RESULT_STATUSES),
         )
-        .scalars()
-        .all()
+        .order_by(P.created_at.asc())
+        .limit(limit)
     )
+    return list((await db.execute(stmt)).scalars().all())
 
 
 # ---------------------------------------------------------------------------
@@ -323,13 +328,39 @@ async def apply_agent_proposal(db: AsyncSession, proposal: ReconResolutionPropos
 
     Mirrors plan_run's supersede-then-insert but scoped to ONE proposal. Returns
     False (no-op, nothing written) if the planner row is no longer eligible
-    (a human decided meanwhile). Commits on success. If the inserted row is a
+    (a human decided meanwhile). If the inserted row is a
     recency-hold carry_forward (action='carry_forward', root_cause in
     resolution_planner.RECENCY_HOLD_ROOT_CAUSES), it shares the planner's
     cross-run snooze lifecycle — a later plan_run supersedes it exactly like
     a planner-authored hold (see the RECENCY HOLDS design note in
     resolution_planner.plan_run).
+
+    Commits on EVERY path, refusals included. The run is read FOR SHARE, and a refusal
+    that left its transaction open would hold that lock through the caller's next items,
+    LLM calls included, stalling a concurrent close_period. A refusal wrote nothing, so
+    its commit only ends the transaction.
     """
+    applied = await _apply_or_refuse(db, proposal, out)
+    await db.commit()
+    return applied
+
+
+async def _apply_or_refuse(db: AsyncSession, proposal: ReconResolutionProposal, out: dict) -> bool:
+    """apply_agent_proposal's body; it never commits, its caller always does."""
+    # Close is a hard freeze, and close_period deliberately leaves needs-review results
+    # unlocked, so the result-status guard below cannot stop a write into a closed run.
+    # FOR SHARE makes a concurrent close wait for this write: after it commits, no
+    # later write can see the run open.
+    run_status = (
+        await db.execute(
+            select(ReconciliationRun.status)
+            .where(ReconciliationRun.id == proposal.run_id, ReconciliationRun.tenant_id == proposal.tenant_id)
+            .with_for_update(read=True)
+        )
+    ).scalar_one_or_none()
+    if run_status in CLOSED_RUN_STATUSES:
+        return False
+
     # A result can go terminal independently of this proposal (e.g. locked via
     # the classic per-result approve path, or closed by a period freeze) while
     # its proposal row is still 'proposed' — mirrors the not_terminal_result
@@ -387,5 +418,4 @@ async def apply_agent_proposal(db: AsyncSession, proposal: ReconResolutionPropos
             updated_at=now,
         )
     )
-    await db.commit()
     return True

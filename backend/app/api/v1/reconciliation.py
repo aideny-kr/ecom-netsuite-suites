@@ -998,8 +998,13 @@ async def get_resolution_summary(
                 Job.tenant_id == user.tenant_id,
                 Job.job_type == "tasks.recon_resolution_agent",
                 Job.parameters["run_id"].astext == str(run_uuid),
+                # A dispatch that found the run busy completes at once and reschedules
+                # itself; its row is not the agent the operator is waiting on.
+                Job.result_summary["skipped"].astext.is_distinct_from("already_running"),
             )
-            .order_by(Job.started_at.desc())
+            # A running agent wins over any newer row (e.g. a busy dispatch whose
+            # reschedule failed): the UI polls only while the job it shows is running.
+            .order_by((Job.status == "running").desc(), Job.started_at.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
