@@ -90,6 +90,12 @@ _DEFAULT_PRICING_KEY = "claude-sonnet-4-6"
 _BENCHMARK_ACTOR_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _BENCHMARK_CORRELATION_ID = "benchmark-agent"
 
+# Every benchmark case is a NetSuite question, and the baseline only has NetSuite.
+# A tenant with several sources makes the agent ask which one to use; the runner
+# gives this reply once, as a user would, instead of scoring the question as the
+# answer (18/18 cases scored 0.00 that way on 2026-09-23).
+_SOURCE_REPLY = "NetSuite"
+
 
 # ---------------------------------------------------------------------------
 # Result dataclass
@@ -126,6 +132,10 @@ class AgentRunResult:
     # "columns": ["Metric","Value","Unit","Period"], "rows": [[...]], ...}.
     # Populated only when metric_compute is called; empty list otherwise.
     metric_data_tables: list[dict] = field(default_factory=list)
+
+    # True when the agent asked which data source to use and the runner answered
+    # "NetSuite" in a second turn. Tokens, cost and latency cover both turns.
+    source_question_answered: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +257,31 @@ def _extract_metric_data_tables(tool_calls_log: list[dict]) -> list[dict]:
         if cols[:4] == _METRIC_COLUMNS_PREFIX:
             result.append(payload)
     return result
+
+
+def _asks_for_source(agent_result: "AgentResult | None") -> bool:
+    """The agent stopped to ask which data source to use.
+
+    Read from the server-owned request context, not the reply text."""
+    context = getattr(agent_result, "request_context", None)
+    return bool(agent_result is not None and agent_result.success and isinstance(context, dict)) and bool(
+        context.get("pending_source")
+    )
+
+
+def _source_reply_history(question: str, asked: "AgentResult") -> list[dict]:
+    """The session as the orchestrator would load it for the reply: the question,
+    then the assistant's source question carrying its persisted request context."""
+    from app.services.chat.request_routing import persist_request_context
+
+    return [
+        {"role": "user", "content": question},
+        {
+            "role": "assistant",
+            "content": str(asked.data or ""),
+            "structured_output": persist_request_context(None, asked.request_context),
+        },
+    ]
 
 
 def _build_adapter(*, provider: str, api_key: str):
@@ -472,22 +507,54 @@ async def run_agent(
         return result
 
     # ── 6. Run with wall-clock timeout, collect the final response ──────
+    # One wall clock covers the question and, when the agent asks which data
+    # source to use, the single "NetSuite" reply that real chat would need too.
     agent_result: AgentResult | None = None
+    asked_for_source: AgentResult | None = None
     try:
 
-        async def _drive_agent():
+        async def _drive_agent(task: str, turn_context: dict[str, Any], history: list[dict] | None = None):
             nonlocal agent_result
+            agent_result = None
             async for event_type, payload in agent.run_streaming(
-                task=question,
-                context=context,
+                task=task,
+                context=turn_context,
                 db=db,
                 adapter=adapter,
                 model=model,
+                conversation_history=history,
             ):
                 if event_type == "response":
                     agent_result = payload
 
-        await asyncio.wait_for(_drive_agent(), timeout=_TOTAL_TIMEOUT_SECONDS)
+        async def _drive_with_source_reply():
+            nonlocal agent, asked_for_source
+            await _drive_agent(question, context)
+            if not _asks_for_source(agent_result):
+                return
+            asked_for_source = agent_result
+            history = _source_reply_history(question, agent_result)
+            # A fresh agent per turn, as the orchestrator builds one per message.
+            agent = UnifiedAgent(
+                tenant_id=tenant_id,
+                user_id=_BENCHMARK_ACTOR_ID,
+                correlation_id=_BENCHMARK_CORRELATION_ID,
+                metadata=metadata,
+                policy=None,
+                context_need="data",
+            )
+            reply_context = {
+                **context,
+                "source_selection_task": _SOURCE_REPLY,
+                "source_selection_history": history,
+            }
+            await _drive_agent(
+                _SOURCE_REPLY,
+                reply_context,
+                [{"role": m["role"], "content": m["content"]} for m in history],
+            )
+
+        await asyncio.wait_for(_drive_with_source_reply(), timeout=_TOTAL_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         result.error = f"timeout: exceeded {_TOTAL_TIMEOUT_SECONDS:.0f}s wall clock"
         result.latency_ms = int((time.monotonic() - start) * 1000)
@@ -525,9 +592,16 @@ async def run_agent(
         result.latency_ms = int((time.monotonic() - start) * 1000)
         return result
 
-    tokens = agent_result.tokens_used
-    result.input_tokens = int(getattr(tokens, "input_tokens", 0) or 0)
-    result.output_tokens = int(getattr(tokens, "output_tokens", 0) or 0)
+    if asked_for_source is not None and _asks_for_source(agent_result):
+        result.error = "source_question_unresolved"
+        result.answer_text = str(agent_result.data or "")
+        result.latency_ms = int((time.monotonic() - start) * 1000)
+        return result
+
+    turns = [asked_for_source, agent_result] if asked_for_source is not None else [agent_result]
+    result.source_question_answered = asked_for_source is not None
+    result.input_tokens = sum(int(getattr(t.tokens_used, "input_tokens", 0) or 0) for t in turns)
+    result.output_tokens = sum(int(getattr(t.tokens_used, "output_tokens", 0) or 0) for t in turns)
     result.cost_usd = _calculate_cost(
         model=model,
         input_tokens=result.input_tokens,
