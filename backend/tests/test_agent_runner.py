@@ -460,6 +460,8 @@ def scripted_turns(patched_deps):
 
     async def _run_streaming(self, *args, **kwargs):
         calls.append(kwargs)
+        if isinstance(self._canned_result, Exception):
+            raise self._canned_result
         yield "response", self._canned_result
 
     with (
@@ -492,10 +494,12 @@ class TestSourceQuestion:
         reply = calls[1]
         assert reply["task"] == "NetSuite"
         assert reply["context"]["source_selection_task"] == "NetSuite"
+        # As the orchestrator loads it: the reply is already saved in the session.
         history = reply["context"]["source_selection_history"]
         assert history[0] == {"role": "user", "content": "Sales by class this week?"}
         assert history[1]["role"] == "assistant"
         assert history[1]["structured_output"]["request_context"]["pending_source"] is True
+        assert history[2] == {"role": "user", "content": "NetSuite"}
         assert [m["role"] for m in reply["conversation_history"]] == ["user", "assistant"]
         # The first turn's retrieval context is not mutated by the reply.
         assert "source_selection_task" not in calls[0]["context"]
@@ -511,6 +515,37 @@ class TestSourceQuestion:
         assert result.success is False
         assert result.error == "source_question_unresolved"
         assert len(calls) == 2
+        # Both turns were paid for; a failed case must not report them as free.
+        assert result.source_question_answered is True
+        assert (result.input_tokens, result.output_tokens) == (2_000, 100)
+        assert result.cost_usd == pytest.approx(0.002 * 3 + 0.0001 * 15)
+
+    async def test_a_failed_reply_still_charges_the_source_question(self, scripted_turns, db_mock):
+        from app.services.benchmarks import agent_runner
+
+        script, calls = scripted_turns
+        failed = _make_agent_result(data="", input_tokens=300, output_tokens=20, success=False)
+        failed.error = "agent_reported_failure"
+        script += [_source_question_result(input_tokens=1_000, output_tokens=50), failed]
+
+        result = await agent_runner.run_agent(tenant_id=_TENANT_ID, question="Sales by class?", db=db_mock)
+
+        assert result.success is False
+        assert result.error == "agent_reported_failure"
+        assert (result.input_tokens, result.output_tokens) == (1_300, 70)
+
+    async def test_a_reply_that_raises_still_charges_the_source_question(self, scripted_turns, db_mock):
+        from app.services.benchmarks import agent_runner
+
+        script, calls = scripted_turns
+        script += [_source_question_result(input_tokens=1_000, output_tokens=50), RuntimeError("stream broke")]
+
+        result = await agent_runner.run_agent(tenant_id=_TENANT_ID, question="Sales by class?", db=db_mock)
+
+        assert result.success is False
+        assert result.error == "stream broke"
+        assert result.source_question_answered is True
+        assert (result.input_tokens, result.output_tokens) == (1_000, 50)
 
     async def test_an_answer_without_a_source_question_runs_one_turn(self, scripted_turns, db_mock):
         from app.services.benchmarks import agent_runner

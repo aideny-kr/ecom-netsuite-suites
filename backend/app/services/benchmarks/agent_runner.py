@@ -269,6 +269,14 @@ def _asks_for_source(agent_result: "AgentResult | None") -> bool:
     )
 
 
+def _charge(result: AgentRunResult, *, model: str, turns: list["AgentResult | None"]) -> None:
+    """Sum the usage of every turn that returned a result into ``result``."""
+    done = [t for t in turns if t is not None]
+    result.input_tokens = sum(int(getattr(t.tokens_used, "input_tokens", 0) or 0) for t in done)
+    result.output_tokens = sum(int(getattr(t.tokens_used, "output_tokens", 0) or 0) for t in done)
+    result.cost_usd = _calculate_cost(model=model, input_tokens=result.input_tokens, output_tokens=result.output_tokens)
+
+
 def _source_reply_history(question: str, asked: "AgentResult") -> list[dict]:
     """The session as the orchestrator would load it for the reply: the question,
     then the assistant's source question carrying its persisted request context."""
@@ -528,12 +536,15 @@ async def run_agent(
                     agent_result = payload
 
         async def _drive_with_source_reply():
-            nonlocal agent, asked_for_source
+            nonlocal agent, agent_result, asked_for_source
             await _drive_agent(question, context)
             if not _asks_for_source(agent_result):
                 return
-            asked_for_source = agent_result
-            history = _source_reply_history(question, agent_result)
+            # Hand the first turn over before anything else can fail, so it is
+            # charged exactly once on every exit path.
+            asked_for_source, agent_result = agent_result, None
+            result.source_question_answered = True
+            history = _source_reply_history(question, asked_for_source)
             # A fresh agent per turn, as the orchestrator builds one per message.
             agent = UnifiedAgent(
                 tenant_id=tenant_id,
@@ -543,10 +554,12 @@ async def run_agent(
                 policy=None,
                 context_need="data",
             )
+            # The orchestrator saves the reply before loading the session, so its
+            # routing history already ends with it.
             reply_context = {
                 **context,
                 "source_selection_task": _SOURCE_REPLY,
-                "source_selection_history": history,
+                "source_selection_history": [*history, {"role": "user", "content": _SOURCE_REPLY}],
             }
             await _drive_agent(
                 _SOURCE_REPLY,
@@ -557,6 +570,7 @@ async def run_agent(
         await asyncio.wait_for(_drive_with_source_reply(), timeout=_TOTAL_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         result.error = f"timeout: exceeded {_TOTAL_TIMEOUT_SECONDS:.0f}s wall clock"
+        _charge(result, model=model, turns=[asked_for_source, agent_result])
         result.latency_ms = int((time.monotonic() - start) * 1000)
         # Still try to capture system_prompt size so we can see "how big
         # was the prompt when it blew up".
@@ -567,6 +581,7 @@ async def run_agent(
         return result
     except Exception as exc:
         result.error = str(exc)
+        _charge(result, model=model, turns=[asked_for_source, agent_result])
         result.latency_ms = int((time.monotonic() - start) * 1000)
         try:
             result.context_chars = len(agent.system_prompt)
@@ -581,6 +596,8 @@ async def run_agent(
         result.context_chars = 0
 
     # ── 8. Map the AgentResult onto AgentRunResult ──────────────────────
+    # Every turn that returned a result was paid for, whether or not the case passes.
+    _charge(result, model=model, turns=[asked_for_source, agent_result])
     if agent_result is None:
         result.error = "agent_produced_no_response"
         result.latency_ms = int((time.monotonic() - start) * 1000)
@@ -598,15 +615,6 @@ async def run_agent(
         result.latency_ms = int((time.monotonic() - start) * 1000)
         return result
 
-    turns = [asked_for_source, agent_result] if asked_for_source is not None else [agent_result]
-    result.source_question_answered = asked_for_source is not None
-    result.input_tokens = sum(int(getattr(t.tokens_used, "input_tokens", 0) or 0) for t in turns)
-    result.output_tokens = sum(int(getattr(t.tokens_used, "output_tokens", 0) or 0) for t in turns)
-    result.cost_usd = _calculate_cost(
-        model=model,
-        input_tokens=result.input_tokens,
-        output_tokens=result.output_tokens,
-    )
     agent_text = str(agent_result.data or "")
     tool_data = _extract_tool_data_for_judge(agent_result.tool_calls_log)
     result.answer_text = f"{agent_text}\n\n{tool_data}".strip() if tool_data else agent_text

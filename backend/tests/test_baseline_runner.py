@@ -177,8 +177,10 @@ class TestRunBaselineHappyPath:
         assert result.output_tokens == 15
         assert result.cost_usd > 0
         assert result.latency_ms >= 0
-        # Anthropic was called exactly once
+        # Anthropic was called exactly once, WITH the NetSuite tools: a toolless call is
+        # the bug that made every baseline number fiction for four months.
         assert mock_create.await_count == 1
+        assert mock_create.await_args.kwargs["tools"] == _ns_tool_defs()
 
 
 # ---------------------------------------------------------------------------
