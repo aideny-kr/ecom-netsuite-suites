@@ -144,6 +144,7 @@ async def test_agent_tail_e2e_through_summary_and_approve(db, tenant_a, monkeypa
         "comparison_failures": 0,
         "not_applied": 0,
         "stopped": "drained",
+        "continued": False,
     }
     assert len(fake_adapter.calls) == 2
 

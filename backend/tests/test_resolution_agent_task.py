@@ -97,6 +97,7 @@ async def test_task_processes_seeded_run_end_to_end(db, tenant_a, monkeypatch):
         "comparison_failures": 0,
         "not_applied": 0,
         "stopped": "drained",
+        "continued": False,
     }
 
     props = (
@@ -225,6 +226,7 @@ async def test_task_processes_two_eligible_items_both_applied(db, tenant_a, monk
         "comparison_failures": 0,
         "not_applied": 0,
         "stopped": "drained",
+        "continued": False,
     }
     assert len(fake_adapter.calls) == 2
 

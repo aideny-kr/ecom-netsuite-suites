@@ -53,10 +53,41 @@ def _run_lock_key(tenant_id, run_id) -> int:
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
+class _Leadership:
+    """A held run lock, and the one connection that holds it."""
+
+    def __init__(self, connection, key: int):
+        self._connection = connection
+        self._hi, self._lo = (key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF
+
+    async def backend_pid(self) -> int:
+        pid = await self._connection.scalar(text("SELECT pg_backend_pid()"))
+        await self._connection.commit()
+        return pid
+
+    async def held(self) -> bool:
+        """Is the lock still ours? A session-level lock goes with its connection, so a
+        dropped connection (network, idle reap, failover) releases it silently; ask that
+        connection itself. Asking also keeps it from idling out between items."""
+        try:
+            count = await self._connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
+                    "AND classid::bigint = :hi AND objid::bigint = :lo AND objsubid = 1 AND granted"
+                ),
+                {"hi": self._hi, "lo": self._lo},
+            )
+            await self._connection.commit()
+            return bool(count)
+        except Exception:
+            logger.warning("resolution_agent.leader_connection_lost", exc_info=True)
+            return False
+
+
 @contextlib.asynccontextmanager
 async def _run_leader(db: AsyncSession, key: int):
-    """Yield True when this task is the run's only resolution agent, False when another
-    task already is.
+    """Yield a _Leadership when this task is the run's only resolution agent, None when
+    another task already is.
 
     The agent is dispatched both when a run completes and from plan-resolutions, so
     one run could get two concurrent tasks classifying the same proposals. A
@@ -68,18 +99,18 @@ async def _run_leader(db: AsyncSession, key: int):
     bind = db.bind
     engine = bind if isinstance(bind, AsyncEngine) else bind.engine
     async with engine.connect() as leader:
-        acquired = bool(await leader.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}))
-        await leader.commit()
-        if not acquired:
-            yield False
-            return
+        acquired = False
         try:
-            yield True
+            acquired = bool(await leader.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}))
+            await leader.commit()  # inside the try: a failed commit must still release the lock
+            yield _Leadership(leader, key) if acquired else None
         finally:
-            try:
-                await asyncio.shield(leader.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key}))
-            except BaseException:
-                await leader.invalidate()  # closing the connection releases the lock
+            if acquired:
+                try:
+                    await asyncio.shield(leader.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key}))
+                except BaseException:
+                    logger.warning("resolution_agent.leader_unlock_failed", exc_info=True)
+                    await leader.invalidate()  # closing the connection releases the lock
 
 
 class ResolutionItemsNotPersistedError(RuntimeError):
@@ -176,6 +207,7 @@ async def run_resolution_agent(
     processed = upgraded = kept_needs_human = not_applied = 0
     contract_violations = persist_failures = comparison_failures = 0
     attempted: set[uuid.UUID] = set()
+    known = 0  # proposals fetched so far: the progress total while the drain runs
 
     async def more_eligible() -> bool:
         return bool(await fetch_agent_eligible(db, tid, rid, limit=1, exclude_ids=attempted))
@@ -206,6 +238,7 @@ async def run_resolution_agent(
                     items = await fetch_agent_eligible(db, tid, rid, limit=budget, exclude_ids=attempted)
                     if not items:
                         break
+                    known += len(items)
                     if adapter is None:
                         provider, model, api_key, _is_byok = await get_tenant_ai_config(db, tid)
                         adapter = get_adapter(provider, api_key)
@@ -231,6 +264,9 @@ async def run_resolution_agent(
                         # apply_agent_proposal refuses the write regardless.
                         if await _run_is_closed(db, tid, rid):
                             stopped = "run_closed"
+                            break
+                        if not await leading.held():
+                            stopped = "leadership_lost"
                             break
                         # A proposal is attempted once per task, whatever happens to it, so a
                         # write that keeps failing can never loop; counted when reached, so a
@@ -322,7 +358,7 @@ async def run_resolution_agent(
                                 upgraded += 1
 
                         if job_id and processed % PROGRESS_UPDATE_EVERY == 0:
-                            _update_job_progress(tenant_id, job_id, processed, len(attempted))
+                            _update_job_progress(tenant_id, job_id, processed, known)
             if stopped != "drained":
                 break
             # Unlocked. A dispatch that landed between the last empty fetch and the unlock
@@ -331,7 +367,14 @@ async def run_resolution_agent(
                 break
 
     if job_id:
-        _update_job_progress(tenant_id, job_id, processed, len(attempted))
+        _update_job_progress(tenant_id, job_id, processed, processed)
+
+    # A dispatch that arrived while this task led was skipped, so a budget stop must hand
+    # the rest on rather than leave it for an unrelated trigger. Only after progress (the
+    # eligible set shrank), so proposals whose writes keep failing cannot chain forever.
+    continued = stopped == "budget" and (upgraded + kept_needs_human + not_applied) > 0
+    if continued:
+        await asyncio.to_thread(dispatch_resolution_agent, str(tenant_id), str(run_id))
 
     return {
         "processed": processed,
@@ -342,6 +385,7 @@ async def run_resolution_agent(
         "persist_failures": persist_failures,
         "comparison_failures": comparison_failures,
         "stopped": stopped,
+        "continued": continued,
     }
 
 

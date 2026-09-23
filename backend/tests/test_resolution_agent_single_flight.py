@@ -193,6 +193,8 @@ async def test_one_task_classifies_at_most_the_per_run_budget(db, tenant_a, monk
 
     adapter = ReplanEveryCall(action="book_fee_line", narrative="Fee.")
     run, _, _ = await _setup(db, tenant_a.id, monkeypatch, adapter=adapter)
+    dispatched = []
+    monkeypatch.setattr(agent_task, "dispatch_resolution_agent", lambda *args: dispatched.append(args))
     summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
     assert summary["stopped"] == "budget"
     assert len(adapter.calls) == 3
@@ -260,3 +262,62 @@ async def test_a_refused_apply_ends_its_transaction(db, tenant_a, monkeypatch, r
     assert not db.in_transaction()
     assert await apply_agent_proposal(db, proposal, out) is False
     assert not db.in_transaction(), "the refusal left its FOR SHARE transaction open"
+
+
+async def test_a_budget_stop_after_progress_hands_the_rest_to_a_fresh_task(db, tenant_a, monkeypatch):
+    """A dispatch that arrived while this task led was skipped; if this task then stops
+    at its budget, the rest must not wait for an unrelated trigger."""
+    from app.services.reconciliation import resolution_agent
+
+    monkeypatch.setattr(resolution_agent, "MAX_ITEMS_PER_RUN", 2)
+    run, _, adapter = await _setup(db, tenant_a.id, monkeypatch, n=3)
+    dispatched = []
+    monkeypatch.setattr(agent_task, "dispatch_resolution_agent", lambda *args: dispatched.append(args))
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+    assert summary["stopped"] == "budget" and summary["upgraded"] == 2 and summary["continued"] is True
+    assert dispatched == [(str(tenant_a.id), str(run.id))]
+
+
+async def test_a_budget_stop_without_progress_never_chains(db, tenant_a, monkeypatch):
+    """Proposals whose writes keep failing must not be handed on forever."""
+    from app.services.reconciliation import resolution_agent
+
+    monkeypatch.setattr(resolution_agent, "MAX_ITEMS_PER_RUN", 2)
+    run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=3)
+
+    async def always_fails(*_args, **_kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(resolution_agent, "apply_agent_proposal", always_fails)
+    dispatched = []
+    monkeypatch.setattr(agent_task, "dispatch_resolution_agent", lambda *args: dispatched.append(args))
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+    assert summary["stopped"] == "budget" and summary["persist_failures"] == 2
+    assert summary["continued"] is False and dispatched == []
+
+
+async def test_a_leader_whose_lock_connection_dies_stops_draining(db, tenant_a, monkeypatch):
+    """The session-level lock goes with its connection. A leader that lost it must stop,
+    or a second task could take the run and classify alongside it."""
+    real_leader, leader_pid = agent_task._run_leader, {}
+
+    @contextlib.asynccontextmanager
+    async def recording_leader(session, key):
+        async with real_leader(session, key) as leading:
+            if leading:
+                leader_pid["pid"] = await leading.backend_pid()
+            yield leading
+
+    class KillLeaderOnFirstCall(FakeAdapter):
+        async def create_message(self, **kwargs):
+            if not self.calls:
+                await db.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": leader_pid["pid"]})
+            return await super().create_message(**kwargs)
+
+    adapter = KillLeaderOnFirstCall(action="book_fee_line", narrative="Fee.")
+    run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=3, adapter=adapter)
+    monkeypatch.setattr(agent_task, "_run_leader", recording_leader)
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+    assert summary["stopped"] == "leadership_lost"
+    assert len(adapter.calls) == 1
+    assert await _lock_is_free(db, agent_task._run_lock_key(tenant_a.id, run.id))
