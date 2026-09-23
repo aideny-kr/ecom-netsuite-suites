@@ -18,6 +18,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
+from app.services.chat.llm_purpose import with_llm_purpose
 from app.services.reconciliation.four_bucket_classifier import TERMINAL_RESULT_STATUSES, is_material
 from app.services.reconciliation.narrative_contract import narrative_respects_evidence
 from app.services.reconciliation.resolution_planner import VEHICLE_BY_ACTION, group_key_for
@@ -214,6 +215,7 @@ correct action is unclear from the context, choose needs_human rather than guess
 You NEVER write to NetSuite. Your output is a proposal for human review, nothing more."""
 
 
+@with_llm_purpose("recon_classify")
 async def classify_item(adapter, model: str, context: dict) -> dict:
     """One forced-tool LLM call; returns the classify_resolution tool-use input."""
     import json

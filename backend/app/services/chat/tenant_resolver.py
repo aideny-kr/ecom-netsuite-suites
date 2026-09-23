@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.tenant_entity_mapping import TenantEntityMapping
 from app.models.tenant_learned_rule import TenantLearnedRule
 from app.services.chat.llm_adapter import BaseLLMAdapter
+from app.services.chat.llm_purpose import with_llm_purpose
 
 logger = structlog.get_logger(__name__)
 
@@ -58,6 +59,7 @@ class TenantEntityResolver:
     """
 
     @staticmethod
+    @with_llm_purpose("entity_extraction")
     async def resolve_entities(
         user_message: str,
         tenant_id: uuid.UUID,

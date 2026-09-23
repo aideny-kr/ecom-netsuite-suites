@@ -206,6 +206,7 @@ def _build_learned_rules_block(learned_rules: list) -> str:
 
 
 from app.services.chat.completion_review import CompletionGuard
+from app.services.chat.llm_purpose import with_llm_purpose
 from app.services.confidence_extractor import extract_structured_confidence
 from app.services.confidence_service import CompositeScorer
 
@@ -738,6 +739,7 @@ class BaseSpecialistAgent(abc.ABC):
     def max_steps(self) -> int:
         return 3
 
+    @with_llm_purpose("agent_turn")
     async def run(
         self,
         task: str,
@@ -1162,6 +1164,7 @@ class BaseSpecialistAgent(abc.ABC):
                 agent_name=self.agent_name,
             )
 
+    @with_llm_purpose("agent_turn_stream")
     async def run_streaming(
         self,
         task: str,
