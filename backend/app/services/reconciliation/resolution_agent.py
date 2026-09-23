@@ -36,27 +36,22 @@ async def fetch_agent_eligible(
     tenant_id,
     run_id,
     limit: int = MAX_ITEMS_PER_RUN,
+    *,
+    exclude_ids=(),
 ) -> list[ReconResolutionProposal]:
-    """Planner abstentions the agent may investigate, oldest first, capped."""
+    """Planner abstentions the agent may investigate, oldest first, capped. Ids in
+    *exclude_ids* (the ones this task already attempted) are skipped."""
     P = ReconResolutionProposal
-    return list(
-        (
-            await db.execute(
-                select(P)
-                .where(
-                    P.tenant_id == tenant_id,
-                    P.run_id == run_id,
-                    P.source == "planner",
-                    P.action == "needs_human",
-                    P.status == "proposed",
-                )
-                .order_by(P.created_at.asc())
-                .limit(limit)
-            )
-        )
-        .scalars()
-        .all()
+    stmt = select(P).where(
+        P.tenant_id == tenant_id,
+        P.run_id == run_id,
+        P.source == "planner",
+        P.action == "needs_human",
+        P.status == "proposed",
     )
+    if exclude_ids:
+        stmt = stmt.where(P.id.not_in(list(exclude_ids)))
+    return list((await db.execute(stmt.order_by(P.created_at.asc()).limit(limit))).scalars().all())
 
 
 # ---------------------------------------------------------------------------
