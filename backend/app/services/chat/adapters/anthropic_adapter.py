@@ -297,26 +297,19 @@ def _log_usage(model: str, raw, *, stream: bool, elapsed_ms: int, kwargs: dict, 
     adapter's own overload retries (stream path) are counted in ``retries`` and their
     backoff is excluded. On the stream path ``ms`` runs to the final message, so it
     includes time the caller spent between chunks. A stream that ends without a final
-    message (deadline, cancellation) has no usage to report and emits no line."""
-    if not logger.isEnabledFor(logging.INFO):
-        return
+    message (deadline, cancellation) has no usage to report and emits no line.
+
+    Printed to stdout, not logged: the app configures no handler for stdlib INFO, so a
+    logger.info line never reached the container logs (0 lines on staging, 2026-09-23).
+    stdout is what docker logs and the Celery worker's stdout redirect both capture."""
     usage = _usage_from(raw)
     write_5m, write_1h = _ttl_split(raw)
-    logger.info(
-        "llm.usage purpose=%s model=%s in=%d cache_write=%d cache_write_5m=%d cache_write_1h=%d cache_read=%d "
-        "out=%d ms=%d retries=%d prefix=%s stream=%s",
-        current_purpose(),
-        model,
-        usage.input_tokens,
-        usage.cache_creation_input_tokens,
-        write_5m,
-        write_1h,
-        usage.cache_read_input_tokens,
-        usage.output_tokens,
-        elapsed_ms,
-        retries,
-        _prefix_fingerprint(kwargs),
-        "true" if stream else "false",
+    print(
+        f"llm.usage purpose={current_purpose()} model={model} in={usage.input_tokens} "
+        f"cache_write={usage.cache_creation_input_tokens} cache_write_5m={write_5m} cache_write_1h={write_1h} "
+        f"cache_read={usage.cache_read_input_tokens} out={usage.output_tokens} ms={elapsed_ms} "
+        f"retries={retries} prefix={_prefix_fingerprint(kwargs)} stream={'true' if stream else 'false'}",
+        flush=True,
     )
 
 

@@ -14,6 +14,10 @@ TOOLS = [
 ]
 
 
+def _usage_line(capsys) -> str:
+    return next(line for line in capsys.readouterr().out.splitlines() if line.startswith("llm.usage"))
+
+
 def _kwargs(**over):
     base = dict(
         model="claude-sonnet-5", max_tokens=100, system="static", system_dynamic="dyn", messages=[], tools=TOOLS
@@ -42,7 +46,7 @@ def test_one_hour_ttl_goes_only_on_the_stable_prefix(monkeypatch):
     assert "category" not in k["tools"][0]  # allowlisting still applies
 
 
-async def test_every_call_logs_its_usage_with_the_four_token_fields(monkeypatch, caplog):
+async def test_every_call_logs_its_usage_with_the_four_token_fields(monkeypatch, capsys):
     usage = SimpleNamespace(
         input_tokens=17, output_tokens=104, cache_creation_input_tokens=2357, cache_read_input_tokens=0
     )
@@ -54,12 +58,10 @@ async def test_every_call_logs_its_usage_with_the_four_token_fields(monkeypatch,
 
     adapter = aa.AnthropicAdapter.__new__(aa.AnthropicAdapter)
     adapter._client = SimpleNamespace(messages=FakeMessages())
-    with caplog.at_level(logging.INFO, logger=aa.__name__):
-        await adapter.create_message(
-            model="claude-sonnet-5", max_tokens=10, system="s", messages=[{"role": "user", "content": "q"}]
-        )
-    line = next(r for r in caplog.records if r.getMessage().startswith("llm.usage"))
-    msg = line.getMessage()
+    await adapter.create_message(
+        model="claude-sonnet-5", max_tokens=10, system="s", messages=[{"role": "user", "content": "q"}]
+    )
+    msg = _usage_line(capsys)
     for field in ("model=claude-sonnet-5", "in=17", "cache_write=2357", "cache_read=0", "out=104", "stream=false"):
         assert field in msg, msg
 
@@ -67,7 +69,7 @@ async def test_every_call_logs_its_usage_with_the_four_token_fields(monkeypatch,
 # ── attribution: the line must be able to explain WHICH call paid what ─────
 
 
-async def test_usage_line_carries_purpose_duration_prefix_and_ttl_split(monkeypatch, caplog):
+async def test_usage_line_carries_purpose_duration_prefix_and_ttl_split(monkeypatch, capsys):
     from app.services.chat.llm_purpose import llm_purpose
 
     usage = SimpleNamespace(
@@ -85,7 +87,7 @@ async def test_usage_line_carries_purpose_duration_prefix_and_ttl_split(monkeypa
 
     adapter = aa.AnthropicAdapter.__new__(aa.AnthropicAdapter)
     adapter._client = SimpleNamespace(messages=FakeMessages())
-    with caplog.at_level(logging.INFO, logger=aa.__name__), llm_purpose("request_routing"):
+    with llm_purpose("request_routing"):
         await adapter.create_message(
             model="claude-sonnet-5",
             max_tokens=10,
@@ -93,7 +95,7 @@ async def test_usage_line_carries_purpose_duration_prefix_and_ttl_split(monkeypa
             messages=[{"role": "user", "content": "q"}],
             tools=TOOLS,
         )
-    msg = next(r for r in caplog.records if r.getMessage().startswith("llm.usage")).getMessage()
+    msg = _usage_line(capsys)
     for field in ("purpose=request_routing", "cache_write_5m=2000", "cache_write_1h=357", "ms="):
         assert field in msg, msg
     import re
@@ -181,7 +183,7 @@ async def test_closing_an_abandoned_generator_from_another_task_does_not_raise()
     await asyncio.create_task(gen.aclose())  # a different Context from the one that started it
 
 
-async def test_stream_timing_excludes_retry_backoff(monkeypatch, caplog):
+async def test_stream_timing_excludes_retry_backoff(monkeypatch, capsys):
     """ms= is the successful attempt's wall time, not the jittered overload sleep."""
     from tests.test_llm_adapters import _install_stream, _make_api_error
 
@@ -194,12 +196,11 @@ async def test_stream_timing_excludes_retry_backoff(monkeypatch, caplog):
     monkeypatch.setattr(aa.asyncio, "sleep", fake_sleep)
     adapter = aa.AnthropicAdapter(api_key="sk-test")
     _install_stream(adapter, _make_api_error("overloaded_error"))
-    with caplog.at_level(logging.INFO, logger=aa.__name__):
-        async for _ in adapter.stream_message(
-            model="claude-sonnet-5", max_tokens=10, system="s", messages=[{"role": "user", "content": "q"}]
-        ):
-            pass
-    msg = next(r for r in caplog.records if r.getMessage().startswith("llm.usage")).getMessage()
+    async for _ in adapter.stream_message(
+        model="claude-sonnet-5", max_tokens=10, system="s", messages=[{"role": "user", "content": "q"}]
+    ):
+        pass
+    msg = _usage_line(capsys)
     assert " ms=0 " in msg and "retries=1" in msg, msg
 
 
@@ -276,3 +277,24 @@ def test_only_the_last_tool_carries_a_cache_breakpoint(monkeypatch):
     k = _kwargs(tools=tools)
     assert "cache_control" not in k["tools"][0]
     assert k["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+# ── the line must reach the container logs ───────────────────────────────
+
+
+async def test_the_usage_line_reaches_stdout_when_the_logger_is_at_warning(monkeypatch, capsys):
+    """Staging's adapter logger sits at WARNING with no handler, so a logger.info line
+    was dropped (0 llm.usage lines, 2026-09-23). The line goes to stdout, which docker
+    logs and the Celery worker's redirect both capture."""
+    usage = SimpleNamespace(input_tokens=5, output_tokens=7, cache_creation_input_tokens=0, cache_read_input_tokens=9)
+    response = SimpleNamespace(content=[SimpleNamespace(type="text", text="hi")], usage=usage, stop_reason="end_turn")
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            return response
+
+    monkeypatch.setattr(aa.logger, "level", logging.WARNING)
+    adapter = aa.AnthropicAdapter.__new__(aa.AnthropicAdapter)
+    adapter._client = SimpleNamespace(messages=FakeMessages())
+    await adapter.create_message(model="claude-sonnet-5", max_tokens=10, system="s", messages=[])
+    assert "cache_read=9" in _usage_line(capsys)
