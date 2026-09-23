@@ -15,6 +15,7 @@ MAX_REFUND_CALLS = 25  # +1 for the single batched credit-memo ledger read
 MAX_DOCUMENTS = 100
 MAX_EDGES = 200
 MAX_DEPTH = 6
+MAX_DEPENDENCIES = 600
 _PARENTS = {
     "CustDep": {"SalesOrd"},
     "CustInvc": {"SalesOrd"},
@@ -204,6 +205,7 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order
         raise ValueError("refund_allocation_ambiguous")
 
     total, included, amounts = Decimal(0), [], {}
+    application_documents = set()
     for identifier in sorted(set(allocations) | cash_refunds, key=int):
         metadata = nodes[identifier]
         if metadata["voided"] == "T":
@@ -234,6 +236,7 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order
                 if item.get("apply") is not True or not _id(doc) or line is None or (doc, line) in seen:
                     raise ValueError("refund_application_ambiguous")
                 seen.add((doc, line))
+                application_documents.add(doc)
                 value = _positive(item.get("amount"))
                 applied += value
                 if doc in allocations[identifier]:
@@ -261,10 +264,23 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order
         else []
     )
     await recheck_links()
+    request_ids = sorted((link["request_id"] for link in request_links), key=int)
+    transaction_ids = [order_id, *sorted(({*nodes, *application_documents} - {order_id}), key=int)]
+    dependency_limit = MAX_DEPENDENCIES - len(request_ids)
     return {
         "amount": total,
         "refund_count": len(included),
         "record_ids": included,
         "request_links": request_links,
         "tax_adjustments": adjustments,
+        # Retain every observed participant, including voided refunds and
+        # parents outside the owned set. They can invalidate the proof later.
+        # This inventories this read's inputs; it is not a change-feed watermark.
+        "dependency_manifest": {
+            "version": 1,
+            "order_id": order_id,
+            "transaction_ids": transaction_ids[:dependency_limit],
+            "refund_requests": request_ids,
+            "truncated": len(transaction_ids) > dependency_limit,
+        },
     }

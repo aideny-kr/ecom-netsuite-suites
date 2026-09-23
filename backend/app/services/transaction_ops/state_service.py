@@ -834,6 +834,9 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
         row.report_json = request.report_json
     run.lease_until = min(run.deadline_at, now + _LEASE)
     await db.flush()
+    from app.services.transaction_ops.dependency_index import record_dependencies
+
+    await record_dependencies(db, tenant_id, run, row)
     from app.services.transaction_ops.case_service import observe_finding
 
     case = await observe_finding(db, tenant_id, run, row, now=now) if final else None
