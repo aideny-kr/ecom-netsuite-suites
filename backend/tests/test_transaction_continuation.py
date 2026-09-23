@@ -124,7 +124,8 @@ async def test_run_api_links_to_its_continuation_without_changing_terminal_evide
     assert "continuation_run_id" not in response.json()["progress_json"]
 
 
-def test_destination_cursor_progress_allows_bounded_continuation():
+@pytest.mark.parametrize("counter", ["destination_scan_count", "dependency_step_count"])
+def test_destination_cursor_progress_allows_bounded_continuation(counter):
     from types import SimpleNamespace
 
     now = datetime.now(timezone.utc)
@@ -134,9 +135,9 @@ def test_destination_cursor_progress_allows_bounded_continuation():
         progress_json={
             "processed": 5,
             "scan_count": 20,
-            "destination_scan_count": 40,
-            "continuation_baseline": {"processed": 5, "scan_count": 20, "destination_scan_count": 20},
+            counter: 40,
+            "continuation_baseline": {"processed": 5, "scan_count": 20, counter: 20},
         },
     )
     metadata = continuation.next_metadata(prior, now)
-    assert metadata["continuation_baseline"]["destination_scan_count"] == 40
+    assert metadata["continuation_baseline"][counter] == 40

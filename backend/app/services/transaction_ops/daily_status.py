@@ -44,6 +44,12 @@ async def daily_status(db, tenant_id, *, now=None):
                 r.progress_json["scan_complete"].astext == "true",
                 r.progress_json["refund_scan_complete"].astext == "true",
                 r.progress_json["destination_scan_complete"].astext == "true",
+                *(
+                    [r.progress_json["dependency_scan_complete"].astext == "true"]
+                    if (config.mapping_json or {}).get("metabase_replica")
+                    and (config.mapping_json or {}).get("reconciliation_policy") is not None
+                    else []
+                ),
             )
             .order_by(cast(r.params_json["window_end"].astext, DateTime(timezone=True)).desc(), r.created_at.desc())
             .limit(1)

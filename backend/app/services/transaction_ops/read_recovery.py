@@ -66,6 +66,14 @@ def safe_read_code(exc):
         "upstream_http_403",
         "upstream_http_404",
         "upstream_http_500",
+        "invalid_dependency_change_scope",
+        "dependency_change_page_incomplete",
+        "dependency_owner_scope_invalid",
+        "dependency_owner_page_incomplete",
+        "dependency_owner_identity_unproven",
+        "dependency_owner_budget",
+        "dependency_owner_depth",
+        "dependency_checkpoint_invalid",
     }:
         return "netsuite_" + str(exc)
     return "unclassified_read_failure"

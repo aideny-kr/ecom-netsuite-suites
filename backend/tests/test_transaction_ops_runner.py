@@ -132,7 +132,7 @@ class State:
         assert lease_token == self.token
         self.reports[args[3]] = deepcopy(args[4])
 
-    async def unseen_references(self, db, tenant_id, run_id, references):
+    async def unseen_references(self, db, tenant_id, run_id, references, *, since=None):
         return [reference for reference in references if reference not in self.reports]
 
     async def finish_run(self, *args, lease_token=None, **kwargs):
