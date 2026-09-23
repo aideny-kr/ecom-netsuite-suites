@@ -57,7 +57,7 @@ def next_metadata(previous, now):
     counts.update(
         {
             key: progress[key]
-            for key in ("refund_scan_count", "outside_scope", "destination_scan_count")
+            for key in ("refund_scan_count", "outside_scope", "destination_scan_count", "dependency_step_count")
             if key in progress
         }
     )

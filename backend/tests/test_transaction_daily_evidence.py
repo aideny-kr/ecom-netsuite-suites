@@ -30,6 +30,7 @@ async def daily(db, root, *, params=None, snapshot=None, progress=None, reason="
             "scan_complete": True,
             "refund_scan_complete": True,
             "destination_scan_complete": True,
+            "dependency_scan_complete": True,
             **(progress or {}),
         },
         status="finished",
@@ -219,3 +220,24 @@ async def test_new_scheduler_run_executes_first_page_with_cycle_metadata(db, adm
     assert run.api_calls_used == 2
     assert run.progress_json["scan_complete"] is True
     assert run.progress_json["schedule_cycle_key"] == key
+
+
+async def test_v2_daily_coverage_requires_all_dependency_streams_but_preserves_legacy_reports(
+    db, admin_user, monkeypatch
+):
+    actor = admin_user[0]
+    config, root = await review(db, actor, monkeypatch)
+    assert root.config_snapshot["destination_discovery_version"] == 2
+    partial = await daily(db, root, progress={"dependency_scan_complete": False})
+    span = ReviewSpan.model_validate(root.params_json["review"])
+    assert not daily_evidence.scan_complete(partial)
+    assert not await daily_evidence.completed_daily_windows(db, root, span)
+    assert not await daily_evidence.completed_observation_windows(db, root, span)
+    legacy = {k: v for k, v in root.config_snapshot.items() if k != "destination_discovery_version"}
+    await daily(db, root, snapshot=legacy, progress={"dependency_scan_complete": False})
+    # An old completed report remains usable as an historical observation. It
+    # cannot certify that the newly required five change feeds completed.
+    assert await daily_evidence.completed_observation_windows(db, root, span)
+    assert not await daily_evidence.completed_daily_windows(db, root, span)
+    rows = await daily_status.daily_status(db, actor.tenant_id)
+    assert next(row for row in rows if row["config_id"] == str(config.id))["run_id"] is None

@@ -23,6 +23,7 @@ async def finish(db, run, reason="done"):
         "scan_complete": True,
         "refund_scan_complete": True,
         "destination_scan_complete": True,
+        "dependency_scan_complete": True,
         "processed": 2,
         "matched": 2,
     }
@@ -174,7 +175,9 @@ async def test_coverage_prefers_final_continuation_over_query_order(monkeypatch)
 
     span = {"id": str(uuid4()), "start": "2026-08-01T00:00:00Z", "end": "2026-09-01T00:00:00Z"}
     params = {"review": span, "window_start": span["start"], "window_end": "2026-08-02T00:00:00Z"}
-    base = dict(config_id=uuid4(), params_json=params, status="finished")
+    base = dict(
+        config_id=uuid4(), params_json=params, status="finished", config_snapshot={"destination_discovery_version": 2}
+    )
     prior = SimpleNamespace(id=uuid4(), termination_reason="budget", progress_json={"continuation_part": 1}, **base)
     final = SimpleNamespace(
         id=uuid4(),
@@ -184,6 +187,7 @@ async def test_coverage_prefers_final_continuation_over_query_order(monkeypatch)
             "scan_complete": True,
             "refund_scan_complete": True,
             "destination_scan_complete": True,
+            "dependency_scan_complete": True,
         },
         **base,
     )

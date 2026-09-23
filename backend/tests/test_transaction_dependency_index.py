@@ -296,3 +296,39 @@ async def test_dependency_rls_uses_non_bypass_role(db, setup_state):
         await db.execute(text("RESET ROLE"))
         await db.execute(text(f"DROP OWNED BY {role}"))
         await db.execute(text(f"DROP ROLE {role}"))
+
+
+async def test_changed_dependencies_require_final_observations_after_the_change_window(db, setup_state):
+    from datetime import datetime, timedelta, timezone
+
+    actor, _, run = setup_state
+    now = datetime.now(timezone.utc)
+    refs = ["R123456780", "R123456781", "R123456782", "R123456783"]
+    # Internal persisted observations stand in for stale cache, interrupted
+    # comparison, fresh comparison, and legacy evidence respectively.
+    for ref, observation in zip(
+        refs,
+        [
+            {"final": True, "observed_at": (now - timedelta(hours=1)).isoformat()},
+            {"final": False, "observed_at": now.isoformat()},
+            {"final": True, "observed_at": now.isoformat()},
+            None,
+        ],
+    ):
+        db.add(
+            TransactionFinding(
+                tenant_id=actor.tenant_id,
+                run_id=run.id,
+                order_reference=ref,
+                report_json={"_observation": observation} if observation else {},
+            )
+        )
+    await db.flush()
+    assert await state.unseen_references(db, actor.tenant_id, run.id, refs) == []
+    assert await state.unseen_references(db, actor.tenant_id, run.id, refs, since=now.isoformat()) == [
+        refs[0],
+        refs[1],
+        refs[3],
+    ]
+    with pytest.raises(state.StateError, match="not_found"):
+        await state.unseen_references(db, uuid4(), run.id, refs, since=now.isoformat())
