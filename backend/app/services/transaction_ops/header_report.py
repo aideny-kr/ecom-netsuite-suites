@@ -92,7 +92,16 @@ def build_header_report(source_evidence, target_evidence, config, mapping, *, no
         "source_provenance": {
             key: value
             for key, value in source_evidence.items()
-            if key in {"source", "scope", "read_at", "celigo_step_id", "connection_id"}
+            if key
+            in {
+                "source",
+                "scope",
+                "read_at",
+                "body_collected_at",
+                "source_validation",
+                "celigo_step_id",
+                "connection_id",
+            }
         },
         "netsuite_provenance": {"scope": target_evidence["scope"], "observed_at": target_evidence["observed_at"]},
     }

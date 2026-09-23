@@ -124,7 +124,8 @@ async def test_run_api_links_to_its_continuation_without_changing_terminal_evide
     assert "continuation_run_id" not in response.json()["progress_json"]
 
 
-def test_destination_cursor_progress_allows_bounded_continuation():
+@pytest.mark.parametrize("counter", ["destination_scan_count", "dependency_step_count"])
+def test_destination_cursor_progress_allows_bounded_continuation(counter):
     from types import SimpleNamespace
 
     now = datetime.now(timezone.utc)
@@ -134,9 +135,41 @@ def test_destination_cursor_progress_allows_bounded_continuation():
         progress_json={
             "processed": 5,
             "scan_count": 20,
-            "destination_scan_count": 40,
-            "continuation_baseline": {"processed": 5, "scan_count": 20, "destination_scan_count": 20},
+            counter: 40,
+            "continuation_baseline": {"processed": 5, "scan_count": 20, counter: 20},
         },
     )
     metadata = continuation.next_metadata(prior, now)
-    assert metadata["continuation_baseline"]["destination_scan_count"] == 40
+    assert metadata["continuation_baseline"][counter] == 40
+
+
+async def test_scheduler_recovers_dependency_only_progress_and_retains_no_progress_guard(db, admin_user):
+    from app.services.transaction_ops.scheduler import _recovery_ids
+
+    actor = admin_user[0]
+    prior, _ = await budget_run(
+        db,
+        actor,
+        progress={
+            "processed": 0,
+            "scan_count": 0,
+            "destination_scan_count": 0,
+            "dependency_step_count": 3,
+            "pending_refs": [],
+            "refund_scan_complete": True,
+            "dependency_scan": {"version": 1, "stream_index": 1, "after": None},
+        },
+    )
+    now = datetime.now(timezone.utc)
+    assert prior.id in await _recovery_ids(db, actor.tenant_id, now)
+    assert prior.id not in await _recovery_ids(db, uuid4(), now)
+    child = await continuation.continue_budget_run(db, actor.tenant_id, prior.id)
+    assert child.progress_json["dependency_scan"] == prior.progress_json["dependency_scan"]
+    assert child.progress_json["continuation_baseline"]["dependency_step_count"] == 3
+    assert prior.id not in await _recovery_ids(db, actor.tenant_id, now)
+    # A child that did no additional discovery cannot earn another budget.
+    child.status, child.termination_reason = "finished", "budget"
+    child.finished_at = datetime.now(timezone.utc)
+    await db.flush()
+    assert await continuation.continue_budget_run(db, actor.tenant_id, child.id) is None
+    assert (await continuation.continuation_result(db, actor.tenant_id, child.id))[1]["reason"] == "no_progress"

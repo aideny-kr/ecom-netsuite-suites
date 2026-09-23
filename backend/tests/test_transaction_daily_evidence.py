@@ -30,6 +30,8 @@ async def daily(db, root, *, params=None, snapshot=None, progress=None, reason="
             "scan_complete": True,
             "refund_scan_complete": True,
             "destination_scan_complete": True,
+            "dependency_scan_complete": True,
+            "dependency_index_seed": {"complete": True},
             **(progress or {}),
         },
         status="finished",
@@ -219,3 +221,58 @@ async def test_new_scheduler_run_executes_first_page_with_cycle_metadata(db, adm
     assert run.api_calls_used == 2
     assert run.progress_json["scan_complete"] is True
     assert run.progress_json["schedule_cycle_key"] == key
+
+
+async def test_v2_daily_coverage_requires_all_dependency_streams_but_preserves_legacy_reports(
+    db, admin_user, monkeypatch
+):
+    actor = admin_user[0]
+    config, root = await review(db, actor, monkeypatch)
+    assert root.config_snapshot["destination_discovery_version"] == 2
+    partial = await daily(db, root, progress={"dependency_scan_complete": False})
+    span = ReviewSpan.model_validate(root.params_json["review"])
+    assert not daily_evidence.scan_complete(partial)
+    assert not await daily_evidence.completed_daily_windows(db, root, span)
+    assert not await daily_evidence.completed_observation_windows(db, root, span)
+    legacy = {k: v for k, v in root.config_snapshot.items() if k != "destination_discovery_version"}
+    await daily(db, root, snapshot=legacy, progress={"dependency_scan_complete": False})
+    # An old completed report remains usable as an historical observation. It
+    # cannot certify that the newly required five change feeds completed.
+    assert await daily_evidence.completed_observation_windows(db, root, span)
+    assert not await daily_evidence.completed_daily_windows(db, root, span)
+    rows = await daily_status.daily_status(db, actor.tenant_id)
+    assert next(row for row in rows if row["config_id"] == str(config.id))["run_id"] is None
+
+
+async def test_real_state_runner_seeds_history_without_zero_spend_reservation(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    _, run = await review(db, actor, monkeypatch)
+    run.progress_json = {"scan_complete": True, "refund_scan_complete": True, "pending_refs": []}
+    await db.flush()
+
+    async def empty(*args, **kwargs):
+        return {
+            "stream": args[6],
+            "page_complete": True,
+            "scan_complete": True,
+            "changes": [],
+            "scope": {"window_end": args[8].isoformat()},
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "next_cursor": None,
+        }
+
+    provider = AsyncMock(side_effect=empty)
+    result = await runner.run_investigation(
+        db,
+        actor.tenant_id,
+        run.id,
+        _dependency_page_reader=provider,
+        _enabled=AsyncMock(return_value=True),
+    )
+    assert result["termination_reason"] == "done"
+    assert provider.await_count == 5
+    assert run.progress_json["dependency_index_seed"]["complete"] is True
+    assert daily_evidence.scan_complete(run)
+    # Provider mocks sent no data calls, so only the explicit OAuth allowance
+    # was charged per stream. Local seed work charged no calls or orders.
+    assert run.api_calls_used == 5 and run.orders_used == 0

@@ -71,6 +71,8 @@ async def test_existing_review_action_resumes_error_and_retries_idempotently(cli
         "scan_complete": True,
         "refund_scan_complete": True,
         "destination_scan_complete": True,
+        "dependency_scan_complete": True,
+        "dependency_index_seed": {"complete": True},
     }
     resumed.status, resumed.termination_reason = "finished", "done"
     resumed.finished_at = datetime.now(timezone.utc)

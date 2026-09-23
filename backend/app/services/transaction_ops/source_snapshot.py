@@ -1,8 +1,10 @@
 """Reuse a real detail observation within a bounded scan, never in a write preflight.
 
-Page/header mirrors and replica rows are not detail evidence. No timestamp is
-refreshed on a hit; later scans, known newer versions, credential changes and
-expired observations require a new source read. Refunds have their own reader.
+Page/header mirrors and replica rows are not detail evidence. A local hit never
+refreshes its timestamp. Old bodies may be loaded separately for explicit HTTP
+validation; only the provider's matching 304 establishes a new observation.
+Credential changes and known newer versions invalidate either path. Refunds
+have their own reader.
 """
 
 import copy
@@ -17,6 +19,7 @@ from app.core.database import set_tenant_context
 from app.models.canonical import Order
 from app.models.tenant import Tenant
 from app.models.transaction_source_snapshot import TransactionSourceSnapshot
+from app.services.http_connector_service import valid_etag
 from app.services.transaction_ops.normalization import _time
 from app.services.transaction_ops.source_projection import ProjectionError, project_order
 from app.services.transaction_ops.source_reader import SourceReadError, direct_connection
@@ -84,6 +87,14 @@ def _project(evidence, connection_id, reference):
             "window_complete": False,
             "next_page": None,
         }
+        if valid_etag(evidence.get("_source_etag")):
+            result["_source_etag"] = evidence["_source_etag"]
+            collected = _timestamp(evidence["body_collected_at"]) if "body_collected_at" in evidence else observed
+            if collected is None or collected > observed:
+                return None
+            result["body_collected_at"] = collected.isoformat()
+            if evidence.get("source_validation") == "etag_not_modified":
+                result["source_validation"] = "etag_not_modified"
         if len(json.dumps(result).encode()) > MAX_BYTES:
             return None
         return result
@@ -101,6 +112,16 @@ async def _connection(db, tenant_id, connection_id):
 
 
 async def load(db, tenant_id, connection_id, reference, *, since, now, minimum_version=None):
+    return await _load(db, tenant_id, connection_id, reference, since=since, now=now, minimum_version=minimum_version)
+
+
+async def load_for_validation(db, tenant_id, connection_id, reference, *, now):
+    """An old body is NOT current evidence until the scoped provider returns 304."""
+    evidence = await _load(db, tenant_id, connection_id, reference, since=None, now=now)
+    return evidence if evidence and valid_etag(evidence.get("_source_etag")) else None
+
+
+async def _load(db, tenant_id, connection_id, reference, *, since, now, minimum_version=None):
     fingerprint = await _connection(db, tenant_id, connection_id)
     row = await db.scalar(
         select(TransactionSourceSnapshot)
@@ -110,7 +131,7 @@ async def load(db, tenant_id, connection_id, reference, *, since, now, minimum_v
             TransactionSourceSnapshot.connection_id == connection_id,
             TransactionSourceSnapshot.order_reference == reference,
             TransactionSourceSnapshot.connection_fingerprint == fingerprint,
-            TransactionSourceSnapshot.observed_at >= max(since, now - MAX_AGE),
+            *([TransactionSourceSnapshot.observed_at >= max(since, now - MAX_AGE)] if since is not None else []),
             TransactionSourceSnapshot.observed_at <= now,
         )
     )
@@ -135,7 +156,10 @@ async def load(db, tenant_id, connection_id, reference, *, since, now, minimum_v
         return None
     if _time(evidence["orders"][0]["updated_at"]) != row.source_updated_at:
         return None
-    return copy.deepcopy(evidence)
+    result = copy.deepcopy(evidence)
+    if since is None:
+        result["_validation_connection_fingerprint"] = fingerprint
+    return result
 
 
 async def save(db, tenant_id, connection_id, reference, evidence, *, now):

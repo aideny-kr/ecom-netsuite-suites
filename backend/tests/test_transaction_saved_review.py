@@ -29,6 +29,8 @@ async def saved_day(db, actor, monkeypatch, *, destination=True):
         "scan_complete": True,
         "refund_scan_complete": True,
         "destination_scan_complete": destination,
+        "dependency_scan_complete": destination,
+        "dependency_index_seed": {"complete": True},
     }
     await db.flush()
     await add(db, actor, run, "R123456789", "matched", run.created_at)

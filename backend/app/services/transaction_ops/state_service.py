@@ -404,7 +404,13 @@ async def control_config(db, tenant_id, config_id, request: ConfigControl, *, ac
 def _config_snapshot(config):
     from app.services.transaction_ops.evidence_contract import VERSION
 
-    return {**ConfigOut.model_validate(config).model_dump(mode="json"), "evidence_contract_version": VERSION}
+    return {
+        **ConfigOut.model_validate(config).model_dump(mode="json"),
+        "evidence_contract_version": VERSION,
+        "destination_discovery_version": 2
+        if config.mapping_json.get("metabase_replica") and config.mapping_json.get("reconciliation_policy") is not None
+        else 1,
+    }
 
 
 async def create_run(
@@ -502,6 +508,7 @@ async def create_run(
                         "refund_scan_count",
                         "outside_scope",
                         "destination_scan_count",
+                        "dependency_step_count",
                     )
                 },
             )
@@ -524,7 +531,14 @@ async def create_run(
         if resume_from_run_id is not None and not automatic_continuation:
             initial_progress["continuation_baseline"] = {
                 field: initial_progress.get(field, 0)
-                for field in ("processed", "scan_count", "refund_scan_count", "outside_scope", "destination_scan_count")
+                for field in (
+                    "processed",
+                    "scan_count",
+                    "refund_scan_count",
+                    "outside_scope",
+                    "destination_scan_count",
+                    "dependency_step_count",
+                )
             }
     row = TransactionRun(
         tenant_id=tenant_id,
@@ -834,6 +848,9 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
         row.report_json = request.report_json
     run.lease_until = min(run.deadline_at, now + _LEASE)
     await db.flush()
+    from app.services.transaction_ops.dependency_index import record_dependencies
+
+    await record_dependencies(db, tenant_id, run, row)
     from app.services.transaction_ops.case_service import observe_finding
 
     case = await observe_finding(db, tenant_id, run, row, now=now) if final else None
@@ -858,13 +875,29 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     return row
 
 
-async def unseen_references(db, tenant_id, run_id, references):
+async def unseen_references(db, tenant_id, run_id, references, *, since=None):
     run = await get_run(db, tenant_id, run_id)
     root = uuid.UUID(
         (run.progress_json or {}).get("evidence_root_id")
         or (run.progress_json or {}).get("continuation_root_id")
         or str(run.id)
     )
+    # A dependency event can invalidate an order already seen in this cycle.
+    # Require finalized evidence whose oldest financial read is after the event
+    # window. JSON timestamps are cast only after the trusted final marker; old
+    # diagnostics have no marker and therefore cannot suppress a fresh read.
+    from sqlalchemy import DateTime, cast
+
+    evidence_filter = []
+    if since is not None:
+        since = datetime.fromisoformat(since) if isinstance(since, str) else since
+        if since.utcoffset() is None:
+            raise StateError("invalid_observation_floor", 422)
+        evidence_filter = [
+            TransactionFinding.report_json["_observation"]["final"].astext == "true",
+            cast(TransactionFinding.report_json["_observation"]["observed_at"].astext, DateTime(timezone=True))
+            >= since,
+        ]
     seen = set(
         (
             await db.scalars(
@@ -874,6 +907,7 @@ async def unseen_references(db, tenant_id, run_id, references):
                     (TransactionRun.id == TransactionFinding.run_id) & (TransactionRun.tenant_id == tenant_id),
                 )
                 .where(
+                    *evidence_filter,
                     TransactionFinding.tenant_id == tenant_id,
                     TransactionFinding.order_reference.in_(references),
                     TransactionRun.config_id == run.config_id,

@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import DateTime, cast, func, or_, select
+from sqlalchemy import DateTime, and_, cast, func, or_, select
 
 from app.models.transaction_ops import TransactionRun
 
@@ -52,7 +52,12 @@ def compatible_observation_runs(root, span):
 
 def compatible_daily_runs(root, span):
     r = TransactionRun
-    return [*compatible_observation_runs(root, span), r.origin == "schedule"]
+    return [
+        *compatible_observation_runs(root, span),
+        r.origin == "schedule",
+        func.coalesce(r.config_snapshot["destination_discovery_version"].astext, "1")
+        == str(root.config_snapshot.get("destination_discovery_version", 1)),
+    ]
 
 
 def scan_complete(run):
@@ -64,7 +69,16 @@ def scan_complete(run):
         and progress.get("refund_scan_complete") is True
         and (
             run.params_json.get("window_basis", "updated_at") != "updated_at"
-            or progress.get("destination_scan_complete") is True
+            or (
+                progress.get("destination_scan_complete") is True
+                and (
+                    run.config_snapshot.get("destination_discovery_version", 1) < 2
+                    or (
+                        progress.get("dependency_scan_complete") is True
+                        and progress.get("dependency_index_seed", {}).get("complete") is True
+                    )
+                )
+            )
         )
     )
 
@@ -85,12 +99,27 @@ async def completed_observation_windows(db, root, span, *, daily_only=False):
         r.termination_reason == "done",
         r.progress_json["scan_complete"].astext == "true",
         r.progress_json["refund_scan_complete"].astext == "true",
+        or_(
+            func.coalesce(r.config_snapshot["destination_discovery_version"].astext, "1") == "1",
+            r.params_json["window_basis"].astext == "completed_at",
+            and_(
+                r.progress_json["dependency_scan_complete"].astext == "true",
+                r.progress_json["dependency_index_seed"]["complete"].astext == "true",
+            ),
+        ),
         # A saved-report receipt is not a new observation. Always resolve
         # coverage from provider-backed scans, before applying the row limit.
         *(r.progress_json[key].astext.is_(None) for key in _REUSE_KEYS),
     )
     if root.params_json.get("window_basis", "completed_at") == "updated_at":
         query = query.where(r.progress_json["destination_scan_complete"].astext == "true")
+    # V2 daily receipts require every dependency stream; historical report
+    # reuse still preserves the old observation contract without claiming a new scan.
+    if daily_only and root.config_snapshot.get("destination_discovery_version", 1) >= 2:
+        query = query.where(
+            r.progress_json["dependency_scan_complete"].astext == "true",
+            r.progress_json["dependency_index_seed"]["complete"].astext == "true",
+        )
     rows = (await db.execute(query.order_by(r.created_at.desc()).limit(512))).all()
     return [
         (

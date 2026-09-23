@@ -64,12 +64,32 @@ async def test_deposit_refund_uses_reverse_payment_link_and_only_this_orders_app
     assert result["amount"] == Decimal("100.00") and result["refund_count"] == 1
     assert result["record_ids"] == ["4"]
     assert reader.calls <= 24
+    assert result["dependency_manifest"] == {
+        "version": 1,
+        "order_id": "1",
+        "transaction_ids": ["1", "2", "3", "4", "999"],
+        "refund_requests": [],
+        "truncated": False,
+    }
+    assert reader.calls == 5  # Inventory adds no provider requests.
 
 
 async def test_complete_empty_related_graph_proves_zero():
     reader = Reader()
     reader.edges = []
     assert (await collect_refunds(reader, "1", "1", "1", order_reference="R123456789"))["amount"] == 0
+
+
+async def test_large_application_inventory_is_bounded_without_changing_refund_amount(monkeypatch):
+    # Lower the cap to exercise truncation using the normal proved graph.
+    monkeypatch.setattr("app.services.transaction_ops.netsuite_refunds.MAX_DEPENDENCIES", 4)
+    reader = Reader()
+    reader.edges[0]["previousdoc"] = "1000"
+    result = await collect_refunds(reader, "1000", "1", "1", order_reference="R123456789")
+    assert result["amount"] == Decimal("100.00")
+    assert result["dependency_manifest"]["transaction_ids"] == ["1000", "2", "3", "4"]
+    assert result["dependency_manifest"]["truncated"] is True
+    assert reader.calls == 5
 
 
 @pytest.mark.parametrize(
@@ -96,7 +116,9 @@ async def test_incomplete_or_ambiguous_allocations_never_prove_a_refund_amount(f
 async def test_voided_refund_does_not_count_as_returned_funds_in_netsuite():
     reader = Reader()
     reader.edges[-1]["previousvoided"] = "T"
-    assert (await collect_refunds(reader, "1", "1", "1", order_reference="R123456789"))["amount"] == 0
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["amount"] == 0
+    assert "4" in result["dependency_manifest"]["transaction_ids"]
 
 
 async def test_credit_refunds_use_the_same_exact_allocation_and_shared_invoices_are_unknown():

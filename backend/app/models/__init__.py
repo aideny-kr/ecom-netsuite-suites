@@ -49,6 +49,7 @@ from app.models.tenant_memory_edge import TenantMemoryEdge
 from app.models.tenant_memory_link import TenantMemoryLink
 from app.models.tenant_profile import TenantProfile
 from app.models.tenant_wallet import TenantWallet
+from app.models.transaction_netsuite_dependency import TransactionNetSuiteDependency  # noqa: F401
 from app.models.transaction_ops import (
     TransactionConfig,
     TransactionFinding,

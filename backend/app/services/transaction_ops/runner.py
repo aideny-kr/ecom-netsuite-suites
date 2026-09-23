@@ -242,7 +242,16 @@ def _build_detailed_report(source_evidence, target_evidence, config, mapping, *,
         "source_provenance": {
             key: value
             for key, value in source_evidence.items()
-            if key in {"source", "scope", "read_at", "celigo_step_id", "connection_id"}
+            if key
+            in {
+                "source",
+                "scope",
+                "read_at",
+                "body_collected_at",
+                "source_validation",
+                "celigo_step_id",
+                "connection_id",
+            }
         },
         "netsuite_provenance": {
             "scope": scope,
@@ -299,6 +308,13 @@ def limit_report(report, *, now):
                 key: report.get("netsuite_provenance", {}).get(key) for key in ("scope", "observed_at")
             },
         }
+        from app.services.transaction_ops.dependency_index import compact_dependency_evidence
+
+        dependencies = compact_dependency_evidence(report)
+        if dependencies:
+            # Identity inventory is separate from omitted financial proof and
+            # cannot turn this incomplete finding into an actionable comparison.
+            summary["refund_dependency_evidence"] = dependencies
         return _bounded_json(summary)
 
 
@@ -313,7 +329,10 @@ async def run_investigation(
     _target_refunds_reader=None,
     _refund_page_reader=None,
     _order_mirror=None,
-    _destination_page_reader=None,
+    _dependency_page_reader=None,
+    _dependency_owner_reader=None,
+    _dependency_index=None,
+    _dependency_seed=None,
     _target_reader=None,
     _page_reader=None,
     _guard_reader=None,
@@ -323,12 +342,13 @@ async def run_investigation(
     _clock=None,
 ):
     from app.services.ingestion.solidus_sync import save_observed_order
-    from app.services.transaction_ops import metabase_reader, source_snapshot
+    from app.services.transaction_ops import dependency_index, dependency_scan, metabase_reader, source_snapshot
     from app.services.transaction_ops.call_meter import metered
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
-    from app.services.transaction_ops.netsuite_changes import read_changed_orders
+    from app.services.transaction_ops.netsuite_change_owners import MAX_OWNER_CALLS, read_order_candidates
     from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
+    from app.services.transaction_ops.netsuite_dependency_changes import read_change_page
     from app.services.transaction_ops.netsuite_reader import MAX_API_CALLS as NETSUITE_READ_CALLS
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
     from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS, read_netsuite_refunds
@@ -353,7 +373,9 @@ async def run_investigation(
         from app.services.transaction_ops.recovery import reconcile_operation_run
 
         return await reconcile_operation_run(db, tenant_id, run_id, _clock=clock)
-    token = await state.claim_run(db, tenant_id, run_id, now=clock())
+    # Production claims use PostgreSQL's clock, matching its immutable budget
+    # trigger. The host clock can otherwise reject a valid first claim by drift.
+    token = await state.claim_run(db, tenant_id, run_id, now=clock() if _clock is not None else None)
     if token is None:
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
     progress = _initial_progress(run)
@@ -552,63 +574,97 @@ async def run_investigation(
                         and mapping.reconciliation_policy is not None
                         and run.params_json.get("window_start")
                         and run.params_json.get("window_basis", "updated_at") == "updated_at"
-                        and not progress.get("destination_scan_complete")
+                        and (
+                            not progress.get("dependency_scan_complete")
+                            or not progress.get("dependency_index_seed", {}).get("complete")
+                        )
                     ):
-                        if not await reserve(4):
-                            return await finish("budget")
-                        page = await bounded_read(
-                            "destination_page",
-                            lambda: (_destination_page_reader or read_changed_orders)(
+                        if not progress.get("dependency_index_seed", {}).get("complete"):
+                            from app.services.transaction_ops import dependency_seed
+
+                            if not progress.get("dependency_index_seed"):
+                                # An older unseeded checkpoint cannot retain a
+                                # deletion page already consumed without owners.
+                                progress.pop("dependency_scan", None)
+                                progress["dependency_scan_complete"] = False
+                            if not await (_enabled or enabled)(db, tenant_id):
+                                return await finish("stall")
+                            # Local indexing spends no provider budget. A leased
+                            # checkpoint enforces ownership/deadline before it.
+                            await save()
+                            progress["dependency_index_seed"] = await (_dependency_seed or dependency_seed.advance)(
                                 db,
                                 tenant_id,
-                                UUID(config["netsuite_connection_id"]),
-                                config["netsuite_account_id"],
-                                config["subsidiary_id"],
-                                mapping.reference_field,
-                                _time(run.params_json["window_start"]),
-                                _time(run.params_json["window_end"]),
-                                after_id=progress.get("destination_after_id", 0),
-                                page_size=20,
-                            ),
-                            retry_calls=4,
+                                run.config_id,
+                                progress.get("dependency_index_seed", {}),
+                            )
+                            progress["dependency_step_count"] = progress.get("dependency_step_count", 0) + 1
+                            await save()
+                            continue
+
+                        async def dependency_page(stream, after):
+                            if not await reserve(2, hold=True):
+                                raise ReadBudgetExhaustedError
+                            return await metered_read(
+                                "dependency_page",
+                                lambda: (_dependency_page_reader or read_change_page)(
+                                    db,
+                                    tenant_id,
+                                    UUID(config["netsuite_connection_id"]),
+                                    config["netsuite_account_id"],
+                                    config["subsidiary_id"],
+                                    mapping.reference_field,
+                                    stream,
+                                    _time(run.params_json["window_start"]),
+                                    _time(run.params_json["window_end"]),
+                                    after=after,
+                                    page_size=20,
+                                ),
+                                held=2,
+                                data_calls=1,
+                                retry_calls=2,
+                            )
+
+                        async def dependency_owners(**options):
+                            calls = MAX_OWNER_CALLS + 1
+                            if not await reserve(calls, hold=True):
+                                raise ReadBudgetExhaustedError
+                            return await metered_read(
+                                "dependency_owners",
+                                lambda: (_dependency_owner_reader or read_order_candidates)(
+                                    db,
+                                    tenant_id,
+                                    UUID(config["netsuite_connection_id"]),
+                                    config["netsuite_account_id"],
+                                    config["subsidiary_id"],
+                                    mapping.reference_field,
+                                    **options,
+                                ),
+                                held=calls,
+                                data_calls=MAX_OWNER_CALLS,
+                                retry_calls=calls,
+                            )
+
+                        async def indexed_owners(keys, **options):
+                            return await (_dependency_index or dependency_index.affected_order_references)(
+                                db,
+                                tenant_id,
+                                run.config_id,
+                                keys,
+                                **options,
+                            )
+
+                        async def unobserved(refs, **options):
+                            return await state.unseen_references(db, tenant_id, run_id, refs, **options)
+
+                        await dependency_scan.advance(
+                            progress,
+                            read_page=dependency_page,
+                            read_owners=dependency_owners,
+                            indexed_owners=indexed_owners,
+                            unobserved=unobserved,
                         )
-                        rows, cursor, complete = (
-                            page.get("orders"),
-                            page.get("next_after_id"),
-                            page.get("scan_complete"),
-                        )
-                        if (
-                            page.get("page_complete") is not True
-                            or not isinstance(rows, list)
-                            or len(rows) > 20
-                            or type(complete) is not bool
-                            or (complete and cursor is not None)
-                            or (not complete and (not rows or type(cursor) is not int))
-                        ):
-                            raise ScanChangedError("destination_page_incomplete")
-                        last = progress.get("destination_after_id", 0)
-                        for row in rows:
-                            identifier = row.get("id")
-                            modified = _time(row.get("updated_at"))
-                            if (
-                                type(identifier) is not int
-                                or identifier <= last
-                                or modified is None
-                                or not _time(run.params_json["window_start"])
-                                <= modified
-                                < _time(run.params_json["window_end"])
-                            ):
-                                raise ScanChangedError("destination_cursor_unproven")
-                            last = identifier
-                        if not complete and cursor != last:
-                            raise ScanChangedError("destination_cursor_unproven")
-                        progress["pending_refs"] = await state.unseen_references(
-                            db, tenant_id, run_id, list(dict.fromkeys(row["number"] for row in rows))
-                        )
-                        progress["destination_after_id"] = last
-                        progress["destination_scan_count"] = progress.get("destination_scan_count", 0) + len(rows)
-                        progress["destination_scan_complete"] = complete
-                        progress["phase"] = "destination"
+                        progress["dependency_step_count"] = progress.get("dependency_step_count", 0) + 1
                         await save()
                         continue
                     return await finish("done")
@@ -668,7 +724,8 @@ async def run_investigation(
                 continue
             reference = progress["pending_refs"][0]
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
-            can_reuse = snapshot_floor is not None and progress.get("phase") == "orders"
+            can_validate = snapshot_floor is not None
+            can_reuse = can_validate and progress.get("phase") == "orders"
             source = None
             if can_reuse:
                 source = await source_snapshot.load(
@@ -686,13 +743,25 @@ async def run_investigation(
             if source_reused:
                 progress["source_snapshot_hits"] = progress.get("source_snapshot_hits", 0) + 1
             else:
+                validating_reader = source_reader
+                if can_validate and _source_reader is None:
+                    from app.services.transaction_ops.source_validation import read_validated_order
+
+                    validating_reader = read_validated_order
                 source = await bounded_read(
                     "source_order",
-                    lambda: source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source),
+                    lambda: validating_reader(
+                        db, tenant_id, source_step_id, reference, **source_options, **direct_source
+                    ),
                     retry_calls=2,
                 )
-                progress["source_detail_reads"] = progress.get("source_detail_reads", 0) + 1
-                if can_reuse:
+                counter = (
+                    "source_body_validations"
+                    if source.get("source_validation") == "etag_not_modified"
+                    else "source_detail_reads"
+                )
+                progress[counter] = progress.get(counter, 0) + 1
+                if can_validate:
                     await source_snapshot.save(
                         db, tenant_id, direct_source["source_connection_id"], reference, source, now=clock()
                     )
