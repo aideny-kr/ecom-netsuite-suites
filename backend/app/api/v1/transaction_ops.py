@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import require_feature, require_permission
 from app.models.user import User
+from app.schemas.accounting_context import ContextDecision, ContextDraft, ContextScope
 from app.schemas.transaction_runs import (
     CaseObservationOut,
     CaseOut,
@@ -26,7 +27,7 @@ from app.schemas.transaction_runs import (
     RunCreate,
     RunOut,
 )
-from app.services.transaction_ops import case_service, order_actions, period_review, scheduler
+from app.services.transaction_ops import case_service, context_provenance, order_actions, period_review, scheduler
 from app.services.transaction_ops import state_service as service
 from app.services.transaction_ops.period_review import PeriodReview
 
@@ -127,6 +128,46 @@ async def configure_accounting_profile(config_id: UUID, request: AccountingProfi
         return await configure_sales_credit_profile(
             db, user.tenant_id, config_id, request.sales_credit_profile, actor=user
         )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/configs/{config_id}/accounting-context")
+async def propose_accounting_context(config_id: UUID, request: ContextDraft, user: Manager, db: Database):
+    try:
+        return await context_provenance.propose_context(db, user.tenant_id, config_id, request, actor=user)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/configs/{config_id}/accounting-context/{key}/review")
+async def review_accounting_context(config_id: UUID, key: str, request: ContextDecision, user: Manager, db: Database):
+    try:
+        return await context_provenance.decide_context(db, user.tenant_id, config_id, key, request, actor=user)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.get("/configs/{config_id}/accounting-context/history")
+async def accounting_context_history(
+    config_id: UUID,
+    user: Reader,
+    db: Database,
+    before_version: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+):
+    try:
+        return await context_provenance.context_history(
+            db, user.tenant_id, config_id, actor=user, before_version=before_version, limit=limit
+        )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/configs/{config_id}/accounting-context/resolve")
+async def resolve_accounting_context(config_id: UUID, request: ContextScope, user: Reader, db: Database):
+    try:
+        return await context_provenance.read_context(db, user.tenant_id, config_id, actor=user, scope=request)
     except service.StateError as exc:
         raise _http_error(exc) from None
 

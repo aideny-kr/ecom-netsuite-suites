@@ -516,6 +516,9 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             references=await reference_provenance(db, tenant_id, case.id),
         )
         evidence["resolution_assessment"] = assessment
+        # Record the exact context catalog/configuration revision inspected during this
+        # investigation. Book/period are not inferred from a sales-order observation.
+        evidence["context_provenance"] = review.get("context_provenance")
         if correction:
             # This object is the same scoped candidate consumed by the confirmation builder.
             # Retain the explanation/provenance with the signed proposal and later audit.

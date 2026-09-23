@@ -31,6 +31,10 @@ class ContextRequest(BaseModel):
     expected_account_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,255}$")
     calendar_year: int | None = Field(default=None, ge=1900, le=2199, strict=True)
     account_id: int | None = Field(default=None, gt=0, le=10**15, strict=True)
+    context_config_id: uuid.UUID | None = None
+    accounting_book_id: str | None = Field(default=None, pattern=r"^[0-9]{1,30}$")
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    posting_period_id: str | None = Field(default=None, pattern=r"^[0-9]{1,30}$")
     limit: int = Field(default=100, ge=1, le=500, strict=True)
 
     @model_validator(mode="after")
@@ -41,6 +45,11 @@ class ContextRequest(BaseModel):
             raise ValueError("account_id is only valid for accounts")
         if self.calendar_year is not None and self.section != "periods":
             raise ValueError("calendar_year is only valid for periods")
+        dimensions = (self.context_config_id, self.accounting_book_id, self.currency, self.posting_period_id)
+        if any(x is not None for x in dimensions) and (
+            self.section != "policies" or not all(x is not None for x in dimensions)
+        ):
+            raise ValueError("Policy context requires config, book, currency and posting period together")
         return self
 
 
@@ -112,30 +121,40 @@ async def _reference(query, scope, context, limit):
     }
 
 
-async def _policies(context, connection_id, account_id):
+async def _policies(context, connection_id, account_id, request=None):
     from app.mcp.tools.transaction_ops_tools import _authorize as authorize_transactions
     from app.mcp.tools.transaction_ops_tools import _ToolError
     from app.models.transaction_ops import TransactionConfig
+    from app.schemas.accounting_context import ContextScope
     from app.services.transaction_ops.accounting_profiles import sales_credit_profile
+    from app.services.transaction_ops.context_provenance import context_manifest
 
     try:
         db, tenant_id, _ = await authorize_transactions(context, create=False)
     except _ToolError:
         return {"status": "unavailable", "reason": "accounting_workflow_not_available"}
+    query = select(TransactionConfig).where(
+        TransactionConfig.tenant_id == tenant_id,
+        TransactionConfig.netsuite_connection_id == connection_id,
+        TransactionConfig.enabled.is_(True),
+    )
+    if request and request.context_config_id:
+        query = query.where(TransactionConfig.id == request.context_config_id)
     configs = (
-        await db.scalars(
-            select(TransactionConfig)
-            .where(
-                TransactionConfig.tenant_id == tenant_id,
-                TransactionConfig.netsuite_connection_id == connection_id,
-                TransactionConfig.enabled.is_(True),
-            )
-            .order_by(TransactionConfig.id)
-            .limit(101)
-            .execution_options(populate_existing=True)
-        )
+        await db.scalars(query.order_by(TransactionConfig.id).limit(101).execution_options(populate_existing=True))
     ).all()
+    if request and request.context_config_id and not configs:
+        return {"status": "unavailable", "reason": "context_config_unavailable"}
     treatments = []
+    context_scope = (
+        ContextScope(
+            accounting_book_id=request.accounting_book_id,
+            currency=request.currency,
+            posting_period_id=request.posting_period_id,
+        )
+        if request and request.context_config_id
+        else None
+    )
     for config in configs[:100]:
         if _account(config.netsuite_account_id) != account_id:
             continue
@@ -151,6 +170,7 @@ async def _policies(context, connection_id, account_id):
                 "subsidiary_id": config.subsidiary_id,
                 "sales_credit_status": status,
                 "sales_credit_profile": profile,
+                "context_provenance": await context_manifest(db, tenant_id, config, scope=context_scope),
             }
         )
     # The profile helper reads fresh connection state. A concurrent revocation
@@ -264,7 +284,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
             request.limit,
         )
     else:
-        sections["policies"] = await _policies(call_context, connection.id, account_id)
+        sections["policies"] = await _policies(call_context, connection.id, account_id, request)
     available = any(
         isinstance(section, dict) and section.get("status") in {"complete", "partial"} for section in sections.values()
     )

@@ -259,6 +259,9 @@ async def accounting_context(db, tenant_id, scope, report=None):
     except (ValueError, TypeError):
         profile = None
         context["sales_credit_profile_status"] = "invalid_configuration"
+    from app.services.transaction_ops.context_provenance import context_manifest
+
+    context["context_provenance"] = await context_manifest(db, tenant_id, config)
     context.update(
         configuration_status="scoped_configuration_found",
         config_id=str(config.id),
