@@ -42,6 +42,9 @@ connection access is rechecked. `GET .../accounting-context/history` returns imm
 historical snapshots with `limit` (1–100) and `before_version`; follow
 `next_before_version` until null. History is a record of past decisions, not current
 permission. Retain these audit records with the deployment's database backups.
+The general audit feed shows the event but redacts its context payload for every
+role. Use this dedicated history endpoint to inspect the full snapshot with the
+required context permissions and feature gates.
 
 Review uses `POST .../accounting-context/{key}/review` with `expected_version`,
 `content_sha256`, `decision` (`approve` or `invalidate`), `reason` and

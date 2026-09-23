@@ -431,3 +431,27 @@ def test_context_governance_parameters_match_advertised_tool():
     assert set(TOOL_CONFIGS[name]["allowlisted_params"]) == set(TOOL_REGISTRY[name]["params_schema"])
     params = {"section": "policies", "context_config_id": str(uuid4()), **SCOPE.model_dump()}
     assert all(validate_params(name, params)[k] == v for k, v in params.items())
+
+
+async def test_general_audit_feed_cannot_bypass_context_history_permissions(client, db, admin_user, readonly_user):
+    actor, admin_headers = admin_user
+    config, _, _ = await setup(db, actor)
+    await enable_feature_flag(db, actor.tenant_id, "celigo")
+    await enable_feature_flag(db, actor.tenant_id, "reconciliation")
+    await propose(db, actor, config)
+    await approve(db, actor, config)
+    for headers in (readonly_user[1], admin_headers):
+        response = await client.get("/api/v1/audit-events", params={"action": service.ACTION}, headers=headers)
+        assert response.status_code == 200
+        events = response.json()["items"]
+        assert len(events) == 2
+        assert all(e["payload"] == {"redacted": True, "reason": "use_accounting_context_history"} for e in events)
+        assert draft().statement not in response.text and "synthetic:policy-1" not in response.text
+    url = f"/api/v1/transaction-ops/configs/{config.id}/accounting-context/history"
+    assert (await client.get(url, headers=readonly_user[1])).status_code == 403
+    history = await client.get(url, headers=admin_headers)
+    assert history.status_code == 200
+    assert history.json()["versions"][0]["entries"]["revenue"]["content"]["statement"] == draft().statement
+    # Serialization must not mutate the immutable stored snapshot.
+    event = await service._latest(db, actor.tenant_id, config.id)
+    assert event.payload["entries"]["revenue"]["content"]["statement"] == draft().statement

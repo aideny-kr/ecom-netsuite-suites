@@ -67,7 +67,12 @@ async def list_audit_events(
             resource_id=e.resource_id,
             correlation_id=e.correlation_id,
             job_id=str(e.job_id) if e.job_id else None,
-            payload=e.payload,
+            # Context snapshots have a stricter reader boundary than audit.view.
+            # Keep the event visible, but require the dedicated history endpoint
+            # for content, even for administrators (including its feature gates).
+            payload={"redacted": True, "reason": "use_accounting_context_history"}
+            if e.action == "accounting.context.version"
+            else e.payload,
             status=e.status,
             error_message=e.error_message,
         )
