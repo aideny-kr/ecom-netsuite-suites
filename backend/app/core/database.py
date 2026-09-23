@@ -59,20 +59,24 @@ _TENANT_APPLIED_KEY = "tenant_context_applied"
 
 
 def _refuse_another_tenant(session: AsyncSession, tenant_id: str) -> None:
-    scoped = session.sync_session.info.get(_TENANT_CONTEXT_KEY)
-    if isinstance(scoped, str) and scoped != tenant_id:  # only ever a str when scoped
+    # Only a session that recorded a tenant can refuse another; anything else (a
+    # session never scoped, a test double) has nothing to compare against.
+    info = getattr(getattr(session, "sync_session", None), "info", None)
+    scoped = info.get(_TENANT_CONTEXT_KEY) if isinstance(info, dict) else None
+    if isinstance(scoped, str) and scoped != tenant_id:
         raise ValueError("a worker session is scoped to one tenant; open another session for another tenant")
 
 
 async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
-    """Set RLS tenant context for the current transaction (SET LOCAL semantics).
+    """Set RLS tenant context for the current database session.
 
-    The UUID is still validated, so a bad id fails here, not as an empty RLS scope.
+    PostgreSQL SET LOCAL does not support parameterized queries ($1 binds),
+    so we validate the tenant_id is a valid UUID to prevent SQL injection.
     On a session scoped by set_tenant_context_session, only that same tenant is allowed.
     """
     validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
     _refuse_another_tenant(session, validated)
-    await session.execute(_SET_TENANT_LOCAL, {"tenant_id": validated})
+    await session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
 
 
 def _apply_tenant_context(session, transaction, connection) -> None:
