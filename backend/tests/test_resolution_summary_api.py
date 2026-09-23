@@ -675,3 +675,34 @@ async def test_group_counts_drop_a_row_whose_result_was_rejected(db, tenant_a):
         "a rejected result still counted as actionable — 'Approve N' overstates the "
         "group forever, and the proposal is stranded at 'proposed'"
     )
+
+
+async def test_a_busy_retry_stub_does_not_hide_the_running_agent_job(db, tenant_a):
+    """A dispatch that found the run busy completes at once with
+    {"skipped": "already_running"} and reschedules itself. Its Job row is newer than the
+    real agent's, but the UI must keep showing the agent that is actually running."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.job import Job
+
+    user, run = await _seed(db, tenant_a)
+    now = datetime.now(timezone.utc)
+    db.add(
+        Job(
+            tenant_id=tenant_a.id, job_type="tasks.recon_resolution_agent", status="running",
+            started_at=now - timedelta(minutes=2), parameters={"run_id": str(run.id)},
+            result_summary={"processed": 3, "total": 10},
+        )
+    )  # fmt: skip
+    db.add(
+        Job(
+            tenant_id=tenant_a.id, job_type="tasks.recon_resolution_agent", status="completed",
+            started_at=now, parameters={"run_id": str(run.id)},
+            result_summary={"skipped": "already_running", "rescheduled_attempt": 1},
+        )
+    )  # fmt: skip
+    await db.flush()
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    assert out.agent_job is not None
+    assert (out.agent_job.status, out.agent_job.processed, out.agent_job.total) == ("running", 3, 10)

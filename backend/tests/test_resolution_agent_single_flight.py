@@ -250,10 +250,15 @@ async def test_a_leader_whose_lock_connection_dies_stops(db, tenant_a, monkeypat
 
     adapter = KillLeaderOnFirstCall(action="book_fee_line", narrative="Fee.")
     run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=3, adapter=adapter)
+    run_id = run.id
     monkeypatch.setattr(agent_task, "_run_leader", recording_leader)
-    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run_id))
     assert summary["stopped"] == "leadership_lost"
     assert len(adapter.calls) == 1
+    # the lock went DURING the item's classification: another task may own the run now,
+    # so this one neither writes that item nor records it
+    assert summary["processed"] == 0
+    assert await _proposals(db, tenant_a.id, run_id, source="agent") == []
     assert await _lock_is_free(db, agent_task._run_lock_key(tenant_a.id, run.id))
 
 

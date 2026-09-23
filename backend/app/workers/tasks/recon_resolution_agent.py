@@ -95,6 +95,11 @@ async def _run_leader(db: AsyncSession, key: int):
     accounting_dispatch.run_slice uses) dies with the process if the worker crashes.
     The acquiring transaction is committed straight away so the connection does not
     sit idle in a transaction for the whole run; the lock is session-level and stays.
+
+    Needs a direct or session-mode connection: behind a transaction-mode pooler a
+    session-level lock can land on a backend another client is handed next. The worker
+    engine uses DATABASE_URL_DIRECT, which staging and production both set (the direct
+    host on :5432).
     """
     bind = db.bind
     engine = bind if isinstance(bind, AsyncEngine) else bind.engine
@@ -318,6 +323,13 @@ async def run_resolution_agent(
                         "key_evidence": [],
                         "contract_violation": "classification_error",
                     }
+
+                # Leadership is re-checked right before the write: if the lock went during
+                # classification, another task may own the run now, so this one neither writes
+                # nor records the item (the compare-and-set would stop a double write anyway).
+                if not await leading.held():
+                    stopped = "leadership_lost"
+                    break
 
                 # Persistence is isolated per item: a commit that fails on one item must degrade
                 # THAT item, never abort the run and strand the rest. The proposal and the
