@@ -17,12 +17,57 @@ from app.services.transaction_ops.netsuite_reader import _account, _id
 
 _RECORD_TYPES = {"transaction", "customrecord_fw_refund_requests"}
 MAX_DEPENDENCIES = 600  # At most two endpoints per graph edge, plus custom requests.
+_INVENTORY_KIND = "observed_refund_dependencies_v1"
 
 
 def _key(kind, identifier):
     if not isinstance(kind, str) or kind not in _RECORD_TYPES or not _id(identifier):
         raise ValueError("invalid_dependency_identity")
     return kind, str(identifier)
+
+
+def compact_dependency_evidence(report):
+    """Keep bounded identities when detailed financial evidence is omitted."""
+    try:
+        target = (report.get("refund_evidence") or {}).get("target") or {}
+        if not target:
+            inventory = report.get("refund_dependency_evidence") or {}
+            target = {**inventory, "complete": inventory.get("kind") == _INVENTORY_KIND}
+        manifest = target["dependency_manifest"]
+        transactions, requests = manifest["transaction_ids"], manifest["refund_requests"]
+        if (
+            target.get("complete") is not True
+            or target.get("provider") != "netsuite"
+            or type(manifest.get("version")) is not int
+            or manifest["version"] != 1
+            or type(manifest.get("truncated")) is not bool
+            or not isinstance(transactions, list)
+            or not isinstance(requests, list)
+            or len(transactions) + len(requests) > MAX_DEPENDENCIES
+            or not _id(manifest.get("order_id"))
+            or not _id(target.get("subsidiary_id"))
+        ):
+            return None
+        scope = {
+            key: target[key] for key in ("provider", "account_id", "connection_id", "subsidiary_id", "order_reference")
+        }
+        if any(not isinstance(value, str) or len(value) > 255 for value in scope.values()):
+            return None
+        _account(scope["account_id"])
+        UUID(scope["connection_id"])
+        return {
+            **scope,
+            "kind": _INVENTORY_KIND,
+            "dependency_manifest": {
+                "version": 1,
+                "order_id": str(manifest["order_id"]),
+                "transaction_ids": [_key("transaction", value)[1] for value in transactions],
+                "refund_requests": [_key("customrecord_fw_refund_requests", value)[1] for value in requests],
+                "truncated": manifest["truncated"],
+            },
+        }
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def observed_dependencies(report, snapshot, reference):
@@ -43,6 +88,9 @@ def observed_dependencies(report, snapshot, reference):
             and target.get("order_reference") == reference
         }
         refund = (report.get("refund_evidence") or {}).get("target") or {}
+        if not refund:
+            inventory = report.get("refund_dependency_evidence") or {}
+            refund = {**inventory, "complete": inventory.get("kind") == _INVENTORY_KIND}
         if (
             refund.get("complete") is not True
             or refund.get("provider") != "netsuite"

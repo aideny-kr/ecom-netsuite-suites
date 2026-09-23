@@ -32,6 +32,6 @@ class TransactionNetSuiteDependency(Base, UUIDPrimaryKeyMixin):
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     order_reference: Mapped[str] = mapped_column(String(100))
     connection_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    account_id: Mapped[str] = mapped_column(String(32))
+    account_id: Mapped[str] = mapped_column(String(255))
     record_type: Mapped[str] = mapped_column(String(64))
     record_id: Mapped[str] = mapped_column(String(30))

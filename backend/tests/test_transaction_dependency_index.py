@@ -14,6 +14,7 @@ from app.schemas.transaction_runs import RunCreate
 from app.services.transaction_ops import dependency_index as service
 from app.services.transaction_ops import state_service as state
 from tests.test_transaction_ops_state import config_input
+from tests.test_transaction_ops_state_db import seed_config
 from tests.test_transaction_ops_state_db import setup_state as _setup_state_fixture
 
 setup_state = _setup_state_fixture
@@ -76,6 +77,22 @@ async def test_finding_indexes_dependencies_idempotently_and_cascades_with_evide
     assert await db.scalar(select(func.count()).select_from(Dependency)) == 0
 
 
+async def test_inventory_accepts_the_existing_account_id_length_contract(db, setup_state):
+    actor, _, _ = setup_state
+    config = await seed_config(db, actor.tenant_id, actor, netsuite_account_id="1" * 40)
+    run = await state.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(evaluation_key="long-account", order_references=["R123456789"]),
+        actor=actor,
+    )
+    await save(db, actor, run, report(run))
+    assert (await service.affected_order_references(db, actor.tenant_id, config.id, [("transaction", "4")]))[
+        "order_references"
+    ] == ["R123456789"]
+
+
 async def test_change_lookup_deduplicates_and_pages_shared_dependencies(db, setup_state):
     actor, config, run = setup_state
     await save(db, actor, run, report(run, "R123456788", "10"))
@@ -131,6 +148,51 @@ async def test_old_dependencies_survive_a_later_partial_checkpoint(db, setup_sta
     assert (await service.affected_order_references(db, actor.tenant_id, config.id, [("transaction", "4")]))[
         "order_references"
     ] == ["R123456789"]
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_oversize_report_preserves_inventory_without_financial_authority(db, setup_state, truncated):
+    from app.services.transaction_ops.runner import build_report, limit_report
+    from tests.test_transaction_balance_report import evidence
+
+    actor, config, run = setup_state
+    source, target, _, mapping, now = evidence()
+    source["orders"][0]["state"] = "complete"
+    target["orders"][0]["header"]["orderStatus"] = {"id": "B"}
+    mapping = mapping.model_copy(update={"business_entity_subsidiaries": {"Framework Inc": config.subsidiary_id}})
+    target["scope"].update(
+        account_id=run.config_snapshot["netsuite_account_id"].replace("_", "-").lower(),
+        subsidiary_id=config.subsidiary_id,
+    )
+    target["orders"][0]["header"]["subsidiary"]["id"] = config.subsidiary_id
+    value = build_report(source, target, run.config_snapshot, mapping, now=now)
+    # This fixture normally falls back to unknown-status header observations.
+    # Use confirmed states to isolate the evidence-size guard in this test.
+    for snapshot in (value["source"], *value["targets"]):
+        snapshot["status"] = "confirmed"
+    reference = value["order_reference"]
+    value["refund_evidence"] = report(run, reference, "200")["refund_evidence"]
+    value["refund_evidence"]["target"]["amount"] = "100"
+    value["refund_evidence"]["target"]["dependency_manifest"]["truncated"] = truncated
+    value["extra_detail"] = "x" * 70000
+    compact = limit_report(value, now=now)
+    assert compact["comparison"]["recommended_action"] == "gather_evidence", compact["comparison"]
+    assert compact["evidence_limits"]["code"] == "evidence_size_limit"
+    assert "refund_evidence" not in compact
+    assert "amount" not in compact["refund_dependency_evidence"]
+    assert "complete" not in compact["refund_dependency_evidence"]
+    assert compact["refund_dependency_evidence"]["dependency_manifest"]["truncated"] is truncated
+    inventory = deepcopy(compact["refund_dependency_evidence"])
+    compact["extra_detail"] = "x" * 70000
+    compact = limit_report(compact, now=now)
+    assert compact["refund_dependency_evidence"] == inventory
+    await save(db, actor, run, compact)
+    assert (await service.affected_order_references(db, actor.tenant_id, config.id, [("transaction", "999")]))[
+        "order_references"
+    ] == [reference]
+    # Compaction does not relax scope validation for dependency consumers.
+    compact["refund_dependency_evidence"]["connection_id"] = str(uuid4())
+    assert service.observed_dependencies(compact, run.config_snapshot, reference) == {("transaction", "200")}
 
 
 async def test_same_connection_and_record_do_not_leak_between_entity_configs(db, setup_state):
