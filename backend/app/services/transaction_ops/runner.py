@@ -242,7 +242,16 @@ def _build_detailed_report(source_evidence, target_evidence, config, mapping, *,
         "source_provenance": {
             key: value
             for key, value in source_evidence.items()
-            if key in {"source", "scope", "read_at", "celigo_step_id", "connection_id"}
+            if key
+            in {
+                "source",
+                "scope",
+                "read_at",
+                "body_collected_at",
+                "source_validation",
+                "celigo_step_id",
+                "connection_id",
+            }
         },
         "netsuite_provenance": {
             "scope": scope,
@@ -715,7 +724,8 @@ async def run_investigation(
                 continue
             reference = progress["pending_refs"][0]
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
-            can_reuse = snapshot_floor is not None and progress.get("phase") == "orders"
+            can_validate = snapshot_floor is not None
+            can_reuse = can_validate and progress.get("phase") == "orders"
             source = None
             if can_reuse:
                 source = await source_snapshot.load(
@@ -733,13 +743,25 @@ async def run_investigation(
             if source_reused:
                 progress["source_snapshot_hits"] = progress.get("source_snapshot_hits", 0) + 1
             else:
+                validating_reader = source_reader
+                if can_validate and _source_reader is None:
+                    from app.services.transaction_ops.source_validation import read_validated_order
+
+                    validating_reader = read_validated_order
                 source = await bounded_read(
                     "source_order",
-                    lambda: source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source),
+                    lambda: validating_reader(
+                        db, tenant_id, source_step_id, reference, **source_options, **direct_source
+                    ),
                     retry_calls=2,
                 )
-                progress["source_detail_reads"] = progress.get("source_detail_reads", 0) + 1
-                if can_reuse:
+                counter = (
+                    "source_body_validations"
+                    if source.get("source_validation") == "etag_not_modified"
+                    else "source_detail_reads"
+                )
+                progress[counter] = progress.get(counter, 0) + 1
+                if can_validate:
                     await source_snapshot.save(
                         db, tenant_id, direct_source["source_connection_id"], reference, source, now=clock()
                     )

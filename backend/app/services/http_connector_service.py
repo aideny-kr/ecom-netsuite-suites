@@ -113,7 +113,19 @@ def _invalid_constant(_):
     raise ValueError("invalid_number")
 
 
+def valid_etag(value):
+    return isinstance(value, str) and len(value) <= 512 and re.fullmatch(r'(?:W/)?"[!#-~]*"', value) is not None
+
+
 async def read_json(credentials, path, *, client=None):
+    body, _, _ = await read_json_response(credentials, path, client=client)
+    return body
+
+
+async def read_json_response(credentials, path, *, client=None, if_none_match=None):
+    """Return body, safe ETag, and not-modified; validators are explicit opt-in."""
+    if if_none_match is not None and not valid_etag(if_none_match):
+        raise ConnectorReadError("invalid_validator")
     validate_path(path, allow_query=True)
     headers = {"Accept": "application/json"}
     auth = credentials["auth_type"]
@@ -121,6 +133,10 @@ async def read_json(credentials, path, *, client=None):
         headers["Authorization"] = f"Bearer {credentials['token']}"
     elif auth == "api_key":
         headers[credentials["header_name"]] = credentials["token"]
+    if if_none_match is not None:
+        if any(key.lower() == "if-none-match" for key in headers):
+            raise ConnectorReadError("invalid_validator")
+        headers["If-None-Match"] = if_none_match
     owns_client = client is None
     http = client or httpx.AsyncClient(transport=PublicHTTPTransport(credentials["base_url"]), trust_env=False)
     try:
@@ -136,6 +152,15 @@ async def read_json(credentials, path, *, client=None):
                     raise ConnectorReadError("authentication_failed")
                 if response.status_code == 429:
                     raise ConnectorReadError("rate_limited")
+                validator = response.headers.get("etag")
+                cacheable = (
+                    "no-store" not in response.headers.get("cache-control", "").lower()
+                    and response.headers.get("vary", "").strip() != "*"
+                )
+                if response.status_code == 304 and if_none_match is not None:
+                    if not cacheable or validator != if_none_match:
+                        raise ConnectorReadError("invalid_validator_response")
+                    return None, validator, True
                 if response.status_code != 200:
                     raise ConnectorReadError("http_error")
                 data = bytearray()
@@ -150,7 +175,7 @@ async def read_json(credentials, path, *, client=None):
                 isinstance(result, dict) and (result.get("errors") or result.get("error"))
             ):
                 raise ConnectorReadError("invalid_response")
-            return result
+            return result, validator if cacheable and valid_etag(validator) else None, False
     except (httpx.HTTPError, TimeoutError, UnsafeEndpointError):
         raise ConnectorReadError("transport_failed") from None
     except (ValueError, UnicodeError, RecursionError, DecimalException):
