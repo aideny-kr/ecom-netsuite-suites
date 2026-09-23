@@ -176,6 +176,10 @@ async def run_resolution_agent(
     processed = upgraded = kept_needs_human = not_applied = 0
     contract_violations = persist_failures = comparison_failures = 0
     attempted: set[uuid.UUID] = set()
+
+    async def more_eligible() -> bool:
+        return bool(await fetch_agent_eligible(db, tid, rid, limit=1, exclude_ids=attempted))
+
     stopped, led = "drained", False
     adapter = model = materiality = None
 
@@ -196,15 +200,12 @@ async def run_resolution_agent(
                     # same cost bound as before draining; the rest waits for the next dispatch.
                     budget = resolution_agent.MAX_ITEMS_PER_RUN - len(attempted)
                     if budget <= 0:
-                        if await fetch_agent_eligible(db, tid, rid, limit=1, exclude_ids=attempted):
+                        if await more_eligible():
                             stopped = "budget"
                         break
                     items = await fetch_agent_eligible(db, tid, rid, limit=budget, exclude_ids=attempted)
                     if not items:
                         break
-                    # A proposal is attempted once per task, whatever happened to it, so a
-                    # write that keeps failing can never loop.
-                    attempted.update(item.id for item in items)
                     if adapter is None:
                         provider, model, api_key, _is_byok = await get_tenant_ai_config(db, tid)
                         adapter = get_adapter(provider, api_key)
@@ -231,6 +232,10 @@ async def run_resolution_agent(
                         if await _run_is_closed(db, tid, rid):
                             stopped = "run_closed"
                             break
+                        # A proposal is attempted once per task, whatever happens to it, so a
+                        # write that keeps failing can never loop; counted when reached, so a
+                        # batch cut short by a close does not count what it never touched.
+                        attempted.add(item_id)
                         shadow = None
                         if expired:
                             try:
@@ -322,7 +327,7 @@ async def run_resolution_agent(
                 break
             # Unlocked. A dispatch that landed between the last empty fetch and the unlock
             # found the lock held and skipped, so check once more and lead again if needed.
-            if not await fetch_agent_eligible(db, tid, rid, limit=1, exclude_ids=attempted):
+            if not await more_eligible():
                 break
 
     if job_id:

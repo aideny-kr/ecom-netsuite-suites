@@ -70,12 +70,20 @@ async def _held_elsewhere(db, key):
 
 
 async def _lock_is_free(db, key) -> bool:
+    """Ask pg_locks, not pg_try_advisory_lock: advisory locks are reentrant per backend,
+    so a probe handed the leader's own pooled connection would "acquire" a lock that
+    was never released."""
+    hi, lo = (key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF
     async with db.bind.engine.connect() as probe:
-        got = await probe.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
-        if got:
-            await probe.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+        held = await probe.scalar(
+            text(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND classid::bigint = :hi AND objid::bigint = :lo AND objsubid = 1 AND granted"
+            ),
+            {"hi": hi, "lo": lo},
+        )
         await probe.commit()
-        return bool(got)
+        return held == 0
 
 
 async def test_a_dispatch_for_a_run_another_task_holds_classifies_nothing(db, tenant_a, monkeypatch):
@@ -206,8 +214,11 @@ async def test_a_run_closed_mid_drain_gets_no_more_agent_proposals(db, tenant_a,
     adapter = CloseOnFirstCall(action="book_fee_line", narrative="Fee.")
     run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=3, adapter=adapter)
     run_id = run.id
-    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run_id))
+    progress = []
+    monkeypatch.setattr(agent_task, "_update_job_progress", lambda *args: progress.append(args[2:]))
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run_id), job_id="job")
     assert summary["stopped"] == "run_closed"
+    assert progress[-1] == (1, 1)  # only the item actually processed counts as attempted
     assert len(adapter.calls) == 1  # nothing classified after the close
     assert summary["not_applied"] == 1 and summary["upgraded"] == 0
     assert await _proposals(db, tenant_a.id, run_id, source="agent") == []
@@ -226,3 +237,26 @@ async def test_apply_refuses_to_write_into_a_closed_run(db, tenant_a, monkeypatc
     assert await apply_agent_proposal(db, proposal, out) is False
     assert await _proposals(db, tenant_a.id, run.id, source="agent") == []
     assert (await db.get(ReconResolutionProposal, proposal.id)).status == "proposed"
+
+
+@pytest.mark.parametrize("refusal", ["run_closed", "result_terminal", "compare_and_set_lost"])
+async def test_a_refused_apply_ends_its_transaction(db, tenant_a, monkeypatch, refusal):
+    """apply_agent_proposal reads the run FOR SHARE. Every way it can refuse must end
+    the transaction too, or the lock outlives the call and a concurrent close_period
+    waits behind the rest of the drain, LLM calls included."""
+    from app.models.reconciliation import ReconciliationResult, ReconciliationRun
+    from app.services.reconciliation.resolution_agent import apply_agent_proposal, fetch_agent_eligible
+
+    run, results, _ = await _setup(db, tenant_a.id, monkeypatch)
+    (proposal,) = await fetch_agent_eligible(db, tenant_a.id, run.id)
+    out = {"action": "book_fee_line", "narrative": "Fee.", "key_evidence": []}
+    if refusal == "run_closed":
+        (await db.get(ReconciliationRun, run.id)).status = "closed"
+    elif refusal == "result_terminal":
+        (await db.get(ReconciliationResult, results[0].id)).status = "locked"
+    else:
+        (await db.get(ReconResolutionProposal, proposal.id)).status = "superseded"
+    await db.commit()
+    assert not db.in_transaction()
+    assert await apply_agent_proposal(db, proposal, out) is False
+    assert not db.in_transaction(), "the refusal left its FOR SHARE transaction open"

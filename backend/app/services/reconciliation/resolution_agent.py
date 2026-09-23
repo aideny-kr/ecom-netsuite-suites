@@ -322,13 +322,25 @@ async def apply_agent_proposal(db: AsyncSession, proposal: ReconResolutionPropos
 
     Mirrors plan_run's supersede-then-insert but scoped to ONE proposal. Returns
     False (no-op, nothing written) if the planner row is no longer eligible
-    (a human decided meanwhile). Commits on success. If the inserted row is a
+    (a human decided meanwhile). If the inserted row is a
     recency-hold carry_forward (action='carry_forward', root_cause in
     resolution_planner.RECENCY_HOLD_ROOT_CAUSES), it shares the planner's
     cross-run snooze lifecycle — a later plan_run supersedes it exactly like
     a planner-authored hold (see the RECENCY HOLDS design note in
     resolution_planner.plan_run).
+
+    Commits on EVERY path, refusals included. The run is read FOR SHARE, and a refusal
+    that left its transaction open would hold that lock through the caller's next items,
+    LLM calls included, stalling a concurrent close_period. A refusal wrote nothing, so
+    its commit only ends the transaction.
     """
+    applied = await _apply_or_refuse(db, proposal, out)
+    await db.commit()
+    return applied
+
+
+async def _apply_or_refuse(db: AsyncSession, proposal: ReconResolutionProposal, out: dict) -> bool:
+    """apply_agent_proposal's body; it never commits, its caller always does."""
     # Close is a hard freeze, and close_period deliberately leaves needs-review results
     # unlocked, so the result-status guard below cannot stop a write into a closed run.
     # FOR SHARE makes a concurrent close wait for this write: after it commits, no
@@ -400,5 +412,4 @@ async def apply_agent_proposal(db: AsyncSession, proposal: ReconResolutionPropos
             updated_at=now,
         )
     )
-    await db.commit()
     return True
