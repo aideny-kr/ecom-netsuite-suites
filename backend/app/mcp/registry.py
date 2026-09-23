@@ -68,7 +68,8 @@ TOOL_REGISTRY = {
             "Read current accounting reference facts on one authorized NetSuite REST connection. "
             "section='overview' returns subsidiaries, base currencies, fiscal calendar IDs and books; "
             "'periods' returns dates and separate closed/lock flags for a calendar-year window; "
-            "'accounts' reads chart-of-accounts references; 'policies' reads configured correction treatments. "
+            "'accounts' reads chart-of-accounts references; 'policies' reads configured correction treatments "
+            "and versioned context provenance. "
             "Use when NetSuite accounting scope is missing or old notes conflict. These are reference facts, "
             "not financial totals, a complete company policy manual, or authorization to post. "
             "Supply both connection_id and expected_account_id for an explicit environment. No writes."
@@ -84,6 +85,19 @@ TOOL_REGISTRY = {
             "expected_account_id": {
                 "type": "string",
                 "description": "Expected NetSuite account/environment; requires connection_id",
+            },
+            "context_config_id": {
+                "type": "string",
+                "description": (
+                    "Policies only: exact config UUID; requires book, currency and posting period. "
+                    "Omit all four for metadata only."
+                ),
+            },
+            "accounting_book_id": {"type": "string", "description": "Policies only: exact native accounting book ID"},
+            "currency": {"type": "string", "description": "Policies only: exact uppercase three-letter currency"},
+            "posting_period_id": {
+                "type": "string",
+                "description": "Policies only: exact native posting period ID, not a calendar date",
             },
             "calendar_year": {
                 "type": "integer",
