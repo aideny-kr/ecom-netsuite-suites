@@ -1,14 +1,14 @@
-"""Reuse scoped daily observations; saved evidence never authorizes a write."""
+"""Reuse scoped collected observations; saved evidence never authorizes a write."""
 
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import DateTime, cast, func, select
+from sqlalchemy import DateTime, cast, func, or_, select
 
 from app.models.transaction_ops import TransactionRun
 
 
-def compatible_daily_runs(root, span):
+def compatible_observation_runs(root, span):
     r = TransactionRun
     snapshot = root.config_snapshot
     # Exact mapping identity is intentional: changing accounting policy cannot
@@ -16,9 +16,15 @@ def compatible_daily_runs(root, span):
     predicates = [
         r.tenant_id == root.tenant_id,
         r.config_id == root.config_id,
-        r.origin == "schedule",
-        r.params_json["review"].astext.is_(None),
+        # Only normal scoped scans contribute a historical cohort. Exact-order
+        # investigations and recovery/write-verification runs are not discovery.
+        or_(
+            (r.origin == "schedule") & r.params_json["review"].astext.is_(None),
+            r.origin.in_(("manual", "chat")) & r.params_json["review"].astext.is_not(None),
+        ),
         r.config_snapshot["mapping_json"] == snapshot.get("mapping_json", {}),
+        func.coalesce(r.config_snapshot["evidence_contract_version"].astext, "1")
+        == str(snapshot.get("evidence_contract_version", 1)),
         func.coalesce(r.params_json["window_basis"].astext, "updated_at")
         == root.params_json.get("window_basis", "completed_at"),
         cast(r.params_json["window_start"].astext, DateTime(timezone=True)) >= span.start,
@@ -38,10 +44,37 @@ def compatible_daily_runs(root, span):
     return predicates
 
 
-async def completed_daily_windows(db, root, span):
+def compatible_daily_runs(root, span):
     r = TransactionRun
-    query = select(r).where(
-        *compatible_daily_runs(root, span),
+    return [*compatible_observation_runs(root, span), r.origin == "schedule"]
+
+
+def scan_complete(run):
+    progress = run.progress_json or {}
+    return (
+        run.status == "finished"
+        and run.termination_reason == "done"
+        and progress.get("scan_complete") is True
+        and progress.get("refund_scan_complete") is True
+        and (
+            run.params_json.get("window_basis", "updated_at") != "updated_at"
+            or progress.get("destination_scan_complete") is True
+        )
+    )
+
+
+async def completed_daily_windows(db, root, span):
+    return await completed_observation_windows(db, root, span, daily_only=True)
+
+
+async def completed_observation_windows(db, root, span, *, daily_only=False):
+    r = TransactionRun
+    query = select(
+        r.id,
+        r.params_json["window_start"].astext.label("window_start"),
+        r.params_json["window_end"].astext.label("window_end"),
+    ).where(
+        *(compatible_daily_runs(root, span) if daily_only else compatible_observation_runs(root, span)),
         r.status == "finished",
         r.termination_reason == "done",
         r.progress_json["scan_complete"].astext == "true",
@@ -49,11 +82,11 @@ async def completed_daily_windows(db, root, span):
     )
     if root.params_json.get("window_basis", "completed_at") == "updated_at":
         query = query.where(r.progress_json["destination_scan_complete"].astext == "true")
-    rows = list(await db.scalars(query.order_by(r.created_at.desc()).limit(512)))
+    rows = (await db.execute(query.order_by(r.created_at.desc()).limit(512))).all()
     return [
         (
-            datetime.fromisoformat(r.params_json["window_start"]),
-            datetime.fromisoformat(r.params_json["window_end"]),
+            datetime.fromisoformat(r.window_start),
+            datetime.fromisoformat(r.window_end),
             str(r.id),
         )
         for r in rows

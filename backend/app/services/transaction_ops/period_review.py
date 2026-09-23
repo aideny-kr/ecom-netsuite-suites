@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from app.models.transaction_ops import TransactionRun
 from app.models.user import User
-from app.schemas.transaction_runs import ReviewSpan, RunCreate
+from app.schemas.transaction_runs import ProgressUpdate, ReviewSpan, RunCreate
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.normalization import TransactionMapping
 from app.services.transaction_ops.periods import ReconciliationPolicy, review_window
@@ -69,7 +69,7 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
     )
     if existing:
         await state._commit(db, tenant_id)
-        return existing
+        return await _complete_saved_review(db, tenant_id, existing)
     previous = await db.scalar(
         same_period.order_by(TransactionRun.created_at.desc(), TransactionRun.id.desc()).limit(1)
     )
@@ -99,20 +99,61 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
             human_retry=True,
         )
     scope["window_end"] = min(span.end, span.start + timedelta(days=1))
-    return await state.create_run(
+    run = await state.create_run(
         db,
         tenant_id,
         config_id,
         RunCreate(evaluation_key=str(request.evaluation_key), review=span, **scope),
         actor=actor,
     )
+    return await _complete_saved_review(db, tenant_id, run)
+
+
+async def _complete_saved_review(db, tenant_id, run):
+    """Materialize a fully covered report without putting a no-op on the queue.
+
+    Findings retain their original observations. This records coverage reuse,
+    not a new provider observation or accounting certification.
+    """
+    if run.status != "pending":
+        return run
+    from app.services.transaction_ops.daily_evidence import completed_observation_windows, covered_until
+    from app.services.transaction_ops.runner import enabled
+
+    span = ReviewSpan.model_validate(run.params_json["review"])
+    windows = await completed_observation_windows(db, run, span)
+    if covered_until(span.start, span.end, windows) != span.end or not await enabled(db, tenant_id):
+        return run
+    token = await state.claim_run(db, tenant_id, run.id)
+    if token is None:
+        return await state.get_run(db, tenant_id, run.id)
+    progress = {
+        **(run.progress_json or {}),
+        "scan_complete": True,
+        "refund_scan_complete": True,
+        "destination_scan_complete": True,
+        "pending_refs": [],
+        "reused_observation_run_ids": [row[2] for row in windows],
+        "review_coverage_complete": True,
+    }
+    await state.update_progress(db, tenant_id, run.id, ProgressUpdate(progress_json=progress), lease_token=token)
+    await state._audit(
+        db,
+        tenant_id,
+        "review.evidence_reused",
+        run,
+        payload={"source_run_ids": progress["reused_observation_run_ids"], "fresh_provider_reads": 0},
+    )
+    return await state.finish_run(db, tenant_id, run.id, "done", lease_token=token)
 
 
 async def continue_review(db, tenant_id, run_id):
     previous = await state.get_run(db, tenant_id, run_id)
     if previous.status != "finished" or previous.termination_reason != "done" or not previous.params_json.get("review"):
         return None
-    if not previous.progress_json.get("scan_complete") or not previous.progress_json.get("refund_scan_complete"):
+    from app.services.transaction_ops.daily_evidence import scan_complete
+
+    if not scan_complete(previous) or previous.progress_json.get("review_coverage_complete") is True:
         return None
     span = ReviewSpan.model_validate(previous.params_json["review"])
     start = datetime.fromisoformat(previous.params_json["window_end"])
@@ -203,17 +244,18 @@ async def review_status(db, tenant_id, run_id):
         previous = slices.get(key)
         if previous is None or _slice_rank(run) > _slice_rank(previous):
             slices[key] = run
-    from app.services.transaction_ops.daily_evidence import completed_daily_windows, covered_days, covered_until
+    from app.services.transaction_ops.daily_evidence import (
+        completed_daily_windows,
+        completed_observation_windows,
+        covered_days,
+        covered_until,
+        scan_complete,
+    )
 
     daily_windows = await completed_daily_windows(db, root, span)
-    own_windows = [
-        (start, end, str(run.id))
-        for (start, end), run in slices.items()
-        if run.termination_reason == "done"
-        and run.progress_json.get("scan_complete")
-        and run.progress_json.get("refund_scan_complete")
-    ]
-    windows = own_windows + daily_windows
+    saved_windows = await completed_observation_windows(db, root, span)
+    own_windows = [(start, end, str(run.id)) for (start, end), run in slices.items() if scan_complete(run)]
+    windows = own_windows + saved_windows
     completed_until = covered_until(span.start, span.end, windows)
     policy = (getattr(root, "config_snapshot", None) or {}).get("mapping_json", {}).get("reconciliation_policy") or {}
     completed_slices = covered_days(span.start, span.end, windows, policy.get("timezone_name", "America/Los_Angeles"))
@@ -234,6 +276,7 @@ async def review_status(db, tenant_id, run_id):
         "status": "complete" if complete else "running" if active else "needs_attention",
         "completed_slices": completed_slices,
         "reused_daily_windows": len(daily_windows),
+        "saved_coverage_windows": len(saved_windows),
         "run_count": len(runs[:512]),
         "truncated": len(runs) > 512,
         "current_run_id": str(active.id) if active else str(slices[max(slices)].id),

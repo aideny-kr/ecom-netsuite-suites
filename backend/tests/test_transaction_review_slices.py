@@ -19,7 +19,13 @@ async def finish(db, run, reason="done"):
     run.status = "finished"
     run.termination_reason = reason
     run.finished_at = datetime.now(timezone.utc)
-    run.progress_json = {"scan_complete": True, "refund_scan_complete": True, "processed": 2, "matched": 2}
+    run.progress_json = {
+        "scan_complete": True,
+        "refund_scan_complete": True,
+        "destination_scan_complete": True,
+        "processed": 2,
+        "matched": 2,
+    }
     await db.flush()
 
 
@@ -173,7 +179,12 @@ async def test_coverage_prefers_final_continuation_over_query_order(monkeypatch)
     final = SimpleNamespace(
         id=uuid4(),
         termination_reason="done",
-        progress_json={"continuation_part": 2, "scan_complete": True, "refund_scan_complete": True},
+        progress_json={
+            "continuation_part": 2,
+            "scan_complete": True,
+            "refund_scan_complete": True,
+            "destination_scan_complete": True,
+        },
         **base,
     )
     monkeypatch.setattr(state, "get_run", AsyncMock(return_value=prior))
@@ -182,6 +193,7 @@ async def test_coverage_prefers_final_continuation_over_query_order(monkeypatch)
     from app.services.transaction_ops import daily_evidence
 
     monkeypatch.setattr(daily_evidence, "completed_daily_windows", AsyncMock(return_value=[]))
+    monkeypatch.setattr(daily_evidence, "completed_observation_windows", AsyncMock(return_value=[]))
     summary = await period_review.review_status(db, uuid4(), prior.id)
     assert summary["completed_until"] == params["window_end"]
 
