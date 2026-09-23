@@ -259,3 +259,40 @@ Negative tests verified: wrong `--uat-slug` → SAFETY ABORT before any write
   so no `SET LOCAL app.current_tenant_id` is needed; for Supabase use a direct
   connection role with equivalent write access. RLS-policy failures surfacing here
   are exactly the kind of staging-only bug this gate exists to catch.
+
+## Jev shadow seed (`jev_shadow_seed.py`)
+
+Gives the `uat-smoke` tenant two recon exceptions the deterministic planner abstains on,
+so the ResolutionAgent runs and — with `JEV_RECON_RESOLUTION_MODE=shadow` on the target —
+Jev's reading is recorded beside the LLM's as audit action `recon.jev_comparison`.
+The smoke's own seed cannot do this: its unmatched charge carries an order reference,
+so the planner resolves it itself and the agent never gets an item.
+
+Differences from the smoke, all deliberate:
+
+- **Login only, never register.** `provision_and_auth` may register a fresh tenant, and
+  registration seeds `/tmp/workspace_storage/{tenant}/soul.md`, which this repo never
+  writes without operator consent. A missing `uat-smoke` tenant is a setup failure.
+- **`seed` leaves its rows in place.** The agent tail is asynchronous (Celery); the
+  comparison rows are the point. `cleanup` removes them.
+- **Flags and materiality are snapshotted and restored.** `seed` enables `reconciliation`
+  and `recon_resolution_agent` and pins materiality to `$50 / 1%`; it prints a `restore`
+  object that `cleanup --restore-json` applies.
+
+Target prerequisites (staging VM env): `TYPESAFE_API_KEY`, `JEV_TENANT_ALLOWLIST=<uat-smoke
+tenant id>`, `JEV_RECON_RESOLUTION_MODE=shadow`. Only the disposable tenant is ever
+allow-listed; real tenants wait for zero-retention terms with TypeSafe.
+
+```bash
+export UAT_SMOKE_EMAIL=... UAT_SMOKE_PASSWORD=...          # ~/.hermes/.env
+P=backend/.venv/bin/python; DB="$DATABASE_URL_DIRECT"; API=https://api-staging.suitestudio.ai
+$P scripts/uat/jev_shadow_seed.py seed    --backend-url $API --database-url "$DB"   # prints run_id, prefix, restore
+sleep 90                                                                             # agent tail
+$P scripts/uat/jev_shadow_seed.py report  --database-url "$DB"                      # one line per comparison row
+$P scripts/uat/jev_shadow_seed.py cleanup --database-url "$DB" --run-id <run_id> --prefix <prefix> --restore-json '<restore>'
+```
+
+`report` prints, per item: the LLM's validated action and latency, Jev's raw pick,
+confidence and latency, whether they agree, and who decided. Two synthetic items prove
+the plumbing, not Jev's accuracy — that needs real exceptions, which is a separate,
+operator-level decision.
