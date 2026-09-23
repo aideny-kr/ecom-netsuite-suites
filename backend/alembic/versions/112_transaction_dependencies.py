@@ -19,7 +19,7 @@ def upgrade():
         sa.Column("run_id", pg.UUID(as_uuid=True), nullable=False),
         sa.Column("order_reference", sa.String(100), nullable=False),
         sa.Column("connection_id", pg.UUID(as_uuid=True), nullable=False),
-        sa.Column("account_id", sa.String(32), nullable=False),
+        sa.Column("account_id", sa.String(255), nullable=False),
         sa.Column("record_type", sa.String(64), nullable=False),
         sa.Column("record_id", sa.String(30), nullable=False),
         sa.ForeignKeyConstraint(

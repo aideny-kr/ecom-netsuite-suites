@@ -299,6 +299,13 @@ def limit_report(report, *, now):
                 key: report.get("netsuite_provenance", {}).get(key) for key in ("scope", "observed_at")
             },
         }
+        from app.services.transaction_ops.dependency_index import compact_dependency_evidence
+
+        dependencies = compact_dependency_evidence(report)
+        if dependencies:
+            # Identity inventory is separate from omitted financial proof and
+            # cannot turn this incomplete finding into an actionable comparison.
+            summary["refund_dependency_evidence"] = dependencies
         return _bounded_json(summary)
 
 
