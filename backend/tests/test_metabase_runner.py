@@ -199,6 +199,7 @@ async def test_destination_only_change_rechecks_an_old_source_order(monkeypatch)
         _dependency_page_reader=native,
         _dependency_owner_reader=owners,
         _dependency_index=index,
+        _dependency_seed=AsyncMock(return_value={"complete": True}),
     )
     assert result["termination_reason"] == "done" and result["processed"] == 1
     assert state.run.progress_json["destination_scan_complete"] is True
@@ -289,6 +290,7 @@ async def test_destination_budget_resume_keeps_fetched_page_before_owner_lookup(
         _dependency_page_reader=native,
         _dependency_owner_reader=owners,
         _dependency_index=index,
+        _dependency_seed=AsyncMock(return_value={"complete": True}),
         _source_reader=AsyncMock(return_value=source_order()),
         _target_reader=AsyncMock(return_value=missing_target()),
         _source_refunds_reader=AsyncMock(
@@ -312,3 +314,56 @@ async def test_destination_budget_resume_keeps_fetched_page_before_owner_lookup(
         "refund_requests",
         "deletions",
     ]
+
+
+async def test_historical_seed_gates_discovery_and_restarts_unseeded_checkpoint():
+    state = configured()
+    state.run.config_snapshot["mapping_json"]["reconciliation_policy"] = {}
+    state.run.progress_json = {
+        "scan_complete": True,
+        "refund_scan_complete": True,
+        "pending_refs": [],
+        "destination_scan_complete": True,
+        "dependency_scan_complete": True,
+        "dependency_scan": {"version": 1, "stream_index": 5, "after": None},
+    }
+    sequence = []
+
+    async def seed(*args):
+        sequence.append("seed")
+        return {"complete": sequence.count("seed") == 2, "after_id": "saved-cursor"}
+
+    async def changes(*args, **kwargs):
+        stream = args[6]
+        sequence.append(stream)
+        return {
+            "stream": stream,
+            "page_complete": True,
+            "scan_complete": True,
+            "changes": [],
+            "scope": {"window_end": NOW.isoformat()},
+            "observed_at": NOW.isoformat(),
+            "next_cursor": None,
+        }
+
+    result = await runner.run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _clock=lambda: NOW,
+        _enabled=AsyncMock(return_value=True),
+        _dependency_seed=seed,
+        _dependency_page_reader=changes,
+    )
+    assert result["termination_reason"] == "done"
+    assert sequence == [
+        "seed",
+        "seed",
+        "transactions",
+        "transaction_lines",
+        "transaction_links",
+        "refund_requests",
+        "deletions",
+    ]
+    assert state.run.progress_json["dependency_index_seed"]["complete"]

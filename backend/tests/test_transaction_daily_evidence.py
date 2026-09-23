@@ -31,6 +31,7 @@ async def daily(db, root, *, params=None, snapshot=None, progress=None, reason="
             "refund_scan_complete": True,
             "destination_scan_complete": True,
             "dependency_scan_complete": True,
+            "dependency_index_seed": {"complete": True},
             **(progress or {}),
         },
         status="finished",

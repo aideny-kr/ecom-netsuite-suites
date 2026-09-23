@@ -323,6 +323,7 @@ async def run_investigation(
     _dependency_page_reader=None,
     _dependency_owner_reader=None,
     _dependency_index=None,
+    _dependency_seed=None,
     _target_reader=None,
     _page_reader=None,
     _guard_reader=None,
@@ -562,8 +563,30 @@ async def run_investigation(
                         and mapping.reconciliation_policy is not None
                         and run.params_json.get("window_start")
                         and run.params_json.get("window_basis", "updated_at") == "updated_at"
-                        and not progress.get("dependency_scan_complete")
+                        and (
+                            not progress.get("dependency_scan_complete")
+                            or not progress.get("dependency_index_seed", {}).get("complete")
+                        )
                     ):
+                        if not progress.get("dependency_index_seed", {}).get("complete"):
+                            from app.services.transaction_ops import dependency_seed
+
+                            if not progress.get("dependency_index_seed"):
+                                # An older unseeded checkpoint cannot retain a
+                                # deletion page already consumed without owners.
+                                progress.pop("dependency_scan", None)
+                                progress["dependency_scan_complete"] = False
+                            if not await reserve(0):
+                                return await finish("budget")
+                            progress["dependency_index_seed"] = await (_dependency_seed or dependency_seed.advance)(
+                                db,
+                                tenant_id,
+                                run.config_id,
+                                progress.get("dependency_index_seed", {}),
+                            )
+                            progress["dependency_step_count"] = progress.get("dependency_step_count", 0) + 1
+                            await save()
+                            continue
 
                         async def dependency_page(stream, after):
                             if not await reserve(2, hold=True):
