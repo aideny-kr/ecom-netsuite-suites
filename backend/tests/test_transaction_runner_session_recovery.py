@@ -104,3 +104,29 @@ async def test_failed_read_finalization_still_obeys_the_owner_fence():
     db.rollback.assert_awaited_once()
     assert state.finish_run.call_args.kwargs["lease_token"] == state.token
     assert state.run.status == "running"
+
+
+async def test_rollback_crossing_deadline_uses_budget_finalization():
+    state, db = State(), AsyncMock()
+    current = datetime.now(timezone.utc)
+    state.run.deadline_at = current + timedelta(seconds=1)
+
+    async def rollback():
+        nonlocal current
+        current = state.run.deadline_at + timedelta(seconds=1)
+
+    db.rollback.side_effect = rollback
+    state.finish_run = AsyncMock(wraps=state.finish_run)
+    result = await run_investigation(
+        db,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _source_reader=AsyncMock(side_effect=ValueError("private provider payload")),
+        _enabled=AsyncMock(return_value=True),
+        _clock=lambda: current,
+    )
+    db.rollback.assert_awaited_once()
+    assert result["termination_reason"] == "budget"
+    assert state.finish_run.call_args.args[3] == "budget"
+    assert state.finish_run.call_args.kwargs["lease_token"] == state.token

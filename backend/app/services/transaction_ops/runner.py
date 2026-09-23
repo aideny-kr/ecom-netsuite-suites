@@ -416,9 +416,9 @@ async def run_investigation(
         # work can invalidate its transaction. Discard it before finalization;
         # committed holds/checkpoints remain durable and finish_run still fences
         # ownership. Use the captured deadline because rollback expires ORM rows.
-        reason = "budget" if clock() >= deadline_at else "error"
         if db is not None:
             await db.rollback()
+        reason = "budget" if clock() >= deadline_at else "error"
         return await finish(reason)
 
     async def reserve(calls, orders=0, *, hold=False):
