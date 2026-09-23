@@ -383,6 +383,7 @@ async def run_investigation(
     token = await state.claim_run(db, tenant_id, run_id, now=clock() if _clock is not None else None)
     if token is None:
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
+    deadline_at = run.deadline_at
     progress = _initial_progress(run)
     from app.services.transaction_ops.run_timing import RunTiming
 
@@ -410,6 +411,16 @@ async def run_investigation(
             "needs_review": progress["needs_review"],
         }
 
+    async def finish_after_failure():
+        # A bounded provider read also performs local DB work. Cancelling that
+        # work can invalidate its transaction. Discard it before finalization;
+        # committed holds/checkpoints remain durable and finish_run still fences
+        # ownership. Use the captured deadline because rollback expires ORM rows.
+        reason = "budget" if clock() >= deadline_at else "error"
+        if db is not None:
+            await db.rollback()
+        return await finish(reason)
+
     async def reserve(calls, orders=0, *, hold=False):
         with timing.measure("enablement"):
             active = await (_enabled or enabled)(db, tenant_id)
@@ -428,7 +439,7 @@ async def run_investigation(
                 progress=progress,
                 reserve=reserve_retry or reserve,
                 save=save,
-                remaining=lambda: (run.deadline_at - clock()).total_seconds(),
+                remaining=lambda: (deadline_at - clock()).total_seconds(),
             )
 
     async def metered_read(stage, factory, *, held, data_calls, **options):
@@ -1006,10 +1017,10 @@ async def run_investigation(
         await save()
         return await finish("stall")
     except TimeoutError:
-        return await finish("budget" if clock() >= run.deadline_at else "error")
+        return await finish_after_failure()
     except state_service.StateError as exc:
         if exc.code == "run_lease_lost":
-            if clock() >= run.deadline_at:
+            if clock() >= deadline_at:
                 try:
                     # A progress write can meet the deadline before the next
                     # budget reservation. Keep this row lock through finish:
@@ -1025,6 +1036,6 @@ async def run_investigation(
     except Exception:
         # Provider helpers use safe error codes, but unexpected library/DB
         # exceptions may carry SQL or bodies. Never persist/return their text.
-        return await finish("error")
+        return await finish_after_failure()
     finally:
         await transport.aclose()
