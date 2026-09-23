@@ -228,9 +228,8 @@ def report_auto_refresh_tenant(tenant_id: str):
 
     async def _run() -> dict:
         async with worker_async_session() as db:
-            # Session-scoped SET (not SET LOCAL): refresh_report commits repeatedly
-            # mid-run, which would clear a transaction-scoped GUC. Safe ONLY because
-            # the engine is disposable (never returns to an app pool).
+            # Session tenant context, re-applied at every transaction: refresh_report
+            # commits repeatedly mid-run, which would clear a one-off SET LOCAL.
             await set_tenant_context_session(db, tenant_id)
             return await sweep_tenant_reports(db, uuid.UUID(tenant_id))
 
