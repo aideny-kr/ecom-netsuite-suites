@@ -63,6 +63,13 @@ async def test_standalone_vat_credit_request_proves_refund_without_standard_orde
     result = await collect_refunds(CustomReader(), "1", "1", "1", order_reference=REFERENCE)
     assert result["amount"] == Decimal("578.38")
     assert result["record_ids"] == ["4"] and result["refund_count"] == 1
+    assert result["dependency_manifest"] == {
+        "version": 1,
+        "order_id": "1",
+        "transaction_ids": ["1", "3", "4"],
+        "refund_requests": ["20"],
+        "truncated": False,
+    }
     link = result["request_links"][0]
     assert link == {
         "request_id": "20",
