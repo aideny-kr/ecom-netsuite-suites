@@ -19,6 +19,12 @@ preparation and its duplicate finding persistence. They still receive a final
 finding, dependency inventory, case observation and existing audit behavior.
 Feature enablement remains a fresh database check before every reservation.
 
+Collection tasks also retain one task-owned database connection across commits.
+This removes repeated pool checkout/ping overhead without opening an enclosing
+transaction. Commits and SET LOCAL transaction boundaries are unchanged. The
+connection and disposable engine close on success, failure and cancellation.
+Other workers keep their existing session behavior.
+
 ## Daily execution lane
 
 Publishing defaults to `recon` for compatibility with existing deployments. To

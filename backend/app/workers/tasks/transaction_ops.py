@@ -49,7 +49,7 @@ def transaction_ops_run(tenant_id: str, run_id: str):
         from app.services.transaction_ops.runner import run_investigation
 
         tenant, run = uuid.UUID(tenant_id), uuid.UUID(run_id)
-        async with worker_async_session() as db:
+        async with worker_async_session(pin_connection=True) as db:
             await set_tenant_context(db, str(tenant))
             result = await run_investigation(db, tenant, run)
             child = None

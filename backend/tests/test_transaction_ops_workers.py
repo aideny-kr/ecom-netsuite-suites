@@ -31,7 +31,8 @@ def test_run_uses_worker_session_and_shared_runner(monkeypatch):
     tenant_id, run_id = uuid.uuid4(), uuid.uuid4()
 
     @asynccontextmanager
-    async def session():
+    async def session(**options):
+        assert options == {"pin_connection": True}
         yield db
 
     runner = AsyncMock(return_value={"status": "finished", "termination_reason": "done"})
@@ -53,7 +54,7 @@ def test_collector_passes_aware_utc_time_to_scheduler(monkeypatch):
     db = SimpleNamespace(scalar=AsyncMock(return_value=database_now))
 
     @asynccontextmanager
-    async def session():
+    async def session(**options):
         yield db
 
     collect = AsyncMock(return_value={"dispatched": 0, "termination_reason": "done"})
@@ -74,7 +75,7 @@ def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):
     tenant, parent, child = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 
     @asynccontextmanager
-    async def session():
+    async def session(**options):
         yield db
 
     runner = AsyncMock(return_value={"status": "finished", "termination_reason": "budget"})
@@ -100,7 +101,7 @@ def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):
 @pytest.mark.parametrize("task", ["run", "scheduler"])
 def test_worker_failure_text_never_contains_upstream_details(monkeypatch, task):
     @asynccontextmanager
-    async def session():
+    async def session(**options):
         yield object()
 
     monkeypatch.setattr(mod, "worker_async_session", session)
