@@ -101,11 +101,19 @@ async def collect_order_candidates(request, subsidiary_id, reference_field, docu
             conditions.append(f"(t.type='SalesOrd' AND t.{reference_field} IN ({quoted}))")
         if not conditions:
             return []
+        # Combining native IDs and references with OR was slow on the verified
+        # REST role even for tiny results. Union the identity sets before the join;
+        # the outer query still checks every matching header/subsidiary and
+        # applies its completeness limit only to the final deduplicated rows.
+        condition = conditions[0]
+        if len(conditions) > 1:
+            identities = " UNION ".join(f"SELECT t.id FROM transaction t WHERE {part}" for part in conditions)
+            condition = f"t.id IN ({identities})"
         rows = await query(
             f"SELECT DISTINCT t.id,t.type,t.{reference_field} AS order_reference,m.subsidiary "
             "FROM transaction t LEFT JOIN transactionline m "
             "ON m.transaction=t.id AND m.mainline='T' AND t.type='SalesOrd' "
-            f"WHERE {' OR '.join(conditions)} ORDER BY t.id"
+            f"WHERE {condition} ORDER BY t.id"
         )
         seen = set()
         for row in rows:

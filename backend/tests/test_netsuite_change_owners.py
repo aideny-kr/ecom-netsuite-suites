@@ -203,3 +203,34 @@ async def test_traversable_graph_over_limit_still_cannot_return_partial_owners()
     reader.edges += [edge(i, 4, "CustCred", "CustRfnd") for i in range(100, 301)]
     with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_page_incomplete"):
         await owners(reader)
+
+
+async def test_combined_id_and_reference_lookup_preserves_every_identity():
+    reader = Reader()
+    reader.records += [record(5, "SalesOrd"), record(6, "SalesOrd", "3"), record(7, "CustCred")]
+    # Two native orders can share a reference; discovery nominates the reference
+    # once and leaves duplicate-order rejection to the financial evidence reader.
+    reader.records.append({**record(8, "SalesOrd"), "order_reference": "R000000005"})
+    reader.records[-2]["order_reference"] = "R000000009"  # Non-order reference is not an owner.
+    result = await owners(reader, ("1",), references=("R000000001", "R000000005", "R000000006", "R000000009"))
+    assert result == {"order_references": ["R000000001", "R000000005"], "outside_subsidiary_ids": ["6"]}
+    assert len(reader.calls) == 1
+    assert " UNION " in reader.calls[0]
+
+
+async def test_combined_lookup_keeps_ambiguous_subsidiary_failure():
+    reader = Reader()
+    reader.records.append(record(1, "SalesOrd", "3"))
+    with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_identity_unproven"):
+        await owners(reader, ("1",), references=("R000000001",))
+
+
+async def test_combined_lookup_applies_completeness_cap_after_union():
+    reader = Reader()
+    reader.records = [record(i, "SalesOrd") for i in range(1, 202)]
+    # One reference has many native matches. Do not limit either identity arm
+    # before combining them, or the apparent complete result could lose owners.
+    for row in reader.records[1:]:
+        row["order_reference"] = "R000000002"
+    with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_page_incomplete"):
+        await owners(reader, ("1",), references=("R000000002",))
