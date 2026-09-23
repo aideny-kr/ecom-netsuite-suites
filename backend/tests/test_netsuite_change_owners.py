@@ -1,4 +1,5 @@
 import re
+import sqlite3
 
 import pytest
 
@@ -35,17 +36,54 @@ class Reader:
         assert method == "POST" and path == "/query/v1/suiteql" and params["limit"] == 201
         sql = body["q"]
         self.calls.append(sql)
-        if "FROM NextTransactionLink" in sql:
-            ids = set(re.search(r"l.previousdoc IN \(([^)]+)\)", sql)[1].split(","))
-            rows = [r for r in self.edges if r["previousdoc"] in ids or r["nextdoc"] in ids]
-        elif "FROM customrecord_fw_refund_requests" in sql:
-            rows = self.requests
-        else:
-            match = re.search(r"t.id IN \(([^)]+)\)", sql)
-            ids = set(match[1].split(",")) if match else set()
-            refs = set(re.findall(r"'R[0-9]{9}'", sql))
-            rows = [r for r in self.records if r["id"] in ids or "'" + str(r["order_reference"]) + "'" in refs]
-        return {"items": rows, "count": len(rows), "totalResults": len(rows), "hasMore": self.partial}
+        # Execute the actual ownership SQL against representative native tables;
+        # only rename SQLite's reserved TRANSACTION table name. This catches
+        # incorrect joins and filtering after the provider's page boundary.
+        with sqlite3.connect(":memory:") as db:
+            db.row_factory = sqlite3.Row
+            db.executescript("""
+                CREATE TABLE native_transaction (id TEXT PRIMARY KEY, type TEXT,
+                    custbody_fw_order_number TEXT);
+                CREATE TABLE transactionline ("transaction" TEXT, mainline TEXT, subsidiary TEXT);
+                CREATE TABLE NextTransactionLink (previousdoc TEXT, nextdoc TEXT);
+                CREATE TABLE customrecord_fw_refund_requests (id TEXT,
+                    custrecord_refreq_so_link TEXT, custrecord_refreq_order_number TEXT,
+                    custrecord_refreq_cm_link TEXT, custrecord_refreq_refund_link TEXT,
+                    custrecord_refreq_cust_dep_link TEXT);
+            """)
+            for row in self.records:
+                db.execute(
+                    "INSERT OR IGNORE INTO native_transaction VALUES (?,?,?)",
+                    (row["id"], row["type"], row["order_reference"]),
+                )
+                db.execute("INSERT INTO transactionline VALUES (?,'T',?)", (row["id"], row["subsidiary"]))
+            for row in self.edges:
+                # Native edge endpoints exist, even when they are irrelevant to
+                # order ownership (e.g. inventory adjustment -> shipment).
+                for prefix in ("previous", "next"):
+                    db.execute(
+                        "INSERT OR IGNORE INTO native_transaction VALUES (?,?,NULL)",
+                        (row[prefix + "doc"], row[prefix + "type"]),
+                    )
+                db.execute("INSERT INTO NextTransactionLink VALUES (?,?)", (row["previousdoc"], row["nextdoc"]))
+            for row in self.requests:
+                db.execute(
+                    "INSERT INTO customrecord_fw_refund_requests VALUES (?,?,?,? ,?,?)",
+                    (
+                        row["id"],
+                        row.get("order_id"),
+                        row.get("order_reference"),
+                        row.get("credit_id", "3"),
+                        row.get("refund_id", "4"),
+                        row.get("deposit_id"),
+                    ),
+                )
+            sql = re.sub(r"(FROM|JOIN) transaction ", r"\1 native_transaction ", sql)
+            sql = sql.replace("m.transaction", 'm."transaction"')
+            rows = [dict(row) for row in db.execute(sql)]
+        total = len(rows)
+        rows = rows[params["offset"] : params["offset"] + params["limit"]]
+        return {"items": rows, "count": len(rows), "totalResults": total, "hasMore": self.partial or total > len(rows)}
 
 
 async def owners(reader, documents=("4",), **kwargs):
@@ -126,3 +164,42 @@ async def test_invalid_scope_cannot_enter_native_queries(documents, references):
     with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_scope_invalid"):
         await owners(reader, documents, references=references)
     assert reader.calls == []
+
+
+async def test_inventory_fanout_is_filtered_before_provider_page_limit():
+    reader = Reader()
+    reader.records += [record(7, "InvAdjst"), record(8, "ItemRcpt")]
+    reader.edges += [edge(7, i, "InvAdjst", "ItemShip") for i in range(100, 3953)]
+    reader.edges += [edge(8, 4, "ItemRcpt", "CustRfnd")]
+    result = await owners(reader, ("4", "7", "8"))
+    assert result["order_references"] == ["R000000001"]
+    assert len(reader.calls) == 6
+
+
+async def test_multisubsidiary_journal_does_not_duplicate_native_identity():
+    reader = Reader()
+    reader.records += [record(7, "Journal", "1"), record(7, "Journal", "2")]
+    reader.edges += [edge(7, 3, "Journal", "DepAppl")]
+    result = await owners(reader, ("4", "7"))
+    assert result == {"order_references": ["R000000001"], "outside_subsidiary_ids": []}
+
+
+async def test_ambiguous_sales_order_subsidiary_still_fails_closed():
+    reader = Reader()
+    reader.records.append(record(1, "SalesOrd", "3"))
+    with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_identity_unproven"):
+        await owners(reader)
+
+
+async def test_missing_sales_order_subsidiary_still_fails_closed():
+    reader = Reader()
+    reader.records[0]["subsidiary"] = None
+    with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_identity_unproven"):
+        await owners(reader)
+
+
+async def test_traversable_graph_over_limit_still_cannot_return_partial_owners():
+    reader = Reader()
+    reader.edges += [edge(i, 4, "CustCred", "CustRfnd") for i in range(100, 301)]
+    with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_page_incomplete"):
+        await owners(reader)

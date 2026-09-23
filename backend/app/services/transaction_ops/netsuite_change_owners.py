@@ -16,7 +16,7 @@ from app.services.transaction_ops.netsuite_reader import (
     _id,
     authenticated_reader,
 )
-from app.services.transaction_ops.netsuite_refunds import _PARENTS, _query
+from app.services.transaction_ops.netsuite_refunds import _PARENTS
 
 MAX_OWNER_CALLS = 9  # Initial records, six ancestor levels, custom links, roots.
 MAX_DOCUMENTS = 100
@@ -38,6 +38,30 @@ def _ids(values):
 
 def _sql_ids(values):
     return ",".join(sorted(values, key=int))
+
+
+def _owner_query(frontier):
+    """Read only traversable ancestor edges, before applying the provider cap.
+
+    The refund evidence query intentionally reads both directions and financial
+    context. Reusing it here expands inventory adjustments into thousands of
+    unrelated shipments and multiplies journals by their subsidiary lines.
+    Candidate ownership needs only the native identities and supported types.
+    """
+    ids = _sql_ids(frontier)
+    pairs = [
+        f"(n.type='{child}' AND p.type IN ({','.join(repr(parent) for parent in sorted(parents))}))"
+        for child, parents in sorted(_PARENTS.items())
+    ]
+    pairs.append("(n.type='CustRfnd' AND p.type IN ('DepAppl','CustCred'))")
+    return (
+        "SELECT DISTINCT l.previousdoc,l.nextdoc,p.type AS previoustype,n.type AS nexttype "
+        "FROM NextTransactionLink l JOIN transaction p ON p.id=l.previousdoc "
+        "JOIN transaction n ON n.id=l.nextdoc "
+        f"WHERE (l.nextdoc IN ({ids}) AND ({' OR '.join(pairs)})) "
+        f"OR (l.previousdoc IN ({ids}) AND p.type='CustRfnd' AND n.type IN ('DepAppl','CustCred')) "
+        "ORDER BY l.previousdoc,l.nextdoc"
+    )
 
 
 async def collect_order_candidates(request, subsidiary_id, reference_field, document_ids, order_ids, references):
@@ -79,7 +103,8 @@ async def collect_order_candidates(request, subsidiary_id, reference_field, docu
             return []
         rows = await query(
             f"SELECT DISTINCT t.id,t.type,t.{reference_field} AS order_reference,m.subsidiary "
-            "FROM transaction t JOIN transactionline m ON m.transaction=t.id AND m.mainline='T' "
+            "FROM transaction t LEFT JOIN transactionline m "
+            "ON m.transaction=t.id AND m.mainline='T' AND t.type='SalesOrd' "
             f"WHERE {' OR '.join(conditions)} ORDER BY t.id"
         )
         seen = set()
@@ -90,7 +115,7 @@ async def collect_order_candidates(request, subsidiary_id, reference_field, docu
                 or int(identifier) <= 0
                 or identifier in seen
                 or not isinstance(row.get("type"), str)
-                or not _id(row.get("subsidiary"))
+                or (row.get("type") == "SalesOrd" and not _id(row.get("subsidiary")))
                 or (
                     identifier not in identifiers
                     and not (row["type"] == "SalesOrd" and row.get("order_reference") in refs)
@@ -121,7 +146,7 @@ async def collect_order_candidates(request, subsidiary_id, reference_field, docu
     for _ in range(MAX_DEPTH):
         if not frontier:
             break
-        rows = await query(_query(frontier))
+        rows = await query(_owner_query(frontier))
         parents = set()
         for row in rows:
             previous, following = _id(row.get("previousdoc")), _id(row.get("nextdoc"))
