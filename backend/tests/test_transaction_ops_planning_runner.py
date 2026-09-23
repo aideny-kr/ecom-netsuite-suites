@@ -81,3 +81,48 @@ async def test_guard_failure_preserves_amount_findings_and_explains_no_proposal(
     assert report["comparison"]["differences"]
     assert report["automation"] == {"status": "blocked", "code": code}
     assert "private provider" not in str(report)
+
+
+async def test_matching_order_without_celigo_step_has_one_final_observation(db, planning_run, monkeypatch):
+    from tests.test_transaction_ops_planner import matched_case
+
+    actor, _, config, run = planning_run
+    case = matched_case()
+    assert run.config_snapshot.get("target_step_id") is None
+    record = AsyncMock(wraps=state.record_finding)
+    monkeypatch.setattr(state, "record_finding", record)
+    guard = AsyncMock()
+    result = await run_case(db, (actor, case, config, run), guard)
+    assert result["termination_reason"] == "done"
+    guard.assert_not_awaited()
+    record.assert_awaited_once()
+    findings = await state.list_findings(db, actor.tenant_id, run.id)
+    assert findings[0].report_json["comparison"]["recommended_action"] == "no_action"
+    assert findings[0].report_json["_observation"]["final"] is True
+    assert not await state.list_proposals(db, actor.tenant_id, run_id=run.id)
+    assert "automation" not in findings[0].report_json
+
+
+async def test_fresh_enablement_query_rejects_flag_or_tenant_revocation(db, planning_run):
+    from sqlalchemy import update
+
+    from app.models.feature_flag import TenantFeatureFlag
+    from app.models.tenant import Tenant
+    from app.services.transaction_ops.runner import enabled
+
+    actor, _, _, _ = planning_run
+    assert await enabled(db, actor.tenant_id)
+    for key in ("celigo", "reconciliation"):
+        await db.execute(
+            update(TenantFeatureFlag)
+            .where(TenantFeatureFlag.tenant_id == actor.tenant_id, TenantFeatureFlag.flag_key == key)
+            .values(enabled=False)
+        )
+        assert not await enabled(db, actor.tenant_id)
+        await db.execute(
+            update(TenantFeatureFlag)
+            .where(TenantFeatureFlag.tenant_id == actor.tenant_id, TenantFeatureFlag.flag_key == key)
+            .values(enabled=True)
+        )
+    await db.execute(update(Tenant).where(Tenant.id == actor.tenant_id).values(is_active=False))
+    assert not await enabled(db, actor.tenant_id)

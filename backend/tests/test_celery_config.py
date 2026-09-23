@@ -251,9 +251,13 @@ def test_collectors_execute_while_bulk_worker_is_saturated(tmp_path):
     )
     try:
         for service in ("worker", "worker-collectors"):
-            flags = shlex.split(production[service]["command"])
+            # This probe launches Celery directly, without Compose resolving
+            # its environment substitution. Exercise the default two-slot setup.
+            command = production[service]["command"].replace("${RECON_BULK_CONCURRENCY:-2}", "2")
+            flags = shlex.split(command)
             original_queues = flags[flags.index("-Q") + 1].split(",")
             if service == "worker":
+                assert "--concurrency=2" in flags
                 assert RECON_COLLECTOR_QUEUE not in original_queues
             else:
                 assert original_queues == [RECON_COLLECTOR_QUEUE]

@@ -123,12 +123,15 @@ async def set_tenant_context_session(session: AsyncSession, tenant_id: str) -> N
         await session.execute(_SET_TENANT_LOCAL, {"tenant_id": validated})
 
 
-def worker_async_session():
+def worker_async_session(*, pin_connection=False):
     """Create a fresh async engine + session for Celery worker tasks.
 
     Each Celery prefork worker creates its own event loop via asyncio.new_event_loop().
     The module-level engine/session_factory are bound to the main process's loop and
     cannot be reused. This function creates a disposable engine per task invocation.
+    Collection may retain a connection across commits to avoid pool checkout/ping
+    roundtrips. This does not open an enclosing transaction: each session commit
+    remains a real commit and SET LOCAL still ends at its transaction boundary.
     """
     from contextlib import asynccontextmanager
 
@@ -144,11 +147,15 @@ def worker_async_session():
             pool_recycle=300 if _is_remote else -1,
         )
         factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
-        async with factory() as session:
-            try:
-                yield session
-            finally:
-                await session.close()
-        await _engine.dispose()
+        try:
+            if pin_connection:
+                async with _engine.connect() as connection:
+                    async with factory(bind=connection) as session:
+                        yield session
+            else:
+                async with factory() as session:
+                    yield session
+        finally:
+            await _engine.dispose()
 
     return _session()

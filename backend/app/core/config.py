@@ -258,6 +258,8 @@ class Settings(BaseSettings):
     # exist there before anything is sent to it. Default: the bulk queue, exactly as before.
     # Set to "recon-actions" in .env.production once worker-actions is running.
     TRANSACTION_OPS_ACTIONS_QUEUE: str = "recon"
+    # Activate only after a daily worker is available. The default preserves existing deployments.
+    TRANSACTION_OPS_DAILY_QUEUE: Literal["recon", "recon-daily"] = "recon"
     # The daily ops digest always writes its per-tenant audit row; this only
     # controls whether the same digest is also emailed to the tenant's admins.
     OPS_DIGEST_EMAIL_ENABLED: bool = True

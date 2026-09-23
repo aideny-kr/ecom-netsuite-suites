@@ -9,12 +9,12 @@ import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 
+from app.models.feature_flag import TenantFeatureFlag
 from app.models.tenant import Tenant
 from app.schemas.transaction_ops import TransactionLookup, TransactionSnapshot
 from app.schemas.transaction_runs import ProgressUpdate, _bounded_json
-from app.services import feature_flag_service
 from app.services.transaction_ops import state_service
 from app.services.transaction_ops.comparison import compare_transactions
 from app.services.transaction_ops.header_report import build_header_report
@@ -31,11 +31,15 @@ from app.services.transaction_ops.source_eligibility import exclusion_report, pa
 
 
 async def enabled(db, tenant_id):
-    tenant = (
-        await db.execute(select(Tenant.id).where(Tenant.id == tenant_id, Tenant.is_active.is_(True)))
-    ).scalar_one_or_none()
-    flags = await feature_flag_service.get_all_flags(db, tenant_id)
-    return tenant is not None and flags.get("celigo") is True and flags.get("reconciliation") is True
+    flags = [
+        exists().where(
+            TenantFeatureFlag.tenant_id == tenant_id,
+            TenantFeatureFlag.flag_key == key,
+            TenantFeatureFlag.enabled.is_(True),
+        )
+        for key in ("celigo", "reconciliation")
+    ]
+    return bool(await db.scalar(select(exists().where(Tenant.id == tenant_id, Tenant.is_active.is_(True), *flags))))
 
 
 class ScanChangedError(ValueError):
@@ -359,6 +363,7 @@ async def run_investigation(
     )
     from app.services.transaction_ops.planner import PlanningError, plan_proposal
     from app.services.transaction_ops.read_batch import ReferenceReads, reference_read_batch
+    from app.services.transaction_ops.read_transport import CollectionTransport, collection_transport
     from app.services.transaction_ops.refund_reader import read_refund_order_page, read_solidus_refunds
     from app.services.transaction_ops.source_reader import read_framework_order, read_framework_orders_page
 
@@ -379,10 +384,16 @@ async def run_investigation(
     if token is None:
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
     progress = _initial_progress(run)
+    from app.services.transaction_ops.run_timing import RunTiming
+
+    timing = RunTiming(progress)
+    state = timing.state(state)
     reference_reads = ReferenceReads()
+    transport = CollectionTransport()
     previous_reference_hits = progress.get("reference_cache_hits", 0)
 
     async def save():
+        timing.snapshot()
         progress["reference_cache_hits"] = previous_reference_hits + reference_reads.hits
         await state.update_progress(
             db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
@@ -400,22 +411,25 @@ async def run_investigation(
         }
 
     async def reserve(calls, orders=0, *, hold=False):
-        if not await (_enabled or enabled)(db, tenant_id):
+        with timing.measure("enablement"):
+            active = await (_enabled or enabled)(db, tenant_id)
+        if not active:
             raise FeatureRevokedError
         return await state.reserve_budget(
             db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, hold=hold, now=clock()
         )
 
     async def bounded_read(stage, factory, *, retry_calls=0, reserve_retry=None):
-        return await read_with_recovery(
-            factory,
-            stage=stage,
-            retry_calls=retry_calls,
-            progress=progress,
-            reserve=reserve_retry or reserve,
-            save=save,
-            remaining=lambda: (run.deadline_at - clock()).total_seconds(),
-        )
+        with timing.measure(stage):
+            return await read_with_recovery(
+                factory,
+                stage=stage,
+                retry_calls=retry_calls,
+                progress=progress,
+                reserve=reserve_retry or reserve,
+                save=save,
+                remaining=lambda: (run.deadline_at - clock()).total_seconds(),
+            )
 
     async def metered_read(stage, factory, *, held, data_calls, **options):
         """A bounded read charged for what it sent rather than the worst case reserved.
@@ -446,7 +460,7 @@ async def run_investigation(
                 db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
             )
 
-        with metered() as meter, reference_read_batch(reference_reads):
+        with metered() as meter, reference_read_batch(reference_reads), collection_transport(transport):
             try:
                 result = await bounded_read(stage, factory, reserve_retry=reserve_retry, **options)
             except asyncio.CancelledError:
@@ -728,15 +742,16 @@ async def run_investigation(
             can_reuse = can_validate and progress.get("phase") == "orders"
             source = None
             if can_reuse:
-                source = await source_snapshot.load(
-                    db,
-                    tenant_id,
-                    direct_source["source_connection_id"],
-                    reference,
-                    since=snapshot_floor,
-                    now=clock(),
-                    minimum_version=_time(progress.get("pending_source_versions", {}).get(reference)),
-                )
+                with timing.measure("source_snapshot"):
+                    source = await source_snapshot.load(
+                        db,
+                        tenant_id,
+                        direct_source["source_connection_id"],
+                        reference,
+                        since=snapshot_floor,
+                        now=clock(),
+                        minimum_version=_time(progress.get("pending_source_versions", {}).get(reference)),
+                    )
             source_reused = source is not None
             if not await reserve(0 if source_reused else 2, 1):
                 return await finish("budget")
@@ -762,9 +777,10 @@ async def run_investigation(
                 )
                 progress[counter] = progress.get(counter, 0) + 1
                 if can_validate:
-                    await source_snapshot.save(
-                        db, tenant_id, direct_source["source_connection_id"], reference, source, now=clock()
-                    )
+                    with timing.measure("source_snapshot"):
+                        await source_snapshot.save(
+                            db, tenant_id, direct_source["source_connection_id"], reference, source, now=clock()
+                        )
             orders = source.get("orders") or []
             if len(orders) != 1 or orders[0].get("number") != reference:
                 raise ValueError("source_reference_mismatch")
@@ -781,14 +797,15 @@ async def run_investigation(
                 if progress.get("phase") != "destination":
                     raise SourceScopeError
             if direct_source:
-                await (_order_mirror or save_observed_order)(
-                    db,
-                    tenant_id,
-                    direct_source["source_connection_id"],
-                    orders[0],
-                    _time(source["read_at"]),
-                    **({"reused": True} if source_reused else {}),
-                )
+                with timing.measure("source_mirror"):
+                    await (_order_mirror or save_observed_order)(
+                        db,
+                        tenant_id,
+                        direct_source["source_connection_id"],
+                        orders[0],
+                        _time(source["read_at"]),
+                        **({"reused": True} if source_reused else {}),
+                    )
             if payment_failed(orders[0]):
                 await state.record_finding(
                     db, tenant_id, run_id, reference, exclusion_report(source), lease_token=token, now=clock()
@@ -900,6 +917,7 @@ async def run_investigation(
                 not settlement
                 and not source_reused
                 and mapping.action_mode == "propose_actions"
+                and (action != "no_action" or config.get("target_step_id"))
                 and action
                 in {
                     "propose_amount_correction",
@@ -1008,3 +1026,5 @@ async def run_investigation(
         # Provider helpers use safe error codes, but unexpected library/DB
         # exceptions may carry SQL or bodies. Never persist/return their text.
         return await finish("error")
+    finally:
+        await transport.aclose()

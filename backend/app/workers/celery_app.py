@@ -18,6 +18,8 @@ RECON_ACTIONS_QUEUE = "recon-actions"
 # the worker yet, and a queue nothing consumes is work that never runs, so this defaults to
 # the bulk queue and the operator moves it once worker-actions is up.
 ACTIONS_QUEUE = settings.TRANSACTION_OPS_ACTIONS_QUEUE or "recon"
+RECON_DAILY_QUEUE = "recon-daily"
+DAILY_QUEUE = settings.TRANSACTION_OPS_DAILY_QUEUE or "recon"
 RECON_ACTION_TASKS = (
     "tasks.transaction_ops_execute",
     "tasks.transaction_ops_recover",
@@ -81,6 +83,7 @@ celery_app.conf.update(
         "recon": {"exchange": "recon", "routing_key": "recon"},
         RECON_COLLECTOR_QUEUE: {"exchange": RECON_COLLECTOR_QUEUE, "routing_key": RECON_COLLECTOR_QUEUE},
         RECON_ACTIONS_QUEUE: {"exchange": RECON_ACTIONS_QUEUE, "routing_key": RECON_ACTIONS_QUEUE},
+        RECON_DAILY_QUEUE: {"exchange": RECON_DAILY_QUEUE, "routing_key": RECON_DAILY_QUEUE},
         "export": {"exchange": "export", "routing_key": "export"},
     },
     # Redis transport supports per-message priority with no new queues and no

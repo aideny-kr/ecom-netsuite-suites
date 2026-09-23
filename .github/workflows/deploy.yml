@@ -203,6 +203,9 @@ jobs:
             if docker compose -f docker-compose.prod.yml config --services | grep -qx worker-actions; then
               BG="$BG worker-actions"
             fi
+            if docker compose -f docker-compose.prod.yml config --services | grep -qx worker-daily; then
+              BG="$BG worker-daily"
+            fi
             docker compose -f docker-compose.prod.yml up -d --no-deps $BG
             # Verify the running container advances to the freshly-pulled image. Container
             # recreation can lag `up -d`, so poll instead of a single check after a fixed
@@ -319,6 +322,9 @@ jobs:
             BG="worker worker-collectors beat"
             if docker compose -f docker-compose.prod.yml config --services | grep -qx worker-actions; then
               BG="$BG worker-actions"
+            fi
+            if docker compose -f docker-compose.prod.yml config --services | grep -qx worker-daily; then
+              BG="$BG worker-daily"
             fi
             docker compose -f docker-compose.prod.yml up -d --no-deps $BG
             BG="backend $BG"

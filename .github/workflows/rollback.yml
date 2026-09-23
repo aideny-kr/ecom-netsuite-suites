@@ -81,6 +81,9 @@ jobs:
             if docker compose -f docker-compose.prod.yml config --services | grep -qx worker-actions; then
               BG="$BG worker-actions"
             fi
+            if docker compose -f docker-compose.prod.yml config --services | grep -qx worker-daily; then
+              BG="$BG worker-daily"
+            fi
             docker compose -f docker-compose.prod.yml up -d --no-deps $BG
             # Poll until the backend container advances to the rollback image (recreation
             # lags `up -d`); fail loud if it never matches instead of false-passing green.
