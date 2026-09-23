@@ -82,9 +82,9 @@ def reconciliation_run_task(
 
     async def _run() -> dict:
         async with worker_async_session() as db:
-            # Session-scoped SET (not SET LOCAL): both engines commit mid-run,
-            # which would clear a transaction-scoped GUC for everything after
-            # the first commit. Safe here because the engine is disposable.
+            # Session tenant context, re-applied at every transaction: both engines
+            # commit mid-run, which would clear a one-off SET LOCAL for everything
+            # after the first commit.
             await set_tenant_context_session(db, tenant_id)
             return await _execute(
                 db,

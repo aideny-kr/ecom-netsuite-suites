@@ -13,9 +13,9 @@ Idempotency (re-runnable safely):
   * **Concepts** dedup by normalized name — first against rows already in the DB
     (so a re-run reuses the prior concept), then within the current run.
 
-RLS in the worker: the upsert loop batch-commits every 10 rows, and ``SET LOCAL``
-is transaction-scoped (lost on each commit). So we set a *session-scoped* GUC
-(plain ``SET``, persists across the batch commits) via ``_set_session_tenant``.
+RLS in the worker: the upsert loop batch-commits every 10 rows, and a one-off
+``SET LOCAL`` is lost on each commit. So ``_set_session_tenant`` uses
+set_tenant_context_session, which re-applies the tenant at every transaction.
 
 ``tenant_id`` MUST be passed as a kwarg — ``InstrumentedTask`` reads
 ``kwargs['tenant_id']`` to scope the Job + audit rows.
@@ -28,7 +28,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.config import settings
@@ -59,16 +59,16 @@ def _normalize_name(name: str) -> str:
 
 
 async def _set_session_tenant(db: AsyncSession, tenant_id: str) -> None:
-    """Set the RLS tenant GUC *session-scoped* (plain SET, survives commits).
+    """RLS tenant context for every transaction of this session.
 
-    The backfill batch-commits every ``_COMMIT_EVERY`` rows; a transaction-scoped
-    ``SET LOCAL`` would be cleared after the first commit, so subsequent inserts
-    would fail the RLS ``WITH CHECK``. A session-scoped ``SET`` persists for the
-    life of the connection. ``SET`` does not accept bind params, so the UUID is
-    validated (raises ``ValueError`` on bad input) before interpolation.
+    The backfill batch-commits every ``_COMMIT_EVERY`` rows, so a one-off
+    ``SET LOCAL`` would be cleared after the first commit and later inserts would fail
+    the RLS ``WITH CHECK``. set_tenant_context_session re-applies it per transaction,
+    which a plain ``SET`` did not (rollbacks, replaced connections).
     """
-    validated = str(uuid.UUID(str(tenant_id)))
-    await db.execute(text(f"SET app.current_tenant_id = '{validated}'"))
+    from app.core.database import set_tenant_context_session
+
+    await set_tenant_context_session(db, tenant_id)
 
 
 async def _collect_source_rows(db: AsyncSession, tenant_id: uuid.UUID) -> list[dict[str, Any]]:

@@ -293,11 +293,11 @@ def rolling_period_compose_tenant(tenant_id: str):
 
     async def _run() -> dict:
         async with worker_async_session() as db:
-            # Session-scoped SET, not SET LOCAL: compose_playbook_report commits, and a
-            # tool call inside it can commit too (OAuth token refresh via
-            # get_valid_token). A transaction-scoped GUC would be cleared by the first
-            # such commit and every later RLS query would silently see zero rows. Safe
-            # only because this engine is disposable and never returns to an app pool.
+            # Session tenant context, re-applied at every transaction:
+            # compose_playbook_report commits, and a tool call inside it can commit too
+            # (OAuth token refresh via get_valid_token). A one-off SET LOCAL would be
+            # cleared by the first such commit and every later RLS query would silently
+            # see zero rows.
             await set_tenant_context_session(db, tenant_id)
             return await sweep_tenant_series(db, uuid.UUID(tenant_id))
 

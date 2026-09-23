@@ -1317,12 +1317,11 @@ def scheduled_jobs_sweep_tenant(tenant_id: str):
 
     async def _run() -> dict:
         async with worker_async_session() as db:
-            # Session-scoped SET (not SET LOCAL): run_schedule_now commits
-            # repeatedly mid-run (the write-step audit-before-call commit, plus
-            # the final commit), which would clear a transaction-scoped GUC.
-            # Safe ONLY because this engine is disposable and never returns to
-            # an app pool (report_auto_refresh_tenant/rolling_period_compose_tenant
-            # use the identical pattern for the identical reason).
+            # Session tenant context, re-applied at every transaction:
+            # run_schedule_now commits repeatedly mid-run (the write-step
+            # audit-before-call commit, plus the final commit), which would clear a
+            # one-off SET LOCAL (report_auto_refresh_tenant and
+            # rolling_period_compose_tenant do the same for the same reason).
             await set_tenant_context_session(db, tenant_id)
             return await run_due_jobs(db, uuid.UUID(tenant_id))
 

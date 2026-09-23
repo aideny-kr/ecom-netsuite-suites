@@ -364,3 +364,27 @@ async def test_a_lock_lost_during_a_shadow_classification_records_no_comparison(
     assert summary["stopped"] == "leadership_lost" and summary["processed"] == 0
     assert recorded == []
     assert await _proposals(db, tenant_a.id, run_id, source="agent") == []
+
+
+async def test_a_tenant_context_failure_after_a_failed_write_stops_the_run(db, tenant_a, monkeypatch):
+    """After a failed write the next transaction re-applies the tenant (after_begin). If
+    that fails, the run must stop loudly, not be counted as a shadow-comparison failure
+    by the comparison's own except block and carry on."""
+    from app.core import database
+    from app.core.database import set_tenant_context_session
+    from app.services.reconciliation import resolution_agent, resolution_jev
+
+    run, _, _ = await _setup(db, tenant_a.id, monkeypatch, n=1)
+    await set_tenant_context_session(db, str(tenant_a.id))
+
+    async def shadow_decision(*_args, **_kwargs):
+        return {"action": "book_fee_line", "narrative": "Fee.", "key_evidence": []}, {"llm_action": "book_fee_line"}
+
+    async def fails_and_breaks_the_context(*_args, **_kwargs):
+        monkeypatch.setattr(database, "_SET_TENANT_LOCAL", text("SELECT 1/0"))
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(resolution_jev, "decide_item", shadow_decision)
+    monkeypatch.setattr(resolution_agent, "apply_agent_proposal", fails_and_breaks_the_context)
+    with pytest.raises(Exception, match="division by zero"):
+        await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))

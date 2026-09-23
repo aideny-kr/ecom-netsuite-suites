@@ -166,20 +166,17 @@ def _reschedule_busy(tenant_id: str, run_id: str, busy_attempt: int) -> dict:
     return {"skipped": "already_running", "rescheduled_attempt": attempt}
 
 
-async def _recover_after_failed_write(db: AsyncSession, tenant_id: str) -> None:
-    """Roll back, then re-apply the tenant context. The worker's context is a plain SET,
-    which a rollback undoes when nothing has committed since it ran, so without this a
-    failure on the first item would leave every later item with no tenant context. A
-    failure to re-apply it is not swallowed: the run stops rather than go on unscoped.
+async def _recover_after_failed_write(db: AsyncSession) -> None:
+    """Roll back after a failed write, then begin the next transaction HERE.
 
-    This restores the context on the session's current connection. A connection the
-    pool replaces mid-run (recycle, failed pre-ping) starts without it; that gap is older
-    than this helper and shared by every worker that uses set_tenant_context_session."""
-    from app.core.database import set_tenant_context_session
-
+    set_tenant_context_session's after_begin listener re-applies the tenant context as
+    that transaction begins. Beginning it here, from inside the caller's except block,
+    means a failure to re-apply stops the run loudly. Otherwise it would surface at the
+    next statement, possibly inside another except (the shadow comparison's) that
+    would count it and carry on."""
     with contextlib.suppress(Exception):
         await db.rollback()
-    await set_tenant_context_session(db, tenant_id)
+    await db.connection()
 
 
 def _update_job_progress(tenant_id: str, job_id, processed: int, total: int) -> None:
@@ -305,7 +302,7 @@ async def run_resolution_agent(
                         persist_failures += 1
                         processed += 1
                         # a database error here leaves the transaction aborted for every later item
-                        await _recover_after_failed_write(db, str(tid))
+                        await _recover_after_failed_write(db)
                         continue
                 try:
                     context = await gather_context(db, tid, item)
@@ -344,7 +341,7 @@ async def run_resolution_agent(
                     persist_failures += 1
                     persisted = False
                     applied = False
-                    await _recover_after_failed_write(db, str(tid))
+                    await _recover_after_failed_write(db)
                     expired = True
 
                 if shadow is not None:
@@ -366,7 +363,7 @@ async def run_resolution_agent(
                             "resolution_agent.jev_comparison_commit_failed", extra={"proposal_id": str(item_id)}
                         )
                         comparison_failures += 1
-                        await _recover_after_failed_write(db, str(tid))
+                        await _recover_after_failed_write(db)
                         expired = True
 
                 processed += 1
@@ -421,11 +418,9 @@ def dispatch_resolution_agent(tenant_id: str, run_id: str) -> None:
 def recon_resolution_agent(self, tenant_id: str, run_id: str, busy_attempt: int = 0, **kwargs) -> dict:
     """Per-run agent tail. Opens its own RLS-scoped session.
 
-    Session-scoped SET (not SET LOCAL): apply_agent_proposal commits once per
-    item it processes, which would clear a transaction-scoped GUC after the
-    FIRST item, silently dropping RLS context for every item after it. Safe
-    here because worker_async_session() is a disposable per-task engine, never
-    a pooled session returned to a shared pool (see database.py docstring)."""
+    Session tenant context, re-applied at every transaction: apply_agent_proposal
+    commits once per item it processes, which would clear a one-off SET LOCAL after
+    the FIRST item and silently drop RLS context for every item after it."""
     from app.core.database import set_tenant_context_session, worker_async_session
 
     async def _run() -> dict:
