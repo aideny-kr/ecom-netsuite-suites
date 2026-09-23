@@ -286,10 +286,10 @@ async def report(args) -> int:
     try:
         rows = await conn.fetch(
             """
-            SELECT a.created_at, a.correlation_id, a.payload
+            SELECT a.timestamp AS created_at, a.correlation_id, a.payload
             FROM audit_events a JOIN tenants t ON t.id = a.tenant_id
             WHERE t.slug = $1 AND a.action = 'recon.jev_comparison'
-            ORDER BY a.created_at DESC LIMIT 50
+            ORDER BY a.timestamp DESC LIMIT 50
             """,
             STANDARD_UAT_SLUG,
         )
