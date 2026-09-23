@@ -94,12 +94,17 @@ async def audited_external_call(
         raise
     body = result if isinstance(result, dict) else {}
     failed = bool(body.get("error")) or body.get("isError") is True or body.get("success") is False
-    encoded = json.dumps(result, sort_keys=True, default=str).encode()
+    # The cache's age marker is provenance, not content: identical provider data hashes
+    # alike whether it came live or from the dispatcher's metadata cache.
+    content = {k: v for k, v in body.items() if k != "served_from_cache"} if isinstance(result, dict) else result
+    encoded = json.dumps(content, sort_keys=True, default=str).encode()
     payload = {
         **payload,
         "result_sha256": hashlib.sha256(encoded).hexdigest(),
         "result_bytes": len(encoded),
         "connection_scope": body.get("verified_connection_scope"),
+        # Set only by the dispatcher's metadata cache: no round trip reached the provider.
+        "served_from_cache": body.get("served_from_cache"),
     }
     try:
         await append_event(
