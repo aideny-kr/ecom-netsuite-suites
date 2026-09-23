@@ -78,7 +78,7 @@ def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):
         yield db
 
     runner = AsyncMock(return_value={"status": "finished", "termination_reason": "budget"})
-    resume = AsyncMock(return_value=SimpleNamespace(id=child, status="pending"))
+    resume = AsyncMock(return_value=SimpleNamespace(id=child, status="pending", origin="schedule", max_orders=100))
     dispatch = AsyncMock()
     monkeypatch.setattr(mod, "worker_async_session", session)
     monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
@@ -86,10 +86,14 @@ def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "app.services.transaction_ops.continuation", SimpleNamespace(continue_budget_run=resume)
     )
-    monkeypatch.setitem(sys.modules, "app.services.transaction_ops.scheduler", SimpleNamespace(_dispatch=dispatch))
+    monkeypatch.setitem(
+        sys.modules,
+        "app.services.transaction_ops.scheduler",
+        SimpleNamespace(_dispatch=dispatch, investigation_queue=lambda origin, orders: "recon-daily"),
+    )
     result = mod.transaction_ops_run.run(str(tenant), str(parent))
     resume.assert_awaited_once_with(db, tenant, parent)
-    assert dispatch.call_args.args[:2] == (tenant, child)
+    assert dispatch.call_args.args == (tenant, child, {"dispatched": 0, "dispatch_failed": 0}, "recon-daily")
     assert result["continuation_run_id"] == str(child)
 
 

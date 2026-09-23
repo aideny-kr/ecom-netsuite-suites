@@ -427,3 +427,30 @@ async def test_period_eligibility_does_not_depend_on_suiteql_display_date_locale
         collector = reader._Reader(client, "https://6738075.suitetalk.api.netsuite.com/services/rest", "fixture-token")
         periods = await collector.period("2026-09-04")
     assert _period({"periods": periods}, "2026-09-04") == "99"
+
+
+async def test_collection_transport_reuses_connections_but_reauthorizes_and_partitions_rotation(context):
+    from app.services.transaction_ops.read_transport import CollectionTransport, collection_transport, current_transport
+
+    db, connection = context
+    pool = CollectionTransport()
+    try:
+        with collection_transport(pool):
+            async with reader.authenticated_reader(db, TENANT, CONNECTION, ACCOUNT) as first:
+                first_client = first.client
+            assert not first_client.is_closed
+            async with reader.authenticated_reader(db, TENANT, CONNECTION, ACCOUNT) as second:
+                assert second.client is first_client
+            assert reader.get_valid_token.await_count == 2
+            reader.get_valid_token.return_value = "ROTATED"
+            async with reader.authenticated_reader(db, TENANT, CONNECTION, ACCOUNT) as rotated:
+                assert rotated.client is not first_client
+            connection.status = "revoked"
+            with pytest.raises(reader.NetSuiteEvidenceError, match="invalid_connection"):
+                async with reader.authenticated_reader(db, TENANT, CONNECTION, ACCOUNT):
+                    pytest.fail("Revoked connection reused a pooled transport")
+        assert current_transport() is None
+    finally:
+        await pool.aclose()
+    assert first_client.is_closed and rotated.client.is_closed
+    assert not pool.clients

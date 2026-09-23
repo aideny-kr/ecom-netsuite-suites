@@ -13,7 +13,7 @@ from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.services import feature_flag_service
 from app.services.ingestion.solidus_dispatch import refresh_due_sources as _refresh_sources
-from app.workers.celery_app import ACTIONS_QUEUE, celery_app
+from app.workers.celery_app import ACTIONS_QUEUE, DAILY_QUEUE, celery_app
 
 _SCAN_LIMIT = 200
 _DISPATCH_TIMEOUT = 5
@@ -249,19 +249,22 @@ def _reserve_publication(connection, tenant_id, run_id):
     return connection.default_channel.client.set(key, "1", nx=True, ex=_PUBLICATION_COOLDOWN)
 
 
-async def _short_run_ids(db, tenant_id, run_ids):
-    """The due runs that are one-order recovery rechecks: they share the task name with
-    hour-long scans, so only the sender can keep them off the long queue."""
+def investigation_queue(origin, max_orders=None):
+    if origin == "recovery" and max_orders == 1:
+        return ACTIONS_QUEUE
+    return DAILY_QUEUE if origin == "schedule" else "recon"
+
+
+async def _run_queues(db, tenant_id, run_ids):
+    """Route durable run origins, including recovered publications and continuations."""
     if not run_ids:
-        return set()
+        return {}
     _, _, _, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     rows = await db.execute(
-        select(run.id).where(
-            run.tenant_id == tenant_id, run.id.in_(list(run_ids)), run.origin == "recovery", run.max_orders == 1
-        )
+        select(run.id, run.origin, run.max_orders).where(run.tenant_id == tenant_id, run.id.in_(list(run_ids)))
     )
-    return set(rows.scalars())
+    return {row.id: investigation_queue(row.origin, row.max_orders) for row in rows}
 
 
 def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon"):
@@ -355,12 +358,12 @@ async def collect_due_runs(db, now: datetime) -> dict:
                 try:
                     recover = await _recovery_ids(db, tenant_id, now)
                     stats["truncated"] |= len(recover) > _SCAN_LIMIT
-                    short = await _short_run_ids(db, tenant_id, recover[:_SCAN_LIMIT])
+                    queues = await _run_queues(db, tenant_id, recover[:_SCAN_LIMIT])
                     # Release a read transaction before waiting on a broker.
                     await db.commit()
                     for run_id in recover[:_SCAN_LIMIT]:
                         stats["recovered"] += 1
-                        await _dispatch(tenant_id, run_id, stats, ACTIONS_QUEUE if run_id in short else "recon")
+                        await _dispatch(tenant_id, run_id, stats, queues.get(run_id, "recon"))
                     candidates = await _candidate_ids(db, tenant_id, now)
                     stats["truncated"] |= len(candidates) > _SCAN_LIMIT
                     await db.commit()
@@ -409,7 +412,7 @@ async def collect_due_runs(db, now: datetime) -> dict:
                         run_id, status = run.id, run.status
                         stats["created"] += 1
                         if status == "pending":
-                            await _dispatch(tenant_id, run_id, stats)
+                            await _dispatch(tenant_id, run_id, stats, DAILY_QUEUE)
                     except Exception:
                         await db.rollback()
                         stats["config_failed"] += 1

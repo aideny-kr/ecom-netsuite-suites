@@ -460,6 +460,12 @@ async def authenticated_reader(db, tenant_id, connection_id, account_id, *, clie
     import hashlib
 
     read_scope = (str(tenant), str(connection_uuid), account, hashlib.sha256(token.encode()).hexdigest())
+    # Pool only the HTTP transport. Every invocation above still authorizes the
+    # exact tenant/connection/account and gets the current credential.
+    from app.services.transaction_ops.read_transport import current_transport
+
+    if client is None and (transport := current_transport()) is not None:
+        client = await transport.get(read_scope, _TIMEOUT)
     if client is not None:
         yield _Reader(client, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
     else:

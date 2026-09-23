@@ -21,6 +21,7 @@ import yaml
         ("worker", "stale"),
         ("worker-collectors", "stale"),
         ("worker-actions", "stale"),
+        ("worker-daily", "stale"),
         ("beat", "exited"),
     ],
 )
@@ -42,9 +43,10 @@ def test_release_rejects_stale_or_stopped_background_services(tmp_path, workflow
     assert any("worker-collectors" in group and "beat" in group for group in re.findall(r'BG="([^"]+)"', script))
     assert "config --services | grep -qx worker-actions" in script
     assert 'BG="$BG worker-actions"' in script
+    assert 'BG="$BG worker-daily"' in script
     if ["backend"] in started:  # a job that deploys the backend on its own still guards it
         assert 'BG="backend $BG"' in script
-    guarded = ["backend", "worker", "worker-collectors", "worker-actions", "beat"]
+    guarded = ["backend", "worker", "worker-collectors", "worker-actions", "worker-daily", "beat"]
     # Execute the checked-in guard, including all its retries and exit behavior.
     # The outer loop's indentation distinguishes it from the inner retry loop.
     start = script.index("for service in $BG; do")

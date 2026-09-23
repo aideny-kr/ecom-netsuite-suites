@@ -48,7 +48,7 @@ def dependencies(monkeypatch):
     monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
     monkeypatch.setattr(mod.feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[TENANT]))
     monkeypatch.setattr(mod, "_recovery_ids", AsyncMock(return_value=[]))
-    monkeypatch.setattr(mod, "_short_run_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(mod, "_run_queues", AsyncMock(return_value={}))
     monkeypatch.setattr(mod, "_candidate_ids", AsyncMock(return_value=[]))
     monkeypatch.setattr(mod, "_refresh_sources", AsyncMock(return_value=0))
     monkeypatch.setattr(mod, "_schedule_history", AsyncMock(return_value=(False, None)))
@@ -524,9 +524,33 @@ async def test_a_one_order_recovery_recheck_is_published_to_the_actions_queue(de
     db = AsyncMock()
     short, long = uuid4(), uuid4()
     mod._recovery_ids.return_value = [short, long]
-    mod._short_run_ids.return_value = {short}
+    mod._run_queues.return_value = {short: ACTIONS_QUEUE, long: "recon"}
     stats = await mod.collect_due_runs(db, NOW)
     assert stats["dispatched"] == 2
     queues = {c.kwargs["kwargs"]["run_id"]: c.kwargs["queue"] for c in mod.celery_app.send_task.call_args_list}
     assert queues == {str(short): ACTIONS_QUEUE, str(long): "recon"}
-    mod._short_run_ids.assert_awaited_once_with(db, TENANT, [short, long])
+    mod._run_queues.assert_awaited_once_with(db, TENANT, [short, long])
+
+
+async def test_new_and_republished_daily_runs_use_reserved_lane(dependencies, monkeypatch):
+    monkeypatch.setattr(mod, "DAILY_QUEUE", "recon-daily")
+    conf = config()
+    pending, created = uuid4(), uuid4()
+    mod._recovery_ids.return_value = [pending]
+    mod._run_queues.return_value = {pending: "recon-daily"}
+    mod._candidate_ids.return_value = [conf.id]
+    dependencies.get_config.return_value = conf
+    dependencies.create_run.return_value = SimpleNamespace(id=created, status="pending")
+    result = await mod.collect_due_runs(AsyncMock(), NOW)
+    assert result["dispatched"] == 2
+    assert {call.kwargs["queue"] for call in mod.celery_app.send_task.call_args_list} == {"recon-daily"}
+
+
+def test_daily_routing_preserves_manual_bulk_and_one_order_recovery(monkeypatch):
+    monkeypatch.setattr(mod, "DAILY_QUEUE", "recon-daily")
+    monkeypatch.setattr(mod, "ACTIONS_QUEUE", "recon-actions")
+    assert mod.investigation_queue("schedule", 100) == "recon-daily"
+    assert mod.investigation_queue("manual", 100) == "recon"
+    assert mod.investigation_queue("chat", 1) == "recon"
+    assert mod.investigation_queue("recovery", 1) == "recon-actions"
+    assert mod.investigation_queue("recovery", 2) == "recon"

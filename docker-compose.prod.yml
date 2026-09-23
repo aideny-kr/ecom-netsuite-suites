@@ -50,13 +50,20 @@ services:
   worker: &worker-runtime
     image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest
     env_file: .env.production
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --prefetch-multiplier=1 -Q default,sync,recon,export
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=${RECON_BULK_CONCURRENCY:-2} --prefetch-multiplier=1 -Q default,sync,recon,export,recon-daily
     restart: unless-stopped
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Enable profile recon-daily with RECON_BULK_CONCURRENCY=1 and
+  # TRANSACTION_OPS_DAILY_QUEUE=recon-daily: two scan slots total, one reserved for schedules.
+  worker-daily:
+    <<: *worker-runtime
+    profiles: [recon-daily]
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=1 --prefetch-multiplier=1 -Q recon-daily
 
   # Keep recovery ticks independent of long scans and financial execution.
   worker-collectors:
