@@ -56,6 +56,7 @@ from app.models.transaction_ops import (
     TransactionProposal,
     TransactionRun,
 )
+from app.models.transaction_source_snapshot import TransactionSourceSnapshot  # noqa: F401
 from app.models.user import Permission, Role, RolePermission, User, UserRole
 from app.models.user_dashboard_preference import UserDashboardPreference  # noqa: F401
 from app.models.workspace import (

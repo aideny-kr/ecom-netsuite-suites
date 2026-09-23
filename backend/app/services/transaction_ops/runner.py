@@ -140,6 +140,9 @@ def _page_progress(page, progress, params, config=None):
             raise ScanChangedError("source_scan_incomplete")
         progress["scan_complete"] = True
     progress["pending_refs"], progress["next_page"] = refs, next_page
+    progress["pending_source_versions"] = {
+        order["number"]: order["updated_at"] for order in page["orders"] if order["number"] in refs
+    }
 
 
 def _replica_page_progress(page, progress, params, config):
@@ -183,6 +186,9 @@ def _replica_page_progress(page, progress, params, config):
     progress["scan_complete"] = complete
     progress["pending_refs"] = references
     progress["unscoped_replica_refs"] = unscoped
+    progress["pending_source_versions"] = {
+        order["number"]: order["updated_at"] for order in orders if order["number"] in references
+    }
 
 
 def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
@@ -317,7 +323,7 @@ async def run_investigation(
     _clock=None,
 ):
     from app.services.ingestion.solidus_sync import save_observed_order
-    from app.services.transaction_ops import metabase_reader
+    from app.services.transaction_ops import metabase_reader, source_snapshot
     from app.services.transaction_ops.call_meter import metered
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
@@ -332,6 +338,7 @@ async def run_investigation(
         read_guard_snapshot,
     )
     from app.services.transaction_ops.planner import PlanningError, plan_proposal
+    from app.services.transaction_ops.read_batch import ReferenceReads, reference_read_batch
     from app.services.transaction_ops.refund_reader import read_refund_order_page, read_solidus_refunds
     from app.services.transaction_ops.source_reader import read_framework_order, read_framework_orders_page
 
@@ -350,8 +357,11 @@ async def run_investigation(
     if token is None:
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
     progress = _initial_progress(run)
+    reference_reads = ReferenceReads()
+    previous_reference_hits = progress.get("reference_cache_hits", 0)
 
     async def save():
+        progress["reference_cache_hits"] = previous_reference_hits + reference_reads.hits
         await state.update_progress(
             db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
         )
@@ -374,9 +384,10 @@ async def run_investigation(
             db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, hold=hold, now=clock()
         )
 
-    async def bounded_read(factory, *, retry_calls=0, reserve_retry=None):
+    async def bounded_read(stage, factory, *, retry_calls=0, reserve_retry=None):
         return await read_with_recovery(
             factory,
+            stage=stage,
             retry_calls=retry_calls,
             progress=progress,
             reserve=reserve_retry or reserve,
@@ -384,7 +395,7 @@ async def run_investigation(
             remaining=lambda: (run.deadline_at - clock()).total_seconds(),
         )
 
-    async def metered_read(factory, *, held, data_calls, **options):
+    async def metered_read(stage, factory, *, held, data_calls, **options):
         """A bounded read charged for what it sent rather than the worst case reserved.
 
         ``held`` is the reservation made with ``hold=True`` just before this read, and
@@ -413,9 +424,9 @@ async def run_investigation(
                 db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
             )
 
-        with metered() as meter:
+        with metered() as meter, reference_read_batch(reference_reads):
             try:
-                result = await bounded_read(factory, reserve_retry=reserve_retry, **options)
+                result = await bounded_read(stage, factory, reserve_retry=reserve_retry, **options)
             except asyncio.CancelledError:
                 # Cancelled from outside: no more awaits here. Finishing charges the hold.
                 raise
@@ -446,6 +457,9 @@ async def run_investigation(
             {"source_connection_id": UUID(config["source_connection_id"])} if config.get("source_connection_id") else {}
         )
         mapping = TransactionMapping.model_validate(config["mapping_json"])
+        snapshot_floor = source_snapshot.scan_floor(run, clock()) if direct_source and not settlement else None
+        if mapping.line_identity_mode == "inventory_units":
+            snapshot_floor = None  # Create-input projections are deliberately not shared.
         if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
             return await finish("stall")
         if run.params_json.get("review"):
@@ -484,6 +498,7 @@ async def run_investigation(
                             else _refund_page_reader or read_refund_order_page
                         )
                         refund_page = await bounded_read(
+                            "refund_page",
                             lambda: refund_scan(
                                 db,
                                 tenant_id,
@@ -535,6 +550,7 @@ async def run_investigation(
                         if not await reserve(4):
                             return await finish("budget")
                         page = await bounded_read(
+                            "destination_page",
                             lambda: (_destination_page_reader or read_changed_orders)(
                                 db,
                                 tenant_id,
@@ -593,6 +609,7 @@ async def run_investigation(
                     if not await reserve(6):
                         return await finish("budget")
                     page = await bounded_read(
+                        "source_page",
                         lambda: metabase_reader.read_order_page(
                             db,
                             tenant_id,
@@ -626,6 +643,7 @@ async def run_investigation(
                 if not await reserve(2):
                     return await finish("budget")
                 page = await bounded_read(
+                    "source_page",
                     lambda: page_reader(
                         db,
                         tenant_id,
@@ -642,13 +660,35 @@ async def run_investigation(
                 await save()
                 continue
             reference = progress["pending_refs"][0]
-            if not await reserve(2, 1):
-                return await finish("budget")
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
-            source = await bounded_read(
-                lambda: source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source),
-                retry_calls=2,
-            )
+            can_reuse = snapshot_floor is not None and progress.get("phase") == "orders"
+            source = None
+            if can_reuse:
+                source = await source_snapshot.load(
+                    db,
+                    tenant_id,
+                    direct_source["source_connection_id"],
+                    reference,
+                    since=snapshot_floor,
+                    now=clock(),
+                    minimum_version=_time(progress.get("pending_source_versions", {}).get(reference)),
+                )
+            source_reused = source is not None
+            if not await reserve(0 if source_reused else 2, 1):
+                return await finish("budget")
+            if source_reused:
+                progress["source_snapshot_hits"] = progress.get("source_snapshot_hits", 0) + 1
+            else:
+                source = await bounded_read(
+                    "source_order",
+                    lambda: source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source),
+                    retry_calls=2,
+                )
+                progress["source_detail_reads"] = progress.get("source_detail_reads", 0) + 1
+                if can_reuse:
+                    await source_snapshot.save(
+                        db, tenant_id, direct_source["source_connection_id"], reference, source, now=clock()
+                    )
             orders = source.get("orders") or []
             if len(orders) != 1 or orders[0].get("number") != reference:
                 raise ValueError("source_reference_mismatch")
@@ -666,7 +706,12 @@ async def run_investigation(
                     raise SourceScopeError
             if direct_source:
                 await (_order_mirror or save_observed_order)(
-                    db, tenant_id, direct_source["source_connection_id"], orders[0], _time(source["read_at"])
+                    db,
+                    tenant_id,
+                    direct_source["source_connection_id"],
+                    orders[0],
+                    _time(source["read_at"]),
+                    **({"reused": True} if source_reused else {}),
                 )
             if payment_failed(orders[0]):
                 await state.record_finding(
@@ -679,6 +724,7 @@ async def run_investigation(
             if not await reserve(10, hold=True):  # NETSUITE_READ_CALLS data reads plus OAuth maintenance.
                 return await finish("budget")
             targets = await metered_read(
+                "netsuite_order",
                 lambda: target_reader(
                     db,
                     tenant_id,
@@ -709,9 +755,11 @@ async def run_investigation(
                     )
                     return await finish("budget")
                 commercial = await metered_read(
+                    "commercial_credit",
                     lambda: read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report),
                     held=20,
                     data_calls=MAX_INVOICE_READS + MAX_CREDIT_READS,
+                    retry_calls=20,
                 )
                 if commercial:
                     targets["commercial_credit_evidence"] = commercial
@@ -728,11 +776,13 @@ async def run_investigation(
                     return await finish("budget")
                 try:
                     refunds["source"] = await bounded_read(
+                        "source_refunds",
                         lambda: (_source_refunds_reader or read_solidus_refunds)(
                             db, tenant_id, mapping.solidus_refund_step_id, reference
-                        )
+                        ),
+                        retry_calls=2,
                     )
-                except (state_service.StateError, FeatureRevokedError):
+                except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                     raise
                 except Exception:
                     refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
@@ -741,6 +791,7 @@ async def run_investigation(
                         return await finish("budget")
                     try:
                         refunds["target"] = await metered_read(
+                            "netsuite_refunds",
                             lambda: (_target_refunds_reader or read_netsuite_refunds)(
                                 db,
                                 tenant_id,
@@ -757,8 +808,9 @@ async def run_investigation(
                             ),
                             held=MAX_REFUND_CALLS + 3,
                             data_calls=MAX_REFUND_CALLS,
+                            retry_calls=MAX_REFUND_CALLS + 3,
                         )
-                    except (state_service.StateError, FeatureRevokedError):
+                    except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                         raise
                     except Exception:
                         refunds["target"] = {"complete": False, "reason": "target_refunds_unavailable"}
@@ -770,6 +822,7 @@ async def run_investigation(
             action = report["comparison"]["recommended_action"]
             if (
                 not settlement
+                and not source_reused
                 and mapping.action_mode == "propose_actions"
                 and action
                 in {
@@ -788,9 +841,10 @@ async def run_investigation(
                         if not await reserve(MAX_GUARD_READ_CALLS):
                             return await finish("budget")
                         guard = await bounded_read(
+                            "create_preview",
                             lambda: (_guard_reader or read_guard_snapshot)(
                                 db, tenant_id, current_config, targets["orders"][0]["record_id"]
-                            )
+                            ),
                         )
                     elif action == "propose_missing_sync":
                         creation = prepare_create_input(
@@ -803,17 +857,19 @@ async def run_investigation(
                         if not await reserve(MAX_GUARD_READ_CALLS):
                             return await finish("budget")
                         guard = await bounded_read(
+                            "guard_snapshot",
                             lambda: (_create_reader or read_create_preview)(
                                 db, tenant_id, current_config, creation.payload_json
-                            )
+                            ),
                         )
                     elif action == "no_action" and current_config.target_step_id:
                         if not await reserve(MAX_READ_CALLS):
                             return await finish("budget")
                         celigo = await bounded_read(
+                            "celigo_error",
                             lambda: (_celigo_reader or read_celigo_error_evidence)(
                                 db, tenant_id, current_config.target_step_id, reference
-                            )
+                            ),
                         )
                     request = plan_proposal(
                         report, targets, current_config, now=clock(), guard=guard, celigo=celigo, creation=creation

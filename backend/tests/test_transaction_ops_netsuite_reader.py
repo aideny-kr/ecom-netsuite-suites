@@ -284,6 +284,62 @@ async def test_no_oauth_token_fails_before_requests(context, monkeypatch):
     assert reader.set_tenant_context.await_count == 2
 
 
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        httpx.ReadTimeout,
+        httpx.ConnectTimeout,
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+    ],
+)
+async def test_wire_failures_reach_retry_layer_as_transport_failures(context, error_type):
+    from app.services.transaction_ops.read_recovery import transient_read_code
+
+    with pytest.raises(reader.NetSuiteEvidenceError) as error:
+        await read(context, [error_type("SECRET upstream URL/response")])
+    assert str(error.value) == "read_transport_failed"
+    assert transient_read_code(error.value) == "netsuite_read_transport_failed"
+    assert "SECRET" not in str(error.value)
+
+
+async def test_actual_reader_recovers_transient_wire_failure_with_paid_retry(context):
+    from app.services.transaction_ops.read_recovery import read_with_recovery
+
+    responses = [httpx.ReadTimeout("SECRET"), lookup(), record()]
+    reserve, save, sleep = AsyncMock(return_value=True), AsyncMock(), AsyncMock()
+    progress = {"pending_refs": [REFERENCE]}
+    result, _ = await read_with_recovery(
+        lambda: read(context, responses),
+        retry_calls=10,
+        progress=progress,
+        reserve=reserve,
+        save=save,
+        sleep=sleep,
+        remaining=lambda: 60,
+        stage="netsuite_order",
+    )
+    assert result["complete"] and result["orders"][0]["complete"]
+    assert progress["last_read_failure"]["resolved"] is True
+    assert "SECRET" not in str(progress)
+    reserve.assert_awaited_once_with(10)
+    sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.parametrize(
+    "response", [httpx.Response(200, content=b"{broken"), httpx.Response(401, json={"secret": "SECRET"})]
+)
+async def test_bad_evidence_and_auth_are_not_transport_failures(context, response):
+    from app.services.transaction_ops.read_recovery import transient_read_code
+
+    with pytest.raises(reader.NetSuiteEvidenceError) as error:
+        await read(context, [response])
+    assert transient_read_code(error.value) is None
+    assert "SECRET" not in str(error.value)
+
+
 async def test_currency_and_closed_period_are_explicit_metadata(context):
     result, _ = await read(
         context,

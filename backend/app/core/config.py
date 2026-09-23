@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # decides when confident, current path otherwise).
     JEV_RECON_RESOLUTION_MODE: Literal["off", "shadow", "live"] = "off"
     JEV_RECON_MIN_CONFIDENCE: float = 0.8
+    # TTL of the prompt-cache entries on the STABLE prefix (tool definitions + static
+    # system block): "5m" (default) or "1h". The conversation itself always uses 5m.
+    # Spec: docs/superpowers/specs/2026-09-20-typesafe-jev-integration-research.md §5
+    # (cache audit). A 1h write costs 2x a 5m write; switch on only with measurement.
+    PROMPT_CACHE_STABLE_TTL: Literal["5m", "1h"] = "5m"
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).
     OPENROUTER_API_KEY: str = ""
     DEFAULT_AI_PROVIDER: str = "anthropic"

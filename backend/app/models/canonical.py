@@ -25,6 +25,7 @@ class Order(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     __table_args__ = (
         UniqueConstraint("tenant_id", "dedupe_key", name="uq_orders_dedupe"),
         Index("ix_orders_tenant_source_date", "tenant_id", "source_created_at"),
+        Index("ix_orders_source_reference", "tenant_id", "source_connection_id", "order_number"),
     )
 
     order_number: Mapped[str] = mapped_column(String(255), nullable=False)

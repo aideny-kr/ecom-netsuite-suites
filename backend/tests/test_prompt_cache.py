@@ -186,3 +186,24 @@ class TestLearnedRulesIsDynamic:
         parts_b = split_system_prompt(rules_b)
         assert parts_a.static == parts_b.static
         assert parts_a.dynamic != parts_b.dynamic
+
+
+class TestDriveKnowledgeIsDynamic:
+    """Drive passages are retrieved per QUESTION. Staging showed 72% of turns paying
+    cold-cache prices; this block sitting in the "static" prefix changed that prefix on
+    every turn and defeated cross-session reuse of the tenant's system prompt."""
+
+    def test_drive_knowledge_block_extracted_to_dynamic(self):
+        prompt = (
+            "You are an assistant.\n\n"
+            '<drive_knowledge>\n  <chunk source="Refund policy" url="u">\n    EU refunds post to 4100.\n  </chunk>\n'
+            "</drive_knowledge>\n\nEnd."
+        )
+        result = split_system_prompt(prompt)
+        assert "drive_knowledge" not in result.static and "4100" not in result.static
+        assert "<drive_knowledge>" in result.dynamic and "4100" in result.dynamic
+
+    def test_static_stable_across_different_retrieved_passages(self):
+        a = split_system_prompt("Sys.\n\n<drive_knowledge>\npassage A\n</drive_knowledge>\n\nEnd.")
+        b = split_system_prompt("Sys.\n\n<drive_knowledge>\npassage B\n</drive_knowledge>\n\nEnd.")
+        assert a.static == b.static and a.dynamic != b.dynamic

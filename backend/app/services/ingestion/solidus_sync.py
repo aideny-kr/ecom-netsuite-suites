@@ -163,7 +163,7 @@ async def _upsert_order(db, row):
     )
 
 
-async def save_observed_order(db, tenant_id, connection_id, order, observed_at):
+async def save_observed_order(db, tenant_id, connection_id, order, observed_at, *, reused=False):
     """Mirror an exact investigation read, including older refunded orders."""
     row = project_canonical_order(order, tenant_id, connection_id, observed_at)
     await set_tenant_context(db, tenant_id)
@@ -187,13 +187,20 @@ async def save_observed_order(db, tenant_id, connection_id, order, observed_at):
         db=db,
         tenant_id=tenant_id,
         category="ingestion",
-        action="solidus.order.excluded" if payment_failed(order) else "solidus.order.observed",
+        action=(
+            "solidus.order.excluded"
+            if payment_failed(order)
+            else "solidus.order.observation_reused"
+            if reused
+            else "solidus.order.observed"
+        ),
         actor_type="system",
         resource_type="connection",
         resource_id=str(connection_id),
         payload={
             "order_reference": row["order_number"],
             "source_updated_at": row["source_updated_at"].isoformat(),
+            **({"observed_at": observed_at.isoformat()} if reused else {}),
             **({"reason": FAILED_PAYMENT} if payment_failed(order) else {}),
         },
     )
