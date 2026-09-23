@@ -106,6 +106,8 @@ class State:
 
     async def reserve_budget(self, *args, api_calls=0, orders=0, hold=False, lease_token=None, **kwargs):
         assert lease_token == self.token
+        if api_calls + orders <= 0:
+            raise ValueError("invalid_budget_reservation")
         self.events.append(("reserve", api_calls, orders))
         if api_calls > self.budget:
             self.run.status, self.run.termination_reason = "finished", "budget"

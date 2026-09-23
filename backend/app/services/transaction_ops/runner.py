@@ -364,7 +364,9 @@ async def run_investigation(
         from app.services.transaction_ops.recovery import reconcile_operation_run
 
         return await reconcile_operation_run(db, tenant_id, run_id, _clock=clock)
-    token = await state.claim_run(db, tenant_id, run_id, now=clock())
+    # Production claims use PostgreSQL's clock, matching its immutable budget
+    # trigger. The host clock can otherwise reject a valid first claim by drift.
+    token = await state.claim_run(db, tenant_id, run_id, now=clock() if _clock is not None else None)
     if token is None:
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
     progress = _initial_progress(run)
@@ -576,8 +578,11 @@ async def run_investigation(
                                 # deletion page already consumed without owners.
                                 progress.pop("dependency_scan", None)
                                 progress["dependency_scan_complete"] = False
-                            if not await reserve(0):
-                                return await finish("budget")
+                            if not await (_enabled or enabled)(db, tenant_id):
+                                return await finish("stall")
+                            # Local indexing spends no provider budget. A leased
+                            # checkpoint enforces ownership/deadline before it.
+                            await save()
                             progress["dependency_index_seed"] = await (_dependency_seed or dependency_seed.advance)(
                                 db,
                                 tenant_id,

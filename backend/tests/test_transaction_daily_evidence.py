@@ -242,3 +242,37 @@ async def test_v2_daily_coverage_requires_all_dependency_streams_but_preserves_l
     assert not await daily_evidence.completed_daily_windows(db, root, span)
     rows = await daily_status.daily_status(db, actor.tenant_id)
     assert next(row for row in rows if row["config_id"] == str(config.id))["run_id"] is None
+
+
+async def test_real_state_runner_seeds_history_without_zero_spend_reservation(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    _, run = await review(db, actor, monkeypatch)
+    run.progress_json = {"scan_complete": True, "refund_scan_complete": True, "pending_refs": []}
+    await db.flush()
+
+    async def empty(*args, **kwargs):
+        return {
+            "stream": args[6],
+            "page_complete": True,
+            "scan_complete": True,
+            "changes": [],
+            "scope": {"window_end": args[8].isoformat()},
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "next_cursor": None,
+        }
+
+    provider = AsyncMock(side_effect=empty)
+    result = await runner.run_investigation(
+        db,
+        actor.tenant_id,
+        run.id,
+        _dependency_page_reader=provider,
+        _enabled=AsyncMock(return_value=True),
+    )
+    assert result["termination_reason"] == "done"
+    assert provider.await_count == 5
+    assert run.progress_json["dependency_index_seed"]["complete"] is True
+    assert daily_evidence.scan_complete(run)
+    # Provider mocks sent no data calls, so only the explicit OAuth allowance
+    # was charged per stream. Local seed work charged no calls or orders.
+    assert run.api_calls_used == 5 and run.orders_used == 0
