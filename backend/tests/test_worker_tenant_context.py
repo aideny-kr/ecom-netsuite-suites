@@ -25,25 +25,32 @@ async def _current(session) -> str | None:
     return (await session.execute(_CURRENT)).scalar() or None
 
 
-async def test_a_rollback_before_any_commit_keeps_the_context(db):
-    tenant = str(uuid.uuid4())
-    await set_tenant_context_session(db, tenant)
-    await db.rollback()
-    assert await _current(db) == tenant
-
-
-async def test_the_context_survives_a_commit(db):
-    tenant = str(uuid.uuid4())
-    await set_tenant_context_session(db, tenant)
-    await db.commit()
-    assert await _current(db) == tenant
-
-
 @pytest.fixture
 async def one_connection_engine():
+    """Real transactions on a real engine. The shared ``db`` fixture turns a commit into
+    RELEASE SAVEPOINT, which does not clear SET LOCAL, so a GUC assertion across a
+    commit there would pass with no fix at all (see tests/conftest.py)."""
     engine = create_async_engine(_test_db_url, connect_args=_test_connect_args, pool_size=1, max_overflow=0)
     yield engine
     await engine.dispose()
+
+
+async def test_a_rollback_before_any_commit_keeps_the_context(one_connection_engine):
+    tenant = str(uuid.uuid4())
+    async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
+        await set_tenant_context_session(session, tenant)
+        await session.rollback()
+        assert await _current(session) == tenant
+
+
+async def test_the_context_survives_real_commits(one_connection_engine):
+    tenant = str(uuid.uuid4())
+    async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
+        await set_tenant_context_session(session, tenant)
+        await session.commit()
+        assert await _current(session) == tenant
+        await session.commit()
+        assert await _current(session) == tenant
 
 
 async def test_a_replaced_connection_gets_the_context(one_connection_engine):
@@ -70,12 +77,39 @@ async def test_a_pooled_connection_carries_no_tenant_to_its_next_user(one_connec
         assert await _current(next_user) is None
 
 
-async def test_calling_it_again_switches_tenant_without_stacking_listeners(db):
+def _count_tenant_sets(engine) -> list:
+    from sqlalchemy import event
+
+    statements = []
+
+    def record(conn, cursor, statement, *args):
+        if "set_config('app.current_tenant_id'" in statement:
+            statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
+    return statements
+
+
+async def test_calling_it_again_switches_tenant_without_stacking_listeners(one_connection_engine):
+    """One listener per session: each new transaction issues exactly one set_config."""
+    statements = _count_tenant_sets(one_connection_engine)
     first, second = str(uuid.uuid4()), str(uuid.uuid4())
-    await set_tenant_context_session(db, first)
-    await set_tenant_context_session(db, second)
-    await db.rollback()
-    assert await _current(db) == second
+    async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
+        await set_tenant_context_session(session, first)
+        await set_tenant_context_session(session, second)
+        await session.commit()
+        statements.clear()
+        assert await _current(session) == second  # a new transaction
+        assert len(statements) == 1
+
+
+async def test_a_fresh_session_sets_the_tenant_once(one_connection_engine):
+    """The first call on a session with no transaction must not issue the SET twice
+    (once from the listener on begin, once explicitly)."""
+    statements = _count_tenant_sets(one_connection_engine)
+    async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
+        await set_tenant_context_session(session, str(uuid.uuid4()))
+        assert len(statements) == 1
 
 
 def test_an_invalid_tenant_id_is_refused():

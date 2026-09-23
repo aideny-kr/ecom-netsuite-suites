@@ -52,19 +52,20 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
-    """Set RLS tenant context for the current database session.
+# set_config(..., is_local => true) is SET LOCAL that accepts a bind parameter.
+_SET_TENANT_LOCAL = text("SELECT set_config('app.current_tenant_id', :tenant_id, true)")
 
-    PostgreSQL SET LOCAL does not support parameterized queries ($1 binds),
-    so we validate the tenant_id is a valid UUID to prevent SQL injection.
+
+async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
+    """Set RLS tenant context for the current transaction (SET LOCAL semantics).
+
+    The UUID is still validated, so a bad id fails here, not as an empty RLS scope.
     """
     validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
-    await session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
+    await session.execute(_SET_TENANT_LOCAL, {"tenant_id": validated})
 
 
 _TENANT_CONTEXT_KEY = "tenant_context"
-# set_config(..., is_local => true) is SET LOCAL that accepts a bind parameter.
-_SET_TENANT_LOCAL = text("SELECT set_config('app.current_tenant_id', :tenant_id, true)")
 
 
 def _apply_tenant_context(session, transaction, connection) -> None:
@@ -83,15 +84,19 @@ async def set_tenant_context_session(session: AsyncSession, tenant_id: str) -> N
     a connection the pool replaces mid-run (pool_recycle, failed pre-ping), and stays
     on a pooled connection handed to the next user. So the tenant is recorded on the
     session and applied as SET LOCAL at the start of each transaction by an after_begin
-    listener, and once now for the transaction in progress. Calling it again switches
-    the tenant; the listener is registered once per session.
+    listener. Calling it again switches the tenant; the listener is registered once per
+    session.
     """
     validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
     sync_session = session.sync_session
     if _TENANT_CONTEXT_KEY not in sync_session.info:
         event.listen(sync_session, "after_begin", _apply_tenant_context)
     sync_session.info[_TENANT_CONTEXT_KEY] = validated
-    await session.execute(_SET_TENANT_LOCAL, {"tenant_id": validated})
+    if session.in_transaction():
+        # after_begin already ran for this transaction, before the tenant was known
+        await session.execute(_SET_TENANT_LOCAL, {"tenant_id": validated})
+    else:
+        await session.connection()  # begins a transaction; the listener applies it
 
 
 def worker_async_session():

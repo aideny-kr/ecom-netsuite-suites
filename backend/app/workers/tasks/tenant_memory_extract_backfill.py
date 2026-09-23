@@ -13,9 +13,9 @@ Idempotency (re-runnable safely):
   * **Concepts** dedup by normalized name — first against rows already in the DB
     (so a re-run reuses the prior concept), then within the current run.
 
-RLS in the worker: the upsert loop batch-commits every 10 rows, and ``SET LOCAL``
-is transaction-scoped (lost on each commit). So we set a *session-scoped* GUC
-(plain ``SET``, persists across the batch commits) via ``_set_session_tenant``.
+RLS in the worker: the upsert loop batch-commits every 10 rows, and a one-off
+``SET LOCAL`` is lost on each commit. So ``_set_session_tenant`` uses
+set_tenant_context_session, which re-applies the tenant at every transaction.
 
 ``tenant_id`` MUST be passed as a kwarg — ``InstrumentedTask`` reads
 ``kwargs['tenant_id']`` to scope the Job + audit rows.
