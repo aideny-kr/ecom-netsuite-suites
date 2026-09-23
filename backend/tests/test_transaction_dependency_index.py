@@ -65,7 +65,16 @@ async def test_finding_indexes_dependencies_idempotently_and_cascades_with_evide
     value = report(run)
     finding = await save(db, actor, run, value)
     await save(db, actor, run, value)
-    assert await db.scalar(select(func.count()).select_from(Dependency)) == 6
+    own_dependencies = (
+        select(func.count())
+        .select_from(Dependency)
+        .where(
+            Dependency.tenant_id == actor.tenant_id,
+            Dependency.run_id == run.id,
+            Dependency.order_reference == finding.order_reference,
+        )
+    )
+    assert await db.scalar(own_dependencies) == 6
     for key in (("transaction", "999"), ("customrecord_fw_refund_requests", "20")):
         result = await service.affected_order_references(db, actor.tenant_id, config.id, [key])
         assert result == {"order_references": ["R123456789"], "has_more": False, "next_after_reference": None}
@@ -73,8 +82,12 @@ async def test_finding_indexes_dependencies_idempotently_and_cascades_with_evide
     assert not (await service.affected_order_references(db, actor.tenant_id, config.id, [("transaction", "20")]))[
         "order_references"
     ]
+    await save(db, actor, run, report(run, "R123456788", "10"))
     await db.execute(delete(TransactionFinding).where(TransactionFinding.id == finding.id))
-    assert await db.scalar(select(func.count()).select_from(Dependency)) == 0
+    assert await db.scalar(own_dependencies) == 0
+    assert (await service.affected_order_references(db, actor.tenant_id, config.id, [("transaction", "999")]))[
+        "order_references"
+    ] == ["R123456788"]
 
 
 async def test_inventory_accepts_the_existing_account_id_length_contract(db, setup_state):
