@@ -170,9 +170,13 @@ async def _policies(context, connection_id, account_id, request=None):
                 "subsidiary_id": config.subsidiary_id,
                 "sales_credit_status": status,
                 "sales_credit_profile": profile,
-                "context_provenance": await context_manifest(db, tenant_id, config, scope=context_scope),
+                "context_provenance": await context_manifest(
+                    db, tenant_id, config, actor_id=context.get("actor_id"), scope=context_scope
+                ),
             }
         )
+    if request and request.context_config_id and not treatments:
+        return {"status": "unavailable", "reason": "context_config_unavailable"}
     # The profile helper reads fresh connection state. A concurrent revocation
     # must be reported as unavailable, not as a missing business treatment.
     current = (

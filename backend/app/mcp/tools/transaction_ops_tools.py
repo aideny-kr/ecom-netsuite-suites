@@ -257,7 +257,7 @@ async def _execute(operation, params, context):
                 "findings": [_finding_summary(finding)],
                 "investigation_guidance": investigation_guidance(case.latest_report_json),
                 "accounting_review": await accounting_context(
-                    db, tenant_id, getattr(case, "scope_json", None) or {}, case.latest_report_json
+                    db, tenant_id, getattr(case, "scope_json", None) or {}, case.latest_report_json, actor_id=actor.id
                 ),
                 "resolution_history": resolutions["resolutions"],
                 "resolution_examples": resolutions["examples"],
@@ -315,6 +315,7 @@ async def _execute(operation, params, context):
                 tenant_id,
                 getattr(run, "config_snapshot", None) or {},
                 findings[0].report_json if len(findings) == 1 else None,
+                actor_id=actor.id,
             ),
             "proposals": [
                 {
@@ -408,7 +409,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             raise _ToolError("invalid_parameters")
         db, tenant_id, actor = await _authorize(context, create=False)
         case = await case_service.get_case(db, tenant_id, uuid.UUID(str(params["case_id"])))
-        review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
+        review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json, actor_id=actor.id)
         import json
 
         evidence = json.loads(

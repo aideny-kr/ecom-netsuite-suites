@@ -61,7 +61,10 @@ connection withholds current context; elapsed `review_by` dates are `stale`.
 Future effective dates cannot yet be approved. Explicitly invalidated entries also
 require a new revision. Conflicting reviewed claims for the same topic and exact
 scope block approval until the obsolete claim is explicitly invalidated.
-There is a maximum of 100 named entries per configuration.
+There is a maximum of 100 named entries per configuration. Replacing a config
+starts a new register; history stays with the old config and policy must be reviewed
+for the replacement. The same authorized human may propose and review; this register
+does not impose separation of duties beyond the existing business authorization.
 
 The existing agent accounting-context tool exposes this provenance under `policies`.
 Supply `context_config_id`, `accounting_book_id`, `currency` and `posting_period_id`

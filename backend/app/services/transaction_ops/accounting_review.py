@@ -169,7 +169,7 @@ def observed_scope(report, scope):
     return result
 
 
-async def accounting_context(db, tenant_id, scope, report=None):
+async def accounting_context(db, tenant_id, scope, report=None, *, actor_id=None):
     """Read current tenant configuration; never dump credentials or arbitrary metadata."""
     scope = scope_projection(scope)
     context = {
@@ -261,7 +261,7 @@ async def accounting_context(db, tenant_id, scope, report=None):
         context["sales_credit_profile_status"] = "invalid_configuration"
     from app.services.transaction_ops.context_provenance import context_manifest
 
-    context["context_provenance"] = await context_manifest(db, tenant_id, config)
+    context["context_provenance"] = await context_manifest(db, tenant_id, config, actor_id=actor_id)
     context.update(
         configuration_status="scoped_configuration_found",
         config_id=str(config.id),

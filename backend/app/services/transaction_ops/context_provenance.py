@@ -13,6 +13,7 @@ from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
 from app.models.tenant import Tenant
+from app.models.user import User
 from app.schemas.accounting_context import ContextDecision, ContextDraft, ContextScope
 from app.services.audit_service import log_event
 from app.services.transaction_ops import state_service as state
@@ -158,14 +159,19 @@ def _project(event, binding, scope=None, *, now=None):
 
 async def read_context(db, tenant_id, config_id, *, actor, scope: ContextScope | None = None):
     config = await _authorize(db, tenant_id, config_id, actor)
-    return await context_manifest(db, tenant_id, config, scope=scope)
+    return await context_manifest(db, tenant_id, config, actor_id=actor.id, scope=scope)
 
 
-async def context_manifest(db, tenant_id, config, *, scope: ContextScope | None = None):
-    """Internal read for already-authorized investigations; tenant is always explicit."""
+async def context_manifest(db, tenant_id, config, *, actor_id=None, scope: ContextScope | None = None):
+    """Every surface rechecks the human reader before exposing context metadata."""
     await set_tenant_context(db, str(tenant_id))
     if config.tenant_id != tenant_id:
         raise state.StateError("context_unavailable", 404)
+    actor = await db.scalar(select(User).where(User.id == actor_id, User.tenant_id == tenant_id)) if actor_id else None
+    try:
+        await state._human(db, tenant_id, actor, "recon.run")
+    except state.StateError:
+        return {"status": "unavailable", "reason": "permission_denied", "entries": [], "authority": AUTHORITY}
     current = await state.get_config(db, tenant_id, config.id)
     binding = await _binding(db, tenant_id, current)
     if binding is None:

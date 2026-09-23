@@ -287,7 +287,11 @@ async def test_agent_policy_read_returns_exact_version_and_rejects_foreign_confi
         "context_config_id": str(config.id),
         **SCOPE.model_dump(),
     }
-    result = await tool.execute(params, context)
+    from app.mcp.server import mcp_server
+
+    result = await mcp_server.call_tool(
+        "netsuite.accounting_context", params, str(actor.tenant_id), str(actor.id), db=db
+    )
     assert result["success"], result
     provenance = result["sections"]["policies"]["configured_treatments"][0]["context_provenance"]
     assert provenance["audit_id"] == approved["audit_id"] and provenance["version"] == 2
@@ -329,7 +333,7 @@ async def test_investigation_manifest_exposes_revision_without_selecting_a_book(
     config, _, _ = await setup(db, actor)
     await propose(db, actor, config)
     approved = await approve(db, actor, config)
-    review = await accounting_context(db, actor.tenant_id, config_scope(config))
+    review = await accounting_context(db, actor.tenant_id, config_scope(config), actor_id=actor.id)
     receipt = review["context_provenance"]
     assert receipt["audit_id"] == approved["audit_id"] and receipt["version"] == 2
     assert receipt["scope_required"] and receipt["entries"][0]["content"] is None
@@ -380,3 +384,50 @@ async def test_real_runtime_concurrent_versions_and_audit_append_only(installati
                 text("UPDATE audit_events SET payload='{}' WHERE action=:action"), {"action": service.ACTION}
             )
         await db.rollback()
+
+
+async def test_readonly_agent_and_investigation_cannot_bypass_context_read_permission(db, admin_user, readonly_user):
+    from app.core.encryption import encrypt_credentials
+    from app.mcp.server import mcp_server
+    from app.services.transaction_ops.accounting_profiles import config_scope
+    from app.services.transaction_ops.accounting_review import accounting_context
+
+    actor = admin_user[0]
+    reader = readonly_user[0]
+    config, connection, _ = await setup(db, actor)
+    connection.encrypted_credentials = encrypt_credentials({"account_id": config.netsuite_account_id})
+    await enable_feature_flag(db, actor.tenant_id, "celigo")
+    await enable_feature_flag(db, actor.tenant_id, "reconciliation")
+    await propose(db, actor, config)
+    await approve(db, actor, config)
+    params = {
+        "section": "policies",
+        "connection_id": str(connection.id),
+        "expected_account_id": config.netsuite_account_id,
+        "context_config_id": str(config.id),
+        **SCOPE.model_dump(),
+    }
+    result = await mcp_server.call_tool(
+        "netsuite.accounting_context", params, str(reader.tenant_id), str(reader.id), db=db
+    )
+    assert result["success"]  # Existing configuration-reference access remains available.
+    provenance = result["sections"]["policies"]["configured_treatments"][0]["context_provenance"]
+    assert provenance["reason"] == "permission_denied" and provenance["entries"] == []
+    for actor_id in (reader.id, None):
+        review = await accounting_context(db, actor.tenant_id, config_scope(config), actor_id=actor_id)
+        assert review["context_provenance"]["reason"] == "permission_denied"
+        assert review["context_provenance"]["entries"] == []
+    # A previously granted actor loses visibility immediately when the role is revoked.
+    await db.execute(text("DELETE FROM user_roles WHERE user_id=:actor"), {"actor": actor.id})
+    manifest = await service.context_manifest(db, actor.tenant_id, config, actor_id=actor.id, scope=SCOPE)
+    assert manifest["reason"] == "permission_denied" and manifest["entries"] == []
+
+
+def test_context_governance_parameters_match_advertised_tool():
+    from app.mcp.governance import TOOL_CONFIGS, validate_params
+    from app.mcp.registry import TOOL_REGISTRY
+
+    name = "netsuite.accounting_context"
+    assert set(TOOL_CONFIGS[name]["allowlisted_params"]) == set(TOOL_REGISTRY[name]["params_schema"])
+    params = {"section": "policies", "context_config_id": str(uuid4()), **SCOPE.model_dump()}
+    assert all(validate_params(name, params)[k] == v for k, v in params.items())
