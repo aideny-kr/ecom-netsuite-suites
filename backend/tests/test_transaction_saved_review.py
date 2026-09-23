@@ -83,6 +83,80 @@ async def test_missing_destination_coverage_cannot_finish_or_advance(db, admin_u
     assert not (await period_review.review_status(db, actor.tenant_id, new.id))["complete"]
 
 
+async def test_repeat_receipts_keep_provider_anchors_and_cannot_self_certify(db, admin_user, monkeypatch):
+    from sqlalchemy import delete
+
+    from app.models.transaction_ops import TransactionFinding, TransactionRun
+    from app.schemas.transaction_runs import ReviewSpan
+    from app.services.transaction_ops.daily_evidence import completed_observation_windows
+
+    actor = admin_user[0]
+    config, original = await saved_day(db, actor, monkeypatch)
+    for _ in range(3):
+        receipt = await period_review.create_review(
+            db,
+            actor.tenant_id,
+            config.id,
+            period_review.PeriodReview(evaluation_key=uuid4(), period="yesterday"),
+            actor=actor,
+        )
+        assert receipt.status == "finished"
+        assert receipt.progress_json["reused_observation_run_ids"] == [str(original.id)]
+    span = ReviewSpan.model_validate(receipt.params_json["review"])
+    windows = await completed_observation_windows(db, receipt, span)
+    assert [row[2] for row in windows] == [str(original.id)]
+    # If the collected anchor is removed, receipts cannot uphold one another.
+    await db.execute(delete(TransactionFinding).where(TransactionFinding.run_id == original.id))
+    await db.execute(delete(TransactionRun).where(TransactionRun.id == original.id))
+    assert not await completed_observation_windows(db, receipt, span)
+    assert not (await period_review.review_status(db, actor.tenant_id, receipt.id))["complete"]
+
+
+async def test_failed_period_retry_uses_newly_available_coverage_without_dispatch(
+    client, db, admin_user, monkeypatch, publisher
+):
+    from app.models.transaction_ops import TransactionRun
+
+    actor, headers = admin_user
+    config, original = await saved_day(db, actor, monkeypatch)
+    failed = TransactionRun(
+        tenant_id=actor.tenant_id,
+        config_id=config.id,
+        config_snapshot=original.config_snapshot,
+        params_json={
+            **original.params_json,
+            "evaluation_key": str(uuid4()),
+            "review": {**original.params_json["review"], "id": str(uuid4())},
+        },
+        initiated_by=actor.id,
+        work_key=uuid4().hex,
+        origin="manual",
+        status="finished",
+        termination_reason="error",
+        max_api_calls=original.max_api_calls,
+        max_orders=original.max_orders,
+        deadline_at=original.deadline_at,
+        created_at=original.created_at + timedelta(seconds=1),
+        finished_at=datetime.now(timezone.utc),
+    )
+    db.add(failed)
+    await db.flush()
+    publisher.reset_mock()
+    response = await client.post(
+        f"/api/v1/transaction-ops/configs/{config.id}/review",
+        json={"period": "yesterday", "evaluation_key": str(uuid4())},
+        headers=headers,
+    )
+    assert response.status_code == 202, response.text
+    data = response.json()
+    assert data["id"] not in (str(original.id), str(failed.id))
+    assert data["status"] == "finished" and data["termination_reason"] == "done"
+    assert data["progress_json"]["continuation_of"] == str(failed.id)
+    assert data["progress_json"]["reused_observation_run_ids"] == [str(original.id)]
+    assert data["api_calls_used"] == data["orders_used"] == 0
+    publisher.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

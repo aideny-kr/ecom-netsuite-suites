@@ -69,6 +69,10 @@ def current_review_evidence(cohort, tenant_id, snapshot, *, name="review_identit
     ]
     account = str(snapshot["netsuite_account_id"]).replace("_", "-").lower()
     scope.append(func.lower(func.replace(Run.config_snapshot["netsuite_account_id"].astext, "_", "-")) == account)
+    scope.append(
+        func.coalesce(Run.config_snapshot["evidence_contract_version"].astext, "1")
+        == str(snapshot.get("evidence_contract_version", 1))
+    )
     # Materialize only identity and winner keys. A per-order correlated lookup
     # otherwise rescans the tenant's finding history thousands of times.
     # The CTE is named explicitly: an anonymous alias takes its number from the

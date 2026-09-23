@@ -89,7 +89,7 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
             raise state.StateError("review_already_running")
         if summary["run_count"] >= 512:
             raise state.StateError("review_history_limit")
-        return await state.create_run(
+        retry = await state.create_run(
             db,
             tenant_id,
             config_id,
@@ -98,6 +98,7 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
             resume_from_run_id=previous.id,
             human_retry=True,
         )
+        return await _complete_saved_review(db, tenant_id, retry)
     scope["window_end"] = min(span.end, span.start + timedelta(days=1))
     run = await state.create_run(
         db,
@@ -249,12 +250,17 @@ async def review_status(db, tenant_id, run_id):
         completed_observation_windows,
         covered_days,
         covered_until,
+        reuses_coverage,
         scan_complete,
     )
 
     daily_windows = await completed_daily_windows(db, root, span)
     saved_windows = await completed_observation_windows(db, root, span)
-    own_windows = [(start, end, str(run.id)) for (start, end), run in slices.items() if scan_complete(run)]
+    own_windows = [
+        (start, end, str(run.id))
+        for (start, end), run in slices.items()
+        if scan_complete(run) and not reuses_coverage(run)
+    ]
     windows = own_windows + saved_windows
     completed_until = covered_until(span.start, span.end, windows)
     policy = (getattr(root, "config_snapshot", None) or {}).get("mapping_json", {}).get("reconciliation_policy") or {}

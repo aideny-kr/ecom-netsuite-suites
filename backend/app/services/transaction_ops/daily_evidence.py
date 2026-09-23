@@ -7,6 +7,12 @@ from sqlalchemy import DateTime, cast, func, or_, select
 
 from app.models.transaction_ops import TransactionRun
 
+_REUSE_KEYS = ("reused_observation_run_ids", "reused_daily_run_ids")
+
+
+def reuses_coverage(run):
+    return any(key in (run.progress_json or {}) for key in _REUSE_KEYS)
+
 
 def compatible_observation_runs(root, span):
     r = TransactionRun
@@ -79,6 +85,9 @@ async def completed_observation_windows(db, root, span, *, daily_only=False):
         r.termination_reason == "done",
         r.progress_json["scan_complete"].astext == "true",
         r.progress_json["refund_scan_complete"].astext == "true",
+        # A saved-report receipt is not a new observation. Always resolve
+        # coverage from provider-backed scans, before applying the row limit.
+        *(r.progress_json[key].astext.is_(None) for key in _REUSE_KEYS),
     )
     if root.params_json.get("window_basis", "completed_at") == "updated_at":
         query = query.where(r.progress_json["destination_scan_complete"].astext == "true")
