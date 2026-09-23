@@ -42,6 +42,12 @@
       "sourceType": "github",
       "skillPath": "packages/agent-skills/netsuite-uif-spa-reference/SKILL.md",
       "computedHash": "6db9198f1fde9fe3118ab620cfb61c807278ee864514cbe7566c3c9536c49149"
+    },
+    "typesafe-ai": {
+      "source": "typesafe-ai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/typesafe-ai/SKILL.md",
+      "computedHash": "9cd84c5e535dec8dec59917c110f9c00b4a61faadb86b432ec7e41051170af12"
     }
   }
 }
