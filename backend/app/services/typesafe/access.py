@@ -25,11 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.encryption import decrypt_credentials
-from app.models.connection import Connection
+from app.models.connection import INCLUDE_JEV_CONNECTION, JEV_PROVIDER, Connection
 
 logger = structlog.get_logger()
 
-PROVIDER = "typesafe"
+PROVIDER = JEV_PROVIDER
 MODES = ("live", "shadow", "off")
 # A hint is the last four characters, shown only when they are a small part of the key:
 # for a very short key they would BE the key.
@@ -75,6 +75,8 @@ async def tenant_connection(db: AsyncSession, tenant_id: uuid.UUID | str) -> Con
         select(Connection)
         .where(Connection.tenant_id == tid, Connection.provider == PROVIDER)
         .order_by(Connection.created_at.desc(), Connection.id.desc())
+        # Every other query is blind to this row (app/models/connection.py).
+        .execution_options(**{INCLUDE_JEV_CONNECTION: True})
     )
     return result.scalars().first()
 

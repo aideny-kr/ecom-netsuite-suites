@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,21 +99,13 @@ class JevStatusResponse(BaseModel):
     problem: str | None = None  # "unreadable_key"
 
 
-# The key fields accept any JSON value: a validation error echoes what was submitted, and
-# this one is a secret. The handlers check them with messages that never repeat the value.
-class JevKeyRequest(BaseModel):
-    api_key: Any = None
-
-
+# The key endpoints take the raw JSON body: a validation error echoes what was submitted,
+# and here that is a secret. _submitted_key checks it with messages that never repeat it.
 _JEV_KEY_MAX = 512
 
 
 class JevModeRequest(BaseModel):
     mode: JevMode
-
-
-class JevTestRequest(BaseModel):
-    api_key: Any = None  # blank = test the key currently in use
 
 
 class JevTestResponse(BaseModel):
@@ -456,14 +448,23 @@ _JEV_ERRORS = {
 }
 
 
-def _submitted_key(value: Any) -> str | None:
-    """The submitted key, stripped; None when blank. Raises 400 (never echoing the value)
-    for anything that cannot be a key."""
+def _submitted_key(body: Any) -> str | None:
+    """``body["api_key"]``, stripped; None when absent or blank. Anything that cannot be a
+    key (a body that is not an object, a non-string, over-long, or not printable ASCII
+    without spaces, which an HTTP header could not carry) is a 400 that never repeats it."""
+    if body is None:
+        return None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
+    value = body.get("api_key")
     if value is None:
         return None
-    if not isinstance(value, str) or len(value.strip()) > _JEV_KEY_MAX:
+    key = value.strip() if isinstance(value, str) else None
+    if key == "":
+        return None
+    if key is None or len(key) > _JEV_KEY_MAX or not (key.isascii() and key.isprintable()) or " " in key:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
-    return value.strip() or None
+    return key
 
 
 def _jev_error(reason: str) -> str:
@@ -527,12 +528,12 @@ async def get_jev_status(
 
 @router.post("/jev/test", response_model=JevTestResponse)
 async def test_jev_key(
-    request: JevTestRequest,
     user: Annotated[User, Depends(require_permission("connections.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
+    body: Annotated[Any, Body()] = None,
 ):
     """Check a candidate key, or (blank) the key this tenant uses now, whatever the mode."""
-    candidate = _submitted_key(request.api_key)
+    candidate = _submitted_key(body)
     if candidate:
         key, source = candidate, "candidate"
     else:
@@ -546,12 +547,12 @@ async def test_jev_key(
 
 @router.put("/jev/key", response_model=JevStatusResponse)
 async def save_jev_key(
-    request: JevKeyRequest,
     user: Annotated[User, Depends(require_permission("connections.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
+    body: Annotated[Any, Body()] = None,
 ):
     """Store the tenant's own TypeSafe key, only after TypeSafe accepts it."""
-    key = _submitted_key(request.api_key)
+    key = _submitted_key(body)
     if not key:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
     reason = await check_key(key)

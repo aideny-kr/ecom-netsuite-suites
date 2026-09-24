@@ -289,3 +289,11 @@ async def test_check_key_without_a_key_makes_no_call(enabled):
     transport, calls = _transport(lambda r: httpx.Response(200, json=OK_BODY))
     assert await jev.check_key("", transport=transport) == "disabled"
     assert calls == []
+
+
+async def test_check_key_never_raises(enabled, monkeypatch):
+    async def boom(*a, **k):
+        raise UnicodeEncodeError("latin-1", "é", 0, 1, "ordinal not in range")
+
+    monkeypatch.setattr(jev, "ask", boom)
+    assert await jev.check_key(KEY) == "unexpected:UnicodeEncodeError"

@@ -4,9 +4,9 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, event
 from sqlalchemy.dialects.postgresql import JSON, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, ORMExecuteState, Session, mapped_column, relationship, with_loader_criteria
 
 # Installs the session-flush guard that refuses Celigo-row writes coming from
 # generic, provider-agnostic paths. Imported HERE, from the model itself, on
@@ -80,3 +80,29 @@ class Connection(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     error_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="connections")
+
+
+# ---------------------------------------------------------------------------
+# The TypeSafe Jev row is invisible unless a query asks for it
+# ---------------------------------------------------------------------------
+# The Jev connection (provider "typesafe") holds a tenant's TypeSafe key and Jev mode, and
+# is managed only by services/typesafe/access.py and its card (/connector-status/jev, which
+# checks the key and serializes writes). Three review rounds on #314 each found one more
+# generic route that could read or change it. So every ORM SELECT on Connection excludes it
+# here, unless the statement carries ``.execution_options(include_jev_connection=True)``;
+# a route that cannot load the row cannot change it. (Bulk ORM UPDATE/DELETE on this table
+# is already refused by the Celigo write guard.) Refreshing an object already loaded (a
+# column load) is left alone. Registered from the model module for the same reason as the
+# Celigo write guard above: no session for this model can exist without it.
+JEV_PROVIDER = "typesafe"
+INCLUDE_JEV_CONNECTION = "include_jev_connection"
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _hide_the_jev_connection(state: ORMExecuteState) -> None:
+    if state.is_column_load or state.execution_options.get(INCLUDE_JEV_CONNECTION):
+        return
+    if state.is_select:
+        state.statement = state.statement.options(
+            with_loader_criteria(Connection, Connection.provider != JEV_PROVIDER, include_aliases=True)
+        )

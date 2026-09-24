@@ -12,14 +12,8 @@ from app.core.encryption import decrypt_credentials, encrypt_credentials, get_cu
 from app.models.connection import RETIRED_CONNECTION_STATUSES, Connection
 from app.services.celigo_write_guard import CeligoManagedElsewhereError
 from app.services.http_connector_service import HTTP_PROVIDERS, public_metadata, validate_credentials, verify_connection
-from app.services.typesafe.access import PROVIDER as JEV_PROVIDER
 
 logger = structlog.get_logger()
-
-# The Jev row (provider "typesafe") is managed only by its card (/connector-status/jev,
-# under a per-tenant lock and a key check). This generic service never serves it, so no
-# generic route, today's or a future one, can read, relabel, re-key or revoke it.
-_NOT_JEV = Connection.provider != JEV_PROVIDER
 
 __all__ = [
     "CeligoManagedElsewhereError",
@@ -62,7 +56,7 @@ async def create_connection(
 async def get_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: uuid.UUID) -> Connection | None:
     """Get a single connection by ID."""
     result = await db.execute(
-        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id, _NOT_JEV)
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
     )
     return result.scalar_one_or_none()
 
@@ -71,7 +65,7 @@ async def list_connections(db: AsyncSession, tenant_id: uuid.UUID) -> list[Conne
     """List connections for a tenant (no secrets exposed)."""
     result = await db.execute(
         select(Connection)
-        .where(Connection.tenant_id == tenant_id, Connection.status != "revoked", _NOT_JEV)
+        .where(Connection.tenant_id == tenant_id, Connection.status != "revoked")
         .order_by(Connection.created_at.desc())
     )
     return list(result.scalars().all())
@@ -98,7 +92,7 @@ async def delete_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_i
     revokes both rows together; callers must go through it instead.
     """
     result = await db.execute(
-        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id, _NOT_JEV)
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
     )
     connection = result.scalar_one_or_none()
     if not connection:
@@ -116,7 +110,7 @@ async def delete_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_i
 async def test_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: uuid.UUID) -> dict:
     """Test a connection by running a lightweight query against the provider."""
     result = await db.execute(
-        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id, _NOT_JEV)
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
     )
     connection = result.scalar_one_or_none()
     if not connection or connection.status in RETIRED_CONNECTION_STATUSES:

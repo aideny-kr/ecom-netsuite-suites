@@ -204,9 +204,12 @@ _PROBE_QUESTIONS = {
 
 
 async def check_key(api_key: str | None, *, transport: httpx.AsyncBaseTransport | None = None) -> str | None:
-    """None when ``api_key`` gets a valid answer from Jev, else the reason it did not."""
+    """None when ``api_key`` gets a valid answer from Jev, else the reason it did not.
+    Never raises (cancellation aside): a key httpx cannot put in a header is a reason too."""
     try:
         await ask("key-check", {"check": True}, _PROBE_QUESTIONS, api_key=api_key, transport=transport)
     except JevUnavailableError as exc:
         return exc.reason
+    except Exception as exc:
+        return f"unexpected:{type(exc).__name__}"
     return None

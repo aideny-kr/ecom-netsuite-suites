@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.encryption import decrypt_credentials
 from app.models.audit import AuditEvent
-from app.models.connection import Connection
+from app.models.connection import INCLUDE_JEV_CONNECTION, Connection
 from app.services.typesafe.access import resolve_access
 
 URL = "/api/v1/connector-status/jev"
@@ -48,9 +48,12 @@ def jev_rejects(monkeypatch):
 
 
 async def _row(db, tenant_id):
-    return (
-        await db.execute(select(Connection).where(Connection.tenant_id == tenant_id, Connection.provider == "typesafe"))
-    ).scalar_one_or_none()
+    statement = (
+        select(Connection)
+        .where(Connection.tenant_id == tenant_id, Connection.provider == "typesafe")
+        .execution_options(**{INCLUDE_JEV_CONNECTION: True}, populate_existing=True)
+    )
+    return (await db.execute(statement)).scalar_one_or_none()
 
 
 async def _audit(db, tenant_id):
@@ -279,3 +282,25 @@ async def test_a_user_without_view_permission_cannot_see_jev(client, db, tenant_
     user, _ = await create_test_user(db, tenant_a, role_name="no-such-role")
     r = await client.get(URL, headers=make_auth_headers(user))
     assert r.status_code == 403
+
+
+# ── T2 gate round 2 on #314 ────────────────────────────────────────────────
+
+
+async def test_a_body_that_is_not_an_object_is_refused_without_echoing_it(client, admin_user, jev_accepts):
+    _, headers = admin_user
+    for method, path in (("put", f"{URL}/key"), ("post", f"{URL}/test")):
+        r = await getattr(client, method)(path, headers=headers, json=["ts-secret-as-the-whole-body"])
+        assert r.status_code == 400, (path, r.status_code)
+        assert "ts-secret-as-the-whole-body" not in r.text
+    assert jev_accepts == []
+
+
+@pytest.mark.parametrize("bad_key", ["ts-kéy-with-accent", "ts key with spaces", "ts-key\u0000nul"])
+async def test_a_key_that_cannot_be_a_header_value_is_a_400_not_a_500(client, admin_user, jev_accepts, bad_key):
+    _, headers = admin_user
+    for method, path in (("put", f"{URL}/key"), ("post", f"{URL}/test")):
+        r = await getattr(client, method)(path, headers=headers, json={"api_key": bad_key})
+        assert r.status_code == 400, (path, r.status_code)
+        assert bad_key not in r.text
+    assert jev_accepts == []
