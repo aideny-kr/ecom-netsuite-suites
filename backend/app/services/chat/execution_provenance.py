@@ -52,6 +52,13 @@ def skill_instructions(slug: str, selection: str, receipts: list[dict] | None) -
     return snapshot["instructions"]
 
 
+def skill_selection_mode(task: str) -> str:
+    from app.services.chat.skills import get_skill_by_trigger
+
+    first = task.split(maxsplit=1)[0] if task.strip() else ""
+    return "explicit" if first.startswith("/") and get_skill_by_trigger(first) else "matched"
+
+
 _CONTEXT_TOOLS = {
     "netsuite_accounting_context",
     "transaction_ops_accounting_evidence",

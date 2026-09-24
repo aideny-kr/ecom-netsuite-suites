@@ -127,6 +127,7 @@ def test_receipt_records_connected_attempts_without_claiming_success_or_modifyin
         ({"error": "revoked"}, "error"),
         ({"success": False, "message": "denied"}, "error"),
         ({"isError": True}, "error"),
+        ({"blocked": True}, "error"),
         ({"status": "failed"}, "error"),
         ({"confirmation_required": True}, "confirmation_required"),
         ({"success": True, "rows": []}, "returned"),
@@ -223,6 +224,23 @@ def test_source_clarification_has_no_fabricated_skill_use():
         AgentResult(success=True, data="Which source?"), SourceSelection(question="Which source?")
     )
     assert result.execution_receipt == {"version": 1, "skills": [], "tools": [], "contexts": []}
+
+
+def test_matching_phrase_after_unknown_slash_is_not_an_explicit_skill_selection():
+    from app.services.chat.execution_provenance import skill_selection_mode
+
+    assert skill_selection_mode("/unknown Investigate transaction case synthetic") == "matched"
+    assert skill_selection_mode("/METABASE-SQL analyze sales") == "explicit"
+
+
+def test_explicit_metabase_body_is_not_recorded_again_as_connected_injection():
+    a = agent()
+    a._active_skill = match_skill("/metabase-sql sales")
+    a._skill_selection_mode = "explicit"
+    a._tool_defs = [{"name": f"ext__{uuid4().hex}__query", "description": "[metabase_mcp] query"}]
+    assert "# Metabase SQL Analysis" in a.system_prompt
+    result = a._finish_source_routing(AgentResult(success=True), SourceSelection())
+    assert [s["selection"] for s in result.execution_receipt["skills"] if s["slug"] == "metabase_sql"] == ["explicit"]
 
 
 @pytest.mark.asyncio

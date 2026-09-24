@@ -829,6 +829,7 @@ def build_tool_call_log_entry(
         # from a connector-supplied receipt.
         if (
             provenance_result.get("error")
+            or provenance_result.get("blocked") is True
             or provenance_result.get("isError") is True
             or provenance_result.get("success") is False
             or provenance_result.get("status") in ("failed", "error", "canceled", "cancelled")

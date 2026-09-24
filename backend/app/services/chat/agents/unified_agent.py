@@ -841,11 +841,12 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._context = context
 
         # Skill detection (before entity augmentation)
+        from app.services.chat.execution_provenance import skill_selection_mode
         from app.services.chat.skills import match_skill
 
         matched = match_skill(task)
         self._active_skill = matched
-        self._skill_selection_mode = "explicit" if task.lstrip().startswith("/") else "matched"
+        self._skill_selection_mode = skill_selection_mode(task)
 
         vernacular = context.get("tenant_vernacular", "")
         if vernacular:

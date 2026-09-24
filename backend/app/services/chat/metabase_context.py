@@ -52,7 +52,7 @@ def build_metabase_skill_context(
     description. Generic tool names or remote descriptions mentioning Metabase
     must not activate this context for an unrelated connector.
     """
-    from app.services.chat.execution_provenance import skill_instructions
+    from app.services.chat.execution_provenance import load_skill_snapshot, record_skill
     from app.services.chat.tools import parse_external_tool_name
 
     connector_tools: dict[str, list[str]] = {}
@@ -76,9 +76,11 @@ def build_metabase_skill_context(
     for connector_id, names in sorted(connector_tools.items()):
         parts.append(f"- Connector {connector_id}: {', '.join(sorted(names))}")
     for slug in METABASE_SKILL_SLUGS:
-        instructions = skill_instructions(slug, "connected", skill_receipts)
+        snapshot = load_skill_snapshot(slug)
+        instructions = snapshot["instructions"] if snapshot else ""
         # Explicit slash skills are already injected by UnifiedAgent.
         if instructions and instructions not in template:
             parts.append(instructions)
+            record_skill(snapshot, "connected", skill_receipts)
     parts.append("</metabase_analysis_context>")
     return "\n\n".join(parts)
