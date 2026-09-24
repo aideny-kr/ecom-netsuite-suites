@@ -121,6 +121,26 @@ def test_receipt_records_connected_attempts_without_claiming_success_or_modifyin
     assert calls == before
 
 
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"error": "revoked"}, "error"),
+        ({"success": False, "message": "denied"}, "error"),
+        ({"isError": True}, "error"),
+        ({"status": "failed"}, "error"),
+        ({"confirmation_required": True}, "confirmation_required"),
+        ({"success": True, "rows": []}, "returned"),
+    ],
+)
+def test_raw_execution_outcome_survives_lossy_log_summary(payload, expected):
+    a = agent()
+    call = build_tool_call_log_entry(
+        step=0, tool_name="agent_skill", params={}, result_str=json.dumps(payload), duration_ms=1
+    )
+    result = a._finish_source_routing(AgentResult(success=True, tool_calls_log=[call]), SourceSelection())
+    assert result.execution_receipt["tools"][0]["outcome"] == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize(

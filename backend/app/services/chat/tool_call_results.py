@@ -824,6 +824,20 @@ def build_tool_call_log_entry(
 
     provenance_result = parse_tool_result_value(result_str)
     if isinstance(provenance_result, dict):
+        # Preserve the outcome before summarize_tool_result turns an error JSON
+        # into human-readable prose. This field is set locally, never copied
+        # from a connector-supplied receipt.
+        if (
+            provenance_result.get("error")
+            or provenance_result.get("isError") is True
+            or provenance_result.get("success") is False
+            or provenance_result.get("status") in ("failed", "error", "canceled", "cancelled")
+        ):
+            entry["execution_outcome"] = "error"
+        elif provenance_result.get("confirmation_required") is True:
+            entry["execution_outcome"] = "confirmation_required"
+        else:
+            entry["execution_outcome"] = "returned"
         entry.update(tool_provenance(tool_name, provenance_result))
     if tool_name in {"transaction_ops_accounting_evidence", "transaction_ops.accounting_evidence"}:
         try:

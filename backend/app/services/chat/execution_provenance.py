@@ -122,7 +122,7 @@ def execution_receipt(skills: list[dict], calls: list[dict]) -> dict:
                 "tool": name,
                 "connector_id": str(parsed[0]) if parsed else None,
                 "step": call.get("step"),
-                "outcome": "error" if tool_call_had_error(call) else "returned",
+                "outcome": call.get("execution_outcome") or ("error" if tool_call_had_error(call) else "unclassified"),
             }
         )
         for receipt in call.get("context_receipts", []):

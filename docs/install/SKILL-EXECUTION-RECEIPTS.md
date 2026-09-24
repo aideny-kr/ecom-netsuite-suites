@@ -18,7 +18,8 @@ created.
 - `tools`: calls recorded by the actual agent loop, their connector IDs when
   external, steps and outcomes. `returned` means a tool response was received;
   it does not mean a business outcome was independently verified. Errors remain
-  distinguishable. Available-but-unused tools are not listed.
+  distinguishable, as do requests awaiting confirmation. Entries without a
+  captured outcome are `unclassified`. Available-but-unused tools are not listed.
 - `contexts`: version, configuration binding and scoped entry revisions from
   the existing local accounting-context/evidence tool contracts. Draft, stale,
   mismatched and invalidated states are retained. Claims, instructions and source
