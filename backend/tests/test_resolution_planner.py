@@ -28,9 +28,14 @@ def _plan(**over):
         evidence={"charge_source_id": "ch_1", "order_reference": "R123456789"},
         already_posted=False,
         currency_basis_verified=True,
+        washout_verified=True,
         **MAT,
     )
     base.update(over)
+    if base["variance_type"] == "fees":
+        base.setdefault("fee_amount", abs(base["variance_amount"]))
+        if "netsuite_amount" not in over:
+            base["netsuite_amount"] = base["stripe_amount"] - abs(base["variance_amount"])
     return plan_result(**base)
 
 

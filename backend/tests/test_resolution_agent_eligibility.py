@@ -12,6 +12,7 @@ from tests.conftest import (
     create_test_user,
     enable_feature_flag,
 )
+from tests.resolution_evidence_helpers import seed_run_linked_evidence
 
 
 def test_flag_registered_default_off():
@@ -64,6 +65,7 @@ async def test_fetch_agent_eligible_filters(db, tenant_a):
     # seeds all DEFAULT_FLAGS rows disabled, so upsert via the shared helper
     # rather than a raw insert to avoid a unique-constraint duplicate).
     await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui", True)
+    await seed_run_linked_evidence(db, tenant_a.id, run.id)
     await plan_resolutions(str(run.id), user=user, db=db)
 
     eligible = await fetch_agent_eligible(db, tenant_a.id, run.id)

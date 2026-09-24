@@ -32,7 +32,16 @@ async def _result(db, tenant_id, run_id, **over):
         evidence={"charge_source_id": f"ch_{uuid.uuid4().hex[:8]}", "order_reference": "R123456789"},
     )
     defaults.update(over)
-    return await create_test_recon_result(db, tenant_id, run_id, **defaults)
+    result = await create_test_recon_result(db, tenant_id, run_id, **defaults)
+    from app.models.reconciliation import ReconciliationRun
+    from tests.resolution_evidence_helpers import seed_linked_evidence, seed_washout_evidence
+
+    run = (await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == run_id))).scalar_one()
+    if result.variance_type == "fees":
+        await seed_linked_evidence(db, run, result)
+    if (result.evidence or {}).get("washout"):
+        await seed_washout_evidence(db, run, result)
+    return result
 
 
 async def test_plan_run_writes_proposals_for_non_matches(db, tenant_a):

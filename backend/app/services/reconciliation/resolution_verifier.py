@@ -56,7 +56,7 @@ def currency_basis_verified(context: dict) -> bool:
         and amount(posting.get("amount")) is not None
         and amount(posting.get("amount")) == amount(posting.get("foreign_amount"))
         and amount(posting.get("amount")) == amount(context.get("netsuite_amount"))
-        and line.get("order_reference") == ref
+        and ref in {line.get("order_reference"), line.get("related_order_id")}
         and line.get("currency") == currency
         and line.get("subsidiary_id") == subsidiary
         and line.get("line_type") == "charge"

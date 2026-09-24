@@ -211,7 +211,8 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
             ).scalar_one_or_none()
             if pl is not None:
                 context["payout_line"] = {
-                    "order_reference": pl.related_order_id or extract_order_ref(pl.description, pattern),
+                    "order_reference": extract_order_ref(pl.description, pattern),
+                    "related_order_id": pl.related_order_id,
                     "subsidiary_id": pl.subsidiary_id,
                     "line_type": pl.line_type,
                     "amount": str(pl.amount),
@@ -282,7 +283,9 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
     )
     if len(rows) == 101:
         return False
-    linked = [p for p in rows if (p.related_order_id or extract_order_ref(p.description, pattern)) == reference]
+    linked = [
+        p for p in rows if (p.related_order_id == reference or extract_order_ref(p.description, pattern) == reference)
+    ]
     charges = [p for p in linked if p.line_type == "charge"]
     if len(charges) != 1 or charges[0].id != charge.id or charge.amount <= 0:
         return False

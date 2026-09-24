@@ -119,6 +119,9 @@ async def _seed_run(db, tenant):
     )
     run.matches_count = 0
     await db.flush()
+    from tests.resolution_evidence_helpers import seed_run_linked_evidence
+
+    await seed_run_linked_evidence(db, tenant.id, run.id)
     await plan_run(db, tenant.id, run.id)
     return user, run, manual_result, chargeback_result
 

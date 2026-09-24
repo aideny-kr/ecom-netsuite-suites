@@ -23,6 +23,7 @@ from tests.conftest import (
     create_test_user,
     enable_feature_flag,
 )
+from tests.resolution_evidence_helpers import seed_legacy_fee_proposals
 
 
 async def _seed_fees(db, tenant, above_too=True):
@@ -51,6 +52,7 @@ async def _seed_fees(db, tenant, above_too=True):
         )
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     return user, run
 
 
@@ -248,6 +250,7 @@ async def test_carry_forward_group_sets_carried_forward_not_approved(db, tenant_
     )
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     await approve_resolution_group(
         str(run.id),
         "timing:carry_forward:none",
@@ -278,6 +281,7 @@ async def test_needs_human_group_not_approvable(db, tenant_a):
     )
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     with pytest.raises(HTTPException) as exc:
         await approve_resolution_group(
             str(run.id),
@@ -394,6 +398,7 @@ async def test_override_response_includes_enrichment(db, tenant_a):
     run.matches_count = 0
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     prop = (await _props(db, run.id))[0]
 
     new = await override_resolution_proposal(

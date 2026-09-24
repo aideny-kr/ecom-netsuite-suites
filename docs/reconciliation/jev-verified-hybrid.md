@@ -16,15 +16,16 @@ idempotency, and proposal compare-and-set controls remain in force.
   tolerance is removed. Tiny unrelated residuals do not establish a fee.
 - Cross-currency or missing transaction-currency evidence is held for FX/basis
   verification before fees or write-offs, including below materiality. This also
-  applies to the deterministic planner's amount-mismatch/FX branches. Materiality
+  applies before the deterministic planner's fee/application/FX branches. Materiality
   settings are unchanged.
 - Washout classification rechecks cached same-order charge/refund events and the
   existing seven-day net-zero rule. Multiple charges, truncated evidence, unknown
   event dates, conflicting subsidiary/currency, or a partial refund fail closed.
   It proves charge/refund netting, not completeness of all ERP ledger dependencies.
 - Model-proposed deposit creation/application remains held: the required canonical
-  source-coverage/application-state proof is not available. Existing deterministic
-  planner policies outside the amount-mismatch/FX branches are unchanged.
+  source-coverage/application-state proof is not available. Deterministic fee
+  proposals require the same exact monetary proof; washouts recheck canonical
+  events during normal planning, before a permanent carry-forward is proposed.
 
 No fresh upstream data pull is required. Jev still receives only code-derived
 boolean/null/allowlisted categorical facts; no customer text, amounts or identifiers.

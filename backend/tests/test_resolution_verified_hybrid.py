@@ -132,6 +132,7 @@ async def test_washout_requires_cached_same_order_events(db, tenant_a, tenant_b,
             )
         )
     ).scalar_one()
+    assert proposal.action == ("carry_forward" if mutation is None else "needs_human")
     context = await gather_context(db, tenant_a.id, proposal)
     assert context["verified_washout"] is (mutation is None)
     decision = validate_output(
@@ -174,3 +175,25 @@ async def test_scoped_live_override_keeps_other_tenants_in_shadow(monkeypatch):
     monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "off")
     _, audit = await rj.decide_item("customer-a", None, "test", _context(), MATERIALITY)
     assert audit is None  # global kill switch wins
+
+
+@pytest.mark.parametrize("kind,evidence", [("fx_rounding", {"deposit_unapplied": True}), ("fees", {})])
+def test_early_planner_rules_cannot_bypass_currency_proof(kind, evidence):
+    from app.services.reconciliation.resolution_planner import plan_result
+
+    out = plan_result(
+        match_type="deterministic",
+        variance_type=kind,
+        variance_amount=Decimal("0.04"),
+        stripe_amount=Decimal("35.41"),
+        netsuite_amount=Decimal("35.37"),
+        currency="USD",
+        variance_explanation=None,
+        evidence=evidence,
+        already_posted=False,
+        materiality_abs=Decimal("50"),
+        materiality_pct=Decimal("0.01"),
+        currency_basis_verified=False,
+        fee_amount=Decimal("0.35"),
+    )
+    assert out.action == "needs_human"

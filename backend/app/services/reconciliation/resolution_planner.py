@@ -173,6 +173,7 @@ def plan_result(
     materiality_pct: Decimal,
     fee_amount: Decimal | None = None,
     currency_basis_verified: bool = False,
+    washout_verified: bool = False,
     days_since_payout: int | None = None,
     payout_status: str | None = None,
 ) -> PlannedProposal | None:
@@ -197,6 +198,16 @@ def plan_result(
             "chargeback",
             ACTION_NEEDS_HUMAN,
             f"Chargeback/dispute — requires human review before any booking.{explain}",
+            abs_variance,
+            above,
+        )
+    if (
+        variance_type in {"amount_mismatch", "fx_rounding", "fees"} or evidence.get("deposit_unapplied") is True
+    ) and not currency_basis_verified:
+        return _mk(
+            root,
+            ACTION_NEEDS_HUMAN,
+            "Verify the linked deposit and settlement currency basis before any fee or write-off.",
             abs_variance,
             above,
         )
@@ -236,6 +247,10 @@ def plan_result(
         )
     # 6. fees: fee line on the payout's bank deposit (aggregated per payout at posting)
     if variance_type == "fees":
+        from app.services.reconciliation.resolution_verifier import fee_explained
+
+        if not fee_explained(stripe_amount, netsuite_amount, variance_amount, fee_amount):
+            return _mk(root, ACTION_NEEDS_HUMAN, "The linked fee does not explain this variance.", abs_variance, above)
         return _mk(
             "fees",
             ACTION_BOOK_FEE_LINE,
@@ -267,6 +282,14 @@ def plan_result(
     #     window-days figure is a program constant (WASHOUT_WINDOW_DAYS,
     #     above), not an invented number.
     if evidence.get("washout") is True:
+        if not washout_verified:
+            return _mk(
+                "washout",
+                ACTION_NEEDS_HUMAN,
+                "Cached charge and refund events do not verify a washout; investigate before booking.",
+                abs_variance,
+                above,
+            )
         return _mk(
             "washout",
             ACTION_CARRY_FORWARD,
@@ -334,14 +357,6 @@ def plan_result(
             variance_type,
             ACTION_NEEDS_HUMAN,
             f"Charge has no NetSuite deposit and no order reference — needs investigation.{explain}",
-            abs_variance,
-            above,
-        )
-    if variance_type in {"amount_mismatch", "fx_rounding"} and not currency_basis_verified:
-        return _mk(
-            root,
-            ACTION_NEEDS_HUMAN,
-            "Verify the linked deposit and settlement currency basis before any fee or write-off.",
             abs_variance,
             above,
         )
@@ -588,6 +603,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         )
         matched_postings.update({p.id: posting_context(p) for p in postings})
     lines = {}
+    line_records = {}
     for i in range(0, len(payout_line_id_list), _INSERT_CHUNK):
         records = (
             (
@@ -601,10 +617,12 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             .scalars()
             .all()
         )
+        line_records.update({p.id: p for p in records})
         lines.update(
             {
                 p.id: {
-                    "order_reference": p.related_order_id or extract_order_ref(p.description, pattern),
+                    "order_reference": extract_order_ref(p.description, pattern),
+                    "related_order_id": p.related_order_id,
                     "subsidiary_id": p.subsidiary_id,
                     "currency": p.currency,
                     "amount": str(p.amount),
@@ -695,6 +713,23 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                     # bad data) must read as "just arrived", not a negative
                     # day count that would slip past the recency guard.
                     days_since_payout = max(0, (today - arrival_date).days)
+        washout_verified = False
+        if evidence.get("washout") is True and pl_uuid in line_records and evidence.get("order_reference"):
+            from app.services.reconciliation.resolution_agent import _verify_cached_washout
+
+            washout_verified = await _verify_cached_washout(
+                db,
+                tid,
+                line_records[pl_uuid],
+                evidence["order_reference"],
+                pattern,
+                {
+                    "currency": row.currency,
+                    "stripe_amount": row.stripe_amount,
+                    "netsuite_amount": row.netsuite_amount,
+                    "matched_posting": matched_postings.get(row.deposit_id),
+                },
+            )
         planned = plan_result(
             match_type=row.match_type,
             variance_type=row.variance_type,
@@ -708,6 +743,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             materiality_abs=mat_abs,
             materiality_pct=mat_pct,
             fee_amount=fee_amount,
+            washout_verified=washout_verified,
             currency_basis_verified=currency_basis_verified(
                 {
                     "evidence": evidence,

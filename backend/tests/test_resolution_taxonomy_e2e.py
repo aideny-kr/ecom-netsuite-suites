@@ -181,12 +181,16 @@ async def test_live_shaped_taxonomy_e2e(db, tenant_a):
     await db.flush()
 
     from app.models.reconciliation import ReconciliationResult
-    from tests.resolution_evidence_helpers import seed_linked_evidence
+    from tests.resolution_evidence_helpers import seed_linked_evidence, seed_washout_evidence
 
     results = (
         (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))).scalars().all()
     )
     for result in results:
+        if result.variance_type == "fees":
+            await seed_linked_evidence(db, run, result)
+        if (result.evidence or {}).get("washout"):
+            await seed_washout_evidence(db, run, result)
         if result.variance_type == "amount_mismatch":
             await seed_linked_evidence(
                 db, run, result, fee=Decimal("3.20") if result.stripe_amount == Decimal("100") else Decimal("0")
