@@ -151,3 +151,66 @@ async def test_the_tenant_cannot_be_set_inside_a_savepoint(one_connection_engine
         with pytest.raises(ValueError, match="savepoint"):
             await set_tenant_context_session(session, str(uuid.uuid4()))
         await session.rollback()
+
+
+async def test_scoped_worker_reuses_context_without_repeated_network_sets(one_connection_engine):
+    from sqlalchemy import event
+
+    from app.core.database import set_tenant_context
+
+    sets = []
+
+    def record(conn, cursor, statement, *args):
+        if "app.current_tenant_id" in statement and "current_setting" not in statement:
+            sets.append(statement)
+
+    event.listen(one_connection_engine.sync_engine, "before_cursor_execute", record)
+    tenant = str(uuid.uuid4())
+    async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
+        await set_tenant_context_session(session, tenant)
+        for _ in range(4):
+            await set_tenant_context(session, tenant)
+            assert await _current(session) == tenant
+        assert len(sets) == 1
+        for finish in (session.commit, session.rollback):
+            await finish()
+            previous = len(sets)
+            await set_tenant_context(session, tenant)
+            await set_tenant_context(session, tenant)
+            assert await _current(session) == tenant
+            assert len(sets) == previous + 1
+        async with session.begin_nested():
+            await set_tenant_context(session, tenant)
+            with pytest.raises(ValueError, match="one tenant"):
+                await set_tenant_context(session, str(uuid.uuid4()))
+        assert await _current(session) == tenant
+
+
+async def test_scoped_helper_reapplies_after_connection_replacement(one_connection_engine):
+    from app.core.database import set_tenant_context
+
+    tenant = str(uuid.uuid4())
+    async with AsyncSession(one_connection_engine, expire_on_commit=False) as session:
+        await set_tenant_context_session(session, tenant)
+        await session.commit()
+        await (await session.connection()).invalidate()
+        await session.rollback()
+        await set_tenant_context(session, tenant)
+        assert await _current(session) == tenant
+    async with AsyncSession(one_connection_engine) as next_session:
+        assert await _current(next_session) is None
+
+
+async def test_unscoped_helper_still_restores_context_explicitly(one_connection_engine):
+    from app.core.database import set_tenant_context
+
+    tenant, other = str(uuid.uuid4()), str(uuid.uuid4())
+    async with AsyncSession(one_connection_engine) as session:
+        await set_tenant_context(session, tenant)
+        assert await _current(session) == tenant
+        await set_tenant_context(session, other)
+        assert await _current(session) == other
+        await session.commit()
+        assert await _current(session) is None
+        await set_tenant_context(session, tenant)
+        assert await _current(session) == tenant

@@ -28,6 +28,7 @@ from app.services.transaction_ops.normalization import (
 from app.services.transaction_ops.order_reconciliation import reconcile_order
 from app.services.transaction_ops.read_recovery import ReadBudgetExhaustedError, read_with_recovery
 from app.services.transaction_ops.source_eligibility import exclusion_report, payment_failed
+from app.services.transaction_ops.source_reader import SourceReadError
 
 
 async def enabled(db, tenant_id):
@@ -389,6 +390,10 @@ async def run_investigation(
 
     timing = RunTiming(progress)
     state = timing.state(state)
+    from app.services.transaction_ops.refund_reader import MAX_BATCH_ORDERS, RefundBatch
+
+    refund_batch = RefundBatch()
+    refund_batch_disabled = False
     reference_reads = ReferenceReads()
     transport = CollectionTransport()
     previous_reference_hits = progress.get("reference_cache_hits", 0)
@@ -876,16 +881,56 @@ async def run_investigation(
                     db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
                 )
                 refunds = {}
-                if not await reserve(2):
-                    return await finish("budget")
                 try:
-                    refunds["source"] = await bounded_read(
-                        "source_refunds",
-                        lambda: (_source_refunds_reader or read_solidus_refunds)(
-                            db, tenant_id, mapping.solidus_refund_step_id, reference
-                        ),
-                        retry_calls=2,
+                    # A run-local batch retains actual observation times and
+                    # reauthorizes each hit. Recovery/write preflights stay fresh.
+                    use_batch = (
+                        not settlement
+                        and not refund_batch_disabled
+                        and mapping.action_mode == "detect_only"
+                        and getattr(run, "origin", None) != "recovery"
+                        and bool(run.params_json.get("window_start"))
+                        and _source_refunds_reader is None
                     )
+                    cached = (
+                        await refund_batch.get(db, tenant_id, mapping.solidus_refund_step_id, reference, now=clock())
+                        if use_batch
+                        else None
+                    )
+                    if cached is not None:
+                        refunds["source"] = cached
+                        progress["source_refund_batch_hits"] = progress.get("source_refund_batch_hits", 0) + 1
+                    else:
+                        references = list(dict.fromkeys(progress["pending_refs"][:MAX_BATCH_ORDERS]))
+                        if use_batch and len(references) > 1:
+                            if not await reserve(2):
+                                return await finish("budget")
+                            try:
+                                refunds["source"] = await bounded_read(
+                                    "source_refunds",
+                                    lambda: refund_batch.read(
+                                        db, tenant_id, mapping.solidus_refund_step_id, references
+                                    ),
+                                    retry_calls=2,
+                                )
+                                progress["source_refund_batches"] = progress.get("source_refund_batches", 0) + 1
+                            except SourceReadError:
+                                refund_batch_disabled = True
+                                # A partial/ambiguous batch proves nothing. Fall
+                                # back to the single-order reader with NEW spend.
+                                progress["source_refund_batch_failures"] = (
+                                    progress.get("source_refund_batch_failures", 0) + 1
+                                )
+                        if "source" not in refunds:
+                            if not await reserve(2):
+                                return await finish("budget")
+                            refunds["source"] = await bounded_read(
+                                "source_refunds",
+                                lambda: (_source_refunds_reader or read_solidus_refunds)(
+                                    db, tenant_id, mapping.solidus_refund_step_id, reference
+                                ),
+                                retry_calls=2,
+                            )
                 except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                     raise
                 except Exception:

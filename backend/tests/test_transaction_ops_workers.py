@@ -37,13 +37,14 @@ def test_run_uses_worker_session_and_shared_runner(monkeypatch):
 
     runner = AsyncMock(return_value={"status": "finished", "termination_reason": "done"})
     monkeypatch.setattr(mod, "worker_async_session", session)
-    monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(mod, "set_tenant_context_session", AsyncMock())
     monkeypatch.setitem(sys.modules, "app.services.transaction_ops.runner", SimpleNamespace(run_investigation=runner))
     next_review = AsyncMock(return_value=None)
     monkeypatch.setitem(
         sys.modules, "app.services.transaction_ops.period_review", SimpleNamespace(continue_review=next_review)
     )
     result = mod.transaction_ops_run.run(str(tenant_id), str(run_id))
+    mod.set_tenant_context_session.assert_awaited_once_with(db, str(tenant_id))
     runner.assert_awaited_once_with(db, tenant_id, run_id)
     next_review.assert_awaited_once_with(db, tenant_id, run_id)
     assert result["termination_reason"] == "done"
@@ -82,7 +83,7 @@ def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):
     resume = AsyncMock(return_value=SimpleNamespace(id=child, status="pending", origin="schedule", max_orders=100))
     dispatch = AsyncMock()
     monkeypatch.setattr(mod, "worker_async_session", session)
-    monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(mod, "set_tenant_context_session", AsyncMock())
     monkeypatch.setitem(sys.modules, "app.services.transaction_ops.runner", SimpleNamespace(run_investigation=runner))
     monkeypatch.setitem(
         sys.modules, "app.services.transaction_ops.continuation", SimpleNamespace(continue_budget_run=resume)
@@ -105,7 +106,7 @@ def test_worker_failure_text_never_contains_upstream_details(monkeypatch, task):
         yield object()
 
     monkeypatch.setattr(mod, "worker_async_session", session)
-    monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(mod, "set_tenant_context_session", AsyncMock())
     failing = AsyncMock(side_effect=RuntimeError("secret connection URL"))
     if task == "run":
         monkeypatch.setitem(
