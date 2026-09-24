@@ -226,6 +226,30 @@ class TestAgentRunResult:
 
 
 class TestCostCalculation:
+    def test_cache_writes_and_reads_are_priced(self):
+        # Since #287 most of our prompt is cache traffic; pricing only fresh input
+        # showed $0.017 a case against a real $0.21 (run ddd4868a, 2026-09-24).
+        # 100 fresh * 3 + 10K written * 3.75 + 100K read * 0.30 + 1K out * 15 = $0.0828
+        from app.services.benchmarks.agent_runner import _calculate_cost
+
+        cost = _calculate_cost(
+            model="claude-sonnet-4-6",
+            input_tokens=100,
+            output_tokens=1_000,
+            cache_write_tokens=10_000,
+            cache_read_tokens=100_000,
+        )
+        assert cost == pytest.approx(0.0828)
+
+    def test_both_runners_price_identically(self):
+        from app.services.benchmarks import agent_runner, baseline_runner
+
+        usage = dict(input_tokens=7, output_tokens=11, cache_write_tokens=13, cache_read_tokens=17)
+        for model in (*agent_runner._MODEL_PRICING, "unknown-model"):
+            assert agent_runner._calculate_cost(model=model, **usage) == baseline_runner._calculate_cost(
+                model=model, **usage
+            )
+
     def test_sonnet_pricing_table(self):
         # 10K input + 5K output on sonnet: 0.010 * 3 + 0.005 * 15 = $0.105
         from app.services.benchmarks.agent_runner import _calculate_cost
@@ -477,9 +501,18 @@ class TestSourceQuestion:
         from app.services.benchmarks import agent_runner
 
         script, calls = scripted_turns
+        asked = _source_question_result(input_tokens=1_000, output_tokens=50)
+        asked.tokens_used.cache_creation_input_tokens = 500
+        asked.tokens_used.cache_read_input_tokens = 10_000
         script += [
-            _source_question_result(input_tokens=1_000, output_tokens=50),
-            _make_agent_result(data="Top class is Laptops.", input_tokens=5_000, output_tokens=200),
+            asked,
+            _make_agent_result(
+                data="Top class is Laptops.",
+                input_tokens=5_000,
+                output_tokens=200,
+                cache_creation=2_000,
+                cache_read=20_000,
+            ),
         ]
 
         result = await agent_runner.run_agent(tenant_id=_TENANT_ID, question="Sales by class this week?", db=db_mock)
@@ -489,7 +522,8 @@ class TestSourceQuestion:
         assert result.source_question_answered is True
         # Both turns are paid for: the clarification costs what it costs a real user.
         assert (result.input_tokens, result.output_tokens) == (6_000, 250)
-        assert result.cost_usd == pytest.approx(0.006 * 3 + 0.00025 * 15)
+        assert (result.cache_write_tokens, result.cache_read_tokens) == (2_500, 30_000)
+        assert result.cost_usd == pytest.approx(0.006 * 3 + 0.00025 * 15 + 0.0025 * 3.75 + 0.030 * 0.3)
         assert len(calls) == 2
         reply = calls[1]
         assert reply["task"] == "NetSuite"
