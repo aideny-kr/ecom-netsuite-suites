@@ -33,6 +33,7 @@ from tests.conftest import (
     create_test_user,
     enable_feature_flag,
 )
+from tests.resolution_evidence_helpers import seed_linked_evidence
 
 
 class FakeAdapter:
@@ -89,6 +90,7 @@ async def _seed_run(db, tenant):
         netsuite_amount=Decimal("991.00"),
         evidence={"charge_source_id": "ch_e2e_ma", "order_reference": "R628489275"},
     )
+    await seed_linked_evidence(db, run, manual_result)
     chargeback_result = await create_test_recon_result(
         db,
         tenant.id,

@@ -108,9 +108,9 @@ async def test_live_shaped_taxonomy_e2e(db, tenant_a):
         bucket="needs_review",
         match_type="deterministic",
         variance_type="amount_mismatch",
-        variance_amount=Decimal("3.00"),
+        variance_amount=Decimal("3.20"),
         stripe_amount=Decimal("100.00"),
-        netsuite_amount=Decimal("97.00"),
+        netsuite_amount=Decimal("96.80"),
         evidence={
             "charge_source_id": "ch_mismatch_fee",
             "order_reference": "R_FEE",
@@ -180,6 +180,17 @@ async def test_live_shaped_taxonomy_e2e(db, tenant_a):
 
     await db.flush()
 
+    from app.models.reconciliation import ReconciliationResult
+    from tests.resolution_evidence_helpers import seed_linked_evidence
+
+    results = (
+        (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))).scalars().all()
+    )
+    for result in results:
+        if result.variance_type == "amount_mismatch":
+            await seed_linked_evidence(
+                db, run, result, fee=Decimal("3.20") if result.stripe_amount == Decimal("100") else Decimal("0")
+            )
     plan = await plan_resolutions(str(run.id), user=user, db=db)
     assert plan["planned_count"] == 7  # the zero-variance fuzzy row produces no proposal
 

@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     # off | shadow (current path decides; Jev is recorded beside it) | live (Jev
     # decides when confident, current path otherwise).
     JEV_RECON_RESOLUTION_MODE: Literal["off", "shadow", "live"] = "off"
+    JEV_RECON_LIVE_TENANTS: str = ""  # scoped live override while global mode stays shadow
     JEV_RECON_MIN_CONFIDENCE: float = 0.8
     # TTL of the prompt-cache entries on the STABLE prefix (tool definitions + static
     # system block): "5m" (default) or "1h". The conversation itself always uses 5m.

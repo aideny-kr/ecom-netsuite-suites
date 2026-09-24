@@ -53,6 +53,22 @@ def _context(**over):
         },
     }
     base.update(over)
+    base.setdefault("subsidiary_id", "1")
+    base.setdefault(
+        "matched_posting",
+        {
+            "record_type": "custdep",
+            "related_payout_id": "R123456789",
+            "subsidiary_id": "1",
+            "amount": base["netsuite_amount"],
+            "foreign_amount": base["netsuite_amount"],
+            "currency": "USD",
+            "transaction_currency": "USD",
+        },
+    )
+    if base.get("payout_line"):
+        base["payout_line"].setdefault("order_reference", "R123456789")
+        base["payout_line"].setdefault("subsidiary_id", "1")
     return base
 
 
@@ -259,6 +275,7 @@ async def test_live_jev_cannot_bypass_the_chargeback_policy(monkeypatch, llm):
 async def test_live_jev_cannot_write_off_a_material_variance(monkeypatch, llm):
     monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("writeoff_je", 0.99))
+    llm.action = "writeoff_je"
     context = _context(variance_amount="-41.00", netsuite_amount="59.00")
     validated, _ = await rj.decide_item(TENANT, llm, "m", context, MATERIALITY)
     assert validated["action"] == "needs_human"
@@ -381,7 +398,7 @@ def test_a_candidate_in_another_currency_never_counts_as_an_amount_match():
     )
     facts = rj.derive_facts(context)
     assert facts["candidate_with_exact_stripe_amount"] is False
-    assert facts["currency_consistent"] is False
+    assert facts["currency_consistent"] is True  # unrelated candidates cannot invalidate the actual match
 
 
 def test_a_fee_in_another_currency_cannot_explain_the_variance():
@@ -403,7 +420,8 @@ def test_payout_recency_and_washout_are_facts_computed_in_code():
     unknown = rj.derive_facts(_context())
     assert unknown["payout_recent"] is None and unknown["payout_status"] is None
     washed = rj.derive_facts(_context(root_cause="washout", evidence={"order_reference": "R1", "washout": "True"}))
-    assert washed["washout"] is True
+    assert washed["washout"] is False  # saved label alone is not a proof
+    assert rj.derive_facts(_context(verified_washout=True))["washout"] is True
     assert rj.derive_facts(_context())["washout"] is False
 
 
@@ -429,7 +447,7 @@ def test_amounts_compare_in_the_transaction_currency_when_the_posting_carries_on
     line = {**_context()["payout_line"], "currency": "EUR"}
     ctx = _context(currency="EUR", stripe_amount="96.80", payout_line=line, candidate_postings=[_eur_candidate()])
     facts = rj.derive_facts(ctx)
-    assert facts["candidate_with_exact_stripe_amount"] is True and facts["currency_consistent"] is True
+    assert facts["candidate_with_exact_stripe_amount"] is True and facts["currency_consistent"] is False
 
 
 def test_base_currency_amount_is_never_compared_to_a_foreign_charge():
@@ -464,7 +482,7 @@ def test_search_completeness_is_a_fact_and_only_local_completeness():
         ),
         ("carry_forward", {}, False),
         ("apply_deposit", {}, False),  # no applicability evidence exists anywhere in the product today
-        ("apply_deposit", {"evidence": {"order_reference": "R1", "deposit_unapplied": "True"}}, True),
+        ("apply_deposit", {"evidence": {"order_reference": "R1", "deposit_unapplied": "True"}}, False),
         (
             "create_and_apply_deposit",
             {"candidate_search_complete": "True", "candidate_postings": []},
@@ -478,13 +496,13 @@ def test_action_eligibility_is_decided_by_facts_in_code(action, ctx_over, eligib
     assert rj.eligible(action, facts) is eligible, (action, facts)
 
 
-async def test_live_ineligible_pick_abstains_and_records_the_reason(monkeypatch, llm):
+async def test_live_ineligible_pick_falls_back_and_records_the_reason(monkeypatch, llm):
     monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("apply_deposit", 0.99))
     validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
-    assert validated["action"] == "needs_human"
-    assert record["decided_by"] == "guard" and record["eligibility_veto"] == "apply_deposit"
-    assert llm.calls == 0
+    assert validated["action"] == "book_fee_line"
+    assert record["decided_by"] == "llm" and record["eligibility_veto"] == "apply_deposit"
+    assert llm.calls == 1
 
 
 async def test_shadow_validates_jevs_pick_too_so_the_veto_rate_is_measurable(monkeypatch, llm):
@@ -494,7 +512,7 @@ async def test_shadow_validates_jevs_pick_too_so_the_veto_rate_is_measurable(mon
     _, record = await rj.decide_item(TENANT, llm, "m", context, MATERIALITY)
     assert record["jev_action"] == "writeoff_je"
     assert record["jev_validated_action"] == "needs_human" and record["jev_veto"] == "writeoff_je above materiality"
-    assert record["llm_action"] == "book_fee_line" and record["agree"] is False
+    assert record["llm_action"] == "needs_human" and record["agree"] is True
 
 
 async def test_shadow_records_the_item_even_when_the_llm_raises(monkeypatch, llm):
@@ -562,4 +580,4 @@ async def test_an_ineligible_pick_goes_through_the_same_validator(monkeypatch, l
 
     monkeypatch.setattr(rj, "validate_output", spy)
     validated, _ = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
-    assert validated["action"] == "needs_human" and calls == ["needs_human"]
+    assert validated["action"] == "book_fee_line" and calls == ["needs_human", "book_fee_line"]

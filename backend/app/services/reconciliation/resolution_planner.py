@@ -63,8 +63,8 @@ from decimal import Decimal
 from app.schemas.reconciliation import WASHOUT_WINDOW_DAYS
 from app.services.reconciliation.four_bucket_classifier import CLOSED_RUN_STATUSES, is_material
 
-# Mirrors the payout classifier's fee-match tolerance.
-FEE_EXPLAIN_TOLERANCE = Decimal("0.50")
+# Fee explanation requires exact stored amounts, including at near-zero residuals.
+FEE_EXPLAIN_TOLERANCE = Decimal("0")  # exact stored monetary identity; retained as public constant
 # New operational threshold (no prior art in the codebase): NetSuite deposit
 # sync runs nightly (02:00 UTC), so 7 days is a generous in-transit window;
 # revisit against observed sync lag.
@@ -172,6 +172,7 @@ def plan_result(
     materiality_abs: Decimal,
     materiality_pct: Decimal,
     fee_amount: Decimal | None = None,
+    currency_basis_verified: bool = False,
     days_since_payout: int | None = None,
     payout_status: str | None = None,
 ) -> PlannedProposal | None:
@@ -336,21 +337,21 @@ def plan_result(
             abs_variance,
             above,
         )
+    if variance_type in {"amount_mismatch", "fx_rounding"} and not currency_basis_verified:
+        return _mk(
+            root,
+            ACTION_NEEDS_HUMAN,
+            "Verify the linked deposit and settlement currency basis before any fee or write-off.",
+            abs_variance,
+            above,
+        )
     # 7b. amount_mismatch: fee-explained first, else fall through to a
     #     materiality split with its own honest narrative — an amount
     #     mismatch is NOT fx/rounding, so it must not borrow that wording.
     if variance_type == "amount_mismatch":
-        if (
-            fee_amount is not None
-            and fee_amount > 0
-            and abs(abs_variance - fee_amount) <= FEE_EXPLAIN_TOLERANCE
-            # A Stripe fee can only ever make NetSuite LOWER than Stripe —
-            # never equal to or higher. Without this, a mismatch where
-            # NetSuite is too HIGH would be misexplained as a fee.
-            and stripe_amount is not None
-            and netsuite_amount is not None
-            and netsuite_amount < stripe_amount
-        ):
+        from app.services.reconciliation.resolution_verifier import fee_explained
+
+        if fee_explained(stripe_amount, netsuite_amount, variance_amount, fee_amount):
             return _mk(
                 "amount_mismatch",
                 ACTION_BOOK_FEE_LINE,
@@ -438,7 +439,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     partial unique index with a raw IntegrityError.
     """
     from app.models.audit import AuditEvent
-    from app.models.canonical import Payout, PayoutLine
+    from app.models.canonical import NetsuitePosting, Payout, PayoutLine
     from app.models.reconciliation import (
         ACTIVE_PROPOSAL_STATUSES,
         ReconciliationResult,
@@ -514,6 +515,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         await db.execute(
             select(
                 ReconciliationResult.id,
+                ReconciliationResult.deposit_id,
                 ReconciliationResult.match_type,
                 ReconciliationResult.variance_type,
                 ReconciliationResult.variance_amount,
@@ -563,6 +565,56 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         ).all()
         for pl_id, fee, arrival_date, payout_status in pl_rows:
             payout_line_info[pl_id] = (fee, arrival_date, payout_status)
+
+    # Batch linked evidence once per run; never issue one lookup per result.
+    from app.services.reconciliation.order_ref import extract_order_ref, load_order_ref_pattern
+    from app.services.reconciliation.resolution_verifier import currency_basis_verified, posting_context
+
+    pattern = await load_order_ref_pattern(db, str(tid))
+    matched_postings = {}
+    deposit_ids = sorted({row.deposit_id for row in rows if row.deposit_id is not None})
+    for i in range(0, len(deposit_ids), _INSERT_CHUNK):
+        postings = (
+            (
+                await db.execute(
+                    select(NetsuitePosting).where(
+                        NetsuitePosting.tenant_id == tid,
+                        NetsuitePosting.id.in_(deposit_ids[i : i + _INSERT_CHUNK]),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        matched_postings.update({p.id: posting_context(p) for p in postings})
+    lines = {}
+    for i in range(0, len(payout_line_id_list), _INSERT_CHUNK):
+        records = (
+            (
+                await db.execute(
+                    select(PayoutLine).where(
+                        PayoutLine.tenant_id == tid,
+                        PayoutLine.id.in_(payout_line_id_list[i : i + _INSERT_CHUNK]),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        lines.update(
+            {
+                p.id: {
+                    "order_reference": p.related_order_id or extract_order_ref(p.description, pattern),
+                    "subsidiary_id": p.subsidiary_id,
+                    "currency": p.currency,
+                    "amount": str(p.amount),
+                    "fee": str(p.fee),
+                    "net": str(p.net),
+                    "line_type": p.line_type,
+                }
+                for p in records
+            }
+        )
 
     today = datetime.now(timezone.utc).date()
 
@@ -629,6 +681,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         fee_amount: Decimal | None = None
         days_since_payout: int | None = None
         payout_status: str | None = None
+        pl_uuid = None
         raw_pl_id = evidence.get("charge_payout_line_id")
         if raw_pl_id:
             try:
@@ -655,6 +708,17 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             materiality_abs=mat_abs,
             materiality_pct=mat_pct,
             fee_amount=fee_amount,
+            currency_basis_verified=currency_basis_verified(
+                {
+                    "evidence": evidence,
+                    "currency": row.currency,
+                    "subsidiary_id": run.subsidiary_id,
+                    "stripe_amount": row.stripe_amount,
+                    "netsuite_amount": row.netsuite_amount,
+                    "matched_posting": matched_postings.get(row.deposit_id),
+                    "payout_line": lines.get(pl_uuid),
+                }
+            ),
             days_since_payout=days_since_payout,
             payout_status=payout_status,
         )
