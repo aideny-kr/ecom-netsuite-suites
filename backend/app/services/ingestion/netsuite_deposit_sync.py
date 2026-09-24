@@ -8,14 +8,16 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from time import perf_counter
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import async_session_factory
+from app.core.database import async_session_factory, set_tenant_context
 from app.core.encryption import decrypt_credentials
 from app.models.canonical import NetsuitePosting
 from app.models.connection import Connection
@@ -124,6 +126,43 @@ async def get_netsuite_rest_connection(db: AsyncSession, tenant_id: str) -> Conn
     return result.scalar_one_or_none()
 
 
+async def _upsert_batch(db, tenant_id, batch, result):
+    """Persist at most ten inputs, preserving repeated-key order and commit size.
+
+    RETURNING the stored UUID distinguishes actual inserts from conflicts, even
+    when another sync inserts the same key concurrently. Conflict updates retain
+    the original ID and creation timestamp. No per-record existence query.
+    """
+    await set_tenant_context(db, tenant_id)
+    pending = {}
+
+    async def flush():
+        if not pending:
+            return
+        statement = insert(NetsuitePosting).values(list(pending.values()))
+        immutable = {"id", "tenant_id", "dedupe_key", "created_at"}
+        statement = statement.on_conflict_do_update(
+            constraint="uq_netsuite_postings_dedupe",
+            set_={key: statement.excluded[key] for key in next(iter(pending.values())) if key not in immutable},
+        ).returning(NetsuitePosting.dedupe_key, NetsuitePosting.id)
+        stored = (await db.execute(statement)).all()
+        new = sum(identifier == pending[key]["id"] for key, identifier in stored)
+        result.records_new += new
+        result.records_updated += len(stored) - new
+        result.records_synced += len(stored)
+        pending.clear()
+
+    for values in batch:
+        # PostgreSQL cannot update one conflict key twice in a single statement.
+        # Flush before a repeat so last-row-wins and new/updated counts remain
+        # identical to sequential ingestion, without discarding input records.
+        if values["dedupe_key"] in pending:
+            await flush()
+        pending[values["dedupe_key"]] = values
+    await flush()
+    await db.commit()
+
+
 async def sync_netsuite_deposits(
     db: AsyncSession,
     tenant_id: str,
@@ -143,6 +182,7 @@ async def sync_netsuite_deposits(
         record_types: Optional list of record types (default: ['Deposit', 'CustDep'])
     """
     result = DepositSyncResult()
+    await set_tenant_context(db, tenant_id)
 
     # 1. Get active NetSuite REST connection
     connection = await get_netsuite_rest_connection(db, tenant_id)
@@ -194,7 +234,9 @@ async def sync_netsuite_deposits(
         rows_returned=len(rows),
     )
 
-    # 4. Upsert each deposit into netsuite_postings
+    # 4. Normalize as before, then write bounded batches.
+    persistence_started = perf_counter()
+    batch = []
     for row in rows:
         row_dict = dict(zip(columns, row)) if isinstance(row, list) else row
         internal_id = str(row_dict.get("internal_id", ""))
@@ -284,20 +326,6 @@ async def sync_netsuite_deposits(
 
         dedupe_key = f"netsuite:{internal_id}"
 
-        # Check if record already exists
-        existing = await db.execute(
-            select(NetsuitePosting.id).where(
-                NetsuitePosting.tenant_id == tenant_id,
-                NetsuitePosting.dedupe_key == dedupe_key,
-            )
-        )
-        is_new = existing.scalar_one_or_none() is None
-
-        # Use raw SQL upsert for performance
-        from datetime import datetime, timezone
-
-        from sqlalchemy.dialects.postgresql import insert
-
         now = datetime.now(timezone.utc)
         values = {
             "id": uuid.uuid4(),
@@ -323,31 +351,17 @@ async def sync_netsuite_deposits(
             "updated_at": now,
         }
 
-        excluded_keys = {"id", "tenant_id", "dedupe_key", "created_at"}
-        set_ = {k: v for k, v in values.items() if k not in excluded_keys}
-        set_["updated_at"] = now
+        batch.append(values)
+        # Keep the established ten-row durability/statement-timeout boundary.
+        if len(batch) == 10:
+            await _upsert_batch(db, tenant_id, batch, result)
+            batch.clear()
 
-        stmt = (
-            insert(NetsuitePosting)
-            .values(**values)
-            .on_conflict_do_update(
-                constraint="uq_netsuite_postings_dedupe",
-                set_=set_,
-            )
-        )
-        await db.execute(stmt)
-
-        result.records_synced += 1
-        if is_new:
-            result.records_new += 1
-        else:
-            result.records_updated += 1
-
-        # Batch commit every 10 records — Supabase has 2min statement timeout
-        if result.records_synced % 10 == 0:
-            await db.commit()
-
-    await db.commit()
+    if batch:
+        await _upsert_batch(db, tenant_id, batch, result)
+    else:
+        await db.commit()
+    persistence_ms = round((perf_counter() - persistence_started) * 1000)
 
     # Bump the freshness cursor so the recon data-status banner reflects this run. The
     # nightly Celery task calls this service directly (not the manual trigger
@@ -385,6 +399,7 @@ async def sync_netsuite_deposits(
     # this is for. The factory gives a genuinely independent connection in both.
     try:
         async with async_session_factory() as cursor_db:
+            await set_tenant_context(cursor_db, tenant_id)
             await save_cursor_async(cursor_db, connection.id, "netsuite_deposits", date_to.isoformat())
             await cursor_db.commit()
     except Exception as e:
@@ -397,6 +412,7 @@ async def sync_netsuite_deposits(
         new=result.records_new,
         updated=result.records_updated,
         currency_fallbacks=result.currency_fallback_count,
+        persistence_ms=persistence_ms,
     )
     return result
 

@@ -33,6 +33,103 @@ from app.services.ingestion.netsuite_deposit_sync import (
 )
 
 
+async def test_batched_duplicates_resync_and_tenant_isolation(db, tenant_a, tenant_b):
+    from contextlib import ExitStack
+
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    other = NetsuitePosting(
+        tenant_id=tenant_b.id,
+        dedupe_key="netsuite:910000",
+        source="netsuite",
+        source_id="910000",
+        record_type="custdep",
+        netsuite_internal_id="910000",
+        amount=999,
+        currency="EUR",
+    )
+    db.add(other)
+    await db.flush()
+    rows = [
+        {
+            "internal_id": str(910000 + i),
+            "amount": "1.25",
+            "record_type": "CustDep",
+            "currency_name": "CAD",
+            "base_currency_name": "USD",
+            "foreign_amount": "2.50",
+            "exchange_rate": "0.5",
+            "sales_order_ref": "Sales Order #R123456789",
+        }
+        for i in range(23)
+    ]
+    rows.insert(4, {**rows[0], "amount": "8.50"})
+    rows.append({**rows[0], "amount": "9.75", "foreign_amount": "19.50"})
+    with ExitStack() as stack:
+        for item in _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db):
+            stack.enter_context(item)
+        first = await sync_netsuite_deposits(db, str(tenant_a.id), date(2026, 9, 1), date(2026, 9, 21))
+        saved = (await db.scalars(select(NetsuitePosting).where(NetsuitePosting.tenant_id == tenant_a.id))).all()
+        identities = {p.dedupe_key: (p.id, p.created_at) for p in saved}
+        second = await sync_netsuite_deposits(db, str(tenant_a.id), date(2026, 9, 1), date(2026, 9, 21))
+    assert (first.records_synced, first.records_new, first.records_updated) == (25, 23, 2)
+    assert (second.records_synced, second.records_new, second.records_updated) == (25, 0, 25)
+    for posting in saved:
+        await db.refresh(posting)
+    assert {p.dedupe_key: (p.id, p.created_at) for p in saved} == identities
+    target = next(p for p in saved if p.source_id == "910000")
+    assert (target.amount, target.foreign_amount) == (Decimal("9.75"), Decimal("19.50"))
+    assert (target.currency, target.transaction_currency) == ("USD", "CAD")
+    assert target.related_payout_id == "R123456789"
+    assert other.amount == 999 and other.currency == "EUR"
+
+
+async def test_batched_write_has_no_per_record_existence_query(db, tenant_a):
+    from contextlib import ExitStack
+
+    from sqlalchemy import event
+
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    statements = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if "netsuite_postings" in statement:
+            statements.append(statement)
+
+    event.listen(db.bind.sync_engine, "before_cursor_execute", capture)
+    rows = [{"internal_id": str(920000 + i), "amount": "1.25", "base_currency_name": "USD"} for i in range(21)]
+    try:
+        with ExitStack() as stack:
+            for item in _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db):
+                stack.enter_context(item)
+            result = await sync_netsuite_deposits(db, str(tenant_a.id), date(2026, 9, 1), date(2026, 9, 21))
+    finally:
+        event.remove(db.bind.sync_engine, "before_cursor_execute", capture)
+    assert result.records_new == 21
+    assert len(statements) == 3
+    assert all(statement.startswith("INSERT INTO netsuite_postings") for statement in statements)
+
+
+async def test_failed_tail_keeps_committed_batch_without_advancing_cursor(db, tenant_a):
+    from contextlib import ExitStack
+
+    import pytest
+    from sqlalchemy.exc import DBAPIError
+
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    connection_id = connection.id
+    rows = [{"internal_id": str(930000 + i), "amount": "1.25", "base_currency_name": "USD"} for i in range(11)]
+    rows[-1]["amount"] = "999999999999999999999"  # Normalizes, but exceeds NUMERIC(15,2).
+    with ExitStack() as stack:
+        for item in _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db):
+            stack.enter_context(item)
+        with pytest.raises(DBAPIError, match="numeric field overflow"):
+            await sync_netsuite_deposits(db, str(tenant_a.id), date(2026, 9, 1), date(2026, 9, 21))
+    await db.rollback()
+    postings = (await db.scalars(select(NetsuitePosting).where(NetsuitePosting.source_id.like("9300%")))).all()
+    assert len(postings) == 10
+    assert await db.scalar(select(CursorState).where(CursorState.connection_id == connection_id)) is None
+
+
 class TestExtractPayoutId:
     """Payout ID regex extraction from memo field."""
 

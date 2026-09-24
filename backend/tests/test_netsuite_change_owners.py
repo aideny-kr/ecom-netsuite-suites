@@ -104,6 +104,17 @@ async def test_reverse_refund_application_finds_its_sales_order():
     assert len(reader.calls) == 6
 
 
+async def test_two_link_directions_deduplicate_same_edge_before_completeness_limit():
+    reader = Reader()
+    # Both endpoints in the frontier cause the refund edge to match both arms.
+    # Keep all native owners and the same bounded request count.
+    result = await owners(reader, ("3", "4"))
+    assert result["order_references"] == ["R000000001"]
+    edges = [sql for sql in reader.calls if "NextTransactionLink" in sql]
+    assert edges and all(" UNION " in sql for sql in edges)
+    assert all("OR (l.previousdoc IN" not in sql for sql in edges)
+
+
 async def test_shared_document_nominates_every_in_scope_order_without_assigning_money():
     reader = Reader()
     reader.records = [record(1, "SalesOrd"), record(5, "SalesOrd"), record(6, "SalesOrd", "3"), record(3, "CustCred")]
