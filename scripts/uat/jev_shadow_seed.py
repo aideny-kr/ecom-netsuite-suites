@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Give the uat-smoke tenant two recon exceptions the planner abstains on, so the
-ResolutionAgent runs and — with JEV_RECON_RESOLUTION_MODE=shadow on the target —
+ResolutionAgent runs and — with a Jev key for the tenant and its Jev card in Shadow —
 Jev's reading is recorded beside the LLM's as audit action ``recon.jev_comparison``.
 
 Why a separate script and not the smoke harness: the smoke's one unmatched charge
@@ -297,7 +297,8 @@ async def report(args) -> int:
         await conn.close()
     if not rows:
         print(
-            "no recon.jev_comparison rows for uat-smoke yet — is JEV_RECON_RESOLUTION_MODE=shadow set and the tenant allow-listed on the target?"
+            "no recon.jev_comparison rows for uat-smoke yet — does the target have a Jev key for it (platform "
+            "TYPESAFE_API_KEY or the tenant's Jev card), with Jev not switched off?"
         )
         return 1
     for r in rows:

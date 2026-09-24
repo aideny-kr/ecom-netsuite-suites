@@ -217,6 +217,7 @@ async def run_resolution_agent(
     )
     from app.services.reconciliation.resolution_jev import decide_item
     from app.services.typesafe import client as jev_client
+    from app.services.typesafe.access import resolve_access
     from app.services.typesafe.audit import record_comparison
 
     tid = uuid.UUID(str(tenant_id))
@@ -243,8 +244,6 @@ async def run_resolution_agent(
     contract_violations = persist_failures = comparison_failures = 0
     stopped = "done"
 
-    from app.core.config import settings
-
     async with _run_leader(db, key) as leading:
         if not leading:
             # Another task holds this run; the Celery task reschedules this dispatch.
@@ -269,13 +268,13 @@ async def run_resolution_agent(
         materiality = await load_materiality(db, tid)
 
         async with contextlib.AsyncExitStack() as stack:
-            # One HTTPS connection for the whole run instead of a TLS handshake per item.
-            # Entered only when Jev is actually on; if entering fails, items run without it.
-            if settings.JEV_RECON_RESOLUTION_MODE in {"shadow", "live"} and settings.TYPESAFE_API_KEY:
-                try:
-                    await stack.enter_async_context(jev_client.session())
-                except Exception:
-                    logger.warning("resolution_agent.jev_session_unavailable", exc_info=True)
+            # One HTTPS connection for the whole run instead of a TLS handshake per item. It
+            # makes no request until an item actually calls Jev; if entering fails, each call
+            # opens its own.
+            try:
+                await stack.enter_async_context(jev_client.session())
+            except Exception:
+                logger.warning("resolution_agent.jev_session_unavailable", exc_info=True)
 
             # A rollback expires EVERY loaded instance (expire_on_commit=False does not cover
             # rollback), and touching an expired attribute on an async session is lazy IO that
@@ -294,6 +293,17 @@ async def run_resolution_agent(
                     stopped = "leadership_lost"
                     break
                 shadow = None
+                # The tenant's Jev key and mode (typesafe.access), per item, so switching Jev
+                # off or changing the key on the card applies from the next item. A failed
+                # lookup means Jev is off for this item, never a failed run: the recovery rolls
+                # back, which expires the loaded items, so the reload below runs.
+                try:
+                    jev_access = await resolve_access(db, tid)
+                except Exception:
+                    logger.warning("resolution_agent.jev_access_unavailable", exc_info=True)
+                    jev_access = None
+                    await _recover_after_failed_write(db)
+                    expired = True
                 if expired:
                     try:
                         await db.refresh(item)
@@ -306,10 +316,10 @@ async def run_resolution_agent(
                         continue
                 try:
                     context = await gather_context(db, tid, item)
-                    # decide_item is the LLM path unchanged when JEV_RECON_RESOLUTION_MODE
-                    # is off; both models' answers go through the same validate_output.
+                    # decide_item is the LLM path unchanged when Jev is off for this tenant
+                    # (jev_access None); both models' answers go through the same validate_output.
                     validated, shadow = await asyncio.wait_for(
-                        decide_item(tid, adapter, model, context, materiality),
+                        decide_item(tid, adapter, model, context, materiality, access=jev_access),
                         timeout=PER_ITEM_TIMEOUT_SECONDS,
                     )
                 except Exception:

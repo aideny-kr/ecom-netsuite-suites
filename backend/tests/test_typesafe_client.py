@@ -1,7 +1,8 @@
 """The Jev client is the single choke point for sending tenant data to TypeSafe.
 
-Every caller goes through ``ask``; the guards tested here (key present, tenant
-allow-listed) therefore cannot be bypassed by adding a caller.
+Every caller goes through ``ask`` with the key ``typesafe.access.resolve_access`` chose for
+the tenant; the client never reads a key from settings, so no caller can send one tenant's
+work under another key, and a missing key refuses before any network I/O.
 """
 
 import json
@@ -14,6 +15,7 @@ from app.core.config import settings
 from app.services.typesafe import client as jev
 
 TENANT = uuid.UUID("90fb7ae5-fd4c-4248-8f82-189a474c7523")
+KEY = "tenant-key-1234"
 QUESTIONS = {
     "kind": {"type": "choice", "instructions": "Which kind?", "criteria": {"a": None, "b": None}},
     "yes": {"type": "noul", "instructions": "Is it?"},
@@ -30,8 +32,8 @@ OK_BODY = {
 
 @pytest.fixture
 def enabled(monkeypatch):
-    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", "test-key")
-    monkeypatch.setattr(settings, "JEV_TENANT_ALLOWLIST", str(TENANT))
+    # A different platform key proves the client sends the key it is GIVEN.
+    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", "platform-key-must-not-be-sent")
     monkeypatch.setattr(settings, "JEV_MODEL", "jev-1.13.0")
 
 
@@ -45,38 +47,20 @@ def _transport(handler):
     return httpx.MockTransport(wrapped), calls
 
 
-async def test_no_key_refuses_without_a_network_call(monkeypatch):
-    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", "")
-    monkeypatch.setattr(settings, "JEV_TENANT_ALLOWLIST", str(TENANT))
+@pytest.mark.parametrize("key", ["", None])
+async def test_no_key_refuses_without_a_network_call(enabled, key):
     transport, calls = _transport(lambda r: httpx.Response(200, json=OK_BODY))
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, api_key=key, transport=transport)
     assert exc.value.reason == "disabled"
-    assert calls == []
-
-
-async def test_tenant_outside_allowlist_is_refused_without_a_network_call(enabled):
-    transport, calls = _transport(lambda r: httpx.Response(200, json=OK_BODY))
-    with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(uuid.uuid4(), {"x": "y"}, QUESTIONS, transport=transport)
-    assert exc.value.reason == "tenant_not_allowed"
-    assert calls == []
-
-
-async def test_empty_allowlist_denies_every_tenant(enabled, monkeypatch):
-    monkeypatch.setattr(settings, "JEV_TENANT_ALLOWLIST", "")
-    transport, calls = _transport(lambda r: httpx.Response(200, json=OK_BODY))
-    with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
-    assert exc.value.reason == "tenant_not_allowed"
     assert calls == []
 
 
 async def test_success_sends_pinned_model_and_returns_typed_answers(enabled):
     transport, calls = _transport(lambda r: httpx.Response(200, json=OK_BODY))
-    result = await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+    result = await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
     sent = json.loads(calls[0].content)
-    assert calls[0].headers["authorization"] == "Bearer test-key"
+    assert calls[0].headers["authorization"] == f"Bearer {KEY}"
     assert sent == {"state": {"x": "y"}, "model": "jev-1.13.0", "questions": QUESTIONS}
     assert result.answers["kind"]["choice"] == "a"
     assert result.answers["yes"]["noul"] == 0.95
@@ -89,7 +73,7 @@ async def test_success_sends_pinned_model_and_returns_typed_answers(enabled):
 async def test_http_error_is_a_reasoned_unavailable(enabled, status):
     transport, _ = _transport(lambda r: httpx.Response(status, json={"error": "x"}))
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
     assert exc.value.reason == f"http_{status}"
 
 
@@ -99,7 +83,7 @@ async def test_timeout_is_a_reasoned_unavailable(enabled):
 
     transport, _ = _transport(boom)
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
     assert exc.value.reason == "timeout"
 
 
@@ -114,7 +98,7 @@ async def test_timeout_is_a_reasoned_unavailable(enabled):
 async def test_malformed_answers_are_rejected(enabled, answers):
     transport, _ = _transport(lambda r: httpx.Response(200, json={**OK_BODY, "answers": answers}))
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
     assert exc.value.reason == "invalid_response"
 
 
@@ -136,7 +120,7 @@ async def test_malformed_answers_are_rejected(enabled, answers):
 async def test_wrongly_typed_answer_values_are_rejected(enabled, bad):
     transport, _ = _transport(lambda r: httpx.Response(200, json={**OK_BODY, "answers": {**OK_BODY["answers"], **bad}}))
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
     assert exc.value.reason == "invalid_response"
 
 
@@ -145,7 +129,7 @@ async def test_score_answers_must_be_numeric(enabled):
     body = {**OK_BODY, "answers": {"sev": {"type": "score", "score": None, "probabilities": {}, "confidence": 0.9}}}
     transport, _ = _transport(lambda r: httpx.Response(200, json=body))
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, questions, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, questions, transport=transport, api_key=KEY)
     assert exc.value.reason == "invalid_response"
 
 
@@ -154,17 +138,17 @@ async def test_score_answers_must_be_numeric(enabled):
 
 async def test_try_ask_returns_the_result_or_a_reason_and_never_raises(enabled, monkeypatch):
     transport, _ = _transport(lambda r: httpx.Response(200, json=OK_BODY))
-    result, reason = await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+    result, reason = await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
     assert result.answers["yes"]["noul"] == 0.95 and reason is None
 
     transport, _ = _transport(lambda r: httpx.Response(529))
-    assert await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport) == (None, "http_529")
+    assert await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY) == (None, "http_529")
 
     async def boom(*a, **k):
         raise KeyError("a bug on our side")
 
     monkeypatch.setattr(jev, "ask", boom)
-    assert await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS) == (None, "unexpected:KeyError")
+    assert await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS, api_key=KEY) == (None, "unexpected:KeyError")
 
 
 async def test_try_ask_lets_cancellation_through(enabled, monkeypatch):
@@ -175,7 +159,7 @@ async def test_try_ask_lets_cancellation_through(enabled, monkeypatch):
 
     monkeypatch.setattr(jev, "ask", cancelled)
     with pytest.raises(asyncio.CancelledError):
-        await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS)
+        await jev.try_ask(TENANT, {"x": "y"}, QUESTIONS, api_key=KEY)
 
 
 # ── session: a batch caller reuses one connection ──────────────────────────
@@ -193,12 +177,12 @@ async def test_a_session_reuses_one_http_client_and_closes_it(enabled, monkeypat
     monkeypatch.setattr(jev.httpx, "AsyncClient", counting)
     transport, calls = _transport(lambda r: httpx.Response(200, json=OK_BODY))
     async with jev.session(transport=transport):
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS)
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, api_key=KEY)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, api_key=KEY)
     assert len(calls) == 2 and len(built) == 1
     assert built[0].is_closed
 
-    await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)  # outside a session: its own client
+    await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)  # outside a session: its own client
     assert len(built) == 2 and built[1].is_closed
 
 
@@ -206,7 +190,7 @@ async def test_try_ask_contains_a_failing_request_builder(enabled):
     def broken_builder():
         raise ValueError("bad state")
 
-    assert await jev.try_ask(TENANT, build=broken_builder) == (None, "unexpected:ValueError")
+    assert await jev.try_ask(TENANT, build=broken_builder, api_key=KEY) == (None, "unexpected:ValueError")
 
 
 # ── gate round 2: no non-finite or out-of-range number can be returned ─────
@@ -219,14 +203,14 @@ async def test_score_must_be_finite_and_within_its_levels(enabled, score):
     body = json.dumps({**OK_BODY, "answers": {"sev": answer}})  # json.dumps emits NaN/Infinity, as a vendor bug would
     transport, _ = _transport(lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"}))
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, questions, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, questions, transport=transport, api_key=KEY)
     assert exc.value.reason == "invalid_response"
 
 
-async def test_a_refused_tenant_never_runs_the_request_builder(enabled):
+async def test_without_a_key_the_request_builder_never_runs(enabled):
     built = []
-    result = await jev.try_ask(uuid.uuid4(), build=lambda: built.append(1) or ({}, {}))
-    assert result == (None, "tenant_not_allowed") and built == []
+    result = await jev.try_ask(TENANT, build=lambda: built.append(1) or ({}, {}), api_key="")
+    assert result == (None, "disabled") and built == []
 
 
 # ── gate round 3 ───────────────────────────────────────────────────────────
@@ -242,7 +226,7 @@ async def test_the_timeout_bounds_the_whole_request_not_each_read(enabled, monke
         return httpx.Response(200, json=OK_BODY)
 
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=httpx.MockTransport(trickle))
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=httpx.MockTransport(trickle), api_key=KEY)
     assert exc.value.reason == "timeout"
 
 
@@ -252,7 +236,7 @@ async def test_every_probability_is_a_finite_number_in_range(enabled, probabilit
     body = json.dumps({**OK_BODY, "answers": {**OK_BODY["answers"], "kind": answer}})
     transport, _ = _transport(lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"}))
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
     assert exc.value.reason == "invalid_response"
 
 
@@ -269,7 +253,7 @@ async def test_choice_probabilities_must_cover_exactly_the_criteria_and_sum_to_o
         lambda r: httpx.Response(200, json={**OK_BODY, "answers": {**OK_BODY["answers"], "kind": answer}})
     )
     with pytest.raises(jev.JevUnavailableError) as exc:
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
     assert exc.value.reason == "invalid_response"
 
 
@@ -279,4 +263,37 @@ async def test_the_chosen_option_must_be_the_most_probable(enabled):
         lambda r: httpx.Response(200, json={**OK_BODY, "answers": {**OK_BODY["answers"], "kind": answer}})
     )
     with pytest.raises(jev.JevUnavailableError):
-        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport)
+        await jev.ask(TENANT, {"x": "y"}, QUESTIONS, transport=transport, api_key=KEY)
+
+
+# ── check_key: what the Jev card's Test button and key save use ────────────
+
+
+async def test_check_key_accepts_a_working_key(enabled):
+    answer = {"type": "choice", "choice": "yes", "probabilities": {"yes": 1.0, "no": 0.0}, "confidence": 1.0}
+    transport, calls = _transport(
+        lambda r: httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"ready": answer}})
+    )
+    assert await jev.check_key(KEY, transport=transport) is None
+    assert calls[0].headers["authorization"] == f"Bearer {KEY}"
+    assert "tenant" not in calls[0].content.decode().lower()  # a probe carries no tenant data
+
+
+@pytest.mark.parametrize("status", [401, 403, 529])
+async def test_check_key_reports_why_a_key_failed(enabled, status):
+    transport, _ = _transport(lambda r: httpx.Response(status))
+    assert await jev.check_key(KEY, transport=transport) == f"http_{status}"
+
+
+async def test_check_key_without_a_key_makes_no_call(enabled):
+    transport, calls = _transport(lambda r: httpx.Response(200, json=OK_BODY))
+    assert await jev.check_key("", transport=transport) == "disabled"
+    assert calls == []
+
+
+async def test_check_key_never_raises(enabled, monkeypatch):
+    async def boom(*a, **k):
+        raise UnicodeEncodeError("latin-1", "é", 0, 1, "ordinal not in range")
+
+    monkeypatch.setattr(jev, "ask", boom)
+    assert await jev.check_key(KEY) == "unexpected:UnicodeEncodeError"

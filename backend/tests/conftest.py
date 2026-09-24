@@ -51,6 +51,14 @@ def _set_encryption_key():
     settings.ENCRYPTION_KEY = Fernet.generate_key().decode()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _no_typesafe_platform_key():
+    """Tests never reach TypeSafe by accident. Jev is on by default (the deployment cap is
+    live), so a developer's platform key in .env would otherwise send every recon test's
+    facts to the real API. A test that needs Jev sets a key explicitly."""
+    settings.TYPESAFE_API_KEY = ""
+
+
 # ---------------------------------------------------------------------------
 # Per-test DB session — fresh engine + connection per test to avoid loop issues
 # ---------------------------------------------------------------------------

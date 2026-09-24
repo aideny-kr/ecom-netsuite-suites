@@ -10,14 +10,19 @@ from decimal import Decimal
 
 import pytest
 
-from app.core.config import settings
 from app.services.reconciliation import resolution_jev as rj
 from app.services.reconciliation.narrative_contract import narrative_respects_evidence
 from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, _flatten_values
+from app.services.typesafe.access import JevAccess
 from app.services.typesafe.client import JevResult, JevUnavailableError
 
 TENANT = uuid.uuid4()
 MATERIALITY = (Decimal("10.00"), Decimal("0.01"))
+
+
+def _access(mode: str) -> JevAccess | None:
+    """The tenant's resolved Jev access in ``mode`` ("off" = None, as resolve_access returns)."""
+    return None if mode == "off" else JevAccess(api_key="k", mode=mode, key_source="platform")
 
 
 def _context(**over):
@@ -213,17 +218,15 @@ def test_template_narrative_always_satisfies_the_no_invented_numbers_contract(ac
 
 
 async def test_off_uses_only_the_llm(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "off")
     seen = _patch_jev(monkeypatch, result=_jev("carry_forward", 0.99))
-    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("off"))
     assert validated["action"] == "book_fee_line"
     assert shadow is None and seen == {} and llm.calls == 1
 
 
 async def test_shadow_keeps_the_llm_decision_and_records_both(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
     _patch_jev(monkeypatch, result=_jev("carry_forward", 0.91))
-    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("shadow"))
     assert validated["action"] == "book_fee_line"
     assert shadow["mode"] == "shadow"
     assert shadow["llm_action"] == "book_fee_line" and shadow["jev_action"] == "carry_forward"
@@ -233,51 +236,47 @@ async def test_shadow_keeps_the_llm_decision_and_records_both(monkeypatch, llm):
 
 
 async def test_shadow_survives_a_jev_failure(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
     _patch_jev(monkeypatch, error=JevUnavailableError("timeout"))
-    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("shadow"))
     assert validated["action"] == "book_fee_line"
     assert shadow["jev_error"] == "timeout" and shadow["jev_action"] is None
 
 
 async def test_live_confident_jev_decides_without_the_llm(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.95))
-    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("live"))
     assert validated["action"] == "book_fee_line" and "contract_violation" not in validated
     assert llm.calls == 0 and shadow["decided_by"] == "jev"
 
 
 async def test_live_unsure_jev_falls_back_to_the_llm(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("carry_forward", 0.4))
-    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("live"))
     assert validated["action"] == "book_fee_line"
     assert llm.calls == 1 and shadow["decided_by"] == "llm"
 
 
 async def test_live_jev_outage_falls_back_to_the_llm(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, error=JevUnavailableError("http_529"))
-    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, shadow = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("live"))
     assert validated["action"] == "book_fee_line" and llm.calls == 1
     assert shadow["jev_error"] == "http_529"
 
 
 async def test_live_jev_cannot_bypass_the_chargeback_policy(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("writeoff_je", 0.99))
-    validated, _ = await rj.decide_item(TENANT, llm, "m", _context(root_cause="chargeback"), MATERIALITY)
+    validated, _ = await rj.decide_item(
+        TENANT, llm, "m", _context(root_cause="chargeback"), MATERIALITY, access=_access("live")
+    )
     assert validated["action"] == "needs_human"
     assert validated["contract_violation"] == "chargeback_policy"
 
 
 async def test_live_jev_cannot_write_off_a_material_variance(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("writeoff_je", 0.99))
     llm.action = "writeoff_je"
     context = _context(variance_amount="-41.00", netsuite_amount="59.00")
-    validated, _ = await rj.decide_item(TENANT, llm, "m", context, MATERIALITY)
+    validated, _ = await rj.decide_item(TENANT, llm, "m", context, MATERIALITY, access=_access("live"))
     assert validated["action"] == "needs_human"
     assert validated["contract_violation"] == "writeoff_je above materiality"
 
@@ -286,18 +285,18 @@ async def test_live_jev_cannot_write_off_a_material_variance(monkeypatch, llm):
 
 
 async def test_a_guard_veto_is_recorded_as_the_guards_decision_not_jevs(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("writeoff_je", 0.99))
-    validated, record = await rj.decide_item(TENANT, llm, "m", _context(root_cause="chargeback"), MATERIALITY)
+    validated, record = await rj.decide_item(
+        TENANT, llm, "m", _context(root_cause="chargeback"), MATERIALITY, access=_access("live")
+    )
     assert validated["action"] == "needs_human"
     assert record["decided_by"] == "guard" and record["guard_veto"] == "chargeback_policy"
     assert record["jev_action"] == "writeoff_je" and record["applied_action"] == "needs_human"
 
 
 async def test_an_unvetoed_jev_decision_records_what_was_applied(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.95))
-    _, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    _, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("live"))
     assert record["decided_by"] == "jev" and record["guard_veto"] is None
     assert record["applied_action"] == "book_fee_line"
 
@@ -305,7 +304,6 @@ async def test_an_unvetoed_jev_decision_records_what_was_applied(monkeypatch, ll
 async def test_shadow_runs_jev_and_the_llm_concurrently(monkeypatch, llm):
     import asyncio
 
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
     started = []
 
     async def slow_try_ask(*a, **k):
@@ -321,28 +319,24 @@ async def test_shadow_runs_jev_and_the_llm_concurrently(monkeypatch, llm):
 
     monkeypatch.setattr(rj, "try_ask", slow_try_ask)
     monkeypatch.setattr(rj.resolution_agent, "classify_item", slow_classify)
-    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("shadow"))
     assert validated["action"] == "book_fee_line" and record["jev_action"] == "carry_forward"
 
 
 async def test_a_bug_in_the_request_builder_never_reaches_the_llm_path(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
-    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", "k")
-    monkeypatch.setattr(settings, "JEV_TENANT_ALLOWLIST", str(TENANT))
 
     def broken(_context):
         raise KeyError("bug")
 
     monkeypatch.setattr(rj, "build_request", broken)
-    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("shadow"))
     assert validated["action"] == "book_fee_line" and record["jev_error"] == "unexpected:KeyError"
 
 
 async def test_out_of_sync_criteria_disable_jev_instead_of_crashing_the_worker(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     seen = _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.99))
     monkeypatch.setattr(rj, "AGENT_ALLOWED_ACTIONS", frozenset({*rj.AGENT_ALLOWED_ACTIONS, "brand_new_action"}))
-    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("live"))
     assert validated["action"] == "book_fee_line" and llm.calls == 1
     assert record["jev_error"] == "criteria_out_of_sync" and seen == {}
 
@@ -355,14 +349,13 @@ def test_the_criteria_cover_exactly_the_allowed_actions():
 
 
 async def test_live_falls_back_to_the_llm_when_building_jevs_proposal_breaks(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.99))
 
     def broken(*a, **k):
         raise KeyError("bug")
 
     monkeypatch.setattr(rj, "template_narrative", broken)
-    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("live"))
     assert validated["action"] == "book_fee_line" and llm.calls == 1
     assert record["decided_by"] == "llm" and record["jev_error"] == "unexpected:KeyError"
 
@@ -497,33 +490,30 @@ def test_action_eligibility_is_decided_by_facts_in_code(action, ctx_over, eligib
 
 
 async def test_live_ineligible_pick_falls_back_and_records_the_reason(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("apply_deposit", 0.99))
-    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("live"))
     assert validated["action"] == "book_fee_line"
     assert record["decided_by"] == "llm" and record["eligibility_veto"] == "apply_deposit"
     assert llm.calls == 1
 
 
 async def test_shadow_validates_jevs_pick_too_so_the_veto_rate_is_measurable(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
     _patch_jev(monkeypatch, result=_jev("writeoff_je", 0.99))
     context = _context(variance_amount="-41.00", netsuite_amount="59.00")  # above the $10 materiality
-    _, record = await rj.decide_item(TENANT, llm, "m", context, MATERIALITY)
+    _, record = await rj.decide_item(TENANT, llm, "m", context, MATERIALITY, access=_access("shadow"))
     assert record["jev_action"] == "writeoff_je"
     assert record["jev_validated_action"] == "needs_human" and record["jev_veto"] == "writeoff_je above materiality"
     assert record["llm_action"] == "needs_human" and record["agree"] is True
 
 
 async def test_shadow_records_the_item_even_when_the_llm_raises(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
     _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.95))
 
     async def broken(adapter_, model, context):
         raise TimeoutError("provider down")
 
     monkeypatch.setattr(rj.resolution_agent, "classify_item", broken)
-    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("shadow"))
     assert validated["action"] == "needs_human" and validated["contract_violation"] == "classification_error"
     assert record["llm_error"] == "TimeoutError" and record["jev_action"] == "book_fee_line"
 
@@ -556,20 +546,18 @@ def test_non_finite_numbers_are_unknown_not_crashes():
 
 
 async def test_a_malformed_context_still_reaches_the_llm(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
     _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.95))
 
     def broken(_context):
         raise ArithmeticError("bad decimal")
 
     monkeypatch.setattr(rj, "derive_facts", broken)
-    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, record = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("shadow"))
     assert validated["action"] == "book_fee_line" and llm.calls == 1
     assert record["jev_error"].startswith("unexpected:")
 
 
 async def test_an_ineligible_pick_goes_through_the_same_validator(monkeypatch, llm):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("apply_deposit", 0.99))
     calls = []
     real = rj.validate_output
@@ -579,5 +567,5 @@ async def test_an_ineligible_pick_goes_through_the_same_validator(monkeypatch, l
         return real(out, context, materiality)
 
     monkeypatch.setattr(rj, "validate_output", spy)
-    validated, _ = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY)
+    validated, _ = await rj.decide_item(TENANT, llm, "m", _context(), MATERIALITY, access=_access("live"))
     assert validated["action"] == "book_fee_line" and calls == ["needs_human", "book_fee_line"]

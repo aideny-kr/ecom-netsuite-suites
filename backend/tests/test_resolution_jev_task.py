@@ -24,6 +24,12 @@ def _jev_answer(action, confidence):
     return JevResult(answers=answers, model="jev-1.13.0", input_tokens=300, elapsed_ms=80)
 
 
+@pytest.fixture(autouse=True)
+def _platform_key(monkeypatch):
+    # Jev needs a key; the mode each test sets is the deployment cap (typesafe.access).
+    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", "platform-test-key")
+
+
 async def _run(db, tenant, monkeypatch, *, mode, jev_action, jev_confidence):
     await enable_feature_flag(db, tenant.id, "reconciliation")
     await enable_feature_flag(db, tenant.id, "recon_resolution_agent")
@@ -439,3 +445,203 @@ async def test_a_failed_reload_recovers_the_session_for_the_items_after_it(db, t
     summary = await agent_task.run_resolution_agent(db, tenant_id, str(run.id))
     assert summary["processed"] == 3 and summary["persist_failures"] == 2
     assert seen == [tenant_id, tenant_id]  # the third item was applied, under the tenant's context
+
+
+# ── per-tenant key and mode (typesafe.access), decided 2026-09-24 ──────────
+
+
+async def _run_with_connection(db, tenant, monkeypatch, *, api_key=None, mode=None, platform_key="platform-test-key"):
+    from tests.test_jev_access import _connect
+
+    monkeypatch.setattr(settings, "TYPESAFE_API_KEY", platform_key)
+    if api_key or mode:
+        await _connect(db, tenant, api_key=api_key, mode=mode)
+    await enable_feature_flag(db, tenant.id, "reconciliation")
+    await enable_feature_flag(db, tenant.id, "recon_resolution_agent")
+    run, _ = await _seed_planned_run(db, tenant.id)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Book the difference as a fee line.")
+    keys = []
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, api_key=None, **_):
+        keys.append(api_key)
+        return _jev_answer("carry_forward", 0.97), None
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+
+    await agent_task.run_resolution_agent(db, str(tenant.id), str(run.id))
+    events = (
+        (
+            await db.execute(
+                select(AuditEvent).where(AuditEvent.tenant_id == tenant.id, AuditEvent.action == "recon.jev_comparison")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return keys, events
+
+
+async def test_jev_is_on_by_default_with_the_platform_key(db, tenant_a, monkeypatch):
+    keys, events = await _run_with_connection(db, tenant_a, monkeypatch)
+    assert keys and set(keys) == {"platform-test-key"}
+    assert {e.payload["mode"] for e in events} == {"live"}
+
+
+async def test_the_tenants_own_key_is_the_one_sent(db, tenant_a, monkeypatch):
+    keys, _ = await _run_with_connection(db, tenant_a, monkeypatch, api_key="tenant-own-key")
+    assert keys and set(keys) == {"tenant-own-key"}
+
+
+async def test_a_tenant_in_shadow_keeps_the_llm_deciding(db, tenant_a, monkeypatch):
+    _, events = await _run_with_connection(db, tenant_a, monkeypatch, mode="shadow")
+    assert events and {e.payload["mode"] for e in events} == {"shadow"}
+    assert {e.payload["decided_by"] for e in events} <= {"llm", "guard"}
+
+
+async def test_without_any_key_jev_is_never_called(db, tenant_a, monkeypatch):
+    keys, events = await _run_with_connection(db, tenant_a, monkeypatch, platform_key="")
+    assert keys == [] and events == []
+
+
+# ── codex review of #314 ───────────────────────────────────────────────────
+
+
+async def _seed_two_items(db, tenant):
+    from decimal import Decimal
+
+    from app.services.reconciliation.resolution_planner import plan_run
+    from tests.conftest import create_test_recon_result, create_test_recon_run
+
+    await enable_feature_flag(db, tenant.id, "reconciliation")
+    await enable_feature_flag(db, tenant.id, "recon_resolution_agent")
+    run = await create_test_recon_run(db, tenant.id, status="completed")
+    for i in range(2):
+        await create_test_recon_result(
+            db, tenant.id, run.id, status="pending", bucket="needs_review", match_type="deterministic",
+            variance_type="manual_adjustment", variance_amount=Decimal("77.10"), stripe_amount=Decimal("500.00"),
+            netsuite_amount=Decimal("422.90"), evidence={"charge_source_id": f"ch_{i}", "order_reference": f"R62848927{i}"},
+        )  # fmt: skip
+    await db.flush()
+    await seed_run_linked_evidence(db, tenant.id, run.id)
+    await plan_run(db, tenant.id, run.id)
+    return run
+
+
+async def test_switching_jev_off_mid_run_stops_it_for_the_items_after(db, tenant_a, monkeypatch):
+    from tests.test_jev_access import _connect
+
+    run = await _seed_two_items(db, tenant_a)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+    keys = []
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, api_key=None, **_):
+        keys.append(api_key)
+        if len(keys) == 1:
+            await _connect(db, tenant_a, mode="off")  # the tenant switches Jev off during the run
+        return _jev_answer("needs_human", 0.3), None
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+
+    assert summary["processed"] == 2
+    assert keys == ["platform-test-key"]  # Jev asked about the first item only
+
+
+async def test_a_failed_access_lookup_runs_the_items_without_jev(db, tenant_a, monkeypatch):
+    """The lookup failing with a real database error aborts the transaction; recovery rolls
+    back, which expires every loaded item. Both items must still be classified."""
+    from sqlalchemy import text
+
+    from app.services.typesafe import access as access_module
+
+    run = await _seed_two_items(db, tenant_a)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+    keys = []
+    real_resolve = access_module.resolve_access
+    state = {"failed": False}
+
+    async def flaky_resolve(session, tenant_id):
+        if not state["failed"]:
+            state["failed"] = True
+            await session.execute(text("SELECT 1/0"))  # a real error: the transaction is now aborted
+        return await real_resolve(session, tenant_id)
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, api_key=None, **_):
+        keys.append(api_key)
+        return _jev_answer("needs_human", 0.3), None
+
+    monkeypatch.setattr(access_module, "resolve_access", flaky_resolve)
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+
+    assert summary["processed"] == 2 and summary["persist_failures"] == 0
+    assert len(adapter.calls) == 2  # both items classified (Jev unsure, so the model decides)
+    assert keys == ["platform-test-key"]  # Jev off for the item whose lookup failed, on for the next
+
+
+async def test_a_mode_change_on_the_card_reaches_a_running_worker(db, tenant_a, monkeypatch):
+    """The card UPDATEs the tenant's existing Jev row from another session. If anything in
+    the worker's session holds that row (the identity map keeps rows only weakly, so the
+    test holds one on purpose), a plain re-select returns the stale object: the resolver
+    must re-read it (gate round 3 on #314)."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.models.connection import INCLUDE_JEV_CONNECTION, Connection
+    from app.services.typesafe.access import tenant_connection
+    from tests.test_jev_access import _connect
+
+    await _connect(db, tenant_a, mode="live")
+    run = await _seed_two_items(db, tenant_a)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+    keys = []
+    held = []
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, api_key=None, **_):
+        keys.append(api_key)
+        if len(keys) == 1:  # the card switches Jev off: an UPDATE of the SAME row, as its endpoint does
+            held.append(await tenant_connection(db, tenant_a.id))
+            # The card's own session updates the SAME row and commits, as its endpoint does.
+            card = AsyncSession(bind=await db.connection(), join_transaction_mode="create_savepoint")
+            statement = (
+                select(Connection)
+                .where(Connection.tenant_id == tenant_a.id, Connection.provider == "typesafe")
+                .execution_options(**{INCLUDE_JEV_CONNECTION: True})
+            )
+            row = (await card.execute(statement)).scalar_one()
+            row.metadata_json = {"mode": "off"}
+            await card.commit()
+            await card.close()
+        return _jev_answer("needs_human", 0.3), None
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+
+    assert summary["processed"] == 2
+    assert keys == ["platform-test-key"]

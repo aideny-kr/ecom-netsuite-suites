@@ -11,8 +11,9 @@ vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast: mocks.toast }) }
 vi.mock("@/components/add-connection-dialog", () => ({ AddConnectionDialog: () => <button>Add Connection</button> }));
 vi.mock("@/components/add-mcp-connector-dialog", () => ({ AddMcpConnectorDialog: () => <button>Add MCP Connector</button> }));
 vi.mock("@/components/settings/celigo-connector-card", () => ({ default: () => <div>Celigo management</div> }));
+vi.mock("@/components/settings/jev-connector-card", () => ({ default: () => <div>Jev management</div> }));
 vi.mock("@/hooks/use-connections", () => ({
-  useConnections: () => ({ isError: mocks.fail, refetch: vi.fn(), data: [{ id: "api", provider: "solidus", label: "Framework", status: "active" }, { id: "gone", provider: "api", label: "Removed API", status: "revoked" }, { id: "celigo", provider: "celigo", label: "Celigo duplicate", status: "active" }] }),
+  useConnections: () => ({ isError: mocks.fail, refetch: vi.fn(), data: [{ id: "api", provider: "solidus", label: "Framework", status: "active" }, { id: "gone", provider: "api", label: "Removed API", status: "revoked" }, { id: "celigo", provider: "celigo", label: "Celigo duplicate", status: "active" }, { id: "jev", provider: "typesafe", label: "TypeSafe Jev", status: "active" }] }),
   useDeleteConnection: () => ({ mutateAsync: mocks.remove }), useTestConnection: () => ({ mutateAsync: mocks.test }),
 }));
 vi.mock("@/components/metabase-connect-button", () => ({ MetabaseConnectButton: () => <button>Connect with Metabase</button> }));
@@ -27,6 +28,9 @@ it("shows API and MCP controls and removes each through its own endpoint", async
   expect(screen.queryByText("Removed API")).not.toBeInTheDocument();
   expect(screen.queryByText("Celigo duplicate")).not.toBeInTheDocument();
   expect(screen.getByText("Celigo management")).toBeVisible();
+  // Jev has its own card; its connection row is not a generic tile.
+  expect(screen.getByText("Jev management")).toBeVisible();
+  expect(screen.queryByText("TypeSafe Jev")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Delete Framework" }));
   expect(mocks.remove).not.toHaveBeenCalled();
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete connection" }));

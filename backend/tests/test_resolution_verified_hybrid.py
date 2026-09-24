@@ -6,7 +6,6 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
-from app.core.config import settings
 from app.models.reconciliation import ReconResolutionProposal
 from app.services.reconciliation import resolution_jev as rj
 from app.services.reconciliation.resolution_agent import gather_context, validate_output
@@ -14,7 +13,7 @@ from app.services.reconciliation.resolution_planner import plan_run
 from app.services.reconciliation.resolution_verifier import fee_explained
 from tests.conftest import create_test_payout_line, create_test_recon_result, create_test_recon_run
 from tests.resolution_evidence_helpers import seed_linked_evidence
-from tests.test_resolution_jev import _context, _jev, _patch_jev
+from tests.test_resolution_jev import _access, _context, _jev, _patch_jev
 
 MATERIALITY = (Decimal("50"), Decimal("0.01"))
 
@@ -67,7 +66,6 @@ async def test_reviewed_foreign_currency_residuals_are_held_by_planner_and_both_
     assert not fee_explained(stripe, ns, context["variance_amount"], fee)
 
     # An overconfident Jev and a fallback insisting on a write-off both fail.
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
     _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.99))
     calls = []
 
@@ -76,7 +74,7 @@ async def test_reviewed_foreign_currency_residuals_are_held_by_planner_and_both_
         return {"action": "writeoff_je", "narrative": "Small difference.", "key_evidence": []}
 
     monkeypatch.setattr(rj.resolution_agent, "classify_item", classify)
-    out, audit = await rj.decide_item(tenant_a.id, None, "test", context, MATERIALITY)
+    out, audit = await rj.decide_item(tenant_a.id, None, "test", context, MATERIALITY, access=_access("live"))
     assert out["action"] == "needs_human" and calls == [True]
     assert audit["jev_veto"] and audit["guard_veto"] == "unverified_currency_or_linkage"
 
@@ -157,9 +155,8 @@ def test_unrelated_fuzzy_candidates_do_not_change_matched_basis():
     assert validate_output({"action": "book_fee_line"}, context, MATERIALITY)["action"] == "book_fee_line"
 
 
-async def test_scoped_live_override_keeps_other_tenants_in_shadow(monkeypatch):
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
-    monkeypatch.setattr(settings, "JEV_RECON_LIVE_TENANTS", "customer-a")
+async def test_each_tenant_decides_in_its_own_mode(monkeypatch):
+    # The deployment cap and kill switch live in typesafe.access (tests/test_jev_access.py).
     _patch_jev(monkeypatch, result=_jev("book_fee_line", 0.99))
     calls = []
 
@@ -168,13 +165,14 @@ async def test_scoped_live_override_keeps_other_tenants_in_shadow(monkeypatch):
         return {"action": "needs_human"}
 
     monkeypatch.setattr(rj.resolution_agent, "classify_item", classify)
-    decision, audit = await rj.decide_item("customer-a", None, "test", _context(), MATERIALITY)
+    decision, audit = await rj.decide_item("customer-a", None, "test", _context(), MATERIALITY, access=_access("live"))
     assert decision["action"] == "book_fee_line" and audit["mode"] == "live" and calls == []
-    decision, audit = await rj.decide_item("customer-b", None, "test", _context(), MATERIALITY)
+    decision, audit = await rj.decide_item(
+        "customer-b", None, "test", _context(), MATERIALITY, access=_access("shadow")
+    )
     assert decision["action"] == "needs_human" and audit["mode"] == "shadow" and calls == [True]
-    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "off")
-    _, audit = await rj.decide_item("customer-a", None, "test", _context(), MATERIALITY)
-    assert audit is None  # global kill switch wins
+    _, audit = await rj.decide_item("customer-c", None, "test", _context(), MATERIALITY, access=None)
+    assert audit is None  # Jev off for this tenant: the model path alone, nothing recorded
 
 
 @pytest.mark.parametrize("kind,evidence", [("fx_rounding", {"deposit_unapplied": True}), ("fees", {})])

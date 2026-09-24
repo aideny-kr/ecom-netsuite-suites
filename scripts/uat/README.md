@@ -263,8 +263,8 @@ Negative tests verified: wrong `--uat-slug` → SAFETY ABORT before any write
 ## Jev shadow seed (`jev_shadow_seed.py`)
 
 Gives the `uat-smoke` tenant two recon exceptions the deterministic planner abstains on,
-so the ResolutionAgent runs and — with `JEV_RECON_RESOLUTION_MODE=shadow` on the target —
-Jev's reading is recorded beside the LLM's as audit action `recon.jev_comparison`.
+so the ResolutionAgent runs and Jev's reading is recorded as audit action
+`recon.jev_comparison` (beside the LLM's in shadow mode; as the decision in live mode).
 The smoke's own seed cannot do this: its unmatched charge carries an order reference,
 so the planner resolves it itself and the agent never gets an item.
 
@@ -279,9 +279,10 @@ Differences from the smoke, all deliberate:
   and `recon_resolution_agent` and pins materiality to `$50 / 1%`; it prints a `restore`
   object that `cleanup --restore-json` applies.
 
-Target prerequisites (staging VM env): `TYPESAFE_API_KEY`, `JEV_TENANT_ALLOWLIST=<uat-smoke
-tenant id>`, `JEV_RECON_RESOLUTION_MODE=shadow`. Only the disposable tenant is ever
-allow-listed; real tenants wait for zero-retention terms with TypeSafe.
+Target prerequisites: a Jev key for `uat-smoke`, either the deployment's `TYPESAFE_API_KEY`
+or the tenant's own key on its Jev card (Settings → Connections). Jev is on by default in
+live mode; to compare Jev with the LLM, set the tenant's Jev card to **Shadow** (or cap the
+whole deployment with `JEV_RECON_RESOLUTION_MODE=shadow`).
 
 ```bash
 export UAT_SMOKE_EMAIL=... UAT_SMOKE_PASSWORD=...          # ~/.hermes/.env

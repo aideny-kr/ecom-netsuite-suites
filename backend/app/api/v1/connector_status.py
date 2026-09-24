@@ -1,16 +1,17 @@
 """Connector status and health check endpoints for data pipeline connectors.
 
-Covers: Stripe connector status/test, NetSuite deposit sync status.
+Covers: Stripe connector status/test, the TypeSafe Jev card (key and mode), NetSuite
+deposit sync status.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +37,10 @@ from app.services.celigo_write_guard import (
     CeligoManagedElsewhereError,
     celigo_writes_allowed,
 )
+from app.services.typesafe.access import PROVIDER as JEV_PROVIDER
+from app.services.typesafe.access import Mode as JevMode
+from app.services.typesafe.access import deployment_cap, key_in_use, load_setting, tenant_connection
+from app.services.typesafe.client import check_key
 
 logger = structlog.get_logger()
 
@@ -83,6 +88,30 @@ class StripeTestResponse(BaseModel):
 class StripeConnectRequest(BaseModel):
     api_key: str
     label: str = "Stripe"
+
+
+class JevStatusResponse(BaseModel):
+    mode: JevMode  # the tenant's choice
+    effective_mode: JevMode  # what recon will actually do: capped, and off without a key
+    deployment_cap: JevMode
+    key_source: Literal["tenant", "platform", "none"]
+    key_hint: str | None = None  # last 4 of the TENANT's key only; the platform key is never hinted
+    problem: str | None = None  # "unreadable_key"
+
+
+# The key endpoints take the raw JSON body: a validation error echoes what was submitted,
+# and here that is a secret. _submitted_key checks it with messages that never repeat it.
+_JEV_KEY_MAX = 512
+
+
+class JevModeRequest(BaseModel):
+    mode: JevMode
+
+
+class JevTestResponse(BaseModel):
+    success: bool
+    key_source: Literal["candidate", "tenant", "platform", "none"]
+    error: str | None = None
 
 
 class DepositSyncStatusResponse(BaseModel):
@@ -402,6 +431,211 @@ async def disconnect_stripe(
     await db.delete(connection)
     await db.commit()
     return {"status": "disconnected"}
+
+
+# ---------------------------------------------------------------------------
+# TypeSafe Jev card: key and mode (decided 2026-09-24: on by default)
+# ---------------------------------------------------------------------------
+
+_JEV_ERRORS = {
+    "http_401": "TypeSafe rejected this key.",
+    "http_403": "TypeSafe rejected this key.",
+    "timeout": "TypeSafe did not answer in time. Try again.",
+    "connection_error": "Could not reach TypeSafe. Try again.",
+    "disabled": "No Jev key is configured.",
+    "unreadable": "The stored key could not be read. Save a new key.",
+    "not_a_key": "That is not a TypeSafe key.",
+    "switched_off": "Jev is switched off for this deployment, so no key can be checked.",
+}
+
+
+def _submitted_key(body: Any) -> str | None:
+    """``body["api_key"]``, stripped; None when absent or blank. Anything that cannot be a
+    key (a body that is not an object, a non-string, over-long, or not printable ASCII
+    without spaces, which an HTTP header could not carry) is a 400 that never repeats it."""
+    if body is None:
+        return None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
+    value = body.get("api_key")
+    if value is None:
+        return None
+    key = value.strip() if isinstance(value, str) else None
+    if key == "":
+        return None
+    if key is None or len(key) > _JEV_KEY_MAX or not (key.isascii() and key.isprintable()) or " " in key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
+    return key
+
+
+def _jev_error(reason: str) -> str:
+    return _JEV_ERRORS.get(reason, f"The TypeSafe check failed ({reason}).")
+
+
+async def _jev_status(db: AsyncSession, tenant_id) -> JevStatusResponse:
+    setting = await load_setting(db, tenant_id)
+    return JevStatusResponse(
+        mode=setting.tenant_mode,
+        effective_mode=setting.effective_mode,
+        deployment_cap=setting.deployment_cap,
+        key_source=setting.key_source,
+        key_hint=setting.key_hint,
+        problem=setting.problem,
+    )
+
+
+async def _jev_status_after_commit(db: AsyncSession, tenant_id) -> JevStatusResponse:
+    """The request's tenant context was SET LOCAL and ended with the commit; re-apply it
+    before reading again, so the read cannot fail under forced row-level security."""
+    await set_tenant_context(db, str(tenant_id))
+    return await _jev_status(db, tenant_id)
+
+
+async def _lock_jev(db: AsyncSession, tenant_id) -> None:
+    """Serialize this tenant's Jev writes until commit, so two first saves cannot each
+    create a row (a later keyless row would otherwise hide the stored key)."""
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"typesafe-connection:{tenant_id}"))))
+
+
+async def _jev_connection(db: AsyncSession, user: User) -> Connection:
+    """The tenant's Jev connection, created (keyless, default mode) when absent.
+    Callers hold ``_lock_jev`` so the read-then-create cannot race."""
+    connection = await tenant_connection(db, user.tenant_id)
+    if connection is None:
+        connection = Connection(
+            tenant_id=user.tenant_id,
+            provider=JEV_PROVIDER,
+            label="TypeSafe Jev",
+            status="active",
+            auth_type="api_key",
+            encrypted_credentials=encrypt_credentials({}),
+            encryption_key_version=get_current_key_version(),
+            created_by=user.id,
+            metadata_json={},
+        )
+        db.add(connection)
+        await db.flush()
+    return connection
+
+
+@router.get("/jev", response_model=JevStatusResponse)
+async def get_jev_status(
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """What Jev will do for this tenant, and which key it uses (never the key itself)."""
+    return await _jev_status(db, user.tenant_id)
+
+
+@router.post("/jev/test", response_model=JevTestResponse)
+async def test_jev_key(
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    body: Annotated[Any, Body()] = None,
+):
+    """Check a candidate key, or (blank) the key this tenant uses now, whatever the mode."""
+    candidate = _submitted_key(body)
+    if deployment_cap() == "off":  # the kill switch stops every call to TypeSafe, probes included
+        source = "candidate" if candidate else (await key_in_use(db, user.tenant_id))[1]
+        return JevTestResponse(success=False, key_source=source, error=_JEV_ERRORS["switched_off"])
+    if candidate:
+        key, source = candidate, "candidate"
+    else:
+        key, source = await key_in_use(db, user.tenant_id)
+    if not key:
+        error = _JEV_ERRORS["unreadable"] if source == "tenant" else _JEV_ERRORS["disabled"]
+        return JevTestResponse(success=False, key_source=source, error=error)
+    reason = await check_key(key)
+    return JevTestResponse(success=reason is None, key_source=source, error=_jev_error(reason) if reason else None)
+
+
+@router.put("/jev/key", response_model=JevStatusResponse)
+async def save_jev_key(
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    body: Annotated[Any, Body()] = None,
+):
+    """Store the tenant's own TypeSafe key, only after TypeSafe accepts it."""
+    key = _submitted_key(body)
+    if not key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
+    if deployment_cap() == "off":  # the key cannot be checked without calling TypeSafe
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_JEV_ERRORS["switched_off"])
+    reason = await check_key(key)
+    if reason:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_jev_error(reason))
+    await _lock_jev(db, user.tenant_id)
+    connection = await _jev_connection(db, user)
+    connection.encrypted_credentials = encrypt_credentials({"api_key": key})
+    connection.encryption_key_version = get_current_key_version()
+    connection.status = "active"
+    connection.error_reason = None
+    connection.last_health_check_at = datetime.now(timezone.utc)
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="jev",
+        action="jev.key_saved",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+    )
+    await db.commit()
+    return await _jev_status_after_commit(db, user.tenant_id)
+
+
+@router.delete("/jev/key", response_model=JevStatusResponse)
+async def remove_jev_key(
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Forget the tenant's own key; Jev returns to the platform key. The mode is kept."""
+    await _lock_jev(db, user.tenant_id)
+    connection = await tenant_connection(db, user.tenant_id)
+    try:
+        has_key = bool(connection and decrypt_credentials(connection.encrypted_credentials).get("api_key"))
+    except Exception:
+        has_key = True  # an unreadable stored key is exactly what removal should clear
+    if not has_key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No Jev key is stored for this workspace")
+    connection.encrypted_credentials = encrypt_credentials({})
+    connection.encryption_key_version = get_current_key_version()
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="jev",
+        action="jev.key_removed",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+    )
+    await db.commit()
+    return await _jev_status_after_commit(db, user.tenant_id)
+
+
+@router.put("/jev/mode", response_model=JevStatusResponse)
+async def set_jev_mode(
+    request: JevModeRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Choose live, shadow (recorded beside the model, never deciding) or off."""
+    await _lock_jev(db, user.tenant_id)
+    connection = await _jev_connection(db, user)
+    # A new dict, so the JSON column's change is detected.
+    connection.metadata_json = {**(connection.metadata_json or {}), "mode": request.mode}
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="jev",
+        action="jev.mode_set",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+        payload={"mode": request.mode},
+    )
+    await db.commit()
+    return await _jev_status_after_commit(db, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
