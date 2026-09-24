@@ -441,7 +441,7 @@ async def run_investigation(
         )
 
     async def bounded_read(stage, factory, *, retry_calls=0, reserve_retry=None):
-        with timing.measure(stage):
+        with timing.measure(stage), collection_transport(transport):
             return await read_with_recovery(
                 factory,
                 stage=stage,
@@ -481,7 +481,7 @@ async def run_investigation(
                 db, tenant_id, run_id, lease_token=token, release=held, spent=held - unused, now=clock()
             )
 
-        with metered() as meter, reference_read_batch(reference_reads), collection_transport(transport):
+        with metered() as meter, reference_read_batch(reference_reads):
             try:
                 result = await bounded_read(stage, factory, reserve_retry=reserve_retry, **options)
             except asyncio.CancelledError:

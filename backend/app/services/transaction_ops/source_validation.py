@@ -14,6 +14,7 @@ from app.services.transaction_ops.source_reader import (
     _ORDER_REFERENCE,
     SourceReadError,
     _check_envelope,
+    _direct_client,
     _project_orders,
     direct_connection,
 )
@@ -35,6 +36,7 @@ async def read_validated_order(db, tenant_id, step_id, reference, *, source_conn
     # partition. A rotation between cache lookup and HTTP cannot reuse old scope.
     if cached and cached.pop("_validation_connection_fingerprint", None) != fingerprint:
         cached = None
+    client = await _direct_client(tenant_id, connection, credentials, client)
     try:
         order, etag, unchanged = await read_json_response(
             credentials,
