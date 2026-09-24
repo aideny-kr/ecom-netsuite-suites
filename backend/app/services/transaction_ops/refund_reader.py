@@ -6,14 +6,19 @@ excluding them would silently omit refunds issued through the return workflow.
 """
 
 import asyncio
+import copy
+import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops import source_reader as source
+
+MAX_BATCH_ORDERS = 20
+BATCH_MAX_AGE = timedelta(minutes=5)
 
 _REFERENCE = re.compile(r"R[0-9]{9}(?:-[A-Z0-9]+)?\Z")
 
@@ -21,6 +26,10 @@ _REFERENCE = re.compile(r"R[0-9]{9}(?:-[A-Z0-9]+)?\Z")
 def _refund_query(reference):
     if not isinstance(reference, str) or not _REFERENCE.fullmatch(reference):
         raise source.SourceReadError("invalid_order_reference", 422)
+    return _refund_select(f"o.number = '{reference}'", 2)
+
+
+def _refund_select(predicate, limit):
     return (
         "SELECT o.number AS order_reference, o.currency, COUNT(r.id)::text AS refund_count, "
         "COUNT(r.id) FILTER (WHERE NULLIF(r.transaction_id, '') IS NULL)::text AS pending_count, "
@@ -30,7 +39,7 @@ def _refund_query(reference):
         "FILTER (WHERE r.id IS NOT NULL AND NULLIF(r.transaction_id, '') IS NOT NULL), '[]'::jsonb) END AS events "
         "FROM spree_orders o LEFT JOIN spree_payments p ON p.order_id = o.id "
         "LEFT JOIN spree_refunds r ON r.payment_id = p.id "
-        f"WHERE o.number = '{reference}' GROUP BY o.id, o.number, o.currency ORDER BY o.id LIMIT 2"
+        f"WHERE {predicate} GROUP BY o.id, o.number, o.currency ORDER BY o.id LIMIT {limit}"
     )
 
 
@@ -119,7 +128,10 @@ async def read_solidus_refunds(db, tenant_id, step_id, order_reference, *, clien
     data, step, connection = await _read_rows(db, tenant_id, step_id, _refund_query(order_reference), 2, client=client)
     if len(data) != 1:
         raise source.SourceReadError("refund_order_identity_unproven")
-    row = data[0]
+    return _refund_report(data[0], step, connection, order_reference, datetime.now(timezone.utc))
+
+
+def _refund_report(row, step, connection, order_reference, observed_at):
     if row.get("order_reference") != order_reference or not re.fullmatch(r"[A-Z]{3}", str(row.get("currency"))):
         raise source.SourceReadError("refund_order_identity_unproven")
     count, pending = _count(row.get("refund_count")), _count(row.get("pending_count"))
@@ -127,7 +139,7 @@ async def read_solidus_refunds(db, tenant_id, step_id, order_reference, *, clien
         amount = _decimal(row.get("amount"))
     except ValueError:
         raise source.SourceReadError("invalid_refund_evidence") from None
-    if pending > count or amount < 0 or (count == 0 and amount != 0):
+    if amount is None or pending > count or amount < 0 or (count == 0 and amount != 0):
         raise source.SourceReadError("invalid_refund_evidence")
     events, events_complete = _events(row.get("events"), count, amount, pending)
     return {
@@ -142,8 +154,76 @@ async def read_solidus_refunds(db, tenant_id, step_id, order_reference, *, clien
         "unconfirmed_count": pending,
         "source_step_id": str(step.id),
         "connection_id": str(connection.id),
-        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observed_at": observed_at.isoformat(),
     }
+
+
+def _batch_query(references):
+    if (
+        not isinstance(references, list)
+        or not 1 <= len(references) <= MAX_BATCH_ORDERS
+        or any(not isinstance(ref, str) or not _REFERENCE.fullmatch(ref) for ref in references)
+        or len(set(references)) != len(references)
+    ):
+        raise source.SourceReadError("invalid_refund_batch", 422)
+    values = ",".join(f"'{ref}'" for ref in references)
+    # More rows than requested identities is ambiguous, never proof of zero.
+    return _refund_select(f"o.number IN ({values})", len(references) + 1)
+
+
+def _batch_scope(tenant_id, step, connection):
+    return (
+        str(tenant_id),
+        str(step.id),
+        str(connection.id),
+        step.adaptor_type,
+        step.connection_celigo_id,
+        hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest(),
+        (connection.metadata_json or {}).get("region", "us"),
+    )
+
+
+class RefundBatch:
+    """Ephemeral read-ahead, scoped to one run and current authorized credentials.
+
+    Cached observations keep their actual timestamp. Nothing survives a restart;
+    partial/missing/ambiguous batches never populate the cache. Every hit checks
+    tenant/connection authorization again. Action/write preflights do not use it.
+    """
+
+    def __init__(self):
+        self.reports = {}
+        self.scope = None
+        self.observed_at = None
+
+    async def get(self, db, tenant_id, step_id, reference, *, now):
+        if reference not in self.reports:
+            return None
+        if self.observed_at is None or not timedelta(0) <= now - self.observed_at <= BATCH_MAX_AGE:
+            self.reports.clear()
+            return None
+        step, connection, _, _ = await source._load_source(db, tenant_id, step_id)
+        if _batch_scope(tenant_id, step, connection) != self.scope:
+            self.reports.clear()
+            return None
+        return copy.deepcopy(self.reports.pop(reference))
+
+    async def read(self, db, tenant_id, step_id, references, *, client=None):
+        query = _batch_query(references)
+        self.reports.clear()
+        rows, step, connection = await _read_rows(db, tenant_id, step_id, query, len(references) + 1, client=client)
+        if len(rows) != len(references) or {row.get("order_reference") for row in rows} != set(references):
+            raise source.SourceReadError("refund_batch_identity_unproven")
+        observed_at = datetime.now(timezone.utc)
+        reports = {
+            row["order_reference"]: _refund_report(row, step, connection, row["order_reference"], observed_at)
+            for row in rows
+        }
+        self.scope = _batch_scope(tenant_id, step, connection)
+        self.observed_at = observed_at
+        self.reports = reports
+        # Current order was authorized by _read_rows; later hits reauthorize.
+        return copy.deepcopy(self.reports.pop(references[0]))
 
 
 async def read_refund_order_page(db, tenant_id, step_id, since, until, *, after_id=0, client=None):

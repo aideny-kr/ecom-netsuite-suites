@@ -143,13 +143,15 @@ async def test_completed_worker_dispatches_the_next_durable_review_slice(monkeyp
         yield db
 
     monkeypatch.setattr(worker, "worker_async_session", session)
-    monkeypatch.setattr(worker, "set_tenant_context", AsyncMock())
+    tenant_context = AsyncMock()
+    monkeypatch.setattr(worker, "set_tenant_context_session", tenant_context)
     monkeypatch.setattr(runner, "run_investigation", AsyncMock(return_value={"termination_reason": "done"}))
     follow = AsyncMock(return_value=SimpleNamespace(id=child_id, status="pending", origin="manual", max_orders=100))
     monkeypatch.setattr(period_review, "continue_review", follow)
     dispatch = AsyncMock()
     monkeypatch.setattr(scheduler, "_dispatch", dispatch)
     result = await asyncio.to_thread(worker.transaction_ops_run.run, str(tenant), str(run_id))
+    tenant_context.assert_awaited_once_with(db, str(tenant))
     assert result["continuation_run_id"] == str(child_id)
     follow.assert_awaited_once_with(db, tenant, run_id)
     assert dispatch.call_args.args == (tenant, child_id, {"dispatched": 0, "dispatch_failed": 0}, "recon")

@@ -344,3 +344,34 @@ async def test_every_case_evaluation_is_audited_and_penny_difference_stays_open(
     observations = await case_service.list_observations(db, actor.tenant_id, case.id)
     assert {event.payload["observation_id"] for event in events} == {str(row.id) for row in observations}
     assert all(event.actor_type == "system" for event in events)
+
+
+@pytest.mark.parametrize("prior_status,late_status", [("matched", "difference"), ("difference", "matched")])
+async def test_prefetched_refund_cannot_replace_newer_financial_observation(db, admin_user, prior_status, late_status):
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    await observe(db, actor, config, report(observed=NOW), NOW)
+    case = (await case_service.list_cases(db, actor.tenant_id))[0]
+    current = NOW + timedelta(minutes=1)
+    await observe(db, actor, config, report(prior_status, current), current)
+    late_at = NOW + timedelta(minutes=2)
+    late = report(late_status, late_at)
+    late["refund_evidence"] = {
+        "source": {"observed_at": NOW.isoformat()},
+        "target": {"observed_at": late_at.isoformat()},
+    }
+    finding = await observe(db, actor, config, late, late_at)
+    assert case.latest_report_json["balance"]["status"] == prior_status
+    assert finding.report_json["_observation"]["observed_at"] == NOW.isoformat()
+
+
+@pytest.mark.parametrize("age", [timedelta(minutes=16), timedelta(seconds=-1)])
+@pytest.mark.parametrize("compacted", [False, True])
+def test_refund_freshness_controls_case_clearing_even_in_compact_reports(age, compacted):
+    body = report("matched", NOW)
+    observed = (NOW - age).isoformat()
+    if compacted:
+        body["refund_observation_times"] = [observed]
+    else:
+        body["refund_evidence"] = {"source": {"observed_at": observed}}
+    assert not case_service._cleared(body, NOW)

@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
-from app.core.database import set_tenant_context, worker_async_session
+from app.core.database import set_tenant_context, set_tenant_context_session, worker_async_session
 from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import ACTIONS_QUEUE, RECON_COLLECTOR_PRIORITY, RECON_COLLECTOR_QUEUE, celery_app
 
@@ -50,7 +50,7 @@ def transaction_ops_run(tenant_id: str, run_id: str):
 
         tenant, run = uuid.UUID(tenant_id), uuid.UUID(run_id)
         async with worker_async_session(pin_connection=True) as db:
-            await set_tenant_context(db, str(tenant))
+            await set_tenant_context_session(db, str(tenant))
             result = await run_investigation(db, tenant, run)
             child = None
             if result.get("termination_reason") == "budget":

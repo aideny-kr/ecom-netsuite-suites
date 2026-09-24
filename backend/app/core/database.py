@@ -76,6 +76,15 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """
     validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
     _refuse_another_tenant(session, validated)
+    info = getattr(getattr(session, "sync_session", None), "info", None)
+    if isinstance(info, dict) and info.get(_TENANT_CONTEXT_KEY) == validated:
+        # The immutable worker scope is applied by after_begin on EVERY
+        # physical transaction, including after commit/rollback/reconnection.
+        # Acquiring the connection fires that listener if needed. Repeating
+        # SET LOCAL inside the same transaction adds no isolation and costs a
+        # network round trip on every reader/checkpoint.
+        await session.connection()
+        return
     await session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
 
 

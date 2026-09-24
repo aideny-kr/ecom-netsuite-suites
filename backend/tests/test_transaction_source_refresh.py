@@ -265,3 +265,54 @@ def test_worker_completion_and_legacy_call_use_same_lease(lease_tenant, monkeypa
     execute.assert_awaited_once_with(lease_tenant, cid, require_setup_features=True)
     sync.celigo_flow_map_sync.run(lease_tenant, cid)
     assert execute.await_count == 2
+
+
+@pytest.mark.parametrize("change", ["credential", "region", "remote"])
+async def test_batch_hit_sees_database_change_outside_its_identity_map(db, admin_user, change):
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select, update
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.core.encryption import encrypt_credentials
+    from app.models.celigo import CeligoFlowStep
+    from app.models.connection import Connection
+    from app.services.transaction_ops import refund_reader, source_reader
+    from tests.test_transaction_ops_state_db import seed_config
+
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    step = await db.scalar(select(CeligoFlowStep).where(CeligoFlowStep.id == config.source_step_id))
+    connection = await db.get(Connection, step.celigo_connection_id)
+    step.adaptor_type = "RDBMSExport"
+    with celigo_writes_allowed(db):
+        connection.encrypted_credentials = encrypt_credentials({"token": "first"})
+        connection.metadata_json = {"region": "us"}
+        await db.flush()
+    loaded_step, loaded_conn, _, _ = await source_reader._load_source(db, actor.tenant_id, step.id)
+    batch = refund_reader.RefundBatch()
+    batch.scope = refund_reader._batch_scope(actor.tenant_id, loaded_step, loaded_conn)
+    batch.observed_at = datetime.now(timezone.utc)
+    batch.reports = {"R123456789": {"complete": True}}
+    old_scope = batch.scope
+    # Separate identity map, shared outer test transaction: durable database
+    # update is visible without refreshing the original session's objects.
+    async with AsyncSession(bind=await db.connection(), join_transaction_mode="create_savepoint") as other:
+        with celigo_writes_allowed(other):
+            if change == "remote":
+                await other.execute(
+                    update(CeligoFlowStep).where(CeligoFlowStep.id == step.id).values(connection_celigo_id="f" * 24)
+                )
+            elif change == "credential":
+                await other.execute(
+                    update(Connection)
+                    .where(Connection.id == connection.id)
+                    .values(encrypted_credentials=encrypt_credentials({"token": "rotated"}))
+                )
+            else:
+                await other.execute(
+                    update(Connection).where(Connection.id == connection.id).values(metadata_json={"region": "eu"})
+                )
+            await other.commit()
+    assert refund_reader._batch_scope(actor.tenant_id, loaded_step, loaded_conn) == old_scope
+    assert await batch.get(db, actor.tenant_id, step.id, "R123456789", now=batch.observed_at) is None
