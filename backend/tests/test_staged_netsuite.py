@@ -45,7 +45,7 @@ async def adapter(monkeypatch):
     return staged.StagedNetSuite(
         None,
         uuid4(),
-        SimpleNamespace(id=uuid4(), created_at=NOW),
+        SimpleNamespace(id=uuid4(), created_at=NOW, max_api_calls=2000, api_calls_used=0, api_calls_held=0),
         {"netsuite_connection_id": str(uuid4()), "netsuite_account_id": "6738075", "subsidiary_id": "1"},
         SimpleNamespace(reference_field="tranid", refund_adjustments=None),
         {"phase": "orders", "pending_refs": REFS.copy()},
@@ -124,3 +124,51 @@ async def test_batch_failure_does_not_retry_for_every_pending_reference(adapter)
     adapter.progress["pending_refs"] = REFS[1:]
     assert await adapter.order(REFS[1]) is None
     assert staged.bulk.read_orders.await_count == 1
+
+
+async def test_oversized_stage_falls_back_but_auth_storage_errors_still_stop(adapter):
+    staged.store.save.side_effect = NetSuiteEvidenceError("batch_size_budget")
+    assert await adapter.order(REFS[0]) is None
+    adapter.progress["pending_refs"] = REFS[1:]
+    assert await adapter.order(REFS[1]) is None
+    assert adapter.reserve.await_count == 1 and adapter.checkpoint.await_count == 0
+    adapter.cache.clear()
+    adapter.attempted.clear()
+    adapter.progress["pending_refs"] = REFS.copy()
+    staged.store.save.side_effect = NetSuiteEvidenceError("batch_credentials_changed")
+    with pytest.raises(NetSuiteEvidenceError, match="batch_credentials_changed"):
+        await adapter.order(REFS[0])
+
+
+@pytest.mark.parametrize("remaining", [37, 90])
+async def test_small_budget_uses_individual_path_without_spending_on_batch(adapter, remaining):
+    adapter.run.max_api_calls = remaining
+    assert await adapter.order(REFS[0]) is None
+    adapter.reserve.assert_not_awaited()
+    staged.bulk.read_orders.assert_not_awaited()
+
+
+async def test_source_updates_and_refund_observations_after_prefetch_require_fresh_target(adapter):
+    first = await adapter.order(REFS[0], source_updated_at=NOW - timedelta(minutes=1))
+    assert first
+    assert await adapter.order(REFS[1], source_updated_at=NOW + timedelta(seconds=1)) is None
+    refund = await adapter.refund(REFS[0], first)
+    assert refund
+    # The report carries its real timestamp; a newer source read invalidates it.
+    refund["observed_at"] = NOW.isoformat()
+    assert await adapter.refund(REFS[0], first, source_observed_at=NOW + timedelta(seconds=1)) is None
+
+
+async def test_delayed_continuation_does_not_reuse_old_financial_observation(adapter, monkeypatch):
+    await adapter.order(REFS[0])
+    adapter.clock = lambda: NOW + timedelta(minutes=16)
+    # Real storage filters the collection interval; model that boundary here.
+    staged.store.load.return_value = None
+    staged.store.load.side_effect = None
+    adapter.cache = {}
+    adapter.attempted = set()
+    staged.bulk.read_orders.return_value["orders"][REFS[0]]["observed_at"] = adapter.clock().isoformat()
+    result = await adapter.order(REFS[0])
+    assert result["observed_at"] == adapter.clock().isoformat()
+    assert staged.bulk.read_orders.await_count == 2
+    assert staged.store.load.call_args.kwargs["since"] == NOW + timedelta(minutes=6)

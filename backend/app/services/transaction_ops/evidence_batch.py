@@ -25,7 +25,7 @@ from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError, 
 
 VERSION = 1
 MAX_BYTES = 4_000_000
-MAX_AGE = timedelta(hours=24)
+MAX_AGE = timedelta(minutes=10)  # Below the 15-minute financial freshness gate.
 
 
 def _encode(value):

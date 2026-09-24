@@ -875,7 +875,9 @@ async def run_investigation(
                 progress["pending_refs"] = progress["pending_refs"][1:]
                 await save()
                 continue
-            targets = await staged.order(reference) if staged else None
+            targets = (
+                await staged.order(reference, source_updated_at=_time(orders[0].get("updated_at"))) if staged else None
+            )
             if targets is None:
                 if not await reserve(10, hold=True):  # NETSUITE_READ_CALLS data reads plus OAuth maintenance.
                     return await finish("budget")
@@ -986,7 +988,9 @@ async def run_investigation(
                 except Exception:
                     refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
                 if staged and _target_refunds_reader is None:
-                    staged_refund = await staged.refund(reference, targets)
+                    staged_refund = await staged.refund(
+                        reference, targets, source_observed_at=_time(refunds.get("source", {}).get("observed_at"))
+                    )
                     if staged_refund is not None:
                         refunds["target"] = staged_refund
                 if (

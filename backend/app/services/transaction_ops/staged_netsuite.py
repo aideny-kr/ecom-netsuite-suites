@@ -37,6 +37,12 @@ class StagedNetSuite:
             self.cache[key] = entry
         identifier, data, _ = entry
         if reference not in data and can_fetch and key not in self.attempted:
+            # Leave enough for the primary individual financial reads after a
+            # failed batch (order + refund + the largest source refund read).
+            fallback = 56 if kind == "orders" else 28
+            remaining = self.run.max_api_calls - self.run.api_calls_used - (self.run.api_calls_held or 0)
+            if remaining < bulk.MAX_CALLS + 3 + fallback:
+                return None
             if await self.reserve(bulk.MAX_CALLS + 3, hold=True):
                 self.attempted.add(key)
                 started = self.clock()
@@ -49,17 +55,25 @@ class StagedNetSuite:
                     self.progress[counter] = self.progress.get(counter, 0) + 1
                     self.cache[key] = (None, {}, started)
                     return None
-                identifier = await store.save(
-                    self.db,
-                    self.tenant,
-                    self.run.id,
-                    kind,
-                    context,
-                    self.config,
-                    result,
-                    started_at=started,
-                    now=self.clock(),
-                )
+                try:
+                    identifier = await store.save(
+                        self.db,
+                        self.tenant,
+                        self.run.id,
+                        kind,
+                        context,
+                        self.config,
+                        result,
+                        started_at=started,
+                        now=self.clock(),
+                    )
+                except NetSuiteEvidenceError as exc:
+                    if str(exc) != "batch_size_budget":
+                        raise
+                    counter = "native_" + kind + "_batch_failures"
+                    self.progress[counter] = self.progress.get(counter, 0) + 1
+                    self.cache[key] = (None, {}, started)
+                    return None
                 data = result[kind]
                 self.cache[key] = (identifier, data, started)
                 self.progress["native_" + kind + "_batch"] = identifier
@@ -67,14 +81,12 @@ class StagedNetSuite:
                 self.progress[counter] = self.progress.get(counter, 0) + 1
                 await self.checkpoint()
         if reference in data:
-            counter = "native_" + kind + "_batch_hits"
-            self.progress[counter] = self.progress.get(counter, 0) + 1
             if kind == "orders":
                 self.order_id = identifier
             return data[reference]
         return None
 
-    async def order(self, reference):
+    async def order(self, reference, *, source_updated_at=None):
         # Include this page's references so advancing the source/dependency feed
         # never reuses a negative result or an older parent-only observation.
         refs = list(dict.fromkeys(self.progress["pending_refs"][: bulk.MAX_ORDERS]))
@@ -89,15 +101,20 @@ class StagedNetSuite:
         if cached and cached[1] and reference not in cached[1]:
             self.cache.clear()
             self.attempted.clear()
-        return await self.get(
+        result = await self.get(
             "orders",
             reference,
             context,
             lambda: bulk.read_orders(*self.scope(), refs, self.mapping.reference_field),
             can_fetch=len(refs) > 1,
         )
+        if result and source_updated_at and _time(result.get("observed_at")) < source_updated_at:
+            return None  # Source changed after this reference was prefetched.
+        if result is not None:
+            self.progress["native_orders_batch_hits"] = self.progress.get("native_orders_batch_hits", 0) + 1
+        return result
 
-    async def refund(self, reference, target):
+    async def refund(self, reference, target, *, source_observed_at=None):
         phase = self.progress.get("phase")
         entry = self.cache.get(("orders", store.context_hash(self.config, phase)))
         if not entry or not self.order_id or entry[1].get(reference) != target:
@@ -110,7 +127,7 @@ class StagedNetSuite:
         }
         if reference not in eligible:
             return None
-        return await self.get(
+        result = await self.get(
             "refunds",
             reference,
             context,
@@ -122,3 +139,8 @@ class StagedNetSuite:
                 else None,
             ),
         )
+        if result and source_observed_at and _time(result.get("observed_at")) < source_observed_at:
+            return None  # A newer source-refund read has no event version to compare.
+        if result is not None:
+            self.progress["native_refunds_batch_hits"] = self.progress.get("native_refunds_batch_hits", 0) + 1
+        return result

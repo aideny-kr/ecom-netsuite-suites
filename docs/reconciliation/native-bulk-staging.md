@@ -12,7 +12,7 @@ All-date identity queries preserve duplicate and cross-subsidiary matches. Compl
 
 Migration 113 adds immutable batches with a tenant/run composite FK, forced RLS, config/phase/parent digest, credential fingerprint and original collection interval. Decimals remain exact strings. Identical observation replays produce the same ID and cannot refresh timestamps. A batch alone does not establish scan or daily coverage.
 
-The runner reserves 35 calls per batch: up to 32 actual native calls plus the existing OAuth allowance. Existing metering settles actual sends; individual fallback requires a separate reservation. Batches are scoped to the current scan cycle and expire within 24 hours. Configuration, phase, parent-batch and credential changes fence durable reuse. Fresh financial-write preflights remain unchanged.
+The runner reserves 35 calls per batch: up to 32 actual native calls plus the existing OAuth allowance. Existing metering settles actual sends; individual fallback requires a separate reservation. Batches are scoped to the current scan cycle and are reusable for at most ten minutes, below the existing fifteen-minute financial freshness gate. Configuration, phase, parent-batch and credential changes fence durable reuse. Fresh financial-write preflights remain unchanged.
 
 This is an operational first bulk path, not an assertion that all native evidence can be extracted via SuiteQL. Commercial records are still retrieved once individually within the shared batch. New daily observations still need change validation; completed review coverage uses the existing daily-evidence mechanism.
 
@@ -23,3 +23,7 @@ Initial integrated focused suite: 218 passed, including seeded reconciliation li
 Live read-only Inc sample: five order projections and refund results matched the individual path exactly, excluding observation times and call accounting. Calls 37 → 11; elapsed collection 24.312s → 8.838s. All five had zero refunds. This small sequential sample is not an end-to-end throughput benchmark; provider warming and order mix may affect timing.
 
 Private artifacts: `/Users/aidenyi/.codex/artifacts/recon-bulk-staging-20260924`. Full CI, independent pre-merge review, staging migration/deployment and live smoke are required release gates.
+
+Independent-review follow-ups also preserve individual-read budget headroom and reject prefetched orders older than the source's updated_at, or refunds older than a newly read source refund observation. Cached evidence is an as-observed comparison, not a claim of current provider state. Financial decisions still require existing fresh preflights. The full schema check also exposed a pre-existing EvalScoreHistory model-only mismatch: its inherited updated_at was never created by migration057; the model now maps only the existing created_at.
+
+Three positive-refund cases also matched exactly (each verified refund100.00): native calls25→14, collection13.017s→10.352s. Post-review focused tests:143 passed. Full schema validation passes after the model correction. Collectors have a90-second batch timeout that falls back under a new reservation, while the runner's deadline remains authoritative.

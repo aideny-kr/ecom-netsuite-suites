@@ -171,21 +171,24 @@ class RefundGraphBatch:
 
 async def read_orders(db, tenant_id, connection_id, account_id, subsidiary_id, refs, reference_field):
     account = _account(account_id)
-    async with asyncio.timeout(240):
-        async with authenticated_reader(db, tenant_id, connection_id, account, max_api_calls=MAX_CALLS) as reader:
-            results = await collect_orders(reader, refs, reference_field, subsidiary_id)
-            for value in results.values():
-                value["scope"] = {
-                    "connection_id": str(connection_id),
-                    "account_id": account,
-                    "subsidiary_id": subsidiary_id,
-                    "reference_field": reference_field,
+    try:
+        async with asyncio.timeout(90):
+            async with authenticated_reader(db, tenant_id, connection_id, account, max_api_calls=MAX_CALLS) as reader:
+                results = await collect_orders(reader, refs, reference_field, subsidiary_id)
+                for value in results.values():
+                    value["scope"] = {
+                        "connection_id": str(connection_id),
+                        "account_id": account,
+                        "subsidiary_id": subsidiary_id,
+                        "reference_field": reference_field,
+                    }
+                return {
+                    "orders": results,
+                    "api_calls": reader.calls,
+                    "credential_fingerprint": reader.credential_fingerprint,
                 }
-            return {
-                "orders": results,
-                "api_calls": reader.calls,
-                "credential_fingerprint": reader.credential_fingerprint,
-            }
+    except TimeoutError:
+        raise NetSuiteEvidenceError("bulk_read_timeout") from None
 
 
 async def read_refunds(db, tenant_id, connection_id, account_id, subsidiary_id, targets, *, adjustment_profile=None):
@@ -197,42 +200,45 @@ async def read_refunds(db, tenant_id, connection_id, account_id, subsidiary_id, 
         ref: refund_scope(connection_id, account, subsidiary_id, ref, target, adjustment_profile)
         for ref, target in targets.items()
     }
-    async with asyncio.timeout(240):
-        async with authenticated_reader(db, tenant_id, connection_id, account, max_api_calls=MAX_CALLS) as reader:
-            batch = await RefundGraphBatch.collect(reader, {ref: scope[0] for ref, scope in scopes.items()})
-            results = {}
-            for ref, (order, currency_id, currency) in scopes.items():
-                before = reader.calls
-                try:
-                    result = await collect_refunds(
-                        reader,
-                        order["record_id"],
-                        subsidiary_id,
-                        currency_id,
-                        order_reference=ref,
-                        adjustment_profile=adjustment_profile,
-                        request_links_reader=batch.links,
-                        graph_reader=batch.graph,
-                    )
-                    results[ref] = {
-                        **result,
-                        "amount": str(result["amount"]),
-                        "complete": True,
-                        "provider": "netsuite",
-                        "account_id": account,
-                        "subsidiary_id": subsidiary_id,
-                        "connection_id": str(connection_id),
-                        "order_reference": ref,
-                        "currency": currency,
-                        "api_calls": reader.calls - before,
-                        "observed_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                except (ValueError, NetSuiteEvidenceError):
-                    # Keep sibling successes. The runner explicitly falls back for
-                    # failed orders, with a new reservation; no negative caching.
-                    continue
-            return {
-                "refunds": results,
-                "api_calls": reader.calls,
-                "credential_fingerprint": reader.credential_fingerprint,
-            }
+    try:
+        async with asyncio.timeout(90):
+            async with authenticated_reader(db, tenant_id, connection_id, account, max_api_calls=MAX_CALLS) as reader:
+                batch = await RefundGraphBatch.collect(reader, {ref: scope[0] for ref, scope in scopes.items()})
+                results = {}
+                for ref, (order, currency_id, currency) in scopes.items():
+                    before = reader.calls
+                    try:
+                        result = await collect_refunds(
+                            reader,
+                            order["record_id"],
+                            subsidiary_id,
+                            currency_id,
+                            order_reference=ref,
+                            adjustment_profile=adjustment_profile,
+                            request_links_reader=batch.links,
+                            graph_reader=batch.graph,
+                        )
+                        results[ref] = {
+                            **result,
+                            "amount": str(result["amount"]),
+                            "complete": True,
+                            "provider": "netsuite",
+                            "account_id": account,
+                            "subsidiary_id": subsidiary_id,
+                            "connection_id": str(connection_id),
+                            "order_reference": ref,
+                            "currency": currency,
+                            "api_calls": reader.calls - before,
+                            "observed_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    except (ValueError, NetSuiteEvidenceError):
+                        # Keep sibling successes. The runner explicitly falls back for
+                        # failed orders, with a new reservation; no negative caching.
+                        continue
+                return {
+                    "refunds": results,
+                    "api_calls": reader.calls,
+                    "credential_fingerprint": reader.credential_fingerprint,
+                }
+    except TimeoutError:
+        raise NetSuiteEvidenceError("bulk_read_timeout") from None
