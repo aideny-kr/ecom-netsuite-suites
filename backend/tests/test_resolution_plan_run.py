@@ -32,7 +32,16 @@ async def _result(db, tenant_id, run_id, **over):
         evidence={"charge_source_id": f"ch_{uuid.uuid4().hex[:8]}", "order_reference": "R123456789"},
     )
     defaults.update(over)
-    return await create_test_recon_result(db, tenant_id, run_id, **defaults)
+    result = await create_test_recon_result(db, tenant_id, run_id, **defaults)
+    from app.models.reconciliation import ReconciliationRun
+    from tests.resolution_evidence_helpers import seed_linked_evidence, seed_washout_evidence
+
+    run = (await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == run_id))).scalar_one()
+    if result.variance_type == "fees":
+        await seed_linked_evidence(db, run, result)
+    if (result.evidence or {}).get("washout"):
+        await seed_washout_evidence(db, run, result)
+    return result
 
 
 async def test_plan_run_writes_proposals_for_non_matches(db, tenant_a):
@@ -968,19 +977,22 @@ async def test_plan_run_enriches_fee_amount_and_emits_book_fee_line(db, tenant_a
     producing book_fee_line (rule 7b) end-to-end — not needs_human."""
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     payout_line = await create_test_payout_line(db, tenant_a.id, fee=Decimal("3.20"))
-    await _result(
+    result = await _result(
         db,
         tenant_a.id,
         run.id,
         variance_type="amount_mismatch",
-        variance_amount=Decimal("3.00"),  # within FEE_EXPLAIN_TOLERANCE (0.50) of fee 3.20
+        variance_amount=Decimal("3.20"),
         stripe_amount=Decimal("100.00"),
-        netsuite_amount=Decimal("97.00"),
+        netsuite_amount=Decimal("96.80"),
         evidence={
             "charge_source_id": f"ch_{uuid.uuid4().hex[:8]}",
             "charge_payout_line_id": str(payout_line.id),
         },
     )
+    from tests.resolution_evidence_helpers import seed_linked_evidence
+
+    await seed_linked_evidence(db, run, result)
     await db.flush()
 
     out = await plan_run(db, tenant_a.id, run.id)

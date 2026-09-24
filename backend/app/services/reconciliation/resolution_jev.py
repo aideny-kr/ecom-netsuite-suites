@@ -28,10 +28,10 @@ from app.core.config import settings
 from app.services.reconciliation import resolution_agent
 from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS, validate_output
 from app.services.reconciliation.resolution_planner import (
-    FEE_EXPLAIN_TOLERANCE,
     RECENCY_HOLD_ROOT_CAUSES,
     RECENT_PAYOUT_LAG_DAYS,
 )
+from app.services.reconciliation.resolution_verifier import currency_basis_verified, fee_explained
 from app.services.typesafe.client import try_ask
 
 # The only string values a fact may carry to the external API, per field: the variance
@@ -72,7 +72,7 @@ _CRITERIA = {
     ),
     "writeoff_je": (
         "A small rounding or currency-conversion difference with no other explanation, and "
-        "`facts.above_materiality` is false."
+        "`facts.above_materiality` is false and `facts.currency_consistent` is true."
     ),
     "carry_forward": (
         "A timing item that needs no booking: `facts.variance_type` is timing (amounts agree, dates "
@@ -83,7 +83,7 @@ _CRITERIA = {
     "needs_human": (
         "None of the other options clearly applies, the evidence conflicts, `facts.currency_consistent` is "
         "false, `facts.payout_status` is failed or canceled (funds never settled), or a chargeback, dispute "
-        "or refund is involved."
+        "or unverified refund is involved. A verified washout can use carry_forward."
     ),
 }
 
@@ -122,7 +122,7 @@ def derive_facts(context: dict) -> dict:
     currency = context.get("currency")
     line = context.get("payout_line") or {}
     fee = _dec(line.get("fee"))
-    fee_same_currency = line.get("currency") in (None, currency)
+    fee_same_currency = bool(currency) and line.get("currency") == currency
     postings = context.get("candidate_postings") or []
 
     def _comparable_amount(p: dict) -> Decimal | None:
@@ -132,7 +132,6 @@ def derive_facts(context: dict) -> dict:
         return _dec(p.get("amount")) if p.get("currency") in (None, currency) else None
 
     comparable = [_comparable_amount(p) for p in postings]
-    same_currency_postings = [p for p, a in zip(postings, comparable, strict=True) if a is not None]
     order_reference = (context.get("evidence") or {}).get("order_reference") or ""
     payout = context.get("payout") or {}
     days = _dec(payout.get("days_since_arrival"))
@@ -143,12 +142,12 @@ def derive_facts(context: dict) -> dict:
         "variance_type": context.get("variance_type"),
         "above_materiality": str(context.get("above_materiality")) == "True",
         "has_order_reference": bool(order_reference),
-        "currency_consistent": fee_same_currency and len(same_currency_postings) == len(postings),
+        "currency_consistent": currency_basis_verified(context) if netsuite is not None else fee_same_currency,
         # A zero fee explains nothing, however small the variance (planner rule 7b: fee > 0).
         "variance_matches_payout_fee": (
             None
             if variance is None or fee is None or not fee_same_currency
-            else fee > 0 and abs(abs(variance) - abs(fee)) <= FEE_EXPLAIN_TOLERANCE
+            else fee_explained(stripe, netsuite, variance, fee)
         ),
         "netsuite_lower_than_stripe": None if stripe is None or netsuite is None else netsuite < stripe,
         "candidate_count": "none" if not postings else "one" if len(postings) == 1 else "several",
@@ -168,7 +167,7 @@ def derive_facts(context: dict) -> dict:
         # so the carry_forward criterion rests on facts rather than on dates Jev cannot read.
         "payout_status": payout.get("status"),
         "payout_recent": None if days is None else days <= RECENT_PAYOUT_LAG_DAYS,
-        "washout": context.get("root_cause") == "washout" or str(evidence.get("washout")) == "True",
+        "washout": context.get("verified_washout") is True,
     }
 
 
@@ -221,7 +220,11 @@ def eligible(action: str, facts: dict) -> bool:
             and facts["currency_consistent"]
         )
     if action == "writeoff_je":
-        return not facts["above_materiality"] and facts["variance_type"] in {"fx_rounding", "amount_mismatch"}
+        return bool(
+            facts["currency_consistent"]
+            and not facts["above_materiality"]
+            and facts["variance_type"] in {"fx_rounding", "amount_mismatch"}
+        )
     if action == "carry_forward":
         # The recency hold is the planner's rule 7 and applies to MISSING counterparts only;
         # a real amount mismatch on a recent payout is not a timing item.
@@ -278,6 +281,12 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
     Jev honestly, including how often the safety net had to step in.
     """
     mode = settings.JEV_RECON_RESOLUTION_MODE
+    # The global mode remains the default; a scoped canary must not promote
+    # other allowlisted tenants. The transport allowlist still gates every call.
+    if mode == "shadow" and str(tenant_id) in {
+        item.strip() for item in settings.JEV_RECON_LIVE_TENANTS.split(",") if item.strip()
+    }:
+        mode = "live"
     if mode not in {"shadow", "live"}:
         out = await resolution_agent.classify_item(adapter, model, context)
         return validate_output(out, context, materiality), None
@@ -342,7 +351,7 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
             record["jev_action"] = None
 
     confident = record["jev_action"] is not None and record["jev_confidence"] >= settings.JEV_RECON_MIN_CONFIDENCE
-    if mode == "live" and confident and jev_validated is not None:
+    if mode == "live" and confident and jev_validated is not None and not record["jev_veto"]:
         record["guard_veto"] = record["jev_veto"]
         record["decided_by"] = "guard" if record["jev_veto"] else "jev"
         record["applied_action"] = jev_validated["action"]
@@ -361,6 +370,9 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
     else:
         llm_out, record["llm_elapsed_ms"] = llm_result
         validated = validate_output(llm_out, context, materiality)
+    record["guard_veto"] = validated.get("contract_violation")
+    if record["guard_veto"]:
+        record["decided_by"] = "guard"
     record["llm_action"] = record["applied_action"] = validated["action"]
     if record["jev_action"] is not None:
         record["agree"] = record["jev_validated_action"] == validated["action"]

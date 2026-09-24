@@ -1,3 +1,5 @@
+from tests.resolution_evidence_helpers import seed_run_linked_evidence
+
 """ResolutionAgent Celery task + flag-gated dispatch after planning.
 
 Uses the FakeAdapter (mirrors LLMResponse/ToolUseBlock) monkeypatched over
@@ -65,6 +67,7 @@ async def _seed_planned_run(db, tenant_id):
         evidence={"charge_source_id": "ch_task1", "order_reference": "R628489275"},
     )
     await db.flush()
+    await seed_run_linked_evidence(db, tenant_id, run.id)
     await plan_run(db, tenant_id, run.id)
     return run, result
 
@@ -200,6 +203,7 @@ async def test_task_processes_two_eligible_items_both_applied(db, tenant_a, monk
             evidence={"charge_source_id": f"ch_task2_{i}", "order_reference": f"R{i}"},
         )
     await db.flush()
+    await seed_run_linked_evidence(db, tenant_a.id, run.id)
     await plan_run(db, tenant_a.id, run.id)
 
     fake_adapter = FakeAdapter(

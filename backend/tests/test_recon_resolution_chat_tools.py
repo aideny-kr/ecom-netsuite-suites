@@ -33,6 +33,7 @@ from tests.conftest import (
     create_test_user,
     enable_feature_flag,
 )
+from tests.resolution_evidence_helpers import seed_run_linked_evidence
 
 
 async def _seed_fee_group(db, tenant):
@@ -57,6 +58,7 @@ async def _seed_fee_group(db, tenant):
         evidence={"charge_source_id": "ch_1", "order_reference": "R1"},
     )
     await db.flush()
+    await seed_run_linked_evidence(db, user.tenant_id, run.id)
     await plan_resolutions(str(run.id), user=user, db=db)
     return user, run
 
@@ -192,6 +194,7 @@ async def test_approve_group_included_above_materiality_ids_survives_real_dispat
     await db.flush()
     from app.api.v1.reconciliation import plan_resolutions
 
+    await seed_run_linked_evidence(db, user.tenant_id, run.id)
     await plan_resolutions(str(run.id), user=user, db=db)
 
     proposals = (
@@ -251,6 +254,7 @@ async def test_approve_group_surfaces_ui_flag_off_as_structured_error(db, tenant
         evidence={"charge_source_id": "ch_1", "order_reference": "R1"},
     )
     await db.flush()
+    await seed_run_linked_evidence(db, user.tenant_id, run.id)
     await plan_resolutions(str(run.id), user=user, db=db)
     await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui", enabled=False)
 

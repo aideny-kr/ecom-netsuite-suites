@@ -24,6 +24,7 @@ from app.services.reconciliation.resolution_agent import (
 )
 from app.services.reconciliation.resolution_planner import plan_run
 from tests.conftest import create_test_recon_result, create_test_recon_run
+from tests.resolution_evidence_helpers import seed_linked_evidence
 
 MATERIALITY = (Decimal("50"), Decimal("0.01"))
 
@@ -70,6 +71,7 @@ async def _seed_needs_human(db, tenant_id, *, variance_amount=Decimal("77.10"), 
         netsuite_amount=Decimal("422.90"),
         evidence={"charge_source_id": f"ch_{uuid.uuid4().hex[:8]}", "order_reference": "R628489275"},
     )
+    await seed_linked_evidence(db, run, result)
     await db.flush()
     await plan_run(db, tenant_id, run.id)
     eligible = await fetch_agent_eligible(db, tenant_id, run.id)
@@ -273,7 +275,7 @@ async def test_gather_context_tenant_scoped_candidate_postings(db, tenant_a, ten
     postings = context["candidate_postings"]
     assert len(postings) == 1
     assert postings[0]["netsuite_internal_id"] == "" or postings[0]["record_type"] == "customerdeposit"
-    assert all(isinstance(v, str) for p in postings for v in p.values())
+    assert all(v is None or isinstance(v, str) for p in postings for v in p.values())
     assert postings[0]["amount"] == "495.00"
 
 

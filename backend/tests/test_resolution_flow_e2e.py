@@ -18,6 +18,7 @@ from tests.conftest import (
     create_test_user,
     enable_feature_flag,
 )
+from tests.resolution_evidence_helpers import seed_run_linked_evidence
 
 
 async def test_summary_first_flow_end_to_end(db, tenant_a):
@@ -68,6 +69,7 @@ async def test_summary_first_flow_end_to_end(db, tenant_a):
     await db.flush()
 
     # 1. plan
+    await seed_run_linked_evidence(db, tenant_a.id, run.id)
     plan = await plan_resolutions(str(run.id), user=user, db=db)
     assert plan["planned_count"] == 3
 

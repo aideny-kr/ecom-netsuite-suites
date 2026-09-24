@@ -12,6 +12,7 @@ from tests.conftest import (
     create_test_user,
     enable_feature_flag,
 )
+from tests.resolution_evidence_helpers import seed_run_linked_evidence
 
 
 async def test_approve_group_core_direct_call_no_fastapi_user(db, tenant_a):
@@ -32,6 +33,7 @@ async def test_approve_group_core_direct_call_no_fastapi_user(db, tenant_a):
         evidence={"charge_source_id": "ch_1", "order_reference": "R1"},
     )
     await db.flush()
+    await seed_run_linked_evidence(db, user.tenant_id, run.id)
     await plan_resolutions(str(run.id), user=user, db=db)
 
     out = await approve_group_core(

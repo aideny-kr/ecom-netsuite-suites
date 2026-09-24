@@ -26,6 +26,7 @@ from app.services.reconciliation.four_bucket_classifier import (
 )
 from app.services.reconciliation.narrative_contract import narrative_respects_evidence
 from app.services.reconciliation.resolution_planner import VEHICLE_BY_ACTION, group_key_for
+from app.services.reconciliation.resolution_verifier import action_violation, posting_context
 
 AGENT_ALLOWED_ACTIONS = frozenset(
     {"book_fee_line", "create_and_apply_deposit", "apply_deposit", "writeoff_je", "carry_forward", "needs_human"}
@@ -104,6 +105,9 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
     + payout line detail if a charge_payout_line_id is present. Every value
     is stringified so the narrative-contract validator can flatten it.
     """
+    if str(proposal.tenant_id) != str(tenant_id):
+        raise ValueError("proposal tenant mismatch")
+
     from app.models.canonical import NetsuitePosting, PayoutLine
 
     result = (
@@ -136,6 +140,33 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
         "evidence": {k: str(v) for k, v in evidence.items()},
     }
 
+    from app.models.reconciliation import ReconciliationRun
+    from app.services.reconciliation.order_ref import extract_order_ref, load_order_ref_pattern
+
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == proposal.run_id,
+                ReconciliationRun.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    context["subsidiary_id"] = run.subsidiary_id if run else None
+    context["matched_posting"] = None
+    if result is not None and result.deposit_id is not None:
+        matched = (
+            await db.execute(
+                select(NetsuitePosting).where(
+                    NetsuitePosting.id == result.deposit_id,
+                    NetsuitePosting.tenant_id == tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if matched is not None:
+            context["matched_posting"] = posting_context(matched)
+    pattern = await load_order_ref_pattern(db, str(tenant_id))
+    context["verified_washout"] = False
+
     conditions = []
     if stripe_amount is not None:
         # A negative stripe_amount (refund/chargeback) flips which bound is
@@ -155,26 +186,14 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
                 await db.execute(
                     select(NetsuitePosting)
                     .where(NetsuitePosting.tenant_id == tenant_id, clause)
+                    .order_by(NetsuitePosting.id)
                     .limit(_CANDIDATE_POSTING_LIMIT)
                 )
             )
             .scalars()
             .all()
         )
-        candidate_postings = [
-            {
-                "record_type": p.record_type,
-                # amount/currency are the SUBSIDIARY BASE values; the transaction-currency
-                # pair is what a Stripe charge must be compared to (canonical.py, Phase A).
-                "amount": str(p.amount),
-                "currency": p.currency,
-                "transaction_currency": p.transaction_currency or "",
-                "foreign_amount": str(p.foreign_amount) if p.foreign_amount is not None else "",
-                "memo": p.memo or "",
-                "netsuite_internal_id": p.netsuite_internal_id or "",
-            }
-            for p in rows
-        ]
+        candidate_postings = [posting_context(p) for p in rows]
         # Only LOCAL completeness: fewer rows than the cap means the local predicate is
         # exhausted, not that NetSuite holds nothing — ingestion is date-bounded and capped.
         context["candidate_search_complete"] = str(len(rows) < _CANDIDATE_POSTING_LIMIT)
@@ -192,6 +211,9 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
             ).scalar_one_or_none()
             if pl is not None:
                 context["payout_line"] = {
+                    "order_reference": extract_order_ref(pl.description, pattern),
+                    "related_order_id": pl.related_order_id,
+                    "subsidiary_id": pl.subsidiary_id,
                     "line_type": pl.line_type,
                     "amount": str(pl.amount),
                     "fee": str(pl.fee),
@@ -216,7 +238,77 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
                         "days_since_arrival": str(days) if days is not None else None,
                     }
 
+                if order_reference and (evidence.get("washout") or proposal.root_cause == "washout"):
+                    context["verified_washout"] = await _verify_cached_washout(
+                        db,
+                        tenant_id,
+                        pl,
+                        order_reference,
+                        pattern,
+                        context,
+                    )
+
     return context
+
+
+async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, context) -> bool:
+    """Bounded canonical recheck, never trusting the saved washout label alone.
+
+    Ambiguous multiple charges, truncated reads, missing event timestamps, or
+    another currency/subsidiary fail closed. No upstream extraction is needed.
+    """
+    from app.models.canonical import PayoutLine
+    from app.services.reconciliation.order_recon_job import _washout_event_date, _washout_evidence
+    from app.services.reconciliation.order_ref import extract_order_ref
+    from app.services.reconciliation.resolution_verifier import amount
+
+    rows = (
+        (
+            await db.execute(
+                select(PayoutLine)
+                .where(
+                    PayoutLine.tenant_id == tenant_id,
+                    or_(
+                        PayoutLine.related_order_id == reference,
+                        PayoutLine.description.contains(reference, autoescape=True),
+                    ),
+                    PayoutLine.line_type.in_(("charge", "refund")),
+                )
+                .order_by(PayoutLine.id)
+                .limit(101)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(rows) == 101:
+        return False
+    linked = [
+        p for p in rows if (p.related_order_id == reference or extract_order_ref(p.description, pattern) == reference)
+    ]
+    charges = [p for p in linked if p.line_type == "charge"]
+    if len(charges) != 1 or charges[0].id != charge.id or charge.amount <= 0:
+        return False
+    if charge.currency != context.get("currency") or charge.amount != amount(context.get("stripe_amount")):
+        return False
+    charge_date, fallback = _washout_event_date(charge.raw_data, None)
+    if fallback or charge_date is None:
+        return False
+    refunds = []
+    for p in linked:
+        if p.line_type != "refund":
+            continue
+        event_date, fallback = _washout_event_date(p.raw_data, None)
+        if (
+            fallback
+            or event_date is None
+            or p.amount >= 0
+            or p.currency != charge.currency
+            or p.subsidiary_id != charge.subsidiary_id
+        ):
+            return False
+        refunds.append((p.amount, event_date, p.currency))
+    return bool(_washout_evidence(charge.amount, charge_date, charge.currency, refunds))
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +394,10 @@ def validate_output(out: dict, context: dict, materiality: tuple[Decimal, Decima
     # from the proposal, so this doesn't need a separate parameter.
     if context.get("root_cause") == "chargeback" and action != "needs_human":
         return _degraded("chargeback_policy", key_evidence)
+
+    violation = action_violation(action, context)
+    if violation:
+        return _degraded(violation, key_evidence)
 
     if action == "writeoff_je":
         mat_abs, mat_pct = materiality

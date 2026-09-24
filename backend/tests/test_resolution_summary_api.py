@@ -20,6 +20,7 @@ from tests.conftest import (
     create_test_user,
     enable_feature_flag,
 )
+from tests.resolution_evidence_helpers import seed_legacy_fee_proposals
 
 
 async def _seed(db, tenant):
@@ -88,6 +89,7 @@ async def _seed(db, tenant):
     run.matches_count = 1
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     return user, run
 
 
@@ -192,6 +194,7 @@ async def test_group_proposals_listing_includes_identifiers_when_matched(db, ten
     run.matches_count = 0
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
 
     page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
     assert len(page) == 1
@@ -232,6 +235,7 @@ async def test_group_proposals_carry_the_result_status_the_api_actually_enforces
     run.matches_count = 0
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
 
     page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
     assert len(page) == 1
@@ -296,6 +300,7 @@ async def test_group_proposals_listing_carries_deposit_fx_fields_when_matched(db
     run.matches_count = 0
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
 
     page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
     assert len(page) == 1
@@ -371,6 +376,7 @@ async def test_needs_human_action_filter_spans_groups_without_group_key(db, tena
     run.matches_count = 0
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
 
     page = await list_group_proposals(str(run.id), user=user, db=db, action="needs_human")
     assert len(page) == 2
@@ -419,6 +425,7 @@ async def test_needs_human_action_filter_http_round_trip(db, admin_user, client)
     run.matches_count = 0
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
 
     resp = await client.get(
         f"/api/v1/reconciliation/runs/{run.id}/resolution-groups/proposals",
@@ -480,6 +487,7 @@ async def _seed_multi_currency_fees(db, tenant):
     )
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     return user, run
 
 

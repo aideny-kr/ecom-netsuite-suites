@@ -27,9 +27,15 @@ def _plan(**over):
         variance_explanation=None,
         evidence={"charge_source_id": "ch_1", "order_reference": "R123456789"},
         already_posted=False,
+        currency_basis_verified=True,
+        washout_verified=True,
         **MAT,
     )
     base.update(over)
+    if base["variance_type"] == "fees":
+        base.setdefault("fee_amount", abs(base["variance_amount"]))
+        if "netsuite_amount" not in over:
+            base["netsuite_amount"] = base["stripe_amount"] - abs(base["variance_amount"])
     return plan_result(**base)
 
 
@@ -343,7 +349,7 @@ def test_rule7b_amount_mismatch_fee_explained_books_fee_line():
         variance_type="amount_mismatch",
         variance_amount=Decimal("3.20"),
         netsuite_amount=Decimal("96.80"),  # < stripe_amount (100.00) — fee lowered NetSuite
-        fee_amount=Decimal("3.00"),
+        fee_amount=Decimal("3.20"),
     )
     assert p.action == "book_fee_line"
     assert p.root_cause == "amount_mismatch"
@@ -356,7 +362,7 @@ def test_rule7b_amount_mismatch_fee_explained_ignores_materiality():
         variance_amount=Decimal("60.20"),
         stripe_amount=Decimal("100.00"),
         netsuite_amount=Decimal("39.80"),  # < stripe_amount — fee lowered NetSuite
-        fee_amount=Decimal("60.00"),
+        fee_amount=Decimal("60.20"),
     )
     assert p.action == "book_fee_line"
     assert p.above_materiality is True
@@ -372,7 +378,7 @@ def test_rule7b_amount_mismatch_fee_proximate_but_wrong_direction_not_fee_explai
         variance_amount=Decimal("3.00"),
         stripe_amount=Decimal("10000.00"),  # large base so 3.00 stays sub-materiality by % too
         netsuite_amount=Decimal("10003.00"),  # HIGHER than stripe — not fee-explainable
-        fee_amount=Decimal("3.00"),
+        fee_amount=Decimal("3.20"),
     )
     assert p.action != "book_fee_line"
     assert p.action == "writeoff_je"  # sub-materiality residual (abs 3.00 < 50, pct 0.03% < 1%)
@@ -436,7 +442,7 @@ def test_rule4_amount_mismatch_does_not_swallow_unapplied_evidence():
         variance_type="amount_mismatch",
         variance_amount=Decimal("3.20"),
         netsuite_amount=Decimal("96.80"),  # < stripe_amount (100.00) — fee lowered NetSuite
-        fee_amount=Decimal("3.00"),
+        fee_amount=Decimal("3.20"),
         evidence={"charge_source_id": "ch_1", "order_reference": "R123456789", "deposit_unapplied": True},
     )
     assert p.action == "book_fee_line"

@@ -23,6 +23,7 @@ from app.models.reconciliation import ReconResolutionProposal
 from app.services.reconciliation.resolution_planner import plan_run
 from app.workers.tasks import recon_resolution_agent as agent_task
 from tests.conftest import create_test_recon_result, create_test_recon_run, enable_feature_flag
+from tests.resolution_evidence_helpers import seed_run_linked_evidence
 from tests.test_resolution_agent_task import FakeAdapter
 
 
@@ -40,6 +41,7 @@ async def _setup(db, tenant_id, monkeypatch, n=1, adapter=None):
     run = await create_test_recon_run(db, tenant_id, status="completed")
     results = [await _result(db, tenant_id, run.id, i) for i in range(n)]
     await db.flush()
+    await seed_run_linked_evidence(db, tenant_id, run.id)
     await plan_run(db, tenant_id, run.id)
     adapter = adapter or FakeAdapter(action="book_fee_line", narrative="Fee.")
 
@@ -133,6 +135,7 @@ async def test_a_re_plan_during_the_run_leaves_its_proposals_for_its_own_dispatc
         async def create_message(self, **kwargs):
             if not state["replanned"]:
                 state["replanned"] = True
+                await seed_run_linked_evidence(db, tenant_a.id, run.id)
                 await plan_run(db, tenant_a.id, run.id)
             return await super().create_message(**kwargs)
 
