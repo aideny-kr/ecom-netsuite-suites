@@ -47,6 +47,39 @@ async def read_netsuite_refunds(
     adjustment_profile=None,
 ):
     account = _account(account_id)
+    order, currency_id, currency = refund_scope(
+        connection_id, account, subsidiary_id, order_reference, target_evidence, adjustment_profile
+    )
+    async with asyncio.timeout(160):
+        async with authenticated_reader(
+            db, tenant_id, connection_id, account, client=client, max_api_calls=MAX_REFUND_CALLS
+        ) as reader:
+            result = await collect_refunds(
+                reader,
+                order["record_id"],
+                subsidiary_id,
+                currency_id,
+                order_reference=order_reference,
+                adjustment_profile=adjustment_profile,
+            )
+            return {
+                **result,
+                "amount": str(result["amount"]),
+                "complete": True,
+                "provider": "netsuite",
+                "account_id": account,
+                "subsidiary_id": subsidiary_id,
+                "connection_id": str(connection_id),
+                "order_reference": order_reference,
+                "currency": currency,
+                "api_calls": reader.calls,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+
+def refund_scope(connection_id, account_id, subsidiary_id, order_reference, target_evidence, adjustment_profile=None):
+    """Shared identity gate for native single and bulk collection."""
+    account = _account(account_id)
     if adjustment_profile and RefundAdjustmentProfile.model_validate(adjustment_profile).account_id != account:
         raise ValueError("adjustment_profile_scope_mismatch")
     evidence = _dict(target_evidence)
@@ -77,31 +110,7 @@ async def read_netsuite_refunds(
         or not re.fullmatch(r"[A-Z]{3}", currency)
     ):
         raise ValueError("refund_target_identity_unproven")
-    async with asyncio.timeout(160):
-        async with authenticated_reader(
-            db, tenant_id, connection_id, account, client=client, max_api_calls=MAX_REFUND_CALLS
-        ) as reader:
-            result = await collect_refunds(
-                reader,
-                order["record_id"],
-                subsidiary_id,
-                currency_id,
-                order_reference=order_reference,
-                adjustment_profile=adjustment_profile,
-            )
-            return {
-                **result,
-                "amount": str(result["amount"]),
-                "complete": True,
-                "provider": "netsuite",
-                "account_id": account,
-                "subsidiary_id": subsidiary_id,
-                "connection_id": str(connection_id),
-                "order_reference": order_reference,
-                "currency": currency,
-                "api_calls": reader.calls,
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-            }
+    return order, currency_id, currency
 
 
 def _query(frontier):
@@ -128,7 +137,17 @@ def _positive(value):
     return amount
 
 
-async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order_reference, adjustment_profile=None):
+async def collect_refunds(
+    reader,
+    order_id,
+    subsidiary_id,
+    currency_id,
+    *,
+    order_reference,
+    adjustment_profile=None,
+    request_links_reader=None,
+    graph_reader=None,
+):
     if any(_id(value) is None for value in (order_id, subsidiary_id, currency_id)):
         raise ValueError("invalid_refund_scope")
     calls = 0
@@ -140,7 +159,7 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order
         calls += 1
         return await reader.request(*args, **kwargs)
 
-    nodes, request_links, recheck_links = await read_request_links(
+    nodes, request_links, recheck_links = await (request_links_reader or read_request_links)(
         request, order_id, subsidiary_id, currency_id, order_reference
     )
     # Custom ownership is additive. Standard upstream links are still traversed
@@ -152,8 +171,12 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order
     for _ in range(MAX_DEPTH):
         if not frontier:
             break
-        result = await request(
-            "POST", "/query/v1/suiteql", params={"limit": MAX_EDGES + 1}, body={"q": _query(frontier)}
+        result = (
+            await graph_reader(request, frontier)
+            if graph_reader
+            else await request(
+                "POST", "/query/v1/suiteql", params={"limit": MAX_EDGES + 1}, body={"q": _query(frontier)}
+            )
         )
         rows, complete = _collection(result)
         if not complete or len(rows) > MAX_EDGES:
