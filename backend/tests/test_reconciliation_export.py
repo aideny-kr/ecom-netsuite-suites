@@ -28,6 +28,7 @@ from tests.conftest import (
     create_test_user,
     enable_feature_flag,
 )
+from tests.resolution_evidence_helpers import seed_legacy_fee_proposals
 
 _GROUPS_HEADERS = [
     "group_key",
@@ -163,6 +164,7 @@ async def _seed_run_with_groups(db, tenant):
     run.matches_count = 1
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     return user, run
 
 
@@ -200,6 +202,7 @@ async def _seed_multi_currency_fees(db, tenant):
     )
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     return user, run
 
 
@@ -239,6 +242,7 @@ async def _seed_needs_human_cross_group(db, tenant):
     run.matches_count = 0
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     return user, run
 
 
@@ -275,6 +279,7 @@ async def _seed_run_with_fx_deposit(db, tenant):
     run.matches_count = 0
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
+    await seed_legacy_fee_proposals(db, run.id)
     return user, run
 
 
