@@ -95,7 +95,10 @@ class Connection(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 # changing a loaded row needs the row, which only an opt-in query returns; bulk ORM
 # UPDATE/DELETE on this table is refused by the Celigo write guard; and a new
 # provider="typesafe" row can only come from the card, since the generic create schema
-# refuses the provider. Registered from the model module for the same reason as the Celigo
+# refuses the provider. Query forms that bypass loader criteria still load the row:
+# ``select(...).from_statement(...)`` over the table, ``contains_eager`` over an explicit
+# join into Tenant.connections, and Session.get of an object already in the identity map.
+# Nothing loads Connection those ways today; do not add one without the opt-in. Registered from the model module for the same reason as the Celigo
 # write guard above: no session for this model can exist without it.
 JEV_PROVIDER = "typesafe"
 INCLUDE_JEV_CONNECTION = "include_jev_connection"

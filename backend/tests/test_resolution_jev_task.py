@@ -604,8 +604,9 @@ async def test_a_mode_change_on_the_card_reaches_a_running_worker(db, tenant_a, 
     the worker's session holds that row (the identity map keeps rows only weakly, so the
     test holds one on purpose), a plain re-select returns the stale object: the resolver
     must re-read it (gate round 3 on #314)."""
-    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
+    from app.models.connection import INCLUDE_JEV_CONNECTION, Connection
     from app.services.typesafe.access import tenant_connection
     from tests.test_jev_access import _connect
 
@@ -622,12 +623,17 @@ async def test_a_mode_change_on_the_card_reaches_a_running_worker(db, tenant_a, 
         keys.append(api_key)
         if len(keys) == 1:  # the card switches Jev off: an UPDATE of the SAME row, as its endpoint does
             held.append(await tenant_connection(db, tenant_a.id))
-            await db.execute(
-                text(
-                    "UPDATE connections SET metadata_json = '{\"mode\": \"off\"}' WHERE tenant_id = :t AND provider = 'typesafe'"
-                ),
-                {"t": tenant_a.id},
+            # The card's own session updates the SAME row and commits, as its endpoint does.
+            card = AsyncSession(bind=await db.connection(), join_transaction_mode="create_savepoint")
+            statement = (
+                select(Connection)
+                .where(Connection.tenant_id == tenant_a.id, Connection.provider == "typesafe")
+                .execution_options(**{INCLUDE_JEV_CONNECTION: True})
             )
+            row = (await card.execute(statement)).scalar_one()
+            row.metadata_json = {"mode": "off"}
+            await card.commit()
+            await card.close()
         return _jev_answer("needs_human", 0.3), None
 
     monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
