@@ -238,16 +238,18 @@ async def test_put_refreshes_intent_embedding_on_text_change(client, admin_user,
     the embedding of the NEW merged text. We stub embed_domain_query to a deterministic
     text-keyed vector so 'embedding == embedding(new text)' is observable (the real
     embedder returns None in tests, which would mask the staleness)."""
+    import hashlib
+
     from sqlalchemy import select
 
     from app.models.metric_definition import MetricDefinition
     from app.services.metrics import metric_authoring
 
-    # Deterministic, text-sensitive fake: maps text → a 1536-d vector (the column is
-    # Vector(1536)) whose first cell is a stable hash of the text. Distinct text ⇒
-    # distinct vector ⇒ staleness is observable. Stable across calls for the same text.
+    # Keep the stub stable across Python hash seeds, without a modulo-1000
+    # collision that can make these two different texts produce the same vector.
     def _vec(text):
-        return [float(hash(text) % 1000)] + [0.0] * 1535
+        digest = hashlib.sha256(text.encode()).digest()
+        return [float(byte) for byte in digest] + [0.0] * (1536 - len(digest))
 
     async def _fake_embed(text):
         return _vec(text)
