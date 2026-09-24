@@ -820,6 +820,11 @@ def build_tool_call_log_entry(
     }
     if agent_name:
         entry["agent"] = agent_name
+    from app.services.chat.execution_provenance import tool_provenance
+
+    provenance_result = parse_tool_result_value(result_str)
+    if isinstance(provenance_result, dict):
+        entry.update(tool_provenance(tool_name, provenance_result))
     if tool_name in {"transaction_ops_accounting_evidence", "transaction_ops.accounting_evidence"}:
         try:
             parsed = json.loads(result_str)

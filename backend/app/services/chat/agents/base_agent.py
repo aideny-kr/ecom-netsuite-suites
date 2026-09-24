@@ -780,6 +780,7 @@ class AgentResult:
     agent_name: str = ""
     confidence_score: float | None = None
     request_context: dict | None = None
+    execution_receipt: dict | None = None
 
 
 def _compute_confidence(

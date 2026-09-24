@@ -360,6 +360,8 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._current_task: str = ""
         self._domain_knowledge: list[str] = []
         self._proven_patterns: list[dict] = []
+        self._skill_receipts: list[dict] = []
+        self._skill_selection_mode = "matched"
         self._active_skill: dict | None = None  # Set when a skill is triggered
         self._context: dict[str, Any] = {}  # Full context dict from orchestrator
         self._connectors: list = []  # Active MCP connectors for this tenant
@@ -723,9 +725,11 @@ class UnifiedAgent(BaseSpecialistAgent):
 
         # Active skill instructions (progressive disclosure)
         if self._active_skill:
-            from app.services.chat.skills import get_skill_instructions
+            from app.services.chat.execution_provenance import skill_instructions
 
-            instructions = get_skill_instructions(self._active_skill["slug"])
+            instructions = skill_instructions(
+                self._active_skill["slug"], self._skill_selection_mode, self._skill_receipts
+            )
             if instructions:
                 parts.append(f"\n<skill_instructions>\n{instructions}\n</skill_instructions>")
                 parts.append(
@@ -780,12 +784,12 @@ class UnifiedAgent(BaseSpecialistAgent):
                 "Use the operation's authorized connection context; all execution and approval checks still apply."
             )
         if getattr(self, "_transaction_workflow", False):
-            from app.services.chat.skills import get_skill_instructions
+            from app.services.chat.execution_provenance import skill_instructions
 
             if not self._active_skill or self._active_skill["slug"] != "accounting_operations":
                 parts.append(
                     "\n<accounting_operations>\n"
-                    + (get_skill_instructions("accounting_operations") or "")
+                    + skill_instructions("accounting_operations", "workflow", self._skill_receipts)
                     + "\n</accounting_operations>"
                 )
             parts.append(
@@ -817,6 +821,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             template=prompt,
             tool_definitions=self._tool_defs or [],
             include_connected_skills=not getattr(self, "_transaction_workflow", False),
+            skill_receipts=self._skill_receipts,
         )
 
     @property
@@ -840,6 +845,7 @@ class UnifiedAgent(BaseSpecialistAgent):
 
         matched = match_skill(task)
         self._active_skill = matched
+        self._skill_selection_mode = "explicit" if task.lstrip().startswith("/") else "matched"
 
         vernacular = context.get("tenant_vernacular", "")
         if vernacular:
@@ -916,6 +922,7 @@ class UnifiedAgent(BaseSpecialistAgent):
     def _reset_source_routing(self):
         from app.services.chat.llm_adapter import TokenUsage
 
+        self._skill_receipts = []
         self._routing_usage = TokenUsage()
         self._routing_error = False
         self._request_kind = None
@@ -996,6 +1003,9 @@ class UnifiedAgent(BaseSpecialistAgent):
         )
 
     def _finish_source_routing(self, result, selection):
+        from app.services.chat.execution_provenance import execution_receipt
+
+        result.execution_receipt = execution_receipt(self._skill_receipts, result.tool_calls_log)
         result.request_context = selection.request_context
         usage = getattr(self, "_routing_usage", None)
         if usage:
