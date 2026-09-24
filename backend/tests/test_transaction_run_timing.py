@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.schemas.transaction_runs import ProgressUpdate
 from app.services.transaction_ops.run_timing import RunTiming
 
 
@@ -32,3 +33,21 @@ async def test_cancellation_is_not_swallowed():
     with pytest.raises(asyncio.CancelledError), timing.measure("netsuite_order"):
         raise asyncio.CancelledError
     assert progress["timing_ms"]["netsuite_order"]["calls"] == 1
+
+
+def test_snapshot_preserves_counters_after_validated_checkpoint_replaces_progress():
+    progress = {"processed": 0}
+    times = iter([0, 1, 2, 3, 4, 6, 7])
+    timing = RunTiming(progress, clock=lambda: next(times))
+    with timing.measure("netsuite_order"):
+        pass
+    timing.snapshot()
+    checkpoint = ProgressUpdate(progress_json={**progress, "processed": 1})
+    progress.update(checkpoint.progress_json)
+    with timing.measure("netsuite_order"):
+        pass
+    timing.snapshot()
+    assert progress["processed"] == 1
+    assert progress["active_ms"] == 7000
+    assert progress["timing_ms"]["netsuite_order"] == {"calls": 2, "total": 3000, "max": 2000}
+    assert checkpoint.progress_json["timing_ms"]["netsuite_order"]["calls"] == 1
