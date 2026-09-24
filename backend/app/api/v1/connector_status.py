@@ -1,6 +1,7 @@
 """Connector status and health check endpoints for data pipeline connectors.
 
-Covers: Stripe connector status/test, NetSuite deposit sync status.
+Covers: Stripe connector status/test, the TypeSafe Jev card (key and mode), NetSuite
+deposit sync status.
 """
 
 from __future__ import annotations
@@ -36,6 +37,9 @@ from app.services.celigo_write_guard import (
     CeligoManagedElsewhereError,
     celigo_writes_allowed,
 )
+from app.services.typesafe.access import PROVIDER as JEV_PROVIDER
+from app.services.typesafe.access import key_in_use, load_setting, tenant_connection
+from app.services.typesafe.client import check_key
 
 logger = structlog.get_logger()
 
@@ -83,6 +87,36 @@ class StripeTestResponse(BaseModel):
 class StripeConnectRequest(BaseModel):
     api_key: str
     label: str = "Stripe"
+
+
+JevMode = Literal["live", "shadow", "off"]
+
+
+class JevStatusResponse(BaseModel):
+    mode: JevMode  # the tenant's choice
+    effective_mode: JevMode  # what recon will actually do: capped, and off without a key
+    deployment_cap: JevMode
+    key_source: Literal["tenant", "platform", "none"]
+    key_hint: str | None = None  # last 4 of the TENANT's key only; the platform key is never hinted
+    problem: str | None = None  # "unreadable_key"
+
+
+class JevKeyRequest(BaseModel):
+    api_key: str = Field(min_length=1, max_length=512)
+
+
+class JevModeRequest(BaseModel):
+    mode: JevMode
+
+
+class JevTestRequest(BaseModel):
+    api_key: str | None = None  # blank = test the key currently in use
+
+
+class JevTestResponse(BaseModel):
+    success: bool
+    key_source: Literal["candidate", "tenant", "platform", "none"]
+    error: str | None = None
 
 
 class DepositSyncStatusResponse(BaseModel):
@@ -402,6 +436,164 @@ async def disconnect_stripe(
     await db.delete(connection)
     await db.commit()
     return {"status": "disconnected"}
+
+
+# ---------------------------------------------------------------------------
+# TypeSafe Jev card: key and mode (decided 2026-09-24: on by default)
+# ---------------------------------------------------------------------------
+
+_JEV_ERRORS = {
+    "http_401": "TypeSafe rejected this key.",
+    "http_403": "TypeSafe rejected this key.",
+    "timeout": "TypeSafe did not answer in time. Try again.",
+    "connection_error": "Could not reach TypeSafe. Try again.",
+    "disabled": "No Jev key is configured.",
+}
+
+
+def _jev_error(reason: str) -> str:
+    return _JEV_ERRORS.get(reason, f"The TypeSafe check failed ({reason}).")
+
+
+async def _jev_status(db: AsyncSession, tenant_id) -> JevStatusResponse:
+    setting = await load_setting(db, tenant_id)
+    return JevStatusResponse(
+        mode=setting.tenant_mode,
+        effective_mode=setting.effective_mode,
+        deployment_cap=setting.deployment_cap,
+        key_source=setting.key_source,
+        key_hint=setting.key_hint,
+        problem=setting.problem,
+    )
+
+
+async def _jev_connection(db: AsyncSession, user: User) -> Connection:
+    """The tenant's Jev connection, created (keyless, default mode) when absent."""
+    connection = await tenant_connection(db, user.tenant_id)
+    if connection is None:
+        connection = Connection(
+            tenant_id=user.tenant_id,
+            provider=JEV_PROVIDER,
+            label="TypeSafe Jev",
+            status="active",
+            auth_type="api_key",
+            encrypted_credentials=encrypt_credentials({}),
+            encryption_key_version=get_current_key_version(),
+            created_by=user.id,
+            metadata_json={},
+        )
+        db.add(connection)
+        await db.flush()
+    return connection
+
+
+@router.get("/jev", response_model=JevStatusResponse)
+async def get_jev_status(
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """What Jev will do for this tenant, and which key it uses (never the key itself)."""
+    return await _jev_status(db, user.tenant_id)
+
+
+@router.post("/jev/test", response_model=JevTestResponse)
+async def test_jev_key(
+    request: JevTestRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Check a candidate key, or (blank) the key this tenant uses now, whatever the mode."""
+    candidate = (request.api_key or "").strip()
+    if candidate:
+        key, source = candidate, "candidate"
+    else:
+        key, source = await key_in_use(db, user.tenant_id)
+    if not key:
+        return JevTestResponse(success=False, key_source=source, error=_JEV_ERRORS["disabled"])
+    reason = await check_key(key)
+    return JevTestResponse(success=reason is None, key_source=source, error=_jev_error(reason) if reason else None)
+
+
+@router.put("/jev/key", response_model=JevStatusResponse)
+async def save_jev_key(
+    request: JevKeyRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Store the tenant's own TypeSafe key, only after TypeSafe accepts it."""
+    key = request.api_key.strip()
+    reason = await check_key(key)
+    if reason:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_jev_error(reason))
+    connection = await _jev_connection(db, user)
+    connection.encrypted_credentials = encrypt_credentials({"api_key": key})
+    connection.encryption_key_version = get_current_key_version()
+    connection.status = "active"
+    connection.error_reason = None
+    connection.last_health_check_at = datetime.now(timezone.utc)
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="jev",
+        action="jev.key_saved",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+    )
+    await db.commit()
+    return await _jev_status(db, user.tenant_id)
+
+
+@router.delete("/jev/key", response_model=JevStatusResponse)
+async def remove_jev_key(
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Forget the tenant's own key; Jev returns to the platform key. The mode is kept."""
+    connection = await tenant_connection(db, user.tenant_id)
+    try:
+        has_key = bool(connection and decrypt_credentials(connection.encrypted_credentials).get("api_key"))
+    except Exception:
+        has_key = True  # an unreadable stored key is exactly what removal should clear
+    if not has_key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No Jev key is stored for this workspace")
+    connection.encrypted_credentials = encrypt_credentials({})
+    connection.encryption_key_version = get_current_key_version()
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="jev",
+        action="jev.key_removed",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+    )
+    await db.commit()
+    return await _jev_status(db, user.tenant_id)
+
+
+@router.put("/jev/mode", response_model=JevStatusResponse)
+async def set_jev_mode(
+    request: JevModeRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Choose live, shadow (recorded beside the model, never deciding) or off."""
+    connection = await _jev_connection(db, user)
+    # A new dict, so the JSON column's change is detected.
+    connection.metadata_json = {**(connection.metadata_json or {}), "mode": request.mode}
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="jev",
+        action="jev.mode_set",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+        payload={"mode": request.mode},
+    )
+    await db.commit()
+    return await _jev_status(db, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------

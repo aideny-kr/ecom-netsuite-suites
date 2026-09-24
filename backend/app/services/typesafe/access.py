@@ -66,31 +66,44 @@ def deployment_cap() -> Mode:
 
 
 async def tenant_connection(db: AsyncSession, tenant_id: uuid.UUID | str) -> Connection | None:
+    """The tenant's Jev connection; the newest wins if two were ever created concurrently."""
     tid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
-    result = await db.execute(select(Connection).where(Connection.tenant_id == tid, Connection.provider == PROVIDER))
+    result = await db.execute(
+        select(Connection)
+        .where(Connection.tenant_id == tid, Connection.provider == PROVIDER)
+        .order_by(Connection.created_at.desc())
+    )
     return result.scalars().first()
+
+
+def _key_of(connection: Connection | None, tenant_id) -> tuple[str | None, Literal["tenant", "platform", "none"], bool]:
+    """(key, source, unreadable) for Jev calls, ignoring the mode."""
+    if connection is not None:
+        try:
+            key = decrypt_credentials(connection.encrypted_credentials).get("api_key") or None
+        except Exception:
+            logger.warning("typesafe.tenant_key_unreadable", tenant_id=str(tenant_id))
+            return None, "tenant", True
+        if key:
+            return key, "tenant", False
+    if settings.TYPESAFE_API_KEY:
+        return settings.TYPESAFE_API_KEY, "platform", False
+    return None, "none", False
+
+
+async def key_in_use(db: AsyncSession, tenant_id) -> tuple[str | None, Literal["tenant", "platform", "none"]]:
+    """The key this tenant's Jev calls use whatever the mode: what the card's Test checks."""
+    key, source, _ = _key_of(await tenant_connection(db, tenant_id), tenant_id)
+    return key, source
 
 
 async def _load(db: AsyncSession, tenant_id) -> tuple[JevSetting, str | None]:
     connection = await tenant_connection(db, tenant_id)
     tenant_mode: Mode = _mode((connection.metadata_json or {}).get("mode") if connection else None, "live")
     cap = deployment_cap()
-    key: str | None = None
-    source: Literal["tenant", "platform", "none"] = "none"
-    hint: str | None = None
-    problem: str | None = None
-
-    if connection is not None:
-        try:
-            key = decrypt_credentials(connection.encrypted_credentials).get("api_key") or None
-        except Exception:
-            logger.warning("typesafe.tenant_key_unreadable", tenant_id=str(tenant_id))
-            problem = "unreadable_key"
-            source = "tenant"
-        if key:
-            source, hint = "tenant", key[-4:]
-    if key is None and problem is None and settings.TYPESAFE_API_KEY:
-        key, source = settings.TYPESAFE_API_KEY, "platform"
+    key, source, unreadable = _key_of(connection, tenant_id)
+    hint = key[-4:] if key and source == "tenant" else None
+    problem = "unreadable_key" if unreadable else None
 
     effective: Mode = min(tenant_mode, cap, key=_RANK.__getitem__) if key and problem is None else "off"
     setting = JevSetting(
