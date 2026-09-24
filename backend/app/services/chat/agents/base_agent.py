@@ -1962,6 +1962,7 @@ class BaseSpecialistAgent(abc.ABC):
                                         params=block.input,
                                         result_str=result_str,
                                         duration_ms=elapsed_ms,
+                                        outcome="error",
                                     )
                                 )
                                 tool_results_content.append(
@@ -2175,6 +2176,7 @@ class BaseSpecialistAgent(abc.ABC):
                                         params=block.input,
                                         result_str=result_str,
                                         duration_ms=elapsed_ms,
+                                        outcome="error",
                                     )
                                 )
                                 tool_results_content.append(
@@ -2549,6 +2551,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 params=block.input,
                                 result_str=result_str,
                                 duration_ms=elapsed_ms,
+                                outcome="error",
                             )
                         )
                         tool_results_content.append(

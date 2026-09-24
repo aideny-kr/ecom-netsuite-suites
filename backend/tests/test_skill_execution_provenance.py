@@ -129,6 +129,7 @@ def test_receipt_records_connected_attempts_without_claiming_success_or_modifyin
         ({"isError": True}, "error"),
         ({"blocked": True}, "error"),
         ({"status": "failed"}, "error"),
+        ({"success": True, "status": "failed"}, "returned"),
         ({"confirmation_required": True}, "confirmation_required"),
         ({"success": True, "rows": []}, "returned"),
     ],
@@ -140,6 +141,19 @@ def test_raw_execution_outcome_survives_lossy_log_summary(payload, expected):
     )
     result = a._finish_source_routing(AgentResult(success=True, tool_calls_log=[call]), SourceSelection())
     assert result.execution_receipt["tools"][0]["outcome"] == expected
+
+
+@pytest.mark.parametrize("flag", ["unexamined_write", "validation_failed", "selector_unavailable"])
+def test_local_refusal_outcome_is_supplied_by_the_gate(flag):
+    call = build_tool_call_log_entry(
+        step=0,
+        tool_name="synthetic_tool",
+        params={},
+        result_str=json.dumps({flag: True}),
+        duration_ms=1,
+        outcome="error",
+    )
+    assert call["execution_outcome"] == "error"
 
 
 @pytest.mark.asyncio

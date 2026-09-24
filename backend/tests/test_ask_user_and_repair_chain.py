@@ -870,6 +870,7 @@ class TestSelectorAppRedirectReachesTheForm:
         log = [p for t, p in events if t == "response"][0].tool_calls_log
         entry = next(e for e in log if "selector_app" in e["tool"])
         assert "selector_unavailable" in entry["result_summary"]
+        assert entry["execution_outcome"] == "error"
         assert "ask_user" in entry["result_summary"]
 
 
