@@ -3,11 +3,12 @@
 Jev is a decision model: a ``state`` plus typed questions (choice / noul /
 score) in, typed answers with probabilities out. It generates nothing.
 
-Every caller must come through here. The guards live in this module rather than
-at call sites so a new caller cannot add a hole: no key, or a tenant outside
-``JEV_TENANT_ALLOWLIST``, raises before any network I/O. There are no retries —
-callers sit on latency paths and already own a slower fallback, so a failure is
-reported once, with a reason, and the caller falls back.
+Every caller must come through here, with the key ``typesafe.access.resolve_access``
+chose for the tenant (the tenant's own key, else the platform key). The client never
+reads a key from settings, so no caller can send one tenant's work under another key,
+and no key refuses before any network I/O. There are no retries — callers sit on
+latency paths and already own a slower fallback, so a failure is reported once, with
+a reason, and the caller falls back.
 
 Three promises callers rely on, both made HERE so no call site has to remember them:
 
@@ -62,11 +63,6 @@ class JevResult:
     model: str
     input_tokens: int
     elapsed_ms: int
-
-
-def tenant_allowed(tenant_id: uuid.UUID | str) -> bool:
-    allowed = {t.strip().lower() for t in settings.JEV_TENANT_ALLOWLIST.split(",") if t.strip()}
-    return str(tenant_id).lower() in allowed
 
 
 def _number(value, low: float | None = None, high: float | None = None) -> bool:
@@ -124,8 +120,8 @@ async def session(*, transport: httpx.AsyncBaseTransport | None = None):
             _session_client.reset(token)
 
 
-async def _post(payload: dict, transport) -> httpx.Response:
-    headers = {"Authorization": f"Bearer {settings.TYPESAFE_API_KEY}"}
+async def _post(payload: dict, transport, api_key: str) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {api_key}"}
     shared = _session_client.get()
     if shared is not None and transport is None:
         return await shared.post(ENDPOINT, headers=headers, json=payload)
@@ -138,19 +134,20 @@ async def ask(
     state: str | dict | list,
     questions: dict[str, dict],
     *,
+    api_key: str | None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> JevResult:
-    if not settings.TYPESAFE_API_KEY:
+    if not api_key:
         raise JevUnavailableError("disabled")
-    if not tenant_allowed(tenant_id):
-        raise JevUnavailableError("tenant_not_allowed")
 
     start = time.monotonic()
     try:
         # httpx's timeout bounds each connect/read/write, not the request: a body that trickles
         # in never trips it. JEV_TIMEOUT_SECONDS is a promise about the WHOLE call, so bound that.
         async with asyncio.timeout(settings.JEV_TIMEOUT_SECONDS):
-            response = await _post({"state": state, "model": settings.JEV_MODEL, "questions": questions}, transport)
+            response = await _post(
+                {"state": state, "model": settings.JEV_MODEL, "questions": questions}, transport, api_key
+            )
     except (httpx.TimeoutException, TimeoutError) as exc:
         raise JevUnavailableError("timeout") from exc
     except httpx.HTTPError as exc:
@@ -174,7 +171,7 @@ async def ask(
     )
 
 
-async def try_ask(tenant_id, state=None, questions=None, *, build=None, **kwargs):
+async def try_ask(tenant_id, state=None, questions=None, *, build=None, api_key: str | None = None, **kwargs):
     """``ask`` that cannot raise: (result, None) or (None, reason). Cancellation still propagates.
 
     Pass ``build`` (a zero-argument callable returning ``(state, questions)``) rather than
@@ -182,17 +179,34 @@ async def try_ask(tenant_id, state=None, questions=None, *, build=None, **kwargs
     builder is a Jev-side failure too, and must not escape into the primary path.
     """
     try:
-        # Refuse before building: a disallowed tenant's data should not even be assembled.
-        if not settings.TYPESAFE_API_KEY:
+        # Refuse before building: without a key the tenant's data should not even be assembled.
+        if not api_key:
             return None, "disabled"
-        if not tenant_allowed(tenant_id):
-            return None, "tenant_not_allowed"
         if build is not None:
             state, questions = build()
-        return await ask(tenant_id, state, questions, **kwargs), None
+        return await ask(tenant_id, state, questions, api_key=api_key, **kwargs), None
     except JevUnavailableError as exc:
         return None, exc.reason
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         return None, f"unexpected:{type(exc).__name__}"
+
+
+# A probe carries no tenant data: one fixed question whose only purpose is to show the key works.
+_PROBE_QUESTIONS = {
+    "ready": {
+        "type": "choice",
+        "instructions": "Connection check. Answer yes.",
+        "criteria": {"yes": "The service is reachable.", "no": "It is not."},
+    }
+}
+
+
+async def check_key(api_key: str | None, *, transport: httpx.AsyncBaseTransport | None = None) -> str | None:
+    """None when ``api_key`` gets a valid answer from Jev, else the reason it did not."""
+    try:
+        await ask("key-check", {"check": True}, _PROBE_QUESTIONS, api_key=api_key, transport=transport)
+    except JevUnavailableError as exc:
+        return exc.reason
+    return None

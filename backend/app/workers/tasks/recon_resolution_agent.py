@@ -217,6 +217,7 @@ async def run_resolution_agent(
     )
     from app.services.reconciliation.resolution_jev import decide_item
     from app.services.typesafe import client as jev_client
+    from app.services.typesafe.access import resolve_access
     from app.services.typesafe.audit import record_comparison
 
     tid = uuid.UUID(str(tenant_id))
@@ -243,8 +244,6 @@ async def run_resolution_agent(
     contract_violations = persist_failures = comparison_failures = 0
     stopped = "done"
 
-    from app.core.config import settings
-
     async with _run_leader(db, key) as leading:
         if not leading:
             # Another task holds this run; the Celery task reschedules this dispatch.
@@ -267,11 +266,19 @@ async def run_resolution_agent(
         provider, model, api_key, _is_byok = await get_tenant_ai_config(db, tid)
         adapter = get_adapter(provider, api_key)
         materiality = await load_materiality(db, tid)
+        # The tenant's Jev key and mode, once per run (typesafe.access). None = Jev off for
+        # this tenant; a failure to resolve is also "off", never a failed run.
+        try:
+            jev_access = await resolve_access(db, tid)
+        except Exception:
+            logger.warning("resolution_agent.jev_access_unavailable", exc_info=True)
+            jev_access = None
+            await _recover_after_failed_write(db)
 
         async with contextlib.AsyncExitStack() as stack:
             # One HTTPS connection for the whole run instead of a TLS handshake per item.
             # Entered only when Jev is actually on; if entering fails, items run without it.
-            if settings.JEV_RECON_RESOLUTION_MODE in {"shadow", "live"} and settings.TYPESAFE_API_KEY:
+            if jev_access is not None:
                 try:
                     await stack.enter_async_context(jev_client.session())
                 except Exception:
@@ -306,10 +313,10 @@ async def run_resolution_agent(
                         continue
                 try:
                     context = await gather_context(db, tid, item)
-                    # decide_item is the LLM path unchanged when JEV_RECON_RESOLUTION_MODE
-                    # is off; both models' answers go through the same validate_output.
+                    # decide_item is the LLM path unchanged when Jev is off for this tenant
+                    # (jev_access None); both models' answers go through the same validate_output.
                     validated, shadow = await asyncio.wait_for(
-                        decide_item(tid, adapter, model, context, materiality),
+                        decide_item(tid, adapter, model, context, materiality, access=jev_access),
                         timeout=PER_ITEM_TIMEOUT_SECONDS,
                     )
                 except Exception:

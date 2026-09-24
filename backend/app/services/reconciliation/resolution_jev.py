@@ -14,8 +14,9 @@ Jev writes no prose. A Jev-decided proposal gets ``template_narrative`` — buil
 from fact names, containing no digits — which satisfies the no-invented-numbers
 contract by construction rather than by detection.
 
-JEV_RECON_RESOLUTION_MODE: off (LLM only) · shadow (LLM decides, Jev recorded
-beside it) · live (Jev decides at or above JEV_RECON_MIN_CONFIDENCE, else LLM).
+The mode is per tenant, from ``typesafe.access.resolve_access`` (the worker resolves it
+once per run): none (Jev off: LLM only) · shadow (LLM decides, Jev recorded beside it) ·
+live (Jev decides at or above JEV_RECON_MIN_CONFIDENCE, else LLM).
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from app.services.reconciliation.resolution_planner import (
     RECENT_PAYOUT_LAG_DAYS,
 )
 from app.services.reconciliation.resolution_verifier import currency_basis_verified, fee_explained
+from app.services.typesafe.access import JevAccess
 from app.services.typesafe.client import try_ask
 
 # The only string values a fact may carry to the external API, per field: the variance
@@ -245,7 +247,7 @@ def template_narrative(action: str, facts: dict) -> str:
     return f"Decision model proposed {action}. Basis: {reason}. Proposal for human review only."
 
 
-async def _jev(tenant_id, context: dict) -> dict:
+async def _jev(tenant_id, context: dict, api_key: str) -> dict:
     """Jev's reading as record fields. Cannot raise (try_ask), so the LLM path beside it is safe.
 
     The criteria/allow-list check is a RUNTIME refusal, not an import-time assert: the worker
@@ -254,7 +256,7 @@ async def _jev(tenant_id, context: dict) -> dict:
     """
     if set(_CRITERIA) != AGENT_ALLOWED_ACTIONS:
         return {"jev_error": "criteria_out_of_sync"}
-    result, reason = await try_ask(tenant_id, build=lambda: build_request(context))
+    result, reason = await try_ask(tenant_id, build=lambda: build_request(context), api_key=api_key)
     if result is None:
         return {"jev_error": reason}
     answer = result.answers["action"]
@@ -273,20 +275,19 @@ async def _llm(adapter, model: str, context: dict) -> tuple[dict, int]:
     return out, int((time.monotonic() - start) * 1000)
 
 
-async def decide_item(tenant_id, adapter, model: str, context: dict, materiality) -> tuple[dict, dict | None]:
+async def decide_item(
+    tenant_id, adapter, model: str, context: dict, materiality, access: JevAccess | None = None
+) -> tuple[dict, dict | None]:
     """Return (validated proposal, comparison record or None).
+
+    ``access`` is the tenant's Jev key and mode from ``resolve_access``; None means Jev is
+    off for this tenant and the LLM path runs exactly as it did before Jev existed.
 
     ``decided_by`` names who actually determined the applied action: "jev", "llm", or
     "guard" when validate_output vetoed Jev's pick — so the record can be used to measure
     Jev honestly, including how often the safety net had to step in.
     """
-    mode = settings.JEV_RECON_RESOLUTION_MODE
-    # The global mode remains the default; a scoped canary must not promote
-    # other allowlisted tenants. The transport allowlist still gates every call.
-    if mode == "shadow" and str(tenant_id) in {
-        item.strip() for item in settings.JEV_RECON_LIVE_TENANTS.split(",") if item.strip()
-    }:
-        mode = "live"
+    mode = access.mode if access is not None else "off"
     if mode not in {"shadow", "live"}:
         out = await resolution_agent.classify_item(adapter, model, context)
         return validate_output(out, context, materiality), None
@@ -335,9 +336,11 @@ async def decide_item(tenant_id, adapter, model: str, context: dict, materiality
         jev_fields = {}
         llm_result, llm_error = (await _llm_guarded()) if mode == "shadow" else (None, None)
     elif mode == "shadow":
-        jev_fields, (llm_result, llm_error) = await asyncio.gather(_jev(tenant_id, context), _llm_guarded())
+        jev_fields, (llm_result, llm_error) = await asyncio.gather(
+            _jev(tenant_id, context, access.api_key), _llm_guarded()
+        )
     else:
-        jev_fields, llm_result, llm_error = await _jev(tenant_id, context), None, None
+        jev_fields, llm_result, llm_error = await _jev(tenant_id, context, access.api_key), None, None
     record.update(jev_fields)
 
     if record["jev_action"] is not None:

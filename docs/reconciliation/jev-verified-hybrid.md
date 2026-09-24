@@ -30,13 +30,19 @@ idempotency, and proposal compare-and-set controls remain in force.
 No fresh upstream data pull is required. Jev still receives only code-derived
 boolean/null/allowlisted categorical facts; no customer text, amounts or identifiers.
 
-## Scoped activation and rollback
+## Activation and rollback
 
-`JEV_RECON_RESOLUTION_MODE=shadow` remains the global default for a shadow rollout.
-`JEV_RECON_LIVE_TENANTS` is a comma-separated list of customer UUIDs promoted to live
-while other tenants remain shadow. `JEV_TENANT_ALLOWLIST` and the configured API key
-still gate every outbound call. Global `off` overrides the scoped list. Removing a
-UUID returns it to shadow without disabling other tenants.
+Jev is on by default (decided 2026-09-24). For each tenant, `services/typesafe/access.py`
+picks the key: the tenant's own TypeSafe key from its Jev card (Settings → Connections,
+stored encrypted as a `typesafe` connection), else the deployment's `TYPESAFE_API_KEY`.
+It also picks the mode the tenant chose on that card: live (default), shadow or off. With
+no key anywhere, the existing model path runs unchanged, so self-hosted deployments need
+no TypeSafe account. `JEV_RECON_RESOLUTION_MODE` caps every tenant: `live` (default, no
+cap), `shadow`, or `off` (kill switch). A tenant key that cannot be decrypted turns Jev off
+for that tenant instead of falling back to the platform key.
+
+Rollback: switch the tenant's Jev card to Shadow or Off, or set
+`JEV_RECON_RESOLUTION_MODE=off` for the whole deployment.
 
 Measure actual fallback rate, guard vetoes, applied actions, and latency in
 `recon.jev_comparison`; confident human-review classifications are not newly
