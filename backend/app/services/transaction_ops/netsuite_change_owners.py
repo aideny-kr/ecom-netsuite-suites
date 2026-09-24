@@ -54,13 +54,22 @@ def _owner_query(frontier):
         for child, parents in sorted(_PARENTS.items())
     ]
     pairs.append("(n.type='CustRfnd' AND p.type IN ('DepAppl','CustCred'))")
-    return (
-        "SELECT DISTINCT l.previousdoc,l.nextdoc,p.type AS previoustype,n.type AS nexttype "
+    projection = (
+        "SELECT l.previousdoc,l.nextdoc,p.type AS previoustype,n.type AS nexttype "
         "FROM NextTransactionLink l JOIN transaction p ON p.id=l.previousdoc "
         "JOIN transaction n ON n.id=l.nextdoc "
-        f"WHERE (l.nextdoc IN ({ids}) AND ({' OR '.join(pairs)})) "
-        f"OR (l.previousdoc IN ({ids}) AND p.type='CustRfnd' AND n.type IN ('DepAppl','CustCred')) "
-        "ORDER BY l.previousdoc,l.nextdoc"
+    )
+    # Keep the two indexed link directions separate. Their OR caused the
+    # verified REST role to time out on ordinary twenty-document pages. UNION
+    # deduplicates the final edge set before the existing completeness cap.
+    return (
+        "SELECT DISTINCT edges.previousdoc,edges.nextdoc,edges.previoustype,edges.nexttype FROM ("
+        + projection
+        + f"WHERE l.nextdoc IN ({ids}) AND ({' OR '.join(pairs)}) "
+        "UNION "
+        + projection
+        + f"WHERE l.previousdoc IN ({ids}) AND p.type='CustRfnd' AND n.type IN ('DepAppl','CustCred') "
+        ") edges ORDER BY edges.previousdoc,edges.nextdoc"
     )
 
 
