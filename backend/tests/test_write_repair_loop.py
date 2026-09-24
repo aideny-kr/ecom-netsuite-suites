@@ -413,6 +413,8 @@ async def test_persisted_log_flags_a_card_shown_after_repair_is_exhausted():
     assert len(tool_calls_log) == 3
 
     _metadata_entry, repair_entry, card_entry = tool_calls_log
+    assert repair_entry["execution_outcome"] == "error"
+    assert card_entry["execution_outcome"] == "confirmation_required"
     # The first (repair-requested) entry is untouched by this change.
     assert "validation_failed_before_confirmation" not in repair_entry
     # The second entry is the card shown despite repair giving up — the

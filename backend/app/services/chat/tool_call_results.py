@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 # Persistence-boundary row cap (re-gate r3, finding #6): the FULL pre-truncation
 # result is frozen into ChatMessage.tool_calls[].result_payload (JSONB) AND the
@@ -810,6 +810,7 @@ def build_tool_call_log_entry(
     result_str: str,
     duration_ms: int,
     agent_name: str | None = None,
+    outcome: Literal["error", "confirmation_required", "returned"] | None = None,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "step": step,
@@ -820,6 +821,31 @@ def build_tool_call_log_entry(
     }
     if agent_name:
         entry["agent"] = agent_name
+    from app.services.chat.execution_provenance import tool_provenance
+
+    provenance_result = parse_tool_result_value(result_str)
+    if isinstance(provenance_result, dict):
+        # Preserve the outcome before summarize_tool_result turns an error JSON
+        # into human-readable prose. This field is set locally, never copied
+        # from a connector-supplied receipt.
+        if outcome is not None:
+            entry["execution_outcome"] = outcome
+        elif (
+            provenance_result.get("error")
+            or provenance_result.get("blocked") is True
+            or provenance_result.get("isError") is True
+            or provenance_result.get("success") is False
+            or (
+                provenance_result.get("success") is not True
+                and provenance_result.get("status") in ("failed", "error", "canceled", "cancelled")
+            )
+        ):
+            entry["execution_outcome"] = "error"
+        elif provenance_result.get("confirmation_required") is True:
+            entry["execution_outcome"] = "confirmation_required"
+        else:
+            entry["execution_outcome"] = "returned"
+        entry.update(tool_provenance(tool_name, provenance_result))
     if tool_name in {"transaction_ops_accounting_evidence", "transaction_ops.accounting_evidence"}:
         try:
             parsed = json.loads(result_str)

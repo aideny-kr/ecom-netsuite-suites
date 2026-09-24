@@ -780,6 +780,7 @@ class AgentResult:
     agent_name: str = ""
     confidence_score: float | None = None
     request_context: dict | None = None
+    execution_receipt: dict | None = None
 
 
 def _compute_confidence(
@@ -1961,6 +1962,7 @@ class BaseSpecialistAgent(abc.ABC):
                                         params=block.input,
                                         result_str=result_str,
                                         duration_ms=elapsed_ms,
+                                        outcome="error",
                                     )
                                 )
                                 tool_results_content.append(
@@ -2174,6 +2176,7 @@ class BaseSpecialistAgent(abc.ABC):
                                         params=block.input,
                                         result_str=result_str,
                                         duration_ms=elapsed_ms,
+                                        outcome="error",
                                     )
                                 )
                                 tool_results_content.append(
@@ -2548,6 +2551,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 params=block.input,
                                 result_str=result_str,
                                 duration_ms=elapsed_ms,
+                                outcome="error",
                             )
                         )
                         tool_results_content.append(

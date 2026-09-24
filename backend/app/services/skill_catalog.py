@@ -123,6 +123,10 @@ def _capabilities(tools: list[dict], permissions: set[str]) -> dict[str, bool]:
     }
 
 
+def skill_version(slug: str, content: bytes) -> str:
+    return hashlib.sha256(content + json.dumps(_BINDINGS.get(slug)).encode()).hexdigest()
+
+
 def resolve_catalog(
     skills: list[dict],
     tools: list[dict],
@@ -161,7 +165,7 @@ def resolve_catalog(
                 )
             )
         content = Path(skill["_path"]).read_bytes()
-        version = hashlib.sha256(content + json.dumps(binding).encode()).hexdigest()
+        version = skill_version(skill["slug"], content)
         catalog.append(
             AgentSkillMetadata(
                 **{k: skill[k] for k in ("name", "description", "triggers", "slug")},

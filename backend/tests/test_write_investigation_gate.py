@@ -174,6 +174,7 @@ class TestInvestigationGateBouncesUnexaminedCreates:
         assert len(responses_events) == 1
         tool_calls_log = responses_events[0].tool_calls_log
         assert len(tool_calls_log) == 1
+        assert tool_calls_log[0]["execution_outcome"] == "error"
 
 
 class TestInvestigationGateOneBouncePerTurnPerRecordType:

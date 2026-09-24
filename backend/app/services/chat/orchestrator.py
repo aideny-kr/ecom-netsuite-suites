@@ -304,7 +304,11 @@ from app.services.chat.tool_inventory import (
 
 
 def _assemble_system_prompt(
-    *, template: str, tool_definitions: list[dict], include_connected_skills: bool = True
+    *,
+    template: str,
+    tool_definitions: list[dict],
+    include_connected_skills: bool = True,
+    skill_receipts: list[dict] | None = None,
 ) -> str:
     """Resolve the {{TOOL_INVENTORY}} placeholder with the real tool schema.
 
@@ -331,7 +335,9 @@ def _assemble_system_prompt(
     # local system_prompt do not reach it. Use this shared final assembly seam,
     # after tool filtering, so both chat paths receive the connected skills.
     metabase_context = (
-        build_metabase_skill_context(tool_definitions, template=template) if include_connected_skills else ""
+        build_metabase_skill_context(tool_definitions, template=template, skill_receipts=skill_receipts)
+        if include_connected_skills
+        else ""
     )
     if metabase_context:
         prompt += f"\n\n{metabase_context}"
@@ -3431,10 +3437,12 @@ async def run_chat_turn(
 
         # ── Resolve {{TOOL_INVENTORY}} placeholder in the system prompt ──
         # using the real tool schema (single source of truth).
+        _legacy_skill_receipts: list[dict] = []
         if not is_onboarding:
             system_prompt = _assemble_system_prompt(
                 template=system_prompt,
                 tool_definitions=tool_definitions,
+                skill_receipts=_legacy_skill_receipts,
             )
 
         # ── Connection health warning (appended after tool inventory) ──
@@ -4398,6 +4406,11 @@ async def run_chat_turn(
                     _persisted_output = persist_request_context(
                         _persisted_output, getattr(agent_result, "request_context", None)
                     )
+                    from app.services.chat.execution_provenance import persist_execution_receipt
+
+                    _persisted_output = persist_execution_receipt(
+                        _persisted_output, getattr(agent_result, "execution_receipt", None)
+                    )
                     if _charts_output:
                         if _persisted_output:
                             _persisted_output = {**_persisted_output, "charts": _charts_output}
@@ -4872,6 +4885,12 @@ async def run_chat_turn(
         final_text = _sanitize_assistant_text(final_text)
 
         # ── Save assistant message ──
+        if not is_onboarding:
+            from app.services.chat.execution_provenance import execution_receipt, persist_execution_receipt
+
+            last_structured_output = persist_execution_receipt(
+                last_structured_output, execution_receipt(_legacy_skill_receipts, tool_calls_log)
+            )
         assistant_msg = ChatMessage(
             tenant_id=tenant_id,
             session_id=session.id,

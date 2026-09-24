@@ -43,14 +43,16 @@ def metabase_tool_names(tool_definitions: list[dict]) -> set[str]:
     }
 
 
-def build_metabase_skill_context(tool_definitions: list[dict], *, template: str = "") -> str:
+def build_metabase_skill_context(
+    tool_definitions: list[dict], *, template: str = "", skill_receipts: list[dict] | None = None
+) -> str:
     """Load both skills when Metabase tools survived this turn's filtering.
 
     The tag is stamped locally by tools._connector_tag, before the remote tool's
     description. Generic tool names or remote descriptions mentioning Metabase
     must not activate this context for an unrelated connector.
     """
-    from app.services.chat.skills import get_skill_instructions
+    from app.services.chat.execution_provenance import load_skill_snapshot, record_skill
     from app.services.chat.tools import parse_external_tool_name
 
     connector_tools: dict[str, list[str]] = {}
@@ -74,9 +76,11 @@ def build_metabase_skill_context(tool_definitions: list[dict], *, template: str 
     for connector_id, names in sorted(connector_tools.items()):
         parts.append(f"- Connector {connector_id}: {', '.join(sorted(names))}")
     for slug in METABASE_SKILL_SLUGS:
-        instructions = get_skill_instructions(slug)
+        snapshot = load_skill_snapshot(slug)
+        instructions = snapshot["instructions"] if snapshot else ""
         # Explicit slash skills are already injected by UnifiedAgent.
         if instructions and instructions not in template:
             parts.append(instructions)
+            record_skill(snapshot, "connected", skill_receipts)
     parts.append("</metabase_analysis_context>")
     return "\n\n".join(parts)
