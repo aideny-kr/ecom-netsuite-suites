@@ -84,6 +84,9 @@ _MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001": (1.0, 5.0),
 }
 _DEFAULT_PRICING_KEY = "claude-sonnet-4-6"
+# Prompt-cache prices relative to the input rate: 5-minute writes and reads.
+_CACHE_WRITE_MULTIPLIER = 1.25
+_CACHE_READ_MULTIPLIER = 0.1
 
 # Sentinel actor id for benchmark-originated tool calls. Audit logs and
 # analytics can filter on this to exclude benchmark traffic.
@@ -137,20 +140,42 @@ class AgentRunResult:
     # "NetSuite" in a second turn. Tokens, cost and latency cover both turns.
     source_question_answered: bool = False
 
+    # Prompt-cache traffic, summed over every paid turn and priced into cost_usd.
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _calculate_cost(*, model: str, input_tokens: int, output_tokens: int) -> float:
-    """Compute USD cost from token counts using the static pricing table.
+def _calculate_cost(
+    *,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_write_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> float:
+    """USD cost of a run from its token counts, using the static pricing table.
 
-    Unknown models fall back to sonnet pricing rather than raising — the
-    benchmark must always return a comparable number.
+    Cache traffic is priced too: writes at 1.25x the input rate (the 5-minute TTL) and
+    reads at 0.1x. Pricing fresh input only showed our side at $0.017 a case against a
+    real $0.21, because since #287 nearly all of our prompt is cache traffic (run
+    ddd4868a, 2026-09-24). TokenUsage has no 5m/1h split, so with
+    PROMPT_CACHE_STABLE_TTL="1h" the stable prefix (written at 2x) is undercounted.
+
+    Unknown models fall back to sonnet pricing rather than raising, so the benchmark
+    always produces a number we can compare. Keep in lockstep with the other runner.
     """
     in_rate, out_rate = _MODEL_PRICING.get(model, _MODEL_PRICING[_DEFAULT_PRICING_KEY])
-    return (input_tokens * in_rate + output_tokens * out_rate) / 1_000_000.0
+    return (
+        input_tokens * in_rate
+        + cache_write_tokens * in_rate * _CACHE_WRITE_MULTIPLIER
+        + cache_read_tokens * in_rate * _CACHE_READ_MULTIPLIER
+        + output_tokens * out_rate
+    ) / 1_000_000.0
 
 
 def _truncate_preview(value: Any) -> str:
@@ -274,7 +299,15 @@ def _charge(result: AgentRunResult, *, model: str, turns: list["AgentResult | No
     done = [t for t in turns if t is not None]
     result.input_tokens = sum(int(getattr(t.tokens_used, "input_tokens", 0) or 0) for t in done)
     result.output_tokens = sum(int(getattr(t.tokens_used, "output_tokens", 0) or 0) for t in done)
-    result.cost_usd = _calculate_cost(model=model, input_tokens=result.input_tokens, output_tokens=result.output_tokens)
+    result.cache_write_tokens = sum(int(getattr(t.tokens_used, "cache_creation_input_tokens", 0) or 0) for t in done)
+    result.cache_read_tokens = sum(int(getattr(t.tokens_used, "cache_read_input_tokens", 0) or 0) for t in done)
+    result.cost_usd = _calculate_cost(
+        model=model,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        cache_write_tokens=result.cache_write_tokens,
+        cache_read_tokens=result.cache_read_tokens,
+    )
 
 
 def _source_reply_history(question: str, asked: "AgentResult") -> list[dict]:

@@ -55,14 +55,14 @@ def _make_tool_use_block(tool_id: str, name: str, tool_input: dict):
     return block
 
 
-def _make_response(content_blocks, input_tokens=100, output_tokens=50):
+def _make_response(content_blocks, input_tokens=100, output_tokens=50, cache_write=0, cache_read=0):
     response = MagicMock()
     response.content = content_blocks
     response.usage = MagicMock(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        cache_creation_input_tokens=0,
-        cache_read_input_tokens=0,
+        cache_creation_input_tokens=cache_write,
+        cache_read_input_tokens=cache_read,
     )
     return response
 
@@ -175,7 +175,7 @@ class TestRunBaselineHappyPath:
         assert result.tool_calls == []
         assert result.input_tokens == 200
         assert result.output_tokens == 15
-        assert result.cost_usd > 0
+        assert result.cost_usd == pytest.approx((200 * 3 + 15 * 15) / 1_000_000)
         assert result.latency_ms >= 0
         # Anthropic was called exactly once, WITH the NetSuite tools: a toolless call is
         # the bug that made every baseline number fiction for four months.
@@ -483,3 +483,29 @@ class TestBaselineFailsClosedWithoutTools:
         # The model must never be called without tools — that is what produced
         # the fake `<tool_call>` transcripts.
         assert mock_create.await_count == 0
+
+
+class TestRunBaselineCacheCost:
+    @pytest.mark.asyncio
+    async def test_cache_tokens_in_the_response_are_priced(self, fake_db, tenant_id):
+        """The baseline sends no cache_control, so this is normally 0; when the API does
+        report cache traffic it is priced the same way as our side."""
+        response = _make_response(
+            [_make_text_block("42.")], input_tokens=100, output_tokens=10, cache_write=1_000, cache_read=5_000
+        )
+        with (
+            patch(
+                "app.services.benchmarks.baseline_runner._build_baseline_tools",
+                new=AsyncMock(return_value=_ns_tool_defs()),
+            ),
+            patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
+        ):
+            mock_client = MagicMock()
+            mock_client.messages.create = AsyncMock(return_value=response)
+            mock_get_client.return_value = mock_client
+            result = await run_baseline(
+                tenant_id=tenant_id, question="Orders today?", model="claude-sonnet-4-6", max_steps=12, db=fake_db
+            )
+
+        assert (result.cache_write_tokens, result.cache_read_tokens) == (1_000, 5_000)
+        assert result.cost_usd == pytest.approx((100 * 3 + 1_000 * 3.75 + 5_000 * 0.3 + 10 * 15) / 1_000_000)
