@@ -403,9 +403,31 @@ async def run_investigation(
     transport = CollectionTransport()
     previous_reference_hits = progress.get("reference_cache_hits", 0)
 
-    async def save():
+    def snapshot_progress():
         timing.snapshot()
         progress["reference_cache_hits"] = previous_reference_hits + reference_reads.hits
+
+    def completed_progress(report):
+        snapshot_progress()
+        balance_status = report["balance"]["status"]
+        group = (
+            "matched"
+            if balance_status == "matched"
+            else "needs_review"
+            if balance_status in {"difference", "ambiguous", "currency_mismatch", "missing_in_netsuite"}
+            else "not_verified"
+        )
+        return ProgressUpdate(
+            progress_json={
+                **progress,
+                "processed": progress["processed"] + 1,
+                group: progress.get(group, 0) + 1,
+                "pending_refs": progress["pending_refs"][1:],
+            }
+        )
+
+    async def save():
+        snapshot_progress()
         await state.update_progress(
             db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
         )
@@ -1041,22 +1063,22 @@ async def run_investigation(
                 except Exception:
                     report = {**report, "automation": {"status": "blocked", "code": "action_evidence_unavailable"}}
             finding = await state.record_finding(
-                db, tenant_id, run_id, reference, report, lease_token=token, now=clock()
+                db,
+                tenant_id,
+                run_id,
+                reference,
+                report,
+                lease_token=token,
+                now=clock(),
+                **({"checkpoint": completed_progress(report)} if not settlement else {}),
             )
             if settlement and run.params_json.get("approval_message_id"):
                 report = finding.report_json
-            progress["processed"] += 1
-            balance_status = report["balance"]["status"]
-            group = (
-                "matched"
-                if balance_status == "matched"
-                else "needs_review"
-                if balance_status in {"difference", "ambiguous", "currency_mismatch", "missing_in_netsuite"}
-                else "not_verified"
-            )
-            progress[group] = progress.get(group, 0) + 1
-            progress["pending_refs"] = progress["pending_refs"][1:]
-            await save()
+            progress.update(completed_progress(report).progress_json)
+            if settlement:
+                # Recovery may replace the report with bound accounting proof.
+                # Its existing post-proof checkpoint remains separate.
+                await save()
     except ReadBudgetExhaustedError:
         return await finish("budget")
     except FeatureRevokedError:
