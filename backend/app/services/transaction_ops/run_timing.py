@@ -41,6 +41,8 @@ class RunTiming:
         progress["timing_ms"] = self.values
 
     def snapshot(self):
+        # Validated checkpoints copy nested JSON; restore the live counters.
+        self.progress["timing_ms"] = self.values
         self.progress["active_ms"] = max(0, round((self.clock() - self.started) * 1000))
 
     @contextmanager
