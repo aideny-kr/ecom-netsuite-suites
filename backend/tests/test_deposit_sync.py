@@ -113,7 +113,7 @@ async def test_failed_tail_keeps_committed_batch_without_advancing_cursor(db, te
     from contextlib import ExitStack
 
     import pytest
-    from sqlalchemy.exc import DataError
+    from sqlalchemy.exc import DBAPIError
 
     connection = await _seed_netsuite_connection(db, tenant_a.id)
     connection_id = connection.id
@@ -122,7 +122,7 @@ async def test_failed_tail_keeps_committed_batch_without_advancing_cursor(db, te
     with ExitStack() as stack:
         for item in _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db):
             stack.enter_context(item)
-        with pytest.raises(DataError):
+        with pytest.raises(DBAPIError, match="numeric field overflow"):
             await sync_netsuite_deposits(db, str(tenant_a.id), date(2026, 9, 1), date(2026, 9, 21))
     await db.rollback()
     postings = (await db.scalars(select(NetsuitePosting).where(NetsuitePosting.source_id.like("9300%")))).all()
