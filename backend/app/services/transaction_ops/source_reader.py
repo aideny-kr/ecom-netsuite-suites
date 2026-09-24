@@ -120,6 +120,7 @@ class _Transport:
 async def _load_source(db: AsyncSession, tenant_id: uuid.UUID, step_id: uuid.UUID):
     result = await db.execute(
         select(CeligoFlowStep, Connection)
+        .execution_options(populate_existing=True)
         .join(
             CeligoFlow,
             and_(

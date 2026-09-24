@@ -313,7 +313,12 @@ def limit_report(report, *, now):
                 key: report.get("netsuite_provenance", {}).get(key) for key in ("scope", "observed_at")
             },
         }
+        from app.services.transaction_ops.case_service import refund_observation_times
         from app.services.transaction_ops.dependency_index import compact_dependency_evidence
+
+        refund_times = refund_observation_times(report)
+        if refund_times:
+            summary["refund_observation_times"] = refund_times
 
         dependencies = compact_dependency_evidence(report)
         if dependencies:
@@ -887,7 +892,10 @@ async def run_investigation(
                     use_batch = (
                         not settlement
                         and not refund_batch_disabled
-                        and mapping.action_mode == "detect_only"
+                        and (
+                            mapping.action_mode == "detect_only"
+                            or report["comparison"]["recommended_action"] in {"human_review", "gather_evidence"}
+                        )
                         and getattr(run, "origin", None) != "recovery"
                         and bool(run.params_json.get("window_start"))
                         and _source_refunds_reader is None
@@ -911,7 +919,7 @@ async def run_investigation(
                                     lambda: refund_batch.read(
                                         db, tenant_id, mapping.solidus_refund_step_id, references
                                     ),
-                                    retry_calls=2,
+                                    retry_calls=0,
                                 )
                                 progress["source_refund_batches"] = progress.get("source_refund_batches", 0) + 1
                             except SourceReadError:

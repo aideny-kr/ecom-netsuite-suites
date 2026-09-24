@@ -13,6 +13,17 @@ from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.source_eligibility import eligible_reports, excluded_report
 
 
+def refund_observation_times(report):
+    """Retain financial read times even when a large report omits event details."""
+    evidence = report.get("refund_evidence") or {}
+    compacted = report.get("refund_observation_times") or []
+    if not isinstance(evidence, dict) or not isinstance(compacted, list):
+        raise ValueError("invalid_refund_observation_times")
+    return [
+        value["observed_at"] for value in evidence.values() if isinstance(value, dict) and "observed_at" in value
+    ] + compacted
+
+
 def observation_time(report, fallback):
     """Order evidence by its reads, not by when a slow job saved the result.
 
@@ -22,6 +33,7 @@ def observation_time(report, fallback):
     try:
         snapshots = [report["source"], *report["targets"]]
         times = [datetime.fromisoformat(snapshot["observed_at"]) for snapshot in snapshots]
+        times.extend(datetime.fromisoformat(value) for value in refund_observation_times(report))
         if all(value.utcoffset() is not None and value <= fallback for value in times):
             return min(times)
     except (KeyError, TypeError, ValueError):
@@ -53,6 +65,10 @@ def _cleared(report, now):
         for snapshot in (report["source"], report["targets"][0]):
             observed = datetime.fromisoformat(snapshot["observed_at"])
             if snapshot.get("authoritative") is not True or not timedelta(0) <= now - observed <= timedelta(minutes=15):
+                return False
+        for value in refund_observation_times(report):
+            observed = datetime.fromisoformat(value)
+            if not timedelta(0) <= now - observed <= timedelta(minutes=15):
                 return False
         for metric in ("order_total", "tax", "refunds"):
             values = balance["amounts"][metric]
