@@ -834,6 +834,14 @@ def _print_summary(results: list[CaseResult], skip_baseline: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _agent_data_sources(db, tenant_id: uuid.UUID) -> dict[str, str]:
+    """The data sources the agent would see for this tenant in this database."""
+    from app.services.chat.tool_inventory import available_data_sources
+    from app.services.chat.tools import build_all_tool_definitions
+
+    return available_data_sources(await build_all_tool_definitions(db, tenant_id))
+
+
 async def _main_async(args: argparse.Namespace) -> int:
     try:
         cases = load_cases(case_ids=args.case, suite=args.suite)
@@ -867,6 +875,17 @@ async def _main_async(args: argparse.Namespace) -> int:
     results: list[CaseResult] = []
     async with async_session_factory() as db:
         await set_tenant_context(db, str(tenant_uuid))
+
+        # Without a data source every case ends in "which data source?", so nothing is
+        # measured. Say so, rather than pass on 0.00 (the PR check did this until
+        # 2026-09-23) or fail every case of a database that has no tenant data (CI).
+        if not await _agent_data_sources(db, tenant_uuid):
+            print(
+                f"NOT MEASURED: tenant {tenant_uuid} has no data source in this database, so no case "
+                "can be answered. Nothing was run or persisted. Measure where the tenant's "
+                "connections live (the staging backend container)."
+            )
+            return 0
 
         for i, case in enumerate(cases, 1):
             print(f"[{i}/{len(cases)}] {case.case_id}: {case.query[:80]}")
