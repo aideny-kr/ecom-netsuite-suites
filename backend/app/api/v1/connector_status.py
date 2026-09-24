@@ -39,7 +39,7 @@ from app.services.celigo_write_guard import (
 )
 from app.services.typesafe.access import PROVIDER as JEV_PROVIDER
 from app.services.typesafe.access import Mode as JevMode
-from app.services.typesafe.access import key_in_use, load_setting, tenant_connection
+from app.services.typesafe.access import deployment_cap, key_in_use, load_setting, tenant_connection
 from app.services.typesafe.client import check_key
 
 logger = structlog.get_logger()
@@ -445,6 +445,7 @@ _JEV_ERRORS = {
     "disabled": "No Jev key is configured.",
     "unreadable": "The stored key could not be read. Save a new key.",
     "not_a_key": "That is not a TypeSafe key.",
+    "switched_off": "Jev is switched off for this deployment, so no key can be checked.",
 }
 
 
@@ -534,6 +535,9 @@ async def test_jev_key(
 ):
     """Check a candidate key, or (blank) the key this tenant uses now, whatever the mode."""
     candidate = _submitted_key(body)
+    if deployment_cap() == "off":  # the kill switch stops every call to TypeSafe, probes included
+        source = "candidate" if candidate else (await key_in_use(db, user.tenant_id))[1]
+        return JevTestResponse(success=False, key_source=source, error=_JEV_ERRORS["switched_off"])
     if candidate:
         key, source = candidate, "candidate"
     else:
@@ -555,6 +559,8 @@ async def save_jev_key(
     key = _submitted_key(body)
     if not key:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
+    if deployment_cap() == "off":  # the key cannot be checked without calling TypeSafe
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_JEV_ERRORS["switched_off"])
     reason = await check_key(key)
     if reason:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_jev_error(reason))

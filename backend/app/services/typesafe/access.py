@@ -75,8 +75,9 @@ async def tenant_connection(db: AsyncSession, tenant_id: uuid.UUID | str) -> Con
         select(Connection)
         .where(Connection.tenant_id == tid, Connection.provider == PROVIDER)
         .order_by(Connection.created_at.desc(), Connection.id.desc())
-        # Every other query is blind to this row (app/models/connection.py).
-        .execution_options(**{INCLUDE_JEV_CONNECTION: True})
+        # Every other query is blind to this row (app/models/connection.py). Re-read it even
+        # when the session already holds it: a card change must reach a running worker.
+        .execution_options(**{INCLUDE_JEV_CONNECTION: True}, populate_existing=True)
     )
     return result.scalars().first()
 

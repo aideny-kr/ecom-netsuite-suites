@@ -597,3 +597,45 @@ async def test_a_failed_access_lookup_runs_the_items_without_jev(db, tenant_a, m
     assert summary["processed"] == 2 and summary["persist_failures"] == 0
     assert len(adapter.calls) == 2  # both items classified (Jev unsure, so the model decides)
     assert keys == ["platform-test-key"]  # Jev off for the item whose lookup failed, on for the next
+
+
+async def test_a_mode_change_on_the_card_reaches_a_running_worker(db, tenant_a, monkeypatch):
+    """The card UPDATEs the tenant's existing Jev row from another session. If anything in
+    the worker's session holds that row (the identity map keeps rows only weakly, so the
+    test holds one on purpose), a plain re-select returns the stale object: the resolver
+    must re-read it (gate round 3 on #314)."""
+    from sqlalchemy import text
+
+    from app.services.typesafe.access import tenant_connection
+    from tests.test_jev_access import _connect
+
+    await _connect(db, tenant_a, mode="live")
+    run = await _seed_two_items(db, tenant_a)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+    keys = []
+    held = []
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, api_key=None, **_):
+        keys.append(api_key)
+        if len(keys) == 1:  # the card switches Jev off: an UPDATE of the SAME row, as its endpoint does
+            held.append(await tenant_connection(db, tenant_a.id))
+            await db.execute(
+                text(
+                    "UPDATE connections SET metadata_json = '{\"mode\": \"off\"}' WHERE tenant_id = :t AND provider = 'typesafe'"
+                ),
+                {"t": tenant_a.id},
+            )
+        return _jev_answer("needs_human", 0.3), None
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+
+    assert summary["processed"] == 2
+    assert keys == ["platform-test-key"]

@@ -304,3 +304,16 @@ async def test_a_key_that_cannot_be_a_header_value_is_a_400_not_a_500(client, ad
         assert r.status_code == 400, (path, r.status_code)
         assert bad_key not in r.text
     assert jev_accepts == []
+
+
+async def test_the_kill_switch_stops_key_checks_too(client, admin_user, db, monkeypatch, jev_accepts):
+    """With the deployment switched off, nothing calls TypeSafe: not even the key probe."""
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "off")
+    user, headers = admin_user
+
+    tested = (await client.post(f"{URL}/test", headers=headers, json={})).json()
+    saved = await client.put(f"{URL}/key", headers=headers, json={"api_key": TENANT_KEY})
+
+    assert tested["success"] is False and "switched off" in tested["error"]
+    assert saved.status_code == 409 and "switched off" in saved.json()["detail"]
+    assert jev_accepts == [] and await _row(db, user.tenant_id) is None

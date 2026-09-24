@@ -102,3 +102,18 @@ async def test_connection_health_does_not_list_it(client, admin_user, db, tenant
 
     assert all(item.get("provider") != "typesafe" for item in body.get("connections", []))
     assert "TypeSafe Jev" not in str(body)
+
+
+async def test_a_lookup_by_id_cannot_load_it(db, tenant_a):
+    await _connect(db, tenant_a, api_key="tenant-key-1234567890")
+    row = (
+        await db.execute(
+            select(Connection)
+            .where(Connection.tenant_id == tenant_a.id)
+            .execution_options(**{INCLUDE_JEV_CONNECTION: True})
+        )
+    ).scalar_one()
+    row_id = row.id
+    db.expunge(row)  # not in the identity map: a real load
+
+    assert await db.get(Connection, row_id) is None

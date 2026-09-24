@@ -88,12 +88,15 @@ class Connection(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 # The Jev connection (provider "typesafe") holds a tenant's TypeSafe key and Jev mode, and
 # is managed only by services/typesafe/access.py and its card (/connector-status/jev, which
 # checks the key and serializes writes). Three review rounds on #314 each found one more
-# generic route that could read or change it. So every ORM SELECT on Connection excludes it
-# here, unless the statement carries ``.execution_options(include_jev_connection=True)``;
-# a route that cannot load the row cannot change it. (Bulk ORM UPDATE/DELETE on this table
-# is already refused by the Celigo write guard.) Refreshing an object already loaded (a
-# column load) is left alone. Registered from the model module for the same reason as the
-# Celigo write guard above: no session for this model can exist without it.
+# generic route that could read or change it. So every ORM load of Connection (a SELECT, a
+# relationship load, Session.get) excludes it here unless the statement carries
+# ``.execution_options(include_jev_connection=True)``. Refreshing an object already loaded
+# (a column load) is left alone. What this does not cover, and what covers it instead:
+# changing a loaded row needs the row, which only an opt-in query returns; bulk ORM
+# UPDATE/DELETE on this table is refused by the Celigo write guard; and a new
+# provider="typesafe" row can only come from the card, since the generic create schema
+# refuses the provider. Registered from the model module for the same reason as the Celigo
+# write guard above: no session for this model can exist without it.
 JEV_PROVIDER = "typesafe"
 INCLUDE_JEV_CONNECTION = "include_jev_connection"
 

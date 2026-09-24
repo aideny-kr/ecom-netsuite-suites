@@ -4,9 +4,10 @@ Jev is a decision model: a ``state`` plus typed questions (choice / noul /
 score) in, typed answers with probabilities out. It generates nothing.
 
 Every caller must come through here, with the key ``typesafe.access.resolve_access``
-chose for the tenant (the tenant's own key, else the platform key). The client never
-reads a key from settings, so no caller can send one tenant's work under another key,
-and no key refuses before any network I/O. There are no retries — callers sit on
+chose for the tenant whose data it sends (the tenant's own key, else the platform key).
+The client sends exactly the key it is given and never reads one from settings; pairing
+key and tenant is the caller's job, and today's one caller (resolution_jev, fed by the
+worker's per-item resolve_access) does it. No key refuses before any network I/O. There are no retries — callers sit on
 latency paths and already own a slower fallback, so a failure is reported once, with
 a reason, and the caller falls back.
 
