@@ -17,7 +17,6 @@ from app.models.tenant import Tenant
 from app.models.transaction_ops import TransactionConfig, TransactionFinding, TransactionRun
 from app.models.user import User
 from app.schemas.transaction_runs import ProgressUpdate
-from app.services.celigo_write_guard import celigo_writes_allowed
 from app.services.transaction_ops import state_service as state
 from tests import test_transaction_ops_state_db as state_fixtures
 from tests.conftest import _test_db_url
@@ -98,9 +97,13 @@ async def committed_run():
         yield factory, tenant, run, token
     finally:
         async with factory() as db:
-            with celigo_writes_allowed(db):
-                for model in (AuditEvent, TransactionFinding, TransactionRun, TransactionConfig, Connection, User):
-                    await db.execute(delete(model).where(model.tenant_id == tenant))
+            for model in (AuditEvent, TransactionFinding, TransactionRun, TransactionConfig):
+                await db.execute(delete(model).where(model.tenant_id == tenant))
+            # These are Solidus/NetSuite fixtures. Per-row deletion keeps the
+            # provider guard active; bulk connection deletion requires a bypass.
+            for connection in await db.scalars(select(Connection).where(Connection.tenant_id == tenant)):
+                await db.delete(connection)
+            await db.execute(delete(User).where(User.tenant_id == tenant))
             await db.execute(delete(Tenant).where(Tenant.id == tenant))
             await db.commit()
             assert await db.scalar(select(Tenant.id).where(Tenant.id == tenant)) is None
