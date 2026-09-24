@@ -11,7 +11,10 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
     "gunicorn>=21.2.0",
-    "sqlalchemy[asyncio]>=2.0.25",
+    # <2.1: SQLAlchemy 2.1 defaults postgresql:// to psycopg v3, which is not installed
+    # (main's CI and every fresh image broke on 2026-09-24). Also enforced at image build
+    # by scripts/assert_dependency_ceilings.py.
+    "sqlalchemy[asyncio]>=2.0.25,<2.1",
     "asyncpg>=0.29.0",
     "duckdb>=1.1.0",
     "alembic>=1.13.0",

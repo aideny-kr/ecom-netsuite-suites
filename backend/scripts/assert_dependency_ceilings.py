@@ -41,8 +41,14 @@ from importlib.metadata import PackageNotFoundError, version
 # Every outbound LLM call dies, and it surfaces to users as the chat's generic
 # "I wasn't able to find relevant information" — silent at exactly the layer
 # someone would investigate first. See ClickUp 86bbm719c before raising it.
+#
+# sqlalchemy: 2.1 changed the default driver for a plain postgresql:// URL from psycopg2
+# to psycopg (v3), which is not installed, so create_engine(DATABASE_URL_SYNC) in
+# app/workers/base_task.py raises ModuleNotFoundError at import and the backend cannot
+# start. Main's CI hit it on 2026-09-24 when 2.1.0 was released under an unbounded pin.
 SUPPORTED: dict[str, tuple[tuple[int, ...], tuple[int, ...]]] = {
     "anthropic": ((0, 40), (1, 0)),
+    "sqlalchemy": ((2, 0, 25), (2, 1)),
 }
 
 
