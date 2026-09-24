@@ -197,3 +197,38 @@ async def test_one_tenants_key_is_invisible_to_another(client, admin_user, admin
 
     body_b = (await client.get(URL, headers=headers_b)).json()
     assert (body_b["key_source"], body_b["key_hint"]) == ("platform", None)
+
+
+# ── codex review of #314 ───────────────────────────────────────────────────
+
+
+async def test_the_generic_delete_cannot_remove_the_jev_connection(client, admin_user, db, jev_accepts):
+    user, headers = admin_user
+    await client.put(f"{URL}/key", headers=headers, json={"api_key": TENANT_KEY})
+    row = await _row(db, user.tenant_id)
+
+    r = await client.delete(f"/api/v1/connections/{row.id}", headers=headers)
+
+    assert r.status_code == 409
+    assert "card" in r.json()["detail"].lower()
+    access = await resolve_access(db, user.tenant_id)
+    assert (access.api_key, access.key_source) == (TENANT_KEY, "tenant")
+
+
+async def test_an_over_long_key_is_refused_without_echoing_it(client, admin_user, db, jev_accepts):
+    user, headers = admin_user
+    long_key = "ts-" + "x" * 600
+
+    r = await client.put(f"{URL}/key", headers=headers, json={"api_key": long_key})
+
+    assert r.status_code == 400
+    assert long_key not in r.text and "x" * 50 not in r.text
+    assert jev_accepts == [] and await _row(db, user.tenant_id) is None
+
+
+async def test_a_user_without_view_permission_cannot_see_jev(client, db, tenant_a):
+    from tests.conftest import create_test_user, make_auth_headers
+
+    user, _ = await create_test_user(db, tenant_a, role_name="no-such-role")
+    r = await client.get(URL, headers=make_auth_headers(user))
+    assert r.status_code == 403

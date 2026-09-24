@@ -12,11 +12,21 @@ from app.core.encryption import decrypt_credentials, encrypt_credentials, get_cu
 from app.models.connection import RETIRED_CONNECTION_STATUSES, Connection
 from app.services.celigo_write_guard import CeligoManagedElsewhereError
 from app.services.http_connector_service import HTTP_PROVIDERS, public_metadata, validate_credentials, verify_connection
+from app.services.typesafe.access import PROVIDER as JEV_PROVIDER
 
 logger = structlog.get_logger()
 
+JEV_CARD_ONLY = "Manage TypeSafe Jev from its card on the Connections page."
+
+
+class JevManagedElsewhereError(Exception):
+    """The Jev connection is changed only through /connector-status/jev (its card)."""
+
+
 __all__ = [
     "CeligoManagedElsewhereError",
+    "JEV_CARD_ONLY",
+    "JevManagedElsewhereError",
     "create_connection",
     "delete_connection",
     "get_connection",
@@ -102,6 +112,9 @@ async def delete_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_i
             "Celigo connections must be disconnected via DELETE /connector-status/celigo, "
             "which also revokes the paired celigo_mcp connector."
         )
+    if connection.provider == JEV_PROVIDER:
+        # Revoking would hide the row while typesafe.access kept using its key and mode.
+        raise JevManagedElsewhereError(JEV_CARD_ONLY)
     connection.status = "revoked"
     await db.flush()
     return True

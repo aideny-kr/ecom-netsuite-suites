@@ -266,23 +266,15 @@ async def run_resolution_agent(
         provider, model, api_key, _is_byok = await get_tenant_ai_config(db, tid)
         adapter = get_adapter(provider, api_key)
         materiality = await load_materiality(db, tid)
-        # The tenant's Jev key and mode, once per run (typesafe.access). None = Jev off for
-        # this tenant; a failure to resolve is also "off", never a failed run.
-        try:
-            jev_access = await resolve_access(db, tid)
-        except Exception:
-            logger.warning("resolution_agent.jev_access_unavailable", exc_info=True)
-            jev_access = None
-            await _recover_after_failed_write(db)
 
         async with contextlib.AsyncExitStack() as stack:
-            # One HTTPS connection for the whole run instead of a TLS handshake per item.
-            # Entered only when Jev is actually on; if entering fails, items run without it.
-            if jev_access is not None:
-                try:
-                    await stack.enter_async_context(jev_client.session())
-                except Exception:
-                    logger.warning("resolution_agent.jev_session_unavailable", exc_info=True)
+            # One HTTPS connection for the whole run instead of a TLS handshake per item. It
+            # makes no request until an item actually calls Jev; if entering fails, each call
+            # opens its own.
+            try:
+                await stack.enter_async_context(jev_client.session())
+            except Exception:
+                logger.warning("resolution_agent.jev_session_unavailable", exc_info=True)
 
             # A rollback expires EVERY loaded instance (expire_on_commit=False does not cover
             # rollback), and touching an expired attribute on an async session is lazy IO that
@@ -301,6 +293,17 @@ async def run_resolution_agent(
                     stopped = "leadership_lost"
                     break
                 shadow = None
+                # The tenant's Jev key and mode (typesafe.access), per item, so switching Jev
+                # off or changing the key on the card applies from the next item. A failed
+                # lookup means Jev is off for this item, never a failed run: the recovery rolls
+                # back, which expires the loaded items, so the reload below runs.
+                try:
+                    jev_access = await resolve_access(db, tid)
+                except Exception:
+                    logger.warning("resolution_agent.jev_access_unavailable", exc_info=True)
+                    jev_access = None
+                    await _recover_after_failed_write(db)
+                    expired = True
                 if expired:
                     try:
                         await db.refresh(item)

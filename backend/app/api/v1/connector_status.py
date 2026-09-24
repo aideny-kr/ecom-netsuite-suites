@@ -102,7 +102,12 @@ class JevStatusResponse(BaseModel):
 
 
 class JevKeyRequest(BaseModel):
-    api_key: str = Field(min_length=1, max_length=512)
+    # No max_length here: a validation error echoes the submitted value, and this one is a
+    # secret. The length is checked in the handler with a message that does not repeat it.
+    api_key: str = Field(min_length=1)
+
+
+_JEV_KEY_MAX = 512
 
 
 class JevModeRequest(BaseModel):
@@ -467,8 +472,22 @@ async def _jev_status(db: AsyncSession, tenant_id) -> JevStatusResponse:
     )
 
 
+async def _jev_status_after_commit(db: AsyncSession, tenant_id) -> JevStatusResponse:
+    """The request's tenant context was SET LOCAL and ended with the commit; re-apply it
+    before reading again, so the read cannot fail under forced row-level security."""
+    await set_tenant_context(db, str(tenant_id))
+    return await _jev_status(db, tenant_id)
+
+
+async def _lock_jev(db: AsyncSession, tenant_id) -> None:
+    """Serialize this tenant's Jev writes until commit, so two first saves cannot each
+    create a row (a later keyless row would otherwise hide the stored key)."""
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"typesafe-connection:{tenant_id}"))))
+
+
 async def _jev_connection(db: AsyncSession, user: User) -> Connection:
-    """The tenant's Jev connection, created (keyless, default mode) when absent."""
+    """The tenant's Jev connection, created (keyless, default mode) when absent.
+    Callers hold ``_lock_jev`` so the read-then-create cannot race."""
     connection = await tenant_connection(db, user.tenant_id)
     if connection is None:
         connection = Connection(
@@ -522,9 +541,12 @@ async def save_jev_key(
 ):
     """Store the tenant's own TypeSafe key, only after TypeSafe accepts it."""
     key = request.api_key.strip()
+    if not key or len(key) > _JEV_KEY_MAX:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That is not a TypeSafe key.")
     reason = await check_key(key)
     if reason:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_jev_error(reason))
+    await _lock_jev(db, user.tenant_id)
     connection = await _jev_connection(db, user)
     connection.encrypted_credentials = encrypt_credentials({"api_key": key})
     connection.encryption_key_version = get_current_key_version()
@@ -541,7 +563,7 @@ async def save_jev_key(
         resource_id=str(connection.id),
     )
     await db.commit()
-    return await _jev_status(db, user.tenant_id)
+    return await _jev_status_after_commit(db, user.tenant_id)
 
 
 @router.delete("/jev/key", response_model=JevStatusResponse)
@@ -550,6 +572,7 @@ async def remove_jev_key(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Forget the tenant's own key; Jev returns to the platform key. The mode is kept."""
+    await _lock_jev(db, user.tenant_id)
     connection = await tenant_connection(db, user.tenant_id)
     try:
         has_key = bool(connection and decrypt_credentials(connection.encrypted_credentials).get("api_key"))
@@ -569,7 +592,7 @@ async def remove_jev_key(
         resource_id=str(connection.id),
     )
     await db.commit()
-    return await _jev_status(db, user.tenant_id)
+    return await _jev_status_after_commit(db, user.tenant_id)
 
 
 @router.put("/jev/mode", response_model=JevStatusResponse)
@@ -579,6 +602,7 @@ async def set_jev_mode(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Choose live, shadow (recorded beside the model, never deciding) or off."""
+    await _lock_jev(db, user.tenant_id)
     connection = await _jev_connection(db, user)
     # A new dict, so the JSON column's change is detected.
     connection.metadata_json = {**(connection.metadata_json or {}), "mode": request.mode}
@@ -593,7 +617,7 @@ async def set_jev_mode(
         payload={"mode": request.mode},
     )
     await db.commit()
-    return await _jev_status(db, user.tenant_id)
+    return await _jev_status_after_commit(db, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------

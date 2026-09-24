@@ -259,6 +259,8 @@ async def delete_connection(
         deleted = await connection_service.delete_connection(db, connection_id, user.tenant_id)
     except connection_service.CeligoManagedElsewhereError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except connection_service.JevManagedElsewhereError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     if not deleted:
         raise HTTPException(status_code=404, detail="Connection not found")
 
@@ -333,6 +335,8 @@ async def reconnect_connection(
     connection = await connection_service.get_connection(db, connection_id, user.tenant_id)
     if not connection:
         raise HTTPException(status_code=404, detail="Connection not found")
+    if connection.provider == "typesafe":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=connection_service.JEV_CARD_ONLY)
 
     # OAuth2 connections need a full re-authorization flow
     if connection.auth_type == "oauth2" and connection.provider == "netsuite":

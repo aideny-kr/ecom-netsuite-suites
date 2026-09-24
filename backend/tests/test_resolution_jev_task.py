@@ -507,3 +507,93 @@ async def test_a_tenant_in_shadow_keeps_the_llm_deciding(db, tenant_a, monkeypat
 async def test_without_any_key_jev_is_never_called(db, tenant_a, monkeypatch):
     keys, events = await _run_with_connection(db, tenant_a, monkeypatch, platform_key="")
     assert keys == [] and events == []
+
+
+# ── codex review of #314 ───────────────────────────────────────────────────
+
+
+async def _seed_two_items(db, tenant):
+    from decimal import Decimal
+
+    from app.services.reconciliation.resolution_planner import plan_run
+    from tests.conftest import create_test_recon_result, create_test_recon_run
+
+    await enable_feature_flag(db, tenant.id, "reconciliation")
+    await enable_feature_flag(db, tenant.id, "recon_resolution_agent")
+    run = await create_test_recon_run(db, tenant.id, status="completed")
+    for i in range(2):
+        await create_test_recon_result(
+            db, tenant.id, run.id, status="pending", bucket="needs_review", match_type="deterministic",
+            variance_type="manual_adjustment", variance_amount=Decimal("77.10"), stripe_amount=Decimal("500.00"),
+            netsuite_amount=Decimal("422.90"), evidence={"charge_source_id": f"ch_{i}", "order_reference": f"R62848927{i}"},
+        )  # fmt: skip
+    await db.flush()
+    await seed_run_linked_evidence(db, tenant.id, run.id)
+    await plan_run(db, tenant.id, run.id)
+    return run
+
+
+async def test_switching_jev_off_mid_run_stops_it_for_the_items_after(db, tenant_a, monkeypatch):
+    from tests.test_jev_access import _connect
+
+    run = await _seed_two_items(db, tenant_a)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+    keys = []
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, api_key=None, **_):
+        keys.append(api_key)
+        if len(keys) == 1:
+            await _connect(db, tenant_a, mode="off")  # the tenant switches Jev off during the run
+        return _jev_answer("needs_human", 0.3), None
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+
+    assert summary["processed"] == 2
+    assert keys == ["platform-test-key"]  # Jev asked about the first item only
+
+
+async def test_a_failed_access_lookup_runs_the_items_without_jev(db, tenant_a, monkeypatch):
+    """The lookup failing with a real database error aborts the transaction; recovery rolls
+    back, which expires every loaded item. Both items must still be classified."""
+    from sqlalchemy import text
+
+    from app.services.typesafe import access as access_module
+
+    run = await _seed_two_items(db, tenant_a)
+    adapter = FakeAdapter(action="book_fee_line", narrative="Fee.")
+    keys = []
+    real_resolve = access_module.resolve_access
+    state = {"failed": False}
+
+    async def flaky_resolve(session, tenant_id):
+        if not state["failed"]:
+            state["failed"] = True
+            await session.execute(text("SELECT 1/0"))  # a real error: the transaction is now aborted
+        return await real_resolve(session, tenant_id)
+
+    async def fake_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    async def fake_try_ask(tenant_id, state=None, questions=None, *, build=None, api_key=None, **_):
+        keys.append(api_key)
+        return _jev_answer("needs_human", 0.3), None
+
+    monkeypatch.setattr(access_module, "resolve_access", flaky_resolve)
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_config)
+    monkeypatch.setattr(rj, "try_ask", fake_try_ask)
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "live")
+
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+
+    assert summary["processed"] == 2 and summary["persist_failures"] == 0
+    assert len(adapter.calls) == 2  # both items classified (Jev unsure, so the model decides)
+    assert keys == ["platform-test-key"]  # Jev off for the item whose lookup failed, on for the next

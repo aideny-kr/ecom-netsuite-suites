@@ -71,7 +71,7 @@ async def tenant_connection(db: AsyncSession, tenant_id: uuid.UUID | str) -> Con
     result = await db.execute(
         select(Connection)
         .where(Connection.tenant_id == tid, Connection.provider == PROVIDER)
-        .order_by(Connection.created_at.desc())
+        .order_by(Connection.created_at.desc(), Connection.id.desc())
     )
     return result.scalars().first()
 
