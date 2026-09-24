@@ -23,7 +23,7 @@ const MODES: { value: JevMode; label: string; detail: string }[] = [
   { value: "off", label: "Off", detail: "Only the model is used." },
 ];
 
-const MODE_LABEL: Record<JevMode, string> = { live: "Live", shadow: "Shadow", off: "Off" };
+const MODE_LABEL = Object.fromEntries(MODES.map((m) => [m.value, m.label])) as Record<JevMode, string>;
 
 const BADGE_CLASS: Record<JevMode, string> = {
   live: "border-green-500/50 bg-green-500/10 text-green-700 dark:text-green-400",

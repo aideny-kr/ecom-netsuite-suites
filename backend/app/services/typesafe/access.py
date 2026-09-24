@@ -31,6 +31,9 @@ logger = structlog.get_logger()
 
 PROVIDER = "typesafe"
 MODES = ("live", "shadow", "off")
+# A hint is the last four characters, shown only when they are a small part of the key:
+# for a very short key they would BE the key.
+_HINT_MIN_KEY_LENGTH = 12
 _RANK = {"off": 0, "shadow": 1, "live": 2}
 
 Mode = Literal["live", "shadow", "off"]
@@ -92,7 +95,8 @@ def _key_of(connection: Connection | None, tenant_id) -> tuple[str | None, Liter
 
 
 async def key_in_use(db: AsyncSession, tenant_id) -> tuple[str | None, Literal["tenant", "platform", "none"]]:
-    """The key this tenant's Jev calls use whatever the mode: what the card's Test checks."""
+    """The key this tenant's Jev calls use whatever the mode: what the card's Test checks.
+    ``(None, "tenant")`` means the tenant's stored key cannot be read."""
     key, source, _ = _key_of(await tenant_connection(db, tenant_id), tenant_id)
     return key, source
 
@@ -102,7 +106,7 @@ async def _load(db: AsyncSession, tenant_id) -> tuple[JevSetting, str | None]:
     tenant_mode: Mode = _mode((connection.metadata_json or {}).get("mode") if connection else None, "live")
     cap = deployment_cap()
     key, source, unreadable = _key_of(connection, tenant_id)
-    hint = key[-4:] if key and source == "tenant" else None
+    hint = key[-4:] if key and source == "tenant" and len(key) >= _HINT_MIN_KEY_LENGTH else None
     problem = "unreadable_key" if unreadable else None
 
     effective: Mode = min(tenant_mode, cap, key=_RANK.__getitem__) if key and problem is None else "off"

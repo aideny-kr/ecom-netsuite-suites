@@ -7,7 +7,7 @@ deposit sync status.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 import structlog
@@ -38,6 +38,7 @@ from app.services.celigo_write_guard import (
     celigo_writes_allowed,
 )
 from app.services.typesafe.access import PROVIDER as JEV_PROVIDER
+from app.services.typesafe.access import Mode as JevMode
 from app.services.typesafe.access import key_in_use, load_setting, tenant_connection
 from app.services.typesafe.client import check_key
 
@@ -89,9 +90,6 @@ class StripeConnectRequest(BaseModel):
     label: str = "Stripe"
 
 
-JevMode = Literal["live", "shadow", "off"]
-
-
 class JevStatusResponse(BaseModel):
     mode: JevMode  # the tenant's choice
     effective_mode: JevMode  # what recon will actually do: capped, and off without a key
@@ -101,10 +99,10 @@ class JevStatusResponse(BaseModel):
     problem: str | None = None  # "unreadable_key"
 
 
+# The key fields accept any JSON value: a validation error echoes what was submitted, and
+# this one is a secret. The handlers check them with messages that never repeat the value.
 class JevKeyRequest(BaseModel):
-    # No max_length here: a validation error echoes the submitted value, and this one is a
-    # secret. The length is checked in the handler with a message that does not repeat it.
-    api_key: str = Field(min_length=1)
+    api_key: Any = None
 
 
 _JEV_KEY_MAX = 512
@@ -115,7 +113,7 @@ class JevModeRequest(BaseModel):
 
 
 class JevTestRequest(BaseModel):
-    api_key: str | None = None  # blank = test the key currently in use
+    api_key: Any = None  # blank = test the key currently in use
 
 
 class JevTestResponse(BaseModel):
@@ -453,7 +451,19 @@ _JEV_ERRORS = {
     "timeout": "TypeSafe did not answer in time. Try again.",
     "connection_error": "Could not reach TypeSafe. Try again.",
     "disabled": "No Jev key is configured.",
+    "unreadable": "The stored key could not be read. Save a new key.",
+    "not_a_key": "That is not a TypeSafe key.",
 }
+
+
+def _submitted_key(value: Any) -> str | None:
+    """The submitted key, stripped; None when blank. Raises 400 (never echoing the value)
+    for anything that cannot be a key."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value.strip()) > _JEV_KEY_MAX:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
+    return value.strip() or None
 
 
 def _jev_error(reason: str) -> str:
@@ -522,13 +532,14 @@ async def test_jev_key(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Check a candidate key, or (blank) the key this tenant uses now, whatever the mode."""
-    candidate = (request.api_key or "").strip()
+    candidate = _submitted_key(request.api_key)
     if candidate:
         key, source = candidate, "candidate"
     else:
         key, source = await key_in_use(db, user.tenant_id)
     if not key:
-        return JevTestResponse(success=False, key_source=source, error=_JEV_ERRORS["disabled"])
+        error = _JEV_ERRORS["unreadable"] if source == "tenant" else _JEV_ERRORS["disabled"]
+        return JevTestResponse(success=False, key_source=source, error=error)
     reason = await check_key(key)
     return JevTestResponse(success=reason is None, key_source=source, error=_jev_error(reason) if reason else None)
 
@@ -540,9 +551,9 @@ async def save_jev_key(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Store the tenant's own TypeSafe key, only after TypeSafe accepts it."""
-    key = request.api_key.strip()
-    if not key or len(key) > _JEV_KEY_MAX:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That is not a TypeSafe key.")
+    key = _submitted_key(request.api_key)
+    if not key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JEV_ERRORS["not_a_key"])
     reason = await check_key(key)
     if reason:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_jev_error(reason))

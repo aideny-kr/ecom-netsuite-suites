@@ -16,17 +16,13 @@ from app.services.typesafe.access import PROVIDER as JEV_PROVIDER
 
 logger = structlog.get_logger()
 
-JEV_CARD_ONLY = "Manage TypeSafe Jev from its card on the Connections page."
-
-
-class JevManagedElsewhereError(Exception):
-    """The Jev connection is changed only through /connector-status/jev (its card)."""
-
+# The Jev row (provider "typesafe") is managed only by its card (/connector-status/jev,
+# under a per-tenant lock and a key check). This generic service never serves it, so no
+# generic route, today's or a future one, can read, relabel, re-key or revoke it.
+_NOT_JEV = Connection.provider != JEV_PROVIDER
 
 __all__ = [
     "CeligoManagedElsewhereError",
-    "JEV_CARD_ONLY",
-    "JevManagedElsewhereError",
     "create_connection",
     "delete_connection",
     "get_connection",
@@ -66,7 +62,7 @@ async def create_connection(
 async def get_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: uuid.UUID) -> Connection | None:
     """Get a single connection by ID."""
     result = await db.execute(
-        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id, _NOT_JEV)
     )
     return result.scalar_one_or_none()
 
@@ -75,7 +71,7 @@ async def list_connections(db: AsyncSession, tenant_id: uuid.UUID) -> list[Conne
     """List connections for a tenant (no secrets exposed)."""
     result = await db.execute(
         select(Connection)
-        .where(Connection.tenant_id == tenant_id, Connection.status != "revoked")
+        .where(Connection.tenant_id == tenant_id, Connection.status != "revoked", _NOT_JEV)
         .order_by(Connection.created_at.desc())
     )
     return list(result.scalars().all())
@@ -102,7 +98,7 @@ async def delete_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_i
     revokes both rows together; callers must go through it instead.
     """
     result = await db.execute(
-        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id, _NOT_JEV)
     )
     connection = result.scalar_one_or_none()
     if not connection:
@@ -112,9 +108,6 @@ async def delete_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_i
             "Celigo connections must be disconnected via DELETE /connector-status/celigo, "
             "which also revokes the paired celigo_mcp connector."
         )
-    if connection.provider == JEV_PROVIDER:
-        # Revoking would hide the row while typesafe.access kept using its key and mode.
-        raise JevManagedElsewhereError(JEV_CARD_ONLY)
     connection.status = "revoked"
     await db.flush()
     return True
@@ -123,7 +116,7 @@ async def delete_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_i
 async def test_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: uuid.UUID) -> dict:
     """Test a connection by running a lightweight query against the provider."""
     result = await db.execute(
-        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id, _NOT_JEV)
     )
     connection = result.scalar_one_or_none()
     if not connection or connection.status in RETIRED_CONNECTION_STATUSES:

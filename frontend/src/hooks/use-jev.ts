@@ -37,8 +37,11 @@ function useStatusMutation<TVars>(mutationFn: (vars: TVars) => Promise<JevStatus
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn,
-    onSuccess: (status) => {
-      queryClient.setQueryData(STATUS_KEY, status);
+    // Refetch rather than write the response into the cache: the key is not scoped by
+    // workspace, and a response landing after a workspace switch would show the previous
+    // workspace's Jev status.
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: STATUS_KEY });
       queryClient.invalidateQueries({ queryKey: ["connections"] });
     },
   });

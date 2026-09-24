@@ -202,17 +202,64 @@ async def test_one_tenants_key_is_invisible_to_another(client, admin_user, admin
 # ── codex review of #314 ───────────────────────────────────────────────────
 
 
-async def test_the_generic_delete_cannot_remove_the_jev_connection(client, admin_user, db, jev_accepts):
+async def test_the_generic_connection_routes_cannot_see_or_change_the_jev_connection(
+    client, admin_user, db, jev_accepts
+):
+    """The Jev row is managed only by its card. The generic connection service does not
+    serve it, so no generic route (today's or a future one) can read or change it."""
     user, headers = admin_user
     await client.put(f"{URL}/key", headers=headers, json={"api_key": TENANT_KEY})
     row = await _row(db, user.tenant_id)
+    before = (row.encrypted_credentials, dict(row.metadata_json or {}), row.label, row.status)
 
-    r = await client.delete(f"/api/v1/connections/{row.id}", headers=headers)
+    listed = (await client.get("/api/v1/connections", headers=headers)).json()
+    assert all(c["provider"] != "typesafe" for c in listed)
+    base = f"/api/v1/connections/{row.id}"
+    responses = [
+        await client.delete(base, headers=headers),
+        await client.patch(base, headers=headers, json={"label": "x"}),
+        await client.post(f"{base}/reconnect", headers=headers),
+        await client.patch(f"{base}/client-id", headers=headers, json={"client_id": "abc"}),
+        await client.patch(f"{base}/restlet-url", headers=headers, json={"restlet_url": "https://x.example/r"}),
+    ]
+    assert [r.status_code for r in responses] == [404] * 5
+    # The generic test route answers any unknown id with 200 + "Connection not found".
+    tested = await client.post(f"{base}/test", headers=headers)
+    assert (tested.json()["status"], tested.json()["message"]) == ("error", "Connection not found")
 
-    assert r.status_code == 409
-    assert "card" in r.json()["detail"].lower()
+    await db.refresh(row)
+    assert (row.encrypted_credentials, dict(row.metadata_json or {}), row.label, row.status) == before
     access = await resolve_access(db, user.tenant_id)
     assert (access.api_key, access.key_source) == (TENANT_KEY, "tenant")
+
+
+async def test_a_short_stored_key_is_never_shown_as_its_own_hint(client, admin_user, db, tenant_a):
+    from tests.test_jev_access import _connect
+
+    _, headers = admin_user
+    await _connect(db, tenant_a, api_key="abc")
+    body = (await client.get(URL, headers=headers)).json()
+    assert (body["key_source"], body["key_hint"]) == ("tenant", None)
+
+
+async def test_testing_an_unreadable_stored_key_says_so(client, admin_user, db, tenant_a, jev_accepts):
+    from tests.test_jev_access import _connect
+
+    _, headers = admin_user
+    await _connect(db, tenant_a, raw="not-a-fernet-token")
+    body = (await client.post(f"{URL}/test", headers=headers, json={})).json()
+    assert body["success"] is False and "could not be read" in body["error"]
+    assert jev_accepts == []
+
+
+@pytest.mark.parametrize("payload", [{"api_key": ["ts-secret-in-a-list"]}, {"api_key": {"k": "ts-secret-in-a-dict"}}])
+async def test_a_malformed_key_is_refused_without_echoing_it(client, admin_user, jev_accepts, payload):
+    _, headers = admin_user
+    for method, path in (("put", f"{URL}/key"), ("post", f"{URL}/test")):
+        r = await getattr(client, method)(path, headers=headers, json=payload)
+        assert r.status_code == 400, (path, r.status_code)
+        assert "ts-secret-in-a" not in r.text
+    assert jev_accepts == []
 
 
 async def test_an_over_long_key_is_refused_without_echoing_it(client, admin_user, db, jev_accepts):
