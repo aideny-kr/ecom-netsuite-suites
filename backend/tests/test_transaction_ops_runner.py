@@ -133,6 +133,8 @@ class State:
     async def record_finding(self, *args, lease_token=None, **kwargs):
         assert lease_token == self.token
         self.reports[args[3]] = deepcopy(args[4])
+        if kwargs.get("checkpoint") is not None:
+            self.run.progress_json = deepcopy(kwargs["checkpoint"].progress_json)
 
     async def unseen_references(self, db, tenant_id, run_id, references, *, since=None):
         return [reference for reference in references if reference not in self.reports]
@@ -164,6 +166,29 @@ async def execute(state, source=None, target=None, page=None, enabled=True):
         _enabled=AsyncMock(return_value=enabled),
         _clock=lambda: NOW,
     )
+
+
+async def test_final_evidence_carries_the_cursor_without_another_progress_commit():
+    state = State()
+    state.record_finding = AsyncMock(wraps=state.record_finding)
+    state.update_progress = AsyncMock(wraps=state.update_progress)
+    result = await execute(state)
+    assert result["termination_reason"] == "done"
+    checkpoint = state.record_finding.call_args.kwargs["checkpoint"]
+    assert checkpoint.progress_json["processed"] == 1
+    assert checkpoint.progress_json["pending_refs"] == []
+    assert state.run.progress_json["processed"] == 1
+    assert all(call.args[3].progress_json["processed"] == 0 for call in state.update_progress.call_args_list)
+
+
+async def test_failed_final_finding_keeps_the_order_pending():
+    state = State()
+    state.record_finding = AsyncMock(side_effect=RuntimeError("failed database commit"))
+    result = await execute(state)
+    assert result["termination_reason"] == "error"
+    assert result["processed"] == 0
+    assert state.run.progress_json["pending_refs"] == [REF]
+    assert state.run.progress_json["processed"] == 0
 
 
 @pytest.mark.parametrize("budget, expected", [(100, "done"), (2, "budget")])

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 
 from pydantic import ValidationError
-from sqlalchemy import and_, func, select
+from sqlalchemy import BigInteger, and_, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -675,6 +675,31 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
     return row.lease_token
 
 
+async def _update_owned_run(db, tenant_id, run_id, lease_token, now, *, values, conditions=()):
+    """One round trip for a fenced update; rejected transitions retain the slow path.
+
+    PostgreSQL locks the matching row and rechecks predicates after concurrent
+    updates. Returning the ORM row refreshes any existing identity, just as
+    get_run(populate_existing=True) does. The caller must commit before using
+    the result to perform external work.
+    """
+    await set_tenant_context(db, str(tenant_id))
+    return await db.scalar(
+        update(TransactionRun)
+        .where(
+            TransactionRun.tenant_id == tenant_id,
+            TransactionRun.id == run_id,
+            TransactionRun.status == "running",
+            TransactionRun.lease_token == lease_token,
+            TransactionRun.lease_until > now,
+            *conditions,
+        )
+        .values(**values, lease_until=func.least(TransactionRun.deadline_at, now + _LEASE))
+        .returning(TransactionRun)
+        .execution_options(synchronize_session=False, populate_existing=True)
+    )
+
+
 async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, orders=0, hold=False, now=None):
     """Pay for calls before making them; the run ends on ``budget`` if they do not fit.
 
@@ -685,6 +710,32 @@ async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, ord
     if any(type(value) is not int or value < 0 for value in (api_calls, orders)) or api_calls + orders == 0:
         raise ValueError("Reserve positive integer spend before a call")
     now = _clock(now)
+    held = func.coalesce(TransactionRun.api_calls_held, 0)
+    values = {"orders_used": TransactionRun.orders_used + orders}
+    if hold:
+        values["api_calls_held"] = held + api_calls
+    else:
+        values["api_calls_used"] = TransactionRun.api_calls_used + api_calls
+    row = None
+    if max(api_calls, orders) <= 2**31 - 1:
+        row = await _update_owned_run(
+            db,
+            tenant_id,
+            run_id,
+            lease_token,
+            now,
+            values=values,
+            conditions=(
+                TransactionRun.deadline_at > now,
+                cast(TransactionRun.api_calls_used, BigInteger) + held + api_calls <= TransactionRun.max_api_calls,
+                cast(TransactionRun.orders_used, BigInteger) + orders <= TransactionRun.max_orders,
+            ),
+        )
+    if row is not None:
+        await _commit(db, tenant_id)
+        return True
+    # Preserve exact failure precedence and audited budget termination, including
+    # the historical deadline-before-lease check. No rejected UPDATE spent calls.
     row = await get_run(db, tenant_id, run_id, lock=True)
     if row.status == "finished":
         await _commit(db, tenant_id)
@@ -725,6 +776,23 @@ async def settle_budget(db, tenant_id, run_id, *, lease_token, release, spent, n
     if release == 0:
         return False
     now = _clock(now)
+    row = None
+    if release <= 2**31 - 1:
+        row = await _update_owned_run(
+            db,
+            tenant_id,
+            run_id,
+            lease_token,
+            now,
+            values={
+                "api_calls_held": TransactionRun.api_calls_held - release,
+                "api_calls_used": TransactionRun.api_calls_used + spent,
+            },
+            conditions=(func.coalesce(TransactionRun.api_calls_held, 0) >= release,),
+        )
+    if row is not None:
+        await _commit(db, tenant_id)
+        return True
     row = await get_run(db, tenant_id, run_id, lock=True)
     if row.status == "finished":
         await _commit(db, tenant_id)
@@ -741,6 +809,12 @@ async def settle_budget(db, tenant_id, run_id, *, lease_token, release, spent, n
 
 async def update_progress(db, tenant_id, run_id, request: ProgressUpdate, *, lease_token, now=None):
     now = _clock(now)
+    row = await _update_owned_run(
+        db, tenant_id, run_id, lease_token, now, values={"progress_json": request.progress_json}
+    )
+    if row is not None:
+        await _commit(db, tenant_id)
+        return row
     row = await get_run(db, tenant_id, run_id, lock=True)
     _lease(row, lease_token, now)
     row.progress_json = request.progress_json
@@ -796,8 +870,12 @@ async def list_proposals(db, tenant_id, *, run_id=None, status=None, limit=100, 
     )
 
 
-async def record_finding(db, tenant_id, run_id, order_reference, report_json, *, lease_token, now=None, final=True):
+async def record_finding(
+    db, tenant_id, run_id, order_reference, report_json, *, lease_token, now=None, final=True, checkpoint=None
+):
     now = _clock(now)
+    if checkpoint is not None and (not final or not isinstance(checkpoint, ProgressUpdate)):
+        raise ValueError("Only a final finding may commit a validated progress checkpoint")
     request = FindingReport(order_reference=order_reference, report_json=report_json)
     if request.report_json.get("order_reference", order_reference) != order_reference:
         raise StateError("finding_order_mismatch", 422)
@@ -871,6 +949,10 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
                 **row.report_json["source_eligibility"],
             },
         )
+    if checkpoint is not None:
+        # Advancing past an order and publishing its final evidence are one
+        # transaction. A failed finding must never leave a skipped reference.
+        run.progress_json = checkpoint.progress_json
     await _commit(db, tenant_id)
     return row
 
