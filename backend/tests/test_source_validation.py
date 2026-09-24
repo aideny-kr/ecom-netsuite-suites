@@ -177,6 +177,9 @@ async def test_daily_runner_uses_provider_validation_and_preserves_provenance(db
     assert result["termination_reason"] == "done"
     validate.assert_awaited_once()
     assert validate.call_args.kwargs["if_none_match"] == ETAG
+    # Collection transport is present during the conditional read and closed
+    # with the run, rather than opening a fresh TLS connection for every order.
+    assert validate.call_args.kwargs["client"].is_closed
     assert state.run.progress_json["source_body_validations"] == 1
     assert not state.run.progress_json.get("source_detail_reads")
     report = state.reports[REF]

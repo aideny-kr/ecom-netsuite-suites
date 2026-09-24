@@ -186,10 +186,27 @@ async def direct_connection(db, tenant_id, connection_id):
     return connection, credentials
 
 
+async def _direct_client(tenant_id, connection, credentials, client):
+    from app.services.transaction_ops.read_transport import current_transport
+
+    pool = current_transport()
+    if client is not None or pool is None:
+        return client
+    return await pool.get_public(
+        (
+            str(tenant_id),
+            str(connection.id),
+            hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest(),
+        ),
+        credentials["base_url"],
+    )
+
+
 async def _direct_read(db, tenant_id, connection_id, relative_uri, *, client):
     from app.services.http_connector_service import ConnectorReadError, read_json
 
     connection, credentials = await direct_connection(db, tenant_id, connection_id)
+    client = await _direct_client(tenant_id, connection, credentials, client)
     try:
         body = await read_json(credentials, relative_uri, client=client)
     except ConnectorReadError as exc:
