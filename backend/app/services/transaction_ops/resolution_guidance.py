@@ -31,6 +31,11 @@ def investigation_guidance(report):
         ),
     }
 
+    hybrid = report.get("hybrid_classification")
+    if isinstance(hybrid, dict):
+        # Recorded advisory interpretation; never replace the proof requirements.
+        result["hybrid_classification"] = hybrid
+
     def route(code, instruction):
         result["routes"].append({"code": code, "next_step": instruction})
 

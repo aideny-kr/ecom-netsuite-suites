@@ -1299,6 +1299,28 @@ async def run_investigation(
                 report = limit_report(report, now=clock())
             if report["order_reference"] != reference:
                 raise ValueError("source_reference_mismatch")
+            from app.services.transaction_ops import hybrid_classification
+
+            if (
+                not settlement
+                and hybrid_classification.configured(run.config_id)
+                and hybrid_classification.eligible(report)
+            ):
+                await flush_findings()
+                hybrid = await hybrid_classification.classify_report(tenant_id, run_id, token, report)
+                if hybrid is not None:
+                    report = hybrid_classification.attach(report, hybrid)
+                    for metric, increment in {
+                        "calls": int(hybrid.get("provider_called") is True),
+                        "cache_hits": int(hybrid.get("cache_hit") is True),
+                        "verified": int(hybrid.get("status") == "verified"),
+                        "held": int(hybrid.get("status") != "verified"),
+                        "total_ms": hybrid.get("total_ms") or 0,
+                        "input_tokens": hybrid.get("input_tokens") or 0,
+                        "output_tokens": hybrid.get("output_tokens") or 0,
+                    }.items():
+                        key = "jev_" + metric
+                        progress[key] = progress.get(key, 0) + increment
             action = report["comparison"]["recommended_action"]
             if (
                 not settlement

@@ -344,7 +344,19 @@ async def test_buffer_expiry_rolls_back_without_leaving_deadline_run_open(db, ad
 
     monkeypatch.setattr(staged_netsuite, "StagedNetSuite", Expire)
     tenant, run_id = actor.tenant_id, run.id
-    result = await run_investigation(db, tenant, run_id, _clock=lambda: datetime.now(timezone.utc) + offset[0])
+    # Only the initial claim uses the DB clock, matching production. The
+    # injected later observations/expiry continue to use the fixture's host clock.
+    claim_clock = await state.run_clock(db)
+    first = True
+
+    def clock():
+        nonlocal first
+        if first:
+            first = False
+            return claim_clock
+        return datetime.now(timezone.utc) + offset[0]
+
+    result = await run_investigation(db, tenant, run_id, _clock=clock)
     assert result["status"] == ("finished" if expired == "deadline" else "yielded")
     assert result["termination_reason"] == ("budget" if expired == "deadline" else "stall")
     current = await state.get_run(db, tenant, run_id)

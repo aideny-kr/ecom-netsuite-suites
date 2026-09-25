@@ -94,6 +94,8 @@ class JevStatusResponse(BaseModel):
     mode: JevMode  # the tenant's choice
     effective_mode: JevMode  # what recon will actually do: capped, and off without a key
     deployment_cap: JevMode
+    transaction_ops_mode: JevMode = "off"
+    transaction_ops_config_count: int = 0
     key_source: Literal["tenant", "platform", "none"]
     key_hint: str | None = None  # last 4 of the TENANT's key only; the platform key is never hinted
     problem: str | None = None  # "unreadable_key"
@@ -474,7 +476,24 @@ def _jev_error(reason: str) -> str:
 
 async def _jev_status(db: AsyncSession, tenant_id) -> JevStatusResponse:
     setting = await load_setting(db, tenant_id)
+    from app.models.transaction_ops import TransactionConfig
+    from app.services.transaction_ops.hybrid_classification import configured
+
+    config_ids = (
+        await db.scalars(
+            select(TransactionConfig.id).where(
+                TransactionConfig.tenant_id == tenant_id,
+                TransactionConfig.enabled.is_(True),
+                TransactionConfig.netsuite_account_id == "6738075",
+                TransactionConfig.subsidiary_id == "1",
+            )
+        )
+    ).all()
+    count = sum(configured(config_id) for config_id in config_ids)
+    hybrid = await load_setting(db, tenant_id, workflow="transaction_ops") if count else None
     return JevStatusResponse(
+        transaction_ops_mode=hybrid.effective_mode if hybrid else "off",
+        transaction_ops_config_count=count,
         mode=setting.tenant_mode,
         effective_mode=setting.effective_mode,
         deployment_cap=setting.deployment_cap,

@@ -18,8 +18,8 @@ import { Badge } from "@/components/ui/badge";
 import { AlertTriangle, FlaskConical, KeyRound, Loader2, ShieldCheck, Trash2, Zap } from "lucide-react";
 
 const MODES: { value: JevMode; label: string; detail: string }[] = [
-  { value: "live", label: "Live", detail: "Jev decides when it is confident; otherwise the model does." },
-  { value: "shadow", label: "Shadow", detail: "The model decides; Jev's answer is recorded beside it." },
+  { value: "live", label: "Live", detail: "Jev suggests a classification; each workflow applies its verification and review controls." },
+  { value: "shadow", label: "Shadow", detail: "Jev's answer is recorded for comparison without applying its route." },
   { value: "off", label: "Off", detail: "Only the model is used." },
 ];
 
@@ -119,7 +119,7 @@ export default function JevConnectorCard() {
         <Badge
           variant="outline"
           role="status"
-          aria-label={`Jev is ${MODE_LABEL[status.effective_mode].toLowerCase()}`}
+          aria-label={`Resolution workflow is ${MODE_LABEL[status.effective_mode].toLowerCase()}`}
           className={`text-[11px] ${BADGE_CLASS[status.effective_mode]}`}
         >
           {MODE_LABEL[status.effective_mode]}
@@ -127,15 +127,20 @@ export default function JevConnectorCard() {
       </div>
 
       <p className="text-[13px] text-muted-foreground">
-        Classifies reconciliation exceptions in about a third of a second, beside the model.
+        Classifies reconciliation exceptions with independent checks and human review.
       </p>
       <div className="flex items-start gap-1.5 text-[12px] text-muted-foreground">
         <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />
         <span>
-          Jev receives only yes/no and category facts, with no amounts, text or identifiers. Every proposal still
+          Jev receives bounded comparison facts, including amounts and currencies for enabled Inc workflows, without customer identifiers or free-form source text. Every proposal still
           needs human approval, and nothing is posted to NetSuite.
         </span>
       </div>
+
+      <p className="text-[12px] text-muted-foreground">
+        Resolution workflow: {MODE_LABEL[status.effective_mode]}. Inc exception workflow: {MODE_LABEL[status.transaction_ops_mode ?? "off"]}
+        {(status.transaction_ops_config_count ?? 0) > 0 && ` (${status.transaction_ops_config_count} enabled configuration${status.transaction_ops_config_count === 1 ? "" : "s"})`}.
+      </p>
 
       {canManage && (
         <div role="radiogroup" aria-label="Jev mode" className="grid gap-2 sm:grid-cols-3">
@@ -163,7 +168,7 @@ export default function JevConnectorCard() {
 
       {capped && (
         <p className="text-[12px] text-muted-foreground">
-          This deployment limits Jev to {MODE_LABEL[status.deployment_cap]}.
+          The resolution workflow is limited to {MODE_LABEL[status.deployment_cap]}.
         </p>
       )}
 
