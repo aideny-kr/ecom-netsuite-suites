@@ -1309,7 +1309,7 @@ async def run_investigation(
                 await flush_findings()
                 hybrid = await hybrid_classification.classify_report(tenant_id, run_id, token, report)
                 if hybrid is not None:
-                    report["hybrid_classification"] = hybrid
+                    report = hybrid_classification.attach(report, hybrid)
                     for metric, increment in {
                         "calls": int(hybrid.get("provider_called") is True),
                         "cache_hits": int(hybrid.get("cache_hit") is True),

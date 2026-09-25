@@ -207,7 +207,7 @@ async def test_daily_and_manual_runner_store_hybrid_without_changing_financial_r
     async def captured(tenant, run_id, token, report):
         from copy import deepcopy
 
-        before[report["order_reference"]] = deepcopy(report["balance"])
+        before[report["order_reference"]] = deepcopy({"balance": report["balance"], "comparison": report["comparison"]})
         return await classify(tenant, run_id, token, report)
 
     monkeypatch.setattr(h, "classify_report", captured)
@@ -216,7 +216,7 @@ async def test_daily_and_manual_runner_store_hybrid_without_changing_financial_r
     findings = (await db.scalars(select(TransactionFinding).where(TransactionFinding.run_id == run_id))).all()
     assert len(findings) == 2
     for finding in findings:
-        assert finding.report_json["balance"] == before[finding.order_reference]
+        assert {key: finding.report_json[key] for key in ("balance", "comparison")} == before[finding.order_reference]
         assert finding.report_json["hybrid_classification"]["provider_called"] is True
     current = await state.get_run(db, tenant, run_id)
     assert current.progress_json["jev_calls"] == 2
@@ -252,3 +252,61 @@ async def test_provider_runs_without_database_transaction(committed, monkeypatch
     monkeypatch.setattr(h, "_classify", capture)
     await h.classify_report(tenant, run, token, report())
     assert observed == [False]
+
+
+async def test_revocation_after_reservation_records_no_provider_send(committed, monkeypatch):
+    db, tenant, run, token, provider = await prepare(committed, monkeypatch)
+    authorize = h._authorize
+    checks = 0
+
+    async def revoking(*args):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            monkeypatch.setattr(settings, "JEV_TRANSACTION_OPS_MODE", "off")
+        return await authorize(*args)
+
+    monkeypatch.setattr(h, "_authorize", revoking)
+    result = await h.classify_report(tenant, run, token, report())
+    assert result["reason"] == "not_sent_revoked" and result["provider_called"] is False
+    receipt = await db.scalar(
+        select(AuditEvent).where(AuditEvent.tenant_id == tenant, AuditEvent.action == h.COMPLETED)
+    )
+    assert receipt.payload["provider_called"] is False
+    monkeypatch.setattr(settings, "JEV_TRANSACTION_OPS_MODE", "live")
+    assert (await h.classify_report(tenant, run, token, report()))["cache_hit"]
+    provider.assert_not_awaited()
+
+
+async def test_oversize_request_does_not_reserve_or_send(committed, monkeypatch):
+    db, tenant, run, token, provider = await prepare(committed, monkeypatch)
+    monkeypatch.setattr(h, "MAX_REQUEST_BYTES", 1)
+    assert (await h.classify_report(tenant, run, token, report()))["reason"] == "input_budget"
+    assert await counts(db, tenant) == {}
+    provider.assert_not_awaited()
+
+
+async def test_near_limit_report_does_not_stall_daily_engine(committed, monkeypatch):
+    import json
+
+    from app.models.transaction_ops import TransactionFinding
+    from app.schemas.transaction_runs import _bounded_json
+    from app.services.transaction_ops import runner
+
+    db, tenant, run, _, provider = await prepare(committed, monkeypatch, claim=False)
+    limit = runner.limit_report
+
+    def large(report, **kwargs):
+        output = limit(report, **kwargs)
+        output["padding"] = ""
+        output["padding"] = "x" * (65520 - len(json.dumps(output).encode()))
+        _bounded_json(output)
+        return output
+
+    monkeypatch.setattr(runner, "limit_report", large)
+    result = await runner.run_investigation(db, tenant, run)
+    assert result["termination_reason"] == "done" and result["processed"] == 2
+    findings = (await db.scalars(select(TransactionFinding).where(TransactionFinding.run_id == run))).all()
+    assert len(findings) == 2 and provider.await_count == 2
+    assert all("hybrid_classification" not in f.report_json for f in findings)
+    assert await counts(db, tenant) == {h.RESERVED: 2, h.COMPLETED: 2}

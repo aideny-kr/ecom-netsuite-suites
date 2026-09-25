@@ -108,3 +108,44 @@ def test_verified_credit_does_not_erase_order_difference():
     assert not j.verify(r, {"choice": "no_amount_difference", "confidence": 1})["accepted"]
     b["adjustments"][0]["invoice_application_status"] = "not_verified"
     assert j.existing_check(r) == "amount_difference"
+
+
+@pytest.mark.parametrize("bad", [None, [None], "bad"])
+def test_malformed_optional_credit_evidence_cannot_break_fallback(bad):
+    r = report()
+    r["balance"]["amounts"]["tax"].update(target="10", delta="0")
+    r["balance"]["posting_reconciliation"] = {
+        "basis": "applied_commercial_credit",
+        "status": "matched",
+        "source": "100",
+        "net_posting_total": "100",
+        "delta": "0",
+    }
+    r["balance"]["adjustments"] = bad
+    assert h._decision(r, reason="classifier_unavailable")["route"] == "needs_review"
+
+
+@pytest.mark.parametrize("size, expected", [(64500, "full"), (65050, "compact"), (65520, "omitted")])
+def test_optional_decision_respects_report_size_limit(size, expected):
+    from app.schemas.transaction_runs import _bounded_json
+
+    r = report()
+    r["padding"] = ""
+    r["padding"] = "x" * (size - len(json.dumps(r).encode()))
+    decision = h._decision(
+        r,
+        answer={"choice": "tax_difference", "confidence": 0.95},
+        audit_id="a" * 36,
+        evidence_fingerprint="b" * 64,
+        provider_called=True,
+    )
+    decision["extra_metrics"] = "x" * 400
+    output = h.attach(r, decision)
+    _bounded_json(output)
+    assert output["balance"] == r["balance"]
+    if expected == "omitted":
+        assert "hybrid_classification" not in output
+    elif expected == "compact":
+        assert output["hybrid_classification"]["reason"] == "evidence_size_limit"
+    else:
+        assert output["hybrid_classification"] == decision

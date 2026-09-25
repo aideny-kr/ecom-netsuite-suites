@@ -161,10 +161,11 @@ def existing_check(report):
                 _decimal(posting["source"]) == _decimal(posting["net_posting_total"])
                 and _decimal(posting["delta"]) == 0
                 and any(
-                    a.get("kind") == "applied_commercial_credit"
+                    isinstance(a, dict)
+                    and a.get("kind") == "applied_commercial_credit"
                     and a.get("status") == "existing_credit_verified"
                     and a.get("invoice_application_status") == "verified"
-                    for a in b.get("adjustments", [])
+                    for a in (b.get("adjustments") or [])
                 )
             ):
                 return "existing_credit_alignment"
@@ -184,8 +185,11 @@ def existing_check(report):
 
 
 def verify(report, answer, minimum_confidence=0.8):
-    checked = existing_check(report)
-    if answer is None:
+    try:
+        checked = existing_check(report)
+    except (KeyError, TypeError, AttributeError, ValueError, ArithmeticError):
+        checked = "needs_review"
+    if not isinstance(answer, dict):
         return {
             "accepted": False,
             "checked_route": checked,

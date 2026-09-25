@@ -18,6 +18,7 @@ from sqlalchemy import func, select, text
 from app.core.config import settings
 from app.core.database import set_tenant_context_session, worker_async_session
 from app.models.audit import AuditEvent
+from app.schemas.transaction_runs import _bounded_json
 from app.services import audit_service
 from app.services.transaction_ops import hybrid_judgment as judgment
 from app.services.transaction_ops import state_service as state
@@ -129,9 +130,9 @@ def _decision(report, *, answer=None, reason=None, mode="live", cached=False, au
 async def classify_report(tenant_id, run_id, lease_token, report):
     """Optional interpretation; failures cannot alter money or stop reconciliation."""
     started = time.monotonic()
-    if not eligible(report):
-        return None
     try:
+        if not eligible(report):
+            return None
         async with worker_async_session(pin_connection=True) as db:
             await set_tenant_context_session(db, str(tenant_id))
             result = await _classify(db, tenant_id, run_id, lease_token, report)
@@ -143,6 +144,42 @@ async def classify_report(tenant_id, run_id, lease_token, report):
     except Exception as error:
         logger.warning("transaction_ops.jev_unavailable", error_type=type(error).__name__)
         return _decision(report, reason="classifier_unavailable", provider_called=None)
+
+
+def attach(report, decision):
+    """Optional advice must never make a previously valid financial report unsavable."""
+    for block in (
+        decision,
+        {
+            "status": "needs_review",
+            "reason": "evidence_size_limit",
+            "reservation_id": decision.get("reservation_id"),
+            "executable": False,
+        },
+    ):
+        candidate = {**report, "hybrid_classification": block}
+        try:
+            _bounded_json(candidate)
+            return candidate
+        except ValueError:
+            continue
+    # The full judgment remains in its durable audit receipt.
+    return report
+
+
+async def _receipt(db, tenant, reservation_id, key, payload):
+    await audit_service.log_event(
+        db,
+        tenant_id=tenant,
+        category="transaction_ops",
+        action=COMPLETED,
+        actor_type="system",
+        resource_type="jev_reservation",
+        resource_id=str(reservation_id),
+        correlation_id=key,
+        payload=payload,
+    )
+    await db.commit()
 
 
 async def _classify(db, tenant, run_id, token, report):
@@ -235,9 +272,25 @@ async def _classify(db, tenant, run_id, token, report):
     reservation_id = reservation.id
     await db.commit()  # No request before this durable reservation succeeds.
     # Re-read authorization after the commit; card/config/lease revocation wins.
-    authorized = await _authorize(db, tenant, run_id, token)
+    try:
+        authorized = await _authorize(db, tenant, run_id, token)
+    except state.StateError:
+        authorized = None
     if authorized is None:
-        return _decision(report, reason="revoked", audit_id=reservation_id, provider_called=False)
+        await _receipt(
+            db,
+            tenant,
+            reservation_id,
+            key,
+            {
+                "answer": None,
+                "error": "not_sent_revoked",
+                "provider_called": False,
+                "version": judgment.VERSION,
+                "fingerprint": digest,
+            },
+        )
+        return _decision(report, reason="not_sent_revoked", audit_id=reservation_id, provider_called=False)
     _, permission, _ = authorized
     await db.rollback()  # Never hold a DB transaction across the provider call.
     result, error = await client.try_ask(tenant, projected, judgment.QUESTIONS, api_key=permission.api_key)
@@ -246,6 +299,7 @@ async def _classify(db, tenant, run_id, token, report):
     answer = result.answers["route"] if result and not error else None
     verification = judgment.verify(report, answer, minimum_confidence=settings.JEV_RECON_MIN_CONFIDENCE)
     receipt = {
+        "provider_called": True,
         "answer": answer,
         "error": error,
         "verification": verification,
@@ -257,18 +311,7 @@ async def _classify(db, tenant, run_id, token, report):
         "version": judgment.VERSION,
         "fingerprint": digest,
     }
-    await audit_service.log_event(
-        db,
-        tenant_id=tenant,
-        category="transaction_ops",
-        action=COMPLETED,
-        actor_type="system",
-        resource_type="jev_reservation",
-        resource_id=str(reservation_id),
-        correlation_id=key,
-        payload=receipt,
-    )
-    await db.commit()
+    await _receipt(db, tenant, reservation_id, key, receipt)
     authorized = await _authorize(db, tenant, run_id, token)
     if authorized is None:
         return _decision(report, reason="revoked", audit_id=reservation_id, provider_called=True)
