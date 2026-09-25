@@ -80,6 +80,16 @@ def _cleared(report, now):
         return False
 
 
+def case_scope(run):
+    config = run.config_snapshot
+    scope = {
+        key: config.get(key)
+        for key in ("source_connection_id", "source_step_id", "netsuite_account_id", "subsidiary_id", "record_type")
+    }
+    scope["netsuite_account_id"] = str(scope["netsuite_account_id"]).replace("_", "-").lower()
+    return scope
+
+
 async def observe_finding(db, tenant_id, run, finding, *, now):
     from app.services.transaction_ops.state_service import _audit, business_digest
 
@@ -87,12 +97,7 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
     # Legacy diagnostic-only findings are not transaction comparison evidence.
     if not isinstance(report.get("balance"), dict) and not isinstance(report.get("comparison"), dict):
         return None
-    config = run.config_snapshot
-    scope = {
-        key: config.get(key)
-        for key in ("source_connection_id", "source_step_id", "netsuite_account_id", "subsidiary_id", "record_type")
-    }
-    scope["netsuite_account_id"] = str(scope["netsuite_account_id"]).replace("_", "-").lower()
+    scope = case_scope(run)
     key = business_digest({**scope, "order_reference": finding.order_reference})
     excluded = excluded_report(report)
     cleared = not excluded and _cleared(report, now)
