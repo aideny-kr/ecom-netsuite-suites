@@ -18,12 +18,22 @@ from tests.test_transaction_ops_state_db import setup_state  # noqa: F401
 
 
 @pytest.mark.parametrize(
-    "mode", ["cached", "source_miss", "batch_miss", "budget", "commit_failure", "partial_failure", "actions"]
+    "mode",
+    [
+        "cached",
+        "source_miss",
+        "batch_miss",
+        "budget",
+        "commit_failure",
+        "partial_failure",
+        "actions",
+        "actions_abstain",
+    ],
 )
 async def test_cached_refunds_skip_only_redundant_partial_commit(monkeypatch, mode):
     state = State(window=True)
     state.run.config_snapshot["mapping_json"]["solidus_refund_step_id"] = str(uuid4())
-    if mode == "actions":
+    if mode in {"actions", "actions_abstain"}:
         state.run.config_snapshot["mapping_json"]["action_mode"] = "propose_actions"
     state.run.progress_json = {
         "pending_refs": [REF],
@@ -59,12 +69,16 @@ async def test_cached_refunds_skip_only_redundant_partial_commit(monkeypatch, mo
     monkeypatch.setattr(staged_netsuite, "StagedNetSuite", lambda *a, **kw: native)
     if mode == "budget":
         state.budget = 2  # Source order uses all remaining calls.
+    source = source_order()
+    if mode == "actions_abstain":
+        source["orders"][0]["state"] = "canceled"
+        state.propose = AsyncMock()
     result = await run_investigation(
         None,
         state.tenant,
         state.run_id,
         _state=state,
-        _source_reader=AsyncMock(return_value=source_order()),
+        _source_reader=AsyncMock(return_value=source),
         _order_mirror=AsyncMock(),
         _enabled=AsyncMock(return_value=True),
         _clock=lambda: NOW,
@@ -81,7 +95,10 @@ async def test_cached_refunds_skip_only_redundant_partial_commit(monkeypatch, mo
             assert state.record_finding.await_count == 1 and not state.reports
         return
     assert result["termination_reason"] == "done" and result["processed"] == 1
-    assert len(partials) == (0 if mode == "cached" else 1)
+    if mode == "actions_abstain":
+        state.propose.assert_not_awaited()
+        batch.get.assert_awaited_once()
+    assert len(partials) == (0 if mode in {"cached", "actions_abstain"} else 1)
     assert state.record_finding.call_args.kwargs["checkpoint"].progress_json["pending_refs"] == []
     assert state.reports[REF]["refund_evidence"]["source"]["observed_at"] == NOW.isoformat()
 
