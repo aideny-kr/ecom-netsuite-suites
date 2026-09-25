@@ -18,6 +18,8 @@ _READS = frozenset(
     {
         "source_page",
         "source_order",
+        "source_prepare_batch",
+        "source_snapshot_batch",
         "source_refunds",
         "netsuite_order",
         "netsuite_refunds",

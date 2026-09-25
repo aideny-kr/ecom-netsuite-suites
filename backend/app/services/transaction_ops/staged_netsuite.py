@@ -95,7 +95,10 @@ class StagedNetSuite:
             return data[reference]
         return None
 
-    async def order(self, reference, *, source_updated_at=None):
+    async def prefetch_orders(self, reference):
+        await self.order(reference, _count_hit=False)
+
+    async def order(self, reference, *, source_updated_at=None, _count_hit=True):
         # Include this page's references so advancing the source/dependency feed
         # never reuses a negative result or an older parent-only observation.
         refs = list(dict.fromkeys(self.progress["pending_refs"][: bulk.MAX_ORDERS]))
@@ -119,7 +122,7 @@ class StagedNetSuite:
         )
         if result and source_updated_at and _time(result.get("observed_at")) < source_updated_at:
             return None  # Source changed after this reference was prefetched.
-        if result is not None:
+        if result is not None and _count_hit:
             self.progress["native_orders_batch_hits"] = self.progress.get("native_orders_batch_hits", 0) + 1
         return result
 
