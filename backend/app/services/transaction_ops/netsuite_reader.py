@@ -218,18 +218,35 @@ def _sublist(record: dict, key: str, label: str, fields: frozenset[str], problem
 
 
 class _Reader:
-    def __init__(self, client: httpx.AsyncClient, base: str, token: str, *, max_api_calls=None, read_scope=None):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        base: str,
+        token: str,
+        *,
+        max_api_calls=None,
+        read_scope=None,
+        max_concurrent_calls=1,
+    ):
         self.read_scope = read_scope
         if max_api_calls is None:
             max_api_calls = MAX_API_CALLS
         if type(max_api_calls) is not int or not 1 <= max_api_calls <= 32:
             raise NetSuiteEvidenceError("invalid_read_budget")
         self.max_api_calls = max_api_calls
+        if type(max_concurrent_calls) is not int or not 1 <= max_concurrent_calls <= 7:
+            raise NetSuiteEvidenceError("invalid_read_concurrency")
+        self.max_concurrent_calls = max_concurrent_calls
+        self.slots = asyncio.Semaphore(max_concurrent_calls)
+        self.active_calls = self.peak_concurrency = 0
+        self.throttled = False
+        self.aborted = False
         self.client, self.base = client, base
         self.headers = {"Authorization": f"Bearer {token}", "Prefer": "transient"}
         self.calls = 0
         self.currencies: dict[str, dict] = {}
         self.periods: dict[str, dict] = {}
+        self.reference_locks = {}
 
     async def request(self, method: str, path: str, *, params=None, body=None) -> dict:
         from app.services.transaction_ops.read_batch import reference_read
@@ -244,13 +261,25 @@ class _Reader:
         )
 
     async def _request(self, method: str, path: str, *, params=None, body=None) -> dict:
-        if self.calls >= self.max_api_calls:
-            raise NetSuiteEvidenceError("api_call_budget")
-        self.calls += 1
-        # Counted where the reader's own limit counts it, so a request that then fails on
-        # the wire is still charged: it was sent. Coalesced reference reads never reach
-        # here and are correctly free.
-        note_call()
+        async with self.slots:
+            # Claim spend only after obtaining a wire slot. No await separates
+            # the shared budget check/increment, even across concurrent tasks.
+            if self.aborted:
+                raise NetSuiteEvidenceError("bulk_read_aborted")
+            if self.throttled:
+                raise NetSuiteEvidenceError("upstream_http_429")
+            if self.calls >= self.max_api_calls:
+                raise NetSuiteEvidenceError("api_call_budget")
+            self.calls += 1
+            note_call()
+            self.active_calls += 1
+            self.peak_concurrency = max(self.peak_concurrency, self.active_calls)
+            try:
+                return await self._send(method, path, params=params, body=body)
+            finally:
+                self.active_calls -= 1
+
+    async def _send(self, method: str, path: str, *, params=None, body=None) -> dict:
         # All record schemas use content negotiation. Without this Accept
         # header NetSuite returns a link catalog, not field metadata. Keep the
         # record-type path syntax bounded; this does not grant write access.
@@ -268,6 +297,8 @@ class _Reader:
                 follow_redirects=False,
             ) as response:
                 if response.status_code != 200:
+                    if response.status_code == 429 and self.max_concurrent_calls > 1:
+                        self.throttled = True  # Do not send queued calls after a throttle.
                     raise NetSuiteEvidenceError(f"upstream_http_{response.status_code}")
                 content = bytearray()
                 async for chunk in response.aiter_bytes():
@@ -300,12 +331,13 @@ class _Reader:
         return parsed
 
     async def currency(self, currency_id: str) -> dict:
-        if currency_id not in self.currencies:
-            raw = await self.request("GET", f"/record/v1/currency/{currency_id}")
-            projected = _project(raw, CURRENCY_FIELDS)
-            if _id(raw.get("id")) != currency_id:
-                raise NetSuiteEvidenceError("currency_identity_mismatch")
-            self.currencies[currency_id] = projected
+        async with self.reference_locks.setdefault(("currency", currency_id), asyncio.Lock()):
+            if currency_id not in self.currencies:
+                raw = await self.request("GET", f"/record/v1/currency/{currency_id}")
+                projected = _project(raw, CURRENCY_FIELDS)
+                if _id(raw.get("id")) != currency_id:
+                    raise NetSuiteEvidenceError("currency_identity_mismatch")
+                self.currencies[currency_id] = projected
         return self.currencies[currency_id]
 
     async def period(self, tran_date: Any) -> dict:
@@ -314,16 +346,22 @@ class _Reader:
                 raise ValueError
         except ValueError:
             return {"complete": False, "items": [], "reason": "invalid_transaction_date"}
-        if tran_date not in self.periods:
-            query = (
-                "SELECT id, periodname, closed, alllocked, arlocked, aplocked, isadjust, "
-                "TO_CHAR(startdate, 'YYYY-MM-DD') AS startdate, TO_CHAR(enddate, 'YYYY-MM-DD') AS enddate "
-                f"FROM accountingperiod WHERE startdate <= TO_DATE('{tran_date}', 'YYYY-MM-DD') "
-                f"AND enddate >= TO_DATE('{tran_date}', 'YYYY-MM-DD') AND isquarter = 'F' AND isyear = 'F'"
-            )
-            raw = await self.request("POST", "/query/v1/suiteql", params={"limit": 10, "offset": 0}, body={"q": query})
-            items, complete = _collection(raw)
-            self.periods[tran_date] = {"complete": complete, "items": [_project(row, PERIOD_FIELDS) for row in items]}
+        async with self.reference_locks.setdefault(("period", tran_date), asyncio.Lock()):
+            if tran_date not in self.periods:
+                query = (
+                    "SELECT id, periodname, closed, alllocked, arlocked, aplocked, isadjust, "
+                    "TO_CHAR(startdate, 'YYYY-MM-DD') AS startdate, TO_CHAR(enddate, 'YYYY-MM-DD') AS enddate "
+                    f"FROM accountingperiod WHERE startdate <= TO_DATE('{tran_date}', 'YYYY-MM-DD') "
+                    f"AND enddate >= TO_DATE('{tran_date}', 'YYYY-MM-DD') AND isquarter = 'F' AND isyear = 'F'"
+                )
+                raw = await self.request(
+                    "POST", "/query/v1/suiteql", params={"limit": 10, "offset": 0}, body={"q": query}
+                )
+                items, complete = _collection(raw)
+                self.periods[tran_date] = {
+                    "complete": complete,
+                    "items": [_project(row, PERIOD_FIELDS) for row in items],
+                }
         return self.periods[tran_date]
 
     async def read(self, *, order_reference: str, reference_field: str, subsidiary_id: str) -> dict:
@@ -420,7 +458,9 @@ class _Reader:
 
 
 @asynccontextmanager
-async def authenticated_reader(db, tenant_id, connection_id, account_id, *, client=None, max_api_calls=None):
+async def authenticated_reader(
+    db, tenant_id, connection_id, account_id, *, client=None, max_api_calls=None, max_concurrent_calls=1
+):
     """Share selected-connection authorization across fixed native read services."""
     tenant, connection_uuid = _uuid(tenant_id, "tenant"), _uuid(connection_id, "connection")
     account = _account(account_id)
@@ -428,6 +468,8 @@ async def authenticated_reader(db, tenant_id, connection_id, account_id, *, clie
         max_api_calls = MAX_API_CALLS
     if type(max_api_calls) is not int or not 1 <= max_api_calls <= 32:
         raise NetSuiteEvidenceError("invalid_read_budget")
+    if type(max_concurrent_calls) is not int or not 1 <= max_concurrent_calls <= 7:
+        raise NetSuiteEvidenceError("invalid_read_concurrency")
     await set_tenant_context(db, str(tenant))
     connection = (
         await db.execute(
@@ -464,6 +506,13 @@ async def authenticated_reader(db, tenant_id, connection_id, account_id, *, clie
         await set_tenant_context(db, str(tenant))
     if not token:
         raise NetSuiteEvidenceError("authentication_failed")
+    # A bulk caller may request parallelism, but only an explicitly configured
+    # selected connection can enable it. Invalid/absent settings fail closed.
+    metadata = getattr(connection, "metadata_json", None)
+    configured = metadata.get("recon_bulk_concurrency", 1) if isinstance(metadata, dict) else 1
+    if type(configured) is not int or not 1 <= configured <= 7:
+        configured = 1
+    max_concurrent_calls = min(max_concurrent_calls, configured)
     base = f"https://{account}.suitetalk.api.netsuite.com/services/rest"
 
     # Partition even identical accounts by tenant, connection and current credential.
@@ -477,12 +526,26 @@ async def authenticated_reader(db, tenant_id, connection_id, account_id, *, clie
     if client is None and (transport := current_transport()) is not None:
         client = await transport.get(read_scope, _TIMEOUT)
     if client is not None:
-        worker = _Reader(client, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
+        worker = _Reader(
+            client,
+            base,
+            token,
+            max_api_calls=max_api_calls,
+            read_scope=read_scope,
+            max_concurrent_calls=max_concurrent_calls,
+        )
         worker.credential_fingerprint = hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest()
         yield worker
     else:
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as owned:
-            worker = _Reader(owned, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
+            worker = _Reader(
+                owned,
+                base,
+                token,
+                max_api_calls=max_api_calls,
+                read_scope=read_scope,
+                max_concurrent_calls=max_concurrent_calls,
+            )
             worker.credential_fingerprint = hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest()
             yield worker
 
