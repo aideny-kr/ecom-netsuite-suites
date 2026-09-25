@@ -9,7 +9,9 @@ Contract being asserted (per ADR-007 §Decision 6 + ADR-008 + /goal #3):
 - `default` model comes from `SUITE_STUDIO_MODEL_DEFAULT`, defaults to `claude-sonnet-4-6`
 - `plan` model comes from `SUITE_STUDIO_MODEL_PLAN`, defaults to `claude-opus-4-7`
 - `sidecar.main()` prints a non-empty response on the happy path
-- `sidecar.main()` refuses to run when `ANTHROPIC_API_KEY` is missing
+- `sidecar.main()` runs off a resolvable credential — env `ANTHROPIC_API_KEY`
+  OR a Claude Code OAuth credential from the macOS Keychain (ADR-008/009);
+  it refuses only when NO credential resolves at all
 - /goal #3: `sidecar.build_mcp_server_config()` returns a dict with the
   `ns-suiteql` server registration (command + args + cwd + env)
 - /goal #3: `sidecar.ensure_connection_template(org)` creates the template
@@ -126,15 +128,99 @@ def test_main_prints_non_empty_response_on_happy_path(monkeypatch, tmp_path):
     assert buf.getvalue().strip(), "main() must print a non-empty response to stdout"
 
 
-def test_main_refuses_to_run_when_anthropic_api_key_missing(monkeypatch, capsys):
+def test_main_refuses_when_no_anthropic_credential_resolves(monkeypatch, capsys):
+    """With NO env key AND nothing resolvable from the Keychain/OAuth chain,
+    main() refuses and constructs no agent. The credential gate is mocked to
+    "nothing resolves" so the assertion is deterministic regardless of whether
+    the host machine happens to have Claude Code credentials in its Keychain.
+    """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(sidecar, "_has_resolvable_anthropic_credential", lambda: False)
 
     exit_code = sidecar.main()
 
     captured = capsys.readouterr()
     assert exit_code != 0
-    assert "ANTHROPIC_API_KEY" in (captured.err + captured.out)
-    assert _StubAIAgent.instances == [], "No AIAgent should be constructed when the key is missing"
+    assert "credential" in (captured.err + captured.out).lower()
+    assert _StubAIAgent.instances == [], "No AIAgent should be constructed when no credential resolves"
+
+
+def test_main_runs_off_keychain_when_env_key_missing(monkeypatch, tmp_path):
+    """ADR-008/009: a signed-in Claude Code user (a credential resolves from the
+    macOS Keychain) runs the desktop sidecar with NO ANTHROPIC_API_KEY env var.
+    This is the whole point of the slice — no env-key handling for the operator.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(sidecar, "_has_resolvable_anthropic_credential", lambda: True)
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+    monkeypatch.delenv("SUITE_STUDIO_MODEL_DEFAULT", raising=False)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        exit_code = sidecar.main()
+
+    assert exit_code == 0
+    assert buf.getvalue().strip(), "main() must run off the resolved credential without an env key"
+    assert _StubAIAgent.instances, "an AIAgent must be constructed when a credential resolves"
+
+
+# ---------------------------------------------------------------------------
+# Credential gate helper (ADR-008/009) — Keychain/OAuth resolution
+# ---------------------------------------------------------------------------
+
+
+def _clear_anthropic_env(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_has_resolvable_credential_true_when_env_key_present(monkeypatch):
+    _clear_anthropic_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    assert sidecar._has_resolvable_anthropic_credential() is True
+
+
+def test_has_resolvable_credential_true_when_keychain_credential_present(monkeypatch):
+    """No env token, but a Claude Code OAuth credential is present in the
+    Keychain / credentials file (read_claude_code_credentials returns it)."""
+    _clear_anthropic_env(monkeypatch)
+    import agent.anthropic_adapter as adapter
+    monkeypatch.setattr(adapter, "read_claude_code_credentials", lambda: {"accessToken": "x"})
+    assert sidecar._has_resolvable_anthropic_credential() is True
+
+
+def test_has_resolvable_credential_false_when_nothing_present(monkeypatch):
+    _clear_anthropic_env(monkeypatch)
+    import agent.anthropic_adapter as adapter
+    monkeypatch.setattr(adapter, "read_claude_code_credentials", lambda: None)
+    assert sidecar._has_resolvable_anthropic_credential() is False
+
+
+def test_has_resolvable_credential_strips_whitespace_env(monkeypatch):
+    """A whitespace-only env key must NOT count as a credential — it matches how
+    the real resolver strips it, avoiding a gate-pass that then fails at the
+    agent (review finding: gate/resolver whitespace divergence)."""
+    _clear_anthropic_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "   ")
+    import agent.anthropic_adapter as adapter
+    monkeypatch.setattr(adapter, "read_claude_code_credentials", lambda: None)
+    assert sidecar._has_resolvable_anthropic_credential() is False
+
+
+def test_has_resolvable_credential_does_not_trigger_token_refresh(monkeypatch):
+    """REGRESSION (T2 major): the presence gate must NOT call the refreshing
+    resolve_anthropic_token() — that blocks on a network refresh and rewrites the
+    credentials file for an expired token. Detonate resolve_anthropic_token; the
+    gate must still resolve via the read-only read_claude_code_credentials()."""
+    _clear_anthropic_env(monkeypatch)
+    import agent.anthropic_adapter as adapter
+
+    def _boom():
+        raise AssertionError("resolve_anthropic_token() must not be called by the presence gate")
+
+    monkeypatch.setattr(adapter, "resolve_anthropic_token", _boom)
+    monkeypatch.setattr(adapter, "read_claude_code_credentials", lambda: {"accessToken": "x"})
+    assert sidecar._has_resolvable_anthropic_credential() is True
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +568,42 @@ def test_serve_json_protocol_responds_to_run_action(monkeypatch, tmp_path):
         f"stub agent should echo the query, got {payload['response']!r}"
 
 
+def test_serve_constructs_agent_off_keychain_when_env_key_missing(monkeypatch, tmp_path):
+    """The serve loop (`_ensure_agent`) must also accept a resolvable Keychain/OAuth
+    credential — not only ANTHROPIC_API_KEY — so the Electron app runs key-free
+    for a signed-in Claude Code user (ADR-008/009)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(sidecar, "_has_resolvable_anthropic_credential", lambda: True)
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "say hello"}) + "\n")
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    payload = json.loads(stdout.getvalue().strip())
+    assert "response" in payload, f"expected a response off the Keychain credential, got {payload!r}"
+    assert "say hello" in payload["response"]
+
+
+def test_serve_emits_error_when_no_credential_resolves(monkeypatch, tmp_path):
+    """With no env key and nothing resolvable, the serve loop surfaces an error
+    JSON to the renderer (not a crash) and constructs no agent."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(sidecar, "_has_resolvable_anthropic_credential", lambda: False)
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "say hello"}) + "\n")
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    payload = json.loads(stdout.getvalue().strip())
+    assert "error" in payload, f"expected an error payload, got {payload!r}"
+    assert "credential" in payload["error"].lower()
+    assert _StubAIAgent.instances == [], "no agent should be constructed when no credential resolves"
+
+
 def test_serve_json_protocol_handles_multiple_queries_on_same_agent(monkeypatch, tmp_path):
     """One AIAgent instance must serve multiple queries — the agent is built
     once before the serve loop, then reused per query (no per-query
@@ -666,11 +788,14 @@ def test_main_without_serve_flag_keeps_existing_cli_behaviour(monkeypatch, tmp_p
         "CLI mode must still echo the user prompt response"
 
 
-def test_serve_json_protocol_refuses_without_anthropic_key(monkeypatch):
-    """Even in serve mode, the sidecar must refuse to construct an agent
-    without ANTHROPIC_API_KEY — and emit an error JSON on the first
-    incoming query so Electron can surface the misconfiguration."""
+def test_serve_json_protocol_refuses_without_any_credential(monkeypatch):
+    """Even in serve mode, the sidecar must refuse to construct an agent when
+    NO credential resolves (no env key and nothing from the Keychain/OAuth
+    chain) — and emit an error JSON on the first incoming query so Electron can
+    surface the misconfiguration. The gate is mocked to "nothing resolves" so
+    the test does not depend on the host machine's Keychain state."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(sidecar, "_has_resolvable_anthropic_credential", lambda: False)
 
     stdin = io.StringIO(json.dumps({"action": "run", "query": "anything"}) + "\n")
     stdout = io.StringIO()
@@ -679,7 +804,7 @@ def test_serve_json_protocol_refuses_without_anthropic_key(monkeypatch):
 
     payload = json.loads(stdout.getvalue().strip())
     assert "error" in payload, payload
-    assert "ANTHROPIC_API_KEY" in payload["error"]
+    assert "credential" in payload["error"].lower()
 
 
 def test_serve_json_protocol_keeps_agent_stdout_chatter_off_protocol_stdout(monkeypatch, tmp_path):
