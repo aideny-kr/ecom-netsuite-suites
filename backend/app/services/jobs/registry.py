@@ -577,7 +577,17 @@ _RECON_RUN_SCHEMA = {
 }
 
 
+from app.services.jobs.agent_step import execute_agent_step
+from app.services.jobs.agent_step import params_schema as agent_params_schema
+
 STEP_REGISTRY: dict[str, StepSpec] = {
+    "agent.review_saved_case": StepSpec(
+        type="agent.review_saved_case",
+        label="Review saved investigation evidence",
+        kind="read",
+        params_schema=agent_params_schema(),
+        executor=execute_agent_step,
+    ),
     "bigquery_sql": StepSpec(
         type="bigquery_sql",
         label="BigQuery SQL query",
@@ -690,6 +700,13 @@ def validate_plan(plan: dict) -> ValidatedPlan:
     raw_steps = plan.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise PlanInvalid(["plan.steps must be a non-empty array"])
+
+    if len(raw_steps) != 1 and any(
+        isinstance(s, dict) and s.get("type") == "agent.review_saved_case" for s in raw_steps
+    ):
+        raise PlanInvalid(
+            ["agent.review_saved_case must be the only step; it cannot grant authority to a later action"]
+        )
 
     errors: list[str] = []
     steps: list[PlanStep] = []

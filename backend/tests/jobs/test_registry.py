@@ -21,6 +21,7 @@ from app.services.jobs.registry import (
 )
 
 V1_TYPES = {
+    "agent.review_saved_case": "read",
     "bigquery_sql": "read",
     "report.compose": "read",
     "report.render_pdf": "read",
