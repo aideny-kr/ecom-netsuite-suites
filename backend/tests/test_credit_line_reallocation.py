@@ -86,6 +86,8 @@ def _us():
         "other_credits": [],
         "source": {
             "number": "R094649369",
+            "completed_at": "2026-08-05T10:00:00Z",
+            "requires_review": False,
             "state": "complete",
             "payment_state": "paid",
             "currency": "USD",
@@ -164,6 +166,8 @@ def _bv():
         "other_credits": [],
         "source": {
             "number": "R600526599",
+            "completed_at": "2026-08-05T10:00:00Z",
+            "requires_review": False,
             "state": "complete",
             "payment_state": "paid",
             "currency": "EUR",
@@ -352,3 +356,63 @@ class TestRefuses:
             reallocation.assess(lines=lines, **_bv())
         assert exc.value.detail["required"] == {"gross": "2594.00", "net": "2143.80", "tax": "450.20"}
         assert exc.value.detail["proposed"] == {"gross": "2594.00", "net": "2143.75", "tax": "450.25"}
+
+
+class TestReviewRoundOne:
+    """Findings of the 2026-09-25 T2 gate round 1 (wf_caf4e844-a12)."""
+
+    def test_tax_must_go_to_an_account_the_invoice_actually_credited(self):
+        facts = _bv()
+        facts["profile"]["tax_item_accounts"] = {"4699": "846", "9999": "999"}
+        facts["items"]["9999"] = {"id": "9999", "isInactive": False, "incomeAccount": {"id": "999"}}
+        lines = [{"line": 1, "item_id": "1603", "amount": "185.95"}, {"item_id": "9999", "amount": "39.05"}]
+        assert _refused(facts, lines) == "tax_account_not_on_invoice"
+
+    def test_tax_reversed_per_account_cannot_exceed_what_that_account_posted(self):
+        facts = _bv()
+        invoice, _ = facts["invoices"][0]
+        facts["invoices"] = [
+            (
+                invoice,
+                _gl(
+                    ("119", "debit", "2819"),
+                    ("54", "credit", "2329.75"),
+                    ("846", "credit", "20"),
+                    ("906", "credit", "469.25"),
+                ),
+            )
+        ]
+        facts["profile"]["tax_item_accounts"] = {"4699": "846", "4700": "906"}
+        facts["items"]["4700"] = {"id": "4700", "isInactive": False, "incomeAccount": {"id": "906"}}
+        assert _refused(facts, BV_FIX) == "tax_reversal_exceeds_posted"
+        ok = [{"line": 1, "item_id": "1603", "amount": "185.95"}, {"item_id": "4700", "amount": "39.05"}]
+        reallocation.assess(lines=ok, **facts)
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"requires_review": True},
+            {"completed_at": None},
+        ],
+    )
+    def test_unfinalized_source_is_refused(self, change):
+        facts = _us()
+        facts["source"] = {
+            **facts["source"],
+            "completed_at": "2026-08-05T10:00:00Z",
+            "requires_review": False,
+            **change,
+        }
+        assert _refused(facts, US_FIX) == "source_not_final"
+
+    def test_unfinalized_source_adjustment_is_refused(self):
+        facts = _us()
+        facts["source"] = {**facts["source"], "adjustments": [{"id": 1, "amount": "-2.8", "finalized": False}]}
+        assert _refused(facts, US_FIX) == "source_not_final"
+
+    def test_readback_ledger_is_compared_exactly(self):
+        expected = {"debit": {"783": "185.95", "846": "39.05"}, "credit": {"119": "225.00"}}
+        sub_cent = _gl(("119", "credit", "225"), ("783", "debit", "185.946"), ("846", "debit", "39.054"))
+        exact = _gl(("119", "credit", "225"), ("783", "debit", "185.95"), ("846", "debit", "39.05"))
+        assert not reallocation._ledger_matches(sub_cent, expected)
+        assert reallocation._ledger_matches(exact, expected)

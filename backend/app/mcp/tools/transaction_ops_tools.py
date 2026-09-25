@@ -468,13 +468,13 @@ async def execute_propose_credit_reallocation(params: dict, **kwargs) -> dict:
             correlation_id=context.get("correlation_id"),
             payload={"correction_candidate": proposal, "financial_writes": 0},
         )
+        # The approval card shows the verified figures; the model gets only the exact call that
+        # displays it, never computed amounts to restate (no LLM-presented tool numbers).
         return {
             "success": True,
             "case_id": str(case_id),
             "audit_id": str(event.id),
-            "verified_outcome": proposal["balance"],
-            "expected_ledger": proposal["expected_ledger"],
-            "approval_basis": proposal["approval_basis"],
+            "outcome": "The server verified that these lines make the order equal the source.",
             "correction_candidate": {
                 "next_action": "Call this tool with these exact params to DISPLAY the approval card. "
                 "Execution requires human approval; do not alter the payload.",

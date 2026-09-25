@@ -418,3 +418,97 @@ class TestGroup:
             expected = "no_verified_exemplar" if outcome == "refused" else "error:RuntimeError"
             assert f"Existing-credit reallocation not prepared: {expected}" in reason
             assert "Preparation needs review" not in reason
+
+
+class TestReviewRoundOneFlow:
+    """Identity scope findings of the 2026-09-25 T2 gate round 1 (wf_caf4e844-a12)."""
+
+    @staticmethod
+    def _two_line_bv(order):
+        facts = _bv()
+        credit = facts["credit"]
+        first = credit["line_evidence"]["lines"][0]
+        first.update(amount="200.0", rate="200.0")
+        second = {**deepcopy(first), "line": 2, "amount": "25.0", "rate": "25.0", "lineUniqueKey": "65500002"}
+        credit["line_evidence"]["lines"].append(second)
+        order["facts"] = facts
+        order["context"] = _context(facts)
+        return [{"line": 1, "item_id": "1603", "amount": "185.95"}, {"line": 2, "item_id": "4699", "amount": "39.05"}]
+
+    async def test_an_edit_to_the_credits_lines_before_approval_refuses(self, order):
+        lines = self._two_line_bv(order)
+        db, p = await _proposed(order, lines)
+        edited = order["facts"]["credit"]["line_evidence"]["lines"]
+        edited[0].update(amount="100.0", rate="100.0")
+        edited[1].update(amount="125.0", rate="125.0")  # same total, same accounts: aggregates unchanged
+        params = {"recordType": "creditMemo", "recordId": p["record_id"], "data": p["wire_record_json"]}
+        with pytest.raises(ValueError, match="related_record_changed"):
+            await tax_correction.validate_approved(db, TENANT, _tool_name(), params, p)
+
+    async def test_recheck_accepts_the_credit_after_its_item_was_replaced(self, order):
+        from app.services.transaction_ops.accounting_credit_recheck import project
+
+        _, p = await _proposed(order)
+        written = _written(order["facts"], p)
+        # A fresh gather reads only the items the credit now uses plus the configured tax items.
+        written["items"] = {"5005": written["items"]["5005"]}
+        now = datetime.now(timezone.utc)
+        report = {
+            "order_reference": p["order_reference"],
+            "source": {"observed_at": now.isoformat()},
+            "balance": {
+                "status": "difference",
+                "amounts": {
+                    "order_total": {"source": "799.0", "target": "801.8", "delta": "-2.8"},
+                    "tax": {"source": "0.0", "target": "2.8", "delta": "-2.8"},
+                },
+            },
+        }
+        projected = project(p, report, ({"precision": 2, **written}, order["context"]), verified_at=now, now=now)
+        assert projected["balance"]["status"] == "matched"
+        order["facts"] = written
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "verified"
+
+    async def test_readback_refuses_a_credit_moved_to_another_period(self, order):
+        _, p = await _proposed(order)
+        written = _written(order["facts"], p)
+        written["credit"]["postingPeriod"] = {"id": "172"}
+        written["period"] = {"id": "172", "closed": False, "arLocked": False, "allLocked": False}
+        order["facts"] = written
+        result = await tax_correction.verify_after(_db(), TENANT, p)
+        assert result["status"] == "needs_review"
+
+    async def test_readback_matches_renumbered_lines_by_content(self, order):
+        order["facts"] = _bv()
+        order["context"] = _context(order["facts"])
+        _, p = await _proposed(order, BV_FIX)
+        written = _written(order["facts"], p)
+        lines = written["credit"]["line_evidence"]["lines"]
+        lines[0]["line"], lines[1]["line"] = 2, 1  # NetSuite renumbered on save
+        order["facts"] = written
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "verified"
+
+    async def test_success_result_hands_the_model_no_computed_figures(self, order, monkeypatch):
+        db = _db()
+
+        async def authorize(context, *, create, fresh=False):
+            return db, TENANT, SimpleNamespace(id=uuid4())
+
+        async def none(*args, **kwargs):
+            return None
+
+        async def log(*args, **kwargs):
+            return SimpleNamespace(id=uuid4())
+
+        monkeypatch.setattr(tools, "_authorize", authorize)
+        monkeypatch.setattr("app.services.transaction_ops.case_resolution_scope.load", none)
+        monkeypatch.setattr("app.services.audit_service.log_event", log)
+        out = await tools.execute_propose_credit_reallocation(
+            {"case_id": CASE, "credit_memo_id": "15788939", "lines": US_FIX}, context={"db": db}
+        )
+        assert out["success"]
+        assert not {"verified_outcome", "expected_ledger", "approval_basis"} & set(out)
+        assert (
+            out["correction_candidate"]["params"]["data"]
+            == db.info["accounting_correction_candidate"]["wire_record_json"]
+        )

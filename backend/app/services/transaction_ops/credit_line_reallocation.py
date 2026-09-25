@@ -13,7 +13,7 @@ and exchange rate are never sent. Tax is classified by GL account, so it covers 
 added on top of the price (US) and a tax included in it (VAT/GST), without a rate.
 """
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 KIND = "credit_line_reallocation"
 
@@ -31,13 +31,15 @@ class RefusalError(ValueError):
 
 
 def _dec(value):
-    if value is None or isinstance(value, (bool, float)):
+    """An exact Decimal by the platform's canonical rules (never a binary float), or None."""
+    from app.schemas.transaction_ops import _decimal
+
+    if value is None:
         return None
     try:
-        number = Decimal(str(value))
-    except InvalidOperation:
+        return _decimal(value if isinstance(value, (Decimal, int, float, bool)) else str(value))
+    except ValueError:
         return None
-    return number if number.is_finite() else None
 
 
 def _amount(value, precision):
@@ -71,22 +73,36 @@ def _gl_rows(gl):
 
 
 def _posted(document, gl, taxed, sign):
-    """(gross, tax) a document posts, as positive amounts: an invoice debits AR and credits tax
-    (sign 1); a credit credits AR and debits tax (sign -1). Callers subtract credits."""
+    """(gross, tax, tax by account) a document posts, as positive amounts: an invoice debits AR and
+    credits tax (sign 1); a credit credits AR and debits tax (sign -1). Callers subtract credits."""
     ar = _ref(document, "account")
-    gross = tax = Decimal(0)
+    gross = Decimal(0)
+    by_account = {}
     for row in _gl_rows(gl):
         debit, credit = _dec(row.get("debit")) or Decimal(0), _dec(row.get("credit")) or Decimal(0)
         account = str(row.get("account"))
         if account == ar:
             gross += (debit - credit) * sign
         elif account in taxed:
-            tax += (credit - debit) * sign
+            by_account[account] = by_account.get(account, Decimal(0)) + (credit - debit) * sign
     if gross != _dec(document.get("total")):
         raise RefusalError(
             "evidence_incomplete", {"reason": "gl_total_differs_from_header", "record_id": document.get("id")}
         )
-    return gross, tax
+    return gross, sum(by_account.values(), Decimal(0)), by_account
+
+
+def _add(total, part):
+    for account, value in part.items():
+        total[account] = total.get(account, Decimal(0)) + value
+    return total
+
+
+def _adjustments(source):
+    """Every source adjustment: order-level, line and shipment."""
+    yield from source.get("adjustments") or []
+    for owner in [*(source.get("line_items") or []), *(source.get("shipments") or [])]:
+        yield from (owner or {}).get("adjustments") or []
 
 
 def _balance(gross, tax, precision):
@@ -137,9 +153,12 @@ def _facts(
     source_tax = _dec(source.get("tax_total"))
     if (
         source.get("state") != "complete"
+        or source.get("requires_review") not in (False, None)
+        or not source.get("completed_at")
         or source.get("payment_state") != "paid"
         or None in (total, paid, source_tax)
         or paid != total
+        or any("finalized" in a and a["finalized"] is not True for a in _adjustments(source))
     ):
         raise RefusalError("source_not_final")
     if (_dec(credit.get("taxTotal")) or Decimal(0)) != 0:
@@ -148,14 +167,17 @@ def _facts(
     if not taxed:
         raise RefusalError("tax_accounts_not_configured")
     gross = tax = Decimal(0)
+    invoice_by_account, other_by_account = {}, {}
     for document, gl in invoices:
-        g, t = _posted(document, gl, taxed, 1)
+        g, t, by = _posted(document, gl, taxed, 1)
         gross, tax = gross + g, tax + t
+        _add(invoice_by_account, by)
     other_gross = other_tax = Decimal(0)
     for document, gl in other_credits:
-        g, t = _posted(document, gl, taxed, -1)
+        g, t, by = _posted(document, gl, taxed, -1)
         other_gross, other_tax = other_gross + g, other_tax + t
-    credit_gross, credit_tax = _posted(credit, credit_gl, taxed, -1)
+        _add(other_by_account, by)
+    credit_gross, credit_tax, _ = _posted(credit, credit_gl, taxed, -1)
     before = (gross - other_gross - credit_gross, tax - other_tax - credit_tax)
     required = (total, source_tax)
     if before[0] != required[0]:
@@ -170,6 +192,8 @@ def _facts(
         "invoice_gross": gross,
         "invoice_tax": tax,
         "others": (other_gross, other_tax),
+        # What each tax account can still give back: invoice tax less other credits' reversals.
+        "reversible": {a: v - other_by_account.get(a, Decimal(0)) for a, v in invoice_by_account.items() if v > 0},
         "before": before,
         "required": required,
         "credit_total": _dec(credit.get("total")),
@@ -237,6 +261,20 @@ def assess(
             {"credit_total": _q(facts["credit_total"], precision), "lines_total": _q(total, precision)},
         )
     new_tax = sum((line["amount"] for line in parsed if line["account"] in facts["taxed"]), Decimal(0))
+    by_account = {}
+    for line in parsed:
+        if line["account"] in facts["taxed"]:
+            by_account[line["account"]] = by_account.get(line["account"], Decimal(0)) + line["amount"]
+    for account, value in sorted(by_account.items()):
+        if account not in facts["reversible"]:
+            raise RefusalError(
+                "tax_account_not_on_invoice", {"account": account, "invoice_tax_accounts": sorted(facts["reversible"])}
+            )
+        if value > facts["reversible"][account]:
+            raise RefusalError(
+                "tax_reversal_exceeds_posted",
+                {"account": account, "reversible": _q(facts["reversible"][account], precision)},
+            )
     other_gross, other_tax = facts["others"]
     after = (facts["invoice_gross"] - other_gross - total, facts["invoice_tax"] - other_tax - new_tax)
     if after != facts["required"]:
@@ -287,7 +325,11 @@ def derive(*, credit, credit_gl, invoices, other_credits, source, profile, items
         subsidiary_id=subsidiary_id,
         precision=precision,
     )
-    tax_items = sorted(str(k) for k in (profile.get("tax_item_accounts") or {}))
+    tax_items = sorted(
+        str(item)
+        for item, account in (profile.get("tax_item_accounts") or {}).items()
+        if str(account) in facts["reversible"]
+    )
     lines = credit["line_evidence"]["lines"]
     if len(tax_items) != 1 or len(lines) != 1:
         raise RefusalError("derive_unsupported_shape", {"tax_items": tax_items, "credit_lines": len(lines)})
@@ -323,9 +365,9 @@ CARD_MAX_AGE_SECONDS = 300
 
 
 def _json(value):
-    import json
+    from app.services.transaction_ops.credit_api_correction import _json as exact_json
 
-    return json.loads(json.dumps(value, default=str))
+    return exact_json(value)
 
 
 async def _suiteql(reader, query, limit):
@@ -384,7 +426,7 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
     sections = evidence.get("sections") or {}
     order = sections.get("sales_order") or {}
     postings = sections.get("posting_documents") or []
-    invoices = [d for d in postings if d.get("record_type") == "invoice"]
+    invoices = sorted((d for d in postings if d.get("record_type") == "invoice"), key=lambda d: int(d.get("id") or 0))
     if not _id(str(order.get("id"))) or order.get("tranId") != source.get("number") or len(invoices) != len(postings):
         raise RefusalError("evidence_incomplete", {"reason": "order_or_posting_documents_unsupported"})
     related = sections.get("related_refund_documents") or {}
@@ -470,7 +512,9 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
 
 
 def _identity(facts, context):
-    """What must not move between proposal, approval and readback (besides the lines themselves)."""
+    """What the approved write must leave unchanged: everything except the credit's own lines, its
+    GL and the item set those lines use. Checked at approval, at readback and at the recheck, so
+    a correct write never fails it and any other change does."""
     from app.services.transaction_ops.resolution_plan import fingerprint
 
     credit = facts["credit"]
@@ -484,9 +528,27 @@ def _identity(facts, context):
             "invoices": [(d, g) for d, g in facts["invoices"]],
             "other_credits": [(d, g) for d, g in facts["other_credits"]],
             "profile": facts["profile"],
-            "items": facts["items"],
             "sales_order": context["order"],
             "refund_graph": context["refund_graph"],
+        }
+    )
+
+
+def _preimage(facts, context):
+    """What the human approved changing FROM: the credit's current lines, GL and the items they and
+    the proposal use. Any change between proposal and approval invalidates the card."""
+    from app.services.transaction_ops.resolution_plan import fingerprint
+
+    lines = (facts["credit"].get("line_evidence") or {}).get("lines") or []
+    return fingerprint(
+        {
+            "identity": _identity(facts, context),
+            "lines": [
+                {k: line.get(k) for k in ("line", "item", "quantity", "rate", "amount", "taxCode", "isTaxable")}
+                for line in lines
+            ],
+            "credit_gl": facts["credit_gl"],
+            "items": facts["items"],
         }
     )
 
@@ -546,7 +608,12 @@ def _proposal(tenant_id, facts, context, result, lines, reason):
             "balance": balance,
             "before": {"total": str(credit.get("total")), "taxTotal": "0.00", "lines": before_lines},
             "source": source,
-            "support": {"invoice": invoice, "credit": credit, "identity": _identity(facts, context)},
+            "support": {
+                "invoice": invoice,
+                "credit": credit,
+                "identity": _identity(facts, context),
+                "preimage": _preimage(facts, context),
+            },
             "protected_sales_order": context["order"],
             "ar_account": _ref(credit, "account"),
             "tax_account": ",".join(sorted(_tax_accounts(facts["profile"]))),
@@ -627,7 +694,7 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, p):
     )
     await case_resolution_scope.validate(db, tenant_id, p)
     facts, context = await fresh(db, tenant_id, p)
-    if _identity(facts, context) != p["support"]["identity"]:
+    if _preimage(facts, context) != p["support"]["preimage"]:
         raise ValueError("credit_reallocation_related_record_changed")
     try:
         result = assess(lines=p["lines"], **facts)
@@ -641,7 +708,8 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, p):
         raise ValueError("credit_reallocation_schema_changed")
 
 
-def _ledger(gl, precision):
+def _ledger(gl):
+    """The credit's saved GL by side and account, exact (never rounded before comparing)."""
     debit, credit = {}, {}
     for row in _gl_rows(gl):
         for side, bucket in (("debit", debit), ("credit", credit)):
@@ -649,27 +717,29 @@ def _ledger(gl, precision):
             if value:
                 account = str(row.get("account"))
                 bucket[account] = bucket.get(account, Decimal(0)) + value
-    return {
-        "debit": {a: _q(v, precision) for a, v in sorted(debit.items())},
-        "credit": {a: _q(v, precision) for a, v in sorted(credit.items())},
-    }
+    return {"debit": debit, "credit": credit}
+
+
+def _ledger_matches(gl, expected):
+    saved = _ledger(gl)
+    return all(
+        set(saved[side]) == set(expected[side])
+        and all(saved[side][a] == Decimal(expected[side][a]) for a in expected[side])
+        for side in ("debit", "credit")
+    )
 
 
 def _lines_match(credit, p):
-    """The saved lines are the approved ones: existing lines by key, new lines by content."""
-    saved = [
-        (line.get("line"), _ref(line, "item"), _dec(line.get("amount")))
+    """The saved lines are the approved ones, compared by content: NetSuite may renumber a sublist
+    on save, and the exact GL comparison already pins which accounts received what."""
+    saved = sorted(
+        (_ref(line, "item"), _dec(line.get("amount")))
         for line in (credit.get("line_evidence") or {}).get("lines") or []
-    ]
-    approved = [
-        (entry.get("line"), entry["item"]["id"], Decimal(entry["amount"]))
-        for entry in p["proposed_fields"]["item"]["items"]
-    ]
-    keyed = {(n, i, a) for n, i, a in approved if n is not None}
-    new = sorted((i, a) for n, i, a in approved if n is None)
-    saved_keyed = {(n, i, a) for n, i, a in saved if n in {k[0] for k in keyed}}
-    saved_new = sorted((i, a) for n, i, a in saved if n not in {k[0] for k in keyed})
-    return len(saved) == len(approved) and saved_keyed == keyed and saved_new == new
+    )
+    approved = sorted(
+        (entry["item"]["id"], Decimal(entry["amount"])) for entry in p["proposed_fields"]["item"]["items"]
+    )
+    return saved == approved
 
 
 async def verify_after(db, tenant_id, p, receipt=None):
@@ -681,13 +751,17 @@ async def verify_after(db, tenant_id, p, receipt=None):
             raise ValueError("credit_reallocation_receipt_identity_conflict")
         facts, context = await fresh(db, tenant_id, p)
         credit = facts["credit"]
+        if _identity(facts, context) != p["support"]["identity"]:
+            raise ValueError("credit_reallocation_related_record_changed")
         if credit.get("application_evidence") != p["support"]["credit"].get("application_evidence"):
             raise ValueError("credit_reallocation_applications_changed")
         if not _lines_match(credit, p):
             raise ValueError("credit_reallocation_lines_differ")
-        ledger = _ledger(facts["credit_gl"], facts["precision"])
-        if ledger != p["expected_ledger"]:
+        if not _ledger_matches(facts["credit_gl"], p["expected_ledger"]):
             raise ValueError("credit_reallocation_ledger_differs")
+        ledger = {
+            side: {a: str(v) for a, v in accounts.items()} for side, accounts in _ledger(facts["credit_gl"]).items()
+        }
         booked, required = booked_balance(**facts)
         if booked != required:
             raise ValueError("credit_reallocation_order_still_differs")
