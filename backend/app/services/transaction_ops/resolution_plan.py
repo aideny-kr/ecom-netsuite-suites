@@ -115,15 +115,16 @@ def proposal_plan(proposal, report):
     if kind not in KINDS:
         raise ValueError("unsupported_accounting_plan")
     order_step = kind in DEPENDENT_KINDS
+    # An amendment of an existing credit: the invoice it reconciles stays the plan's anchor.
+    treatment = treatment_of(proposal)
+    existing_credit = treatment.family == "amendment" and treatment.record_type == "creditmemo"
     before = proposal["before"]
     order_id = (
         proposal["record_id"]
         if order_step
         else proposal.get("sales_order_id") or (before.get("createdFrom") or {}).get("id")
     )
-    invoice_id = (
-        proposal.get("invoice_id") if order_step or kind == "credit_tax_reallocation" else proposal.get("record_id")
-    )
+    invoice_id = proposal.get("invoice_id") if order_step or existing_credit else proposal.get("record_id")
     amounts = (report.get("balance") or {}).get("amounts") or {}
     total = amounts.get("order_total") or {}
     source = proposal.get("source") or {}
@@ -163,7 +164,7 @@ def proposal_plan(proposal, report):
         if order_step
         else "After posting verification, read the sales order again and prepare an exact amendment if needed.",
     }
-    if kind == "credit_tax_reallocation":
+    if existing_credit:
         posting.update(
             record_id=proposal["record_id"],
             current_total=before.get("total"),

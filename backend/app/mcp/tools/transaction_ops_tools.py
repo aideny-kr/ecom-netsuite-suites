@@ -387,6 +387,111 @@ async def execute_accounting_group(params: dict, **kwargs) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+_REALLOCATION_GUIDANCE = {
+    "outcome_does_not_match_source": "The lines do not make the order equal the source. Use detail.required: "
+    "the tax part of the credit is what the order's posted tax exceeds the source by. Never round. "
+    "Do not show these figures to the user; use them only to correct the lines.",
+    "lines_total_changed": "The credit's total, refund and applications stay unchanged; the lines must add up to it.",
+    "item_not_allowed": "Use only the credit's own items or the subsidiary's configured tax-refund item in detail.",
+    "existing_line_missing": "List every existing line (by its line number) and any new line; omit none.",
+    "tax_refund_items_not_configured": "This subsidiary has no configured tax-refund item. Report the configuration "
+    "gap; do not substitute an item or propose another document.",
+    "no_difference": "The posted tax already equals the source; nothing to reallocate.",
+    "gross_not_reconciled": "Gross does not reconcile, so this is not a reallocation of an existing credit.",
+    "period_locked": "The credit's period is locked; the correction needs the period policy, not this tool.",
+    "foreign_currency_unsupported": "Foreign-currency credits are not supported by this correction.",
+}
+
+
+async def execute_propose_credit_reallocation(params: dict, **kwargs) -> dict:
+    """Agent-proposed reallocation of an existing credit's lines, accepted only by outcome.
+
+    The model chooses the credit, items and amounts. The server re-reads the order and accepts
+    the lines only when invoices less credits then equal the finalized source in gross, net and
+    tax, then binds the exact connector payload for the human approval card. No financial writes.
+    """
+    from app.services.audit_service import log_event
+    from app.services.transaction_ops import case_resolution_scope
+    from app.services.transaction_ops import credit_line_reallocation as reallocation
+    from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
+    from app.services.transaction_ops.source_reader import SourceReadError
+    from app.services.transaction_ops.state_service import StateError
+
+    context = kwargs.get("context") or {}
+    try:
+        if set(params) - {"case_id", "credit_memo_id", "lines", "reason"} or any(
+            k not in params for k in ("case_id", "credit_memo_id", "lines")
+        ):
+            raise _ToolError("invalid_parameters")
+        db, tenant_id, actor = await _authorize(context, create=False)
+        db.info.pop("accounting_correction_candidate", None)
+        case_id = uuid.UUID(str(params["case_id"]))
+        restriction = await case_resolution_scope.load(db, tenant_id, case_id)
+        try:
+            proposal = await reallocation.propose(
+                db, tenant_id, case_id, str(params["credit_memo_id"]), params["lines"], params.get("reason")
+            )
+        except reallocation.RefusalError as exc:
+            await log_event(
+                db,
+                tenant_id,
+                category="transaction_ops",
+                action="accounting.reallocation.refused",
+                actor_id=actor.id,
+                resource_type="transaction_case",
+                resource_id=str(case_id),
+                correlation_id=context.get("correlation_id"),
+                payload={"code": exc.code, "detail": exc.detail, "lines": params["lines"], "financial_writes": 0},
+                status="error",
+            )
+            return {
+                "success": False,
+                "refused": exc.code,
+                "detail": exc.detail,
+                "guidance": _REALLOCATION_GUIDANCE.get(
+                    exc.code, "Resolve the stated evidence gap; do not switch to another write path."
+                ),
+                "financial_writes": 0,
+            }
+        if not case_resolution_scope.allows(restriction, proposal):
+            db.info.pop("accounting_correction_candidate", None)
+            return {"success": False, "refused": "outside_case_resolution_scope", "financial_writes": 0}
+        if restriction:
+            proposal["resolution_scope"] = restriction
+        event = await log_event(
+            db,
+            tenant_id,
+            category="transaction_ops",
+            action="accounting.reallocation.proposed",
+            actor_id=actor.id,
+            resource_type="transaction_case",
+            resource_id=str(case_id),
+            correlation_id=context.get("correlation_id"),
+            payload={"correction_candidate": proposal, "financial_writes": 0},
+        )
+        # The approval card shows the verified figures; the model gets only the exact call that
+        # displays it, never computed amounts to restate (no LLM-presented tool numbers).
+        return {
+            "success": True,
+            "case_id": str(case_id),
+            "audit_id": str(event.id),
+            "outcome": "The server verified that these lines make the order equal the source.",
+            "correction_candidate": {
+                "next_action": "Call this tool with these exact params to DISPLAY the approval card. "
+                "Execution requires human approval; do not alter the payload.",
+                "tool_name": f"ext__{uuid.UUID(proposal['connector_id']).hex}__ns_updateRecord",
+                "params": {
+                    "recordType": proposal["record_type"],
+                    "recordId": proposal["record_id"],
+                    "data": proposal["wire_record_json"],
+                },
+            },
+            "financial_writes": 0,
+        }
+    except (ValueError, _ToolError, StateError, NetSuiteEvidenceError, SourceReadError) as exc:
+        return {"success": False, "error": "Accounting case or scoped configuration unavailable.", "reason": str(exc)}
+
+
 async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
     """Exact-case native reads; caller cannot choose another account or inject SQL."""
     from app.services.transaction_ops import case_service

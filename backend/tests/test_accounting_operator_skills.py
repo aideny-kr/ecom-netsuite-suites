@@ -20,6 +20,7 @@ from app.services.chat.tools import build_external_tool_definitions, build_local
         "accounting_treatments",
         "accounting_verification",
         "evidence_led_operations",
+        "credit_reallocation",
     ],
 )
 async def test_load_maintained_skill_and_revision(slug):
@@ -98,3 +99,15 @@ def test_transaction_prompt_loads_accounting_core_without_eager_metabase_manuals
     assert "exact record_links" in prompt
     agent._transaction_workflow = False
     assert "# Metabase SQL Analysis" in agent.system_prompt
+
+
+def test_the_eagerly_loaded_accounting_skill_points_to_the_existing_credit_reallocation():
+    """The transaction prompt injects accounting_operations; it must route a misposted credit to the
+    reallocation method instead of the old "no supported adapter" stop (R979773019, 2026-09-24)."""
+    core = get_skill_instructions("accounting_operations")
+    assert "credit_reallocation" in core and "transaction_ops_propose_credit_reallocation" in core
+    method = get_skill_instructions("credit_reallocation")
+    for rule in ("Never propose a new credit", "never round", "configured tax-refund item", "exact params"):
+        assert rule.lower() in method.lower()
+    tools = {t["name"] for t in build_local_tool_definitions()}
+    assert "transaction_ops_propose_credit_reallocation" in tools

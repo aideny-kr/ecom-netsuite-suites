@@ -127,6 +127,38 @@ TOOL_REGISTRY = {
             "search": {"type": "string"},
         },
     },
+    "transaction_ops.propose_credit_reallocation": {
+        "description": "Propose correcting an EXISTING credit memo whose lines post to the wrong account, "
+        "e.g. a refunded tax booked as a sales return. Use after transaction_ops_accounting_evidence shows the "
+        "credit, its GL and the source. You choose the credit and its complete item lines: every existing line by "
+        "its line number, plus any new line, using only the credit's own items or the subsidiary's configured "
+        "tax-refund item. The credit total, refund and applications stay unchanged; never propose a new credit "
+        "for an already refunded amount. The server re-reads the order and accepts the lines only if invoices "
+        "less credits then equal the finalized source in gross, net and tax; otherwise it returns a refusal code "
+        "and the required figures. On success, call the returned correction_candidate tool with its exact params "
+        "to display the human approval card. No financial writes.",
+        "execute": transaction_ops_tools.execute_propose_credit_reallocation,
+        "params_schema": {
+            "case_id": {"type": "string", "required": True, "description": "Durable case UUID"},
+            "credit_memo_id": {"type": "string", "required": True, "description": "Existing credit memo record id"},
+            "lines": {
+                "type": "array",
+                "required": True,
+                "description": "The credit's complete item lines after the change. "
+                "Each: {line (existing line number; omit for a new line), item_id, amount (decimal string)}.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "line": {"type": "integer"},
+                        "item_id": {"type": "string"},
+                        "amount": {"type": "string"},
+                    },
+                    "required": ["item_id", "amount"],
+                },
+            },
+            "reason": {"type": "string", "description": "The observed cause, in one sentence."},
+        },
+    },
     "transaction_ops.accounting_evidence": {
         "description": "Read scoped native accounting evidence for a transaction case in one bounded call. "
         "Use FIRST after investigation status, before ad-hoc SuiteQL. Returns native lifecycle labels, linked "
