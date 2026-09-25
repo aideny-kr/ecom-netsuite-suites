@@ -584,6 +584,88 @@ async def run_investigation(
             await settle(meter)
             return result
 
+    async def prepare_concurrently(refs, workers):
+        from app.services.transaction_ops import source_preparation
+
+        connection_id = direct_source["source_connection_id"]
+        cached = {}
+        if progress.get("phase") == "orders":
+            with timing.measure("source_snapshot_batch"):
+                cached = await source_snapshot.load_many(
+                    db,
+                    tenant_id,
+                    connection_id,
+                    refs,
+                    since=snapshot_floor,
+                    now=clock(),
+                    minimum_versions={ref: _time(progress.get("pending_source_versions", {}).get(ref)) for ref in refs},
+                )
+        missing = [ref for ref in refs if ref not in cached]
+        # Pay all possible first attempts before either pipeline branch starts.
+        # Retries still make their own committed reservation below.
+        if missing and not await reserve(2 * len(missing)):
+            return False
+
+        async def check_active(branch_db):
+            if clock() >= deadline_at:
+                raise TimeoutError
+            current = await state_service.get_run(branch_db, tenant_id, run_id)
+            state_service._lease(current, token, clock())
+            if not await (_enabled or enabled)(branch_db, tenant_id):
+                raise FeatureRevokedError
+            if not (await state_service.get_config(branch_db, tenant_id, run.config_id)).enabled:
+                raise FeatureRevokedError
+
+        async def fetch():
+            if not missing:
+                return {}, 0
+            with timing.measure("source_prepare_batch"):
+                return await source_preparation.collect(
+                    tenant_id,
+                    connection_id,
+                    missing,
+                    workers=workers,
+                    check_active=check_active,
+                    clock=clock,
+                    deadline_at=deadline_at,
+                )
+
+        # Only the NetSuite branch uses the coordinator session. Source branches
+        # have separate sessions and cannot mutate the run, its budget or cursor.
+        # Each provider read retains its own paid timeout/retry policy. Do not
+        # time out the join: target evidence and checkpoint commits must finish.
+        (results, peak), _ = await source_preparation.joined(fetch(), staged.prefetch_orders(refs[0]))
+        progress["source_prepare_concurrency_peak"] = max(progress.get("source_prepare_concurrency_peak", 0), peak)
+        progress["pipeline_prepare_batches"] = progress.get("pipeline_prepare_batches", 0) + 1
+        for ref in refs:
+            reused = ref in cached
+            observed = cached.get(ref) if reused else results.get(ref)
+            if observed is None or isinstance(observed, Exception):
+                # Feed a failed first attempt into the existing persisted retry
+                # policy. It does not send again until a NEW retry is paid.
+                first = [observed] if isinstance(observed, Exception) else []
+
+                async def read(ref=ref, first=first):
+                    if first:
+                        raise first.pop()
+                    await check_active(db)
+                    from app.services.transaction_ops.source_validation import read_validated_order
+
+                    return await read_validated_order(db, tenant_id, source_step_id, ref, **direct_source)
+
+                observed = await bounded_read("source_order", read, retry_calls=2)
+                with timing.measure("source_snapshot"):
+                    await source_snapshot.save(db, tenant_id, connection_id, ref, observed, now=clock())
+            if not reused:
+                counter = (
+                    "source_body_validations"
+                    if observed.get("source_validation") == "etag_not_modified"
+                    else "source_detail_reads"
+                )
+                progress[counter] = progress.get(counter, 0) + 1
+            staged_source[ref] = (reused, observed["read_at"])
+        return True
+
     try:
         if not await (_enabled or enabled)(db, tenant_id):
             return await finish("stall")
@@ -890,48 +972,54 @@ async def run_investigation(
                     refs = progress["pending_refs"][:count]
                     if not await reserve(0, count):
                         return await finish("budget")
+                    from app.services.transaction_ops import source_preparation
                     from app.services.transaction_ops.source_validation import read_validated_order
 
-                    for ref in refs:
-                        if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
-                            return await finish("stall")
-                        observed = None
-                        # Later phases still obtain fresh source evidence. The
-                        # staging boundary changes ordering, never their reuse
-                        # policy. Only orders may reuse earlier cycle evidence.
-                        if progress.get("phase") == "orders":
-                            with timing.measure("source_snapshot"):
-                                observed = await source_snapshot.load(
-                                    db,
-                                    tenant_id,
-                                    direct_source["source_connection_id"],
-                                    ref,
-                                    since=snapshot_floor,
-                                    now=clock(),
-                                    minimum_version=_time(progress.get("pending_source_versions", {}).get(ref)),
+                    workers = await source_preparation.concurrency(db, tenant_id, direct_source["source_connection_id"])
+                    if workers > 1:
+                        if not await prepare_concurrently(refs, workers):
+                            return await finish("budget")
+                    else:
+                        for ref in refs:
+                            if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
+                                return await finish("stall")
+                            observed = None
+                            # Later phases still obtain fresh source evidence. The
+                            # staging boundary changes ordering, never their reuse
+                            # policy. Only orders may reuse earlier cycle evidence.
+                            if progress.get("phase") == "orders":
+                                with timing.measure("source_snapshot"):
+                                    observed = await source_snapshot.load(
+                                        db,
+                                        tenant_id,
+                                        direct_source["source_connection_id"],
+                                        ref,
+                                        since=snapshot_floor,
+                                        now=clock(),
+                                        minimum_version=_time(progress.get("pending_source_versions", {}).get(ref)),
+                                    )
+                            reused = observed is not None
+                            if not reused:
+                                if not await reserve(2):
+                                    return await finish("budget")
+                                observed = await bounded_read(
+                                    "source_order",
+                                    lambda ref=ref: read_validated_order(
+                                        db, tenant_id, source_step_id, ref, **direct_source
+                                    ),
+                                    retry_calls=2,
                                 )
-                        reused = observed is not None
-                        if not reused:
-                            if not await reserve(2):
-                                return await finish("budget")
-                            observed = await bounded_read(
-                                "source_order",
-                                lambda ref=ref: read_validated_order(
-                                    db, tenant_id, source_step_id, ref, **direct_source
-                                ),
-                                retry_calls=2,
-                            )
-                            counter = (
-                                "source_body_validations"
-                                if observed.get("source_validation") == "etag_not_modified"
-                                else "source_detail_reads"
-                            )
-                            progress[counter] = progress.get(counter, 0) + 1
-                            with timing.measure("source_snapshot"):
-                                await source_snapshot.save(
-                                    db, tenant_id, direct_source["source_connection_id"], ref, observed, now=clock()
+                                counter = (
+                                    "source_body_validations"
+                                    if observed.get("source_validation") == "etag_not_modified"
+                                    else "source_detail_reads"
                                 )
-                        staged_source[ref] = (reused, observed["read_at"])
+                                progress[counter] = progress.get(counter, 0) + 1
+                                with timing.measure("source_snapshot"):
+                                    await source_snapshot.save(
+                                        db, tenant_id, direct_source["source_connection_id"], ref, observed, now=clock()
+                                    )
+                            staged_source[ref] = (reused, observed["read_at"])
                     progress["source_staged_groups"] = progress.get("source_staged_groups", 0) + 1
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
             can_validate = snapshot_floor is not None

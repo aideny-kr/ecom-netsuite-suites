@@ -122,14 +122,31 @@ async def load_for_validation(db, tenant_id, connection_id, reference, *, now):
 
 
 async def _load(db, tenant_id, connection_id, reference, *, since, now, minimum_version=None):
+    values = await load_many(
+        db,
+        tenant_id,
+        connection_id,
+        [reference],
+        since=since,
+        now=now,
+        minimum_versions={reference: minimum_version},
+    )
+    return values.get(reference)
+
+
+async def load_many(db, tenant_id, connection_id, references, *, since, now, minimum_versions=None):
+    """One authorized snapshot lookup with the same per-order invalidation gates."""
+    if not 1 <= len(references) <= 10 or len(set(references)) != len(references):
+        raise ValueError("invalid_source_snapshot_batch")
+    minimum_versions = minimum_versions or {}
     fingerprint = await _connection(db, tenant_id, connection_id)
-    row = await db.scalar(
+    rows = await db.scalars(
         select(TransactionSourceSnapshot)
         .execution_options(populate_existing=True)
         .where(
             TransactionSourceSnapshot.tenant_id == tenant_id,
             TransactionSourceSnapshot.connection_id == connection_id,
-            TransactionSourceSnapshot.order_reference == reference,
+            TransactionSourceSnapshot.order_reference.in_(references),
             TransactionSourceSnapshot.connection_fingerprint == fingerprint,
             *([TransactionSourceSnapshot.observed_at >= max(since, now - MAX_AGE)] if since is not None else []),
             TransactionSourceSnapshot.observed_at <= now,
@@ -138,27 +155,30 @@ async def _load(db, tenant_id, connection_id, reference, *, since, now, minimum_
                 Order.tenant_id == tenant_id,
                 Order.source_connection_id == connection_id,
                 Order.source == "solidus",
-                Order.order_number == reference,
+                Order.order_number == TransactionSourceSnapshot.order_reference,
                 Order.source_updated_at > TransactionSourceSnapshot.source_updated_at,
             )
             .exists(),
         )
     )
-    if row is None or (minimum_version is not None and row.source_updated_at < minimum_version):
-        return None
-    # The correlated anti-join above rejects detail invalidated by the mirror
-    # in the same statement that loads it, without a second database round trip.
-    if not isinstance(row.evidence_json, dict) or row.evidence_json.get("version") != VERSION:
-        return None
-    evidence = _project(row.evidence_json.get("evidence"), connection_id, reference)
-    if evidence is None or _time(evidence["read_at"]) != row.observed_at:
-        return None
-    if _time(evidence["orders"][0]["updated_at"]) != row.source_updated_at:
-        return None
-    result = copy.deepcopy(evidence)
-    if since is None:
-        result["_validation_connection_fingerprint"] = fingerprint
-    return result
+    results = {}
+    for row in rows:
+        reference = row.order_reference
+        minimum_version = minimum_versions.get(reference)
+        if minimum_version is not None and row.source_updated_at < minimum_version:
+            continue
+        if not isinstance(row.evidence_json, dict) or row.evidence_json.get("version") != VERSION:
+            continue
+        evidence = _project(row.evidence_json.get("evidence"), connection_id, reference)
+        if evidence is None or _time(evidence["read_at"]) != row.observed_at:
+            continue
+        if _time(evidence["orders"][0]["updated_at"]) != row.source_updated_at:
+            continue
+        result = copy.deepcopy(evidence)
+        if since is None:
+            result["_validation_connection_fingerprint"] = fingerprint
+        results[reference] = result
+    return results
 
 
 async def save(db, tenant_id, connection_id, reference, evidence, *, now):
