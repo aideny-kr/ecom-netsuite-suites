@@ -16,7 +16,13 @@ from app.services.transaction_ops import accounting_credit_recheck
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.settlement import SCOPE
-from app.services.transaction_ops.treatments import is_mcp, reconciliation_target_id, supports, treatment_of
+from app.services.transaction_ops.treatments import (
+    is_mcp,
+    reconciliation_target_id,
+    supports,
+    treatment_of,
+    treatment_or_none,
+)
 
 # Provider-call ceiling of one recheck run. The MCP existing-credit recheck adds the
 # subledger read budget it reserves in accounting_credit_recheck plus a small headroom,
@@ -28,7 +34,8 @@ MCP_RECHECK_HEADROOM = 8
 
 def needs_subledger_recheck(proposal):
     """The one recheck that re-reads the subledger: an existing-credit correction sent over MCP."""
-    return proposal.get("kind") == "credit_tax_reallocation" and is_mcp(proposal)
+    treatment = treatment_or_none(proposal)
+    return bool(treatment and treatment.subledger_recheck) and is_mcp(proposal)
 
 
 def recheck_call_ceiling(proposal):

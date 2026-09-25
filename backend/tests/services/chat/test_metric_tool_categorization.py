@@ -47,6 +47,9 @@ _ALLOWED_OTHER_CHAT_TOOLS: frozenset[str] = frozenset(
         # decide the next action — not a row dump the model should stop restating; see
         # accounting_evidence.py's `interpretation` field and collect_accounting_evidence().
         "transaction_ops.accounting_evidence",
+        # A refusal returns the required net/tax so the model can correct its own proposal;
+        # an accepted proposal's exact figures are shown by the server's approval card.
+        "transaction_ops.propose_credit_reallocation",
         "transaction_ops.accounting_group",
         "suitescript.sync",  # control action, no data rows
         "tenant.save_learned_rule",  # write-side control action, no data rows

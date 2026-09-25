@@ -93,8 +93,24 @@ def _balance(gross, tax, precision):
     return {"gross": _q(gross, precision), "net": _q(gross - tax, precision), "tax": _q(tax, precision)}
 
 
-def _facts(*, credit, credit_gl, invoices, other_credits, source, profile, items, period, subsidiary_id, precision):
-    """Everything about the order that does not depend on the proposal; refuses early and specifically."""
+def _facts(
+    *,
+    credit,
+    credit_gl,
+    invoices,
+    other_credits,
+    source,
+    profile,
+    items,
+    period,
+    subsidiary_id,
+    precision=2,
+    require_difference=True,
+):
+    """Everything about the order that does not depend on the proposal; refuses early and specifically.
+
+    ``require_difference=False`` is the readback: after the write the order must agree.
+    """
     documents = [credit, *(d for d, _ in invoices), *(d for d, _ in other_credits)]
     if (
         not invoices
@@ -147,7 +163,7 @@ def _facts(*, credit, credit_gl, invoices, other_credits, source, profile, items
             "gross_not_reconciled",
             {"booked": _balance(*before, precision), "required": _balance(*required, precision)},
         )
-    if before[1] == required[1]:
+    if require_difference and before[1] == required[1]:
         raise RefusalError("no_difference", {"booked": _balance(*before, precision)})
     return {
         "taxed": taxed,
@@ -287,3 +303,462 @@ def derive(*, credit, credit_gl, invoices, other_credits, source, profile, items
         {"line": line, "item_id": _ref(lines[0], "item"), "amount": _q(net_part, precision)},
         {"item_id": tax_items[0], "amount": _q(tax_part, precision)},
     ]
+
+
+def booked_balance(**facts):
+    """The order's posted balance and the source's, as they stand now (the readback's view)."""
+    precision = facts.get("precision", 2)
+    current = _facts(**facts, require_difference=False)
+    return _balance(*current["before"], precision), _balance(*current["required"], precision)
+
+
+# --- Reads, the card, approval and readback -------------------------------------------------
+#
+# The same gather() feeds the proposal, the approval-time revalidation and the readback, so
+# the three can never check different things. No function here sends a write: the signed
+# confirmation dispatcher behind the one-use permit owns execution.
+
+READ_CALLS = 31  # refund graph (<= 25) + transaction types + items + period + currency + metadata
+CARD_MAX_AGE_SECONDS = 300
+
+
+def _json(value):
+    import json
+
+    return json.loads(json.dumps(value, default=str))
+
+
+async def _suiteql(reader, query, limit):
+    from app.services.transaction_ops.netsuite_reader import _collection
+
+    rows, complete = _collection(
+        await reader.request("POST", "/query/v1/suiteql", params={"limit": limit + 1}, body={"q": query})
+    )
+    if not complete or len(rows) > limit:
+        raise RefusalError("evidence_incomplete", {"reason": "suiteql_result_incomplete"})
+    return rows
+
+
+async def gather(db, tenant_id, case_id, credit_memo_id):
+    """Fresh, complete evidence for one credit of one case: ``(facts, context)``.
+
+    ``facts`` is exactly what :func:`assess` and :func:`derive` take. Every invoice and credit
+    the order's refund graph reaches must be in the evidence, or nothing is proposed.
+    """
+    from uuid import UUID
+
+    from pydantic import ValidationError
+    from sqlalchemy import select
+
+    from app.models.transaction_ops import TransactionConfig
+    from app.services.transaction_ops.accounting_evidence import collect_accounting_evidence
+    from app.services.transaction_ops.accounting_review import accounting_context
+    from app.services.transaction_ops.case_service import get_case
+    from app.services.transaction_ops.netsuite_reader import _id, authenticated_reader
+    from app.services.transaction_ops.netsuite_refunds import collect_refunds
+    from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile
+    from app.services.transaction_ops.tax_correction import refresh_source
+
+    if not _id(str(credit_memo_id)):
+        raise RefusalError("credit_not_in_case", {"credit_memo_id": str(credit_memo_id)})
+    case = await get_case(db, tenant_id, UUID(str(case_id)))
+    review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
+    if (
+        review.get("configuration_status") != "scoped_configuration_found"
+        or review.get("connection_active") is not True
+        or not review.get("native_mcp_connector_id")
+    ):
+        raise RefusalError("configuration_unavailable", {"status": review.get("configuration_status")})
+    scope = review["scope"]
+    config = await db.scalar(
+        select(TransactionConfig).where(
+            TransactionConfig.tenant_id == tenant_id, TransactionConfig.id == UUID(review["config_id"])
+        )
+    )
+    try:
+        profile = RefundAdjustmentProfile.model_validate(((config and config.mapping_json) or {})["refund_adjustments"])
+    except (KeyError, TypeError, ValidationError):
+        raise RefusalError("tax_refund_items_not_configured", {"subsidiary_id": str(scope["subsidiary_id"])}) from None
+    source = _json(await refresh_source(db, tenant_id, scope, case.order_reference, include_accounting_detail=True))
+    evidence = _json(await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json))
+    sections = evidence.get("sections") or {}
+    order = sections.get("sales_order") or {}
+    postings = sections.get("posting_documents") or []
+    invoices = [d for d in postings if d.get("record_type") == "invoice"]
+    if not _id(str(order.get("id"))) or order.get("tranId") != source.get("number") or len(invoices) != len(postings):
+        raise RefusalError("evidence_incomplete", {"reason": "order_or_posting_documents_unsupported"})
+    related = sections.get("related_refund_documents") or {}
+    credits = [d for d in related.get("documents") or [] if str(d.get("record_type", "")).lower() == "creditmemo"]
+    target = next((c for c in credits if str(c.get("id")) == str(credit_memo_id)), None)
+    if target is None:
+        raise RefusalError("credit_not_in_case", {"credit_memo_ids": [str(c.get("id")) for c in credits]})
+    gl = sections.get("gl") or {}
+    lines = (target.get("line_evidence") or {}).get("lines") or []
+    item_ids = sorted({_ref(line, "item") for line in lines} | {str(k) for k in profile.tax_item_accounts})
+    if not all(_id(i) for i in item_ids) or not _id(_ref(target, "postingPeriod") or ""):
+        raise RefusalError("evidence_incomplete", {"reason": "credit_references_unreadable"})
+    async with authenticated_reader(
+        db, tenant_id, review["netsuite_connection_id"], scope["netsuite_account_id"], max_api_calls=READ_CALLS
+    ) as reader:
+        try:
+            graph = await collect_refunds(
+                reader,
+                str(order["id"]),
+                str(scope["subsidiary_id"]),
+                _ref(invoices[0], "currency") if invoices else "",
+                order_reference=source["number"],
+            )
+        except ValueError as exc:
+            raise RefusalError("evidence_incomplete", {"reason": f"refund_graph:{exc}"}) from None
+        manifest = graph.get("dependency_manifest") or {}
+        ids = [str(i) for i in manifest.get("transaction_ids") or [] if _id(str(i))]
+        if manifest.get("truncated") is not False or not ids:
+            raise RefusalError("evidence_incomplete", {"reason": "refund_graph_truncated"})
+        types = {
+            str(r["id"]): r.get("type")
+            for r in await _suiteql(reader, f"SELECT id, type FROM transaction WHERE id IN ({','.join(ids)})", 200)
+        }
+        if {i for i, t in types.items() if t == "CustInvc"} != {str(d["id"]) for d in invoices} or {
+            i for i, t in types.items() if t == "CustCred"
+        } != {str(c["id"]) for c in credits}:
+            raise RefusalError("evidence_incomplete", {"reason": "order_documents_differ_from_refund_graph"})
+        items = {
+            str(r["id"]): {
+                "id": str(r["id"]),
+                "isInactive": r.get("isinactive") != "F",
+                "incomeAccount": {"id": str(r["incomeaccount"])} if r.get("incomeaccount") is not None else None,
+            }
+            for r in await _suiteql(
+                reader, f"SELECT id, isinactive, incomeaccount FROM item WHERE id IN ({','.join(item_ids)})", 50
+            )
+        }
+        period = await reader.request("GET", f"/record/v1/accountingPeriod/{_ref(target, 'postingPeriod')}")
+        currency = await reader.request("GET", f"/record/v1/currency/{_ref(target, 'currency')}")
+        catalog = await reader.request("GET", "/record/v1/metadata-catalog/creditMemo")
+    precision = currency.get("currencyPrecision")
+    if isinstance(precision, bool) or not isinstance(precision, int) or not 0 <= precision <= 4:
+        raise RefusalError("evidence_incomplete", {"reason": "currency_precision_unknown"})
+    facts = {
+        "credit": target,
+        "credit_gl": gl.get(str(target["id"])),
+        "invoices": [(d, gl.get(str(d["id"]))) for d in invoices],
+        "other_credits": [(c, gl.get(str(c["id"]))) for c in credits if c is not target],
+        "source": source,
+        "profile": {
+            "subsidiary_id": profile.subsidiary_id,
+            "tax_accounts": list(profile.tax_accounts),
+            "tax_item_accounts": dict(profile.tax_item_accounts),
+        },
+        "items": items,
+        "period": {k: period.get(k) for k in ("id", "closed", "arLocked", "allLocked")},
+        "subsidiary_id": str(scope["subsidiary_id"]),
+        "precision": precision,
+    }
+    context = {
+        "case_id": str(case.id),
+        "report": case.latest_report_json or {},
+        "review": review,
+        "order": order,
+        "catalog": catalog,
+        "refund_graph": _json({k: graph.get(k) for k in ("amount", "record_ids", "dependency_manifest")}),
+    }
+    return facts, context
+
+
+def _identity(facts, context):
+    """What must not move between proposal, approval and readback (besides the lines themselves)."""
+    from app.services.transaction_ops.resolution_plan import fingerprint
+
+    credit = facts["credit"]
+    return fingerprint(
+        {
+            "credit": {
+                k: credit.get(k)
+                for k in ("id", "entity", "account", "subsidiary", "currency", "postingPeriod", "tranDate", "total")
+            },
+            "applications": credit.get("application_evidence"),
+            "invoices": [(d, g) for d, g in facts["invoices"]],
+            "other_credits": [(d, g) for d, g in facts["other_credits"]],
+            "profile": facts["profile"],
+            "items": facts["items"],
+            "sales_order": context["order"],
+            "refund_graph": context["refund_graph"],
+        }
+    )
+
+
+def _proposal(tenant_id, facts, context, result, lines, reason):
+    import json
+    from datetime import datetime, timezone
+
+    from app.services.transaction_ops.credit_api_correction import schema_contract, typed_fields
+
+    review, credit, source = context["review"], facts["credit"], facts["source"]
+    invoice = facts["invoices"][0][0]
+    try:
+        schema = schema_contract(context["catalog"], result["proposed_fields"])
+        wire = json.dumps(typed_fields(context["catalog"], result["proposed_fields"]), allow_nan=False)
+    except ValueError as exc:
+        raise RefusalError("connector_schema_unsupported", {"reason": str(exc)}) from None
+    before_lines = [
+        {"line": int(line["line"]), "item_id": _ref(line, "item"), "amount": str(line.get("amount"))}
+        for line in credit["line_evidence"]["lines"]
+    ]
+    after = ", ".join(
+        f"{line.get('line', 'new')}: item {line['item']['id']} {line['amount']}"
+        for line in result["proposed_fields"]["item"]["items"]
+    )
+    balance = result["balance"]
+    return _json(
+        {
+            "kind": KIND,
+            "tenant_id": str(tenant_id),
+            "case_id": context["case_id"],
+            "scope": review["scope"],
+            "config_id": review["config_id"],
+            "connection_id": review["netsuite_connection_id"],
+            "connector_id": review["native_mcp_connector_id"],
+            "order_reference": source["number"],
+            "record_type": "creditmemo",
+            "record_id": str(credit["id"]),
+            "invoice_id": str(invoice["id"]),
+            "sales_order_id": str(context["order"]["id"]),
+            "reconciliation_target": {"record_type": "salesorder", "record_id": str(context["order"]["id"])},
+            "lines": [
+                {
+                    k: v
+                    for k, v in {"line": x.get("line"), "item_id": x.get("item_id"), "amount": x.get("amount")}.items()
+                    if v is not None
+                }
+                for x in lines
+            ],
+            "proposed_fields": result["proposed_fields"],
+            "wire_record_json": wire,
+            "connector_schema": schema,
+            "execution_transport": "mcp_record_api",
+            "required_transport": "connected_mcp_record_update",
+            "expected_after": result["expected_after"],
+            "expected_ledger": result["expected_ledger"],
+            "balance": balance,
+            "before": {"total": str(credit.get("total")), "taxTotal": "0.00", "lines": before_lines},
+            "source": source,
+            "support": {"invoice": invoice, "credit": credit, "identity": _identity(facts, context)},
+            "protected_sales_order": context["order"],
+            "ar_account": _ref(credit, "account"),
+            "tax_account": ",".join(sorted(_tax_accounts(facts["profile"]))),
+            "reason": str(reason or "")[:500],
+            "approval_basis": (
+                f"Reallocate the lines of existing credit {credit.get('tranId') or credit['id']} "
+                f"(total {credit.get('total')} {source.get('currency')} unchanged) to: {after}. "
+                f"Posted order balance after: net {balance['after']['net']}, tax {balance['after']['tax']}, "
+                f"which equals the finalized source. The credit's refund, applications, customer, period, "
+                "invoice and sales order are not changed. The line items were chosen by the assistant from "
+                "evidence and the subsidiary's configured tax-refund item; the server verified the result. "
+                "The GL is re-read after execution."
+            ),
+            "status": "ready_for_exact_human_approval",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+async def propose(db, tenant_id, case_id, credit_memo_id, lines, reason):
+    """Check the agent's lines against fresh evidence; on success, bind them as the case's candidate."""
+    facts, context = await gather(db, tenant_id, case_id, credit_memo_id)
+    result = assess(lines=lines, **facts)
+    proposal = _proposal(tenant_id, facts, context, result, lines, reason)
+    from app.services.transaction_ops.resolution_plan import proposal_plan
+
+    proposal["resolution_plan"] = proposal_plan(proposal, context["report"])
+    db.info["accounting_correction_candidate"] = proposal
+    return proposal
+
+
+def review_for_card(db, tenant_id, tool_name, record_type, normalized, *, check_age=True):
+    """Bind the model's ns_updateRecord call to the exact server-verified proposal."""
+    import json
+    from datetime import datetime, timezone
+
+    from app.services.chat.tools import parse_external_tool_name
+
+    p = db.info.get("accounting_correction_candidate") or {}
+    parsed = parse_external_tool_name(tool_name)
+    if p.get("kind") != KIND:
+        raise ValueError("fresh_credit_reallocation_proposal_required")
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(p["observed_at"])).total_seconds()
+    if (
+        not parsed
+        or parsed[1] != "ns_updateRecord"
+        or str(parsed[0]).replace("-", "") != str(p["connector_id"]).replace("-", "")
+        or p["tenant_id"] != str(tenant_id)
+        or record_type.lower() != "creditmemo"
+        or normalized.record_id != p["record_id"]
+        or normalized.record != json.loads(p["wire_record_json"])
+        or (check_age and not 0 <= age <= CARD_MAX_AGE_SECONDS)
+    ):
+        raise ValueError("credit_reallocation_binding_changed")
+    return p
+
+
+async def fresh(db, tenant_id, p):
+    facts, context = await gather(db, tenant_id, p["case_id"], p["record_id"])
+    if _json(facts["source"]) != p["source"]:
+        raise ValueError("credit_reallocation_source_changed")
+    if context["review"]["scope"] != p["scope"] or context["review"]["config_id"] != p["config_id"]:
+        raise ValueError("credit_reallocation_scope_changed")
+    return facts, context
+
+
+async def validate_approved(db, tenant_id, tool_name, tool_input, p):
+    """Immediately before the permit: the same check on fresh reads must give the same card."""
+    import json
+
+    from app.services.chat.write_payload import normalize_write_payload
+    from app.services.transaction_ops import case_resolution_scope
+    from app.services.transaction_ops.credit_api_correction import schema_contract, typed_fields
+
+    db.info["accounting_correction_candidate"] = p
+    review_for_card(
+        db, tenant_id, tool_name, tool_input.get("recordType", ""), normalize_write_payload(tool_input), check_age=False
+    )
+    await case_resolution_scope.validate(db, tenant_id, p)
+    facts, context = await fresh(db, tenant_id, p)
+    if _identity(facts, context) != p["support"]["identity"]:
+        raise ValueError("credit_reallocation_related_record_changed")
+    try:
+        result = assess(lines=p["lines"], **facts)
+    except RefusalError as exc:
+        raise ValueError(f"credit_reallocation_refused:{exc.code}") from None
+    if any(result[k] != p[k] for k in ("proposed_fields", "expected_after", "expected_ledger")):
+        raise ValueError("credit_reallocation_treatment_changed")
+    if schema_contract(context["catalog"], p["proposed_fields"]) != p["connector_schema"] or typed_fields(
+        context["catalog"], p["proposed_fields"]
+    ) != json.loads(p["wire_record_json"]):
+        raise ValueError("credit_reallocation_schema_changed")
+
+
+def _ledger(gl, precision):
+    debit, credit = {}, {}
+    for row in _gl_rows(gl):
+        for side, bucket in (("debit", debit), ("credit", credit)):
+            value = _dec(row.get(side))
+            if value:
+                account = str(row.get("account"))
+                bucket[account] = bucket.get(account, Decimal(0)) + value
+    return {
+        "debit": {a: _q(v, precision) for a, v in sorted(debit.items())},
+        "credit": {a: _q(v, precision) for a, v in sorted(credit.items())},
+    }
+
+
+def _lines_match(credit, p):
+    """The saved lines are the approved ones: existing lines by key, new lines by content."""
+    saved = [
+        (line.get("line"), _ref(line, "item"), _dec(line.get("amount")))
+        for line in (credit.get("line_evidence") or {}).get("lines") or []
+    ]
+    approved = [
+        (entry.get("line"), entry["item"]["id"], Decimal(entry["amount"]))
+        for entry in p["proposed_fields"]["item"]["items"]
+    ]
+    keyed = {(n, i, a) for n, i, a in approved if n is not None}
+    new = sorted((i, a) for n, i, a in approved if n is None)
+    saved_keyed = {(n, i, a) for n, i, a in saved if n in {k[0] for k in keyed}}
+    saved_new = sorted((i, a) for n, i, a in saved if n not in {k[0] for k in keyed})
+    return len(saved) == len(approved) and saved_keyed == keyed and saved_new == new
+
+
+async def verify_after(db, tenant_id, p, receipt=None):
+    """Readback: the credit's saved lines and GL are the approved ones and the order now agrees."""
+    try:
+        if isinstance(receipt, dict) and any(
+            str(receipt[k]) != p["record_id"] for k in ("id", "recordId", "internalId") if receipt.get(k)
+        ):
+            raise ValueError("credit_reallocation_receipt_identity_conflict")
+        facts, context = await fresh(db, tenant_id, p)
+        credit = facts["credit"]
+        if credit.get("application_evidence") != p["support"]["credit"].get("application_evidence"):
+            raise ValueError("credit_reallocation_applications_changed")
+        if not _lines_match(credit, p):
+            raise ValueError("credit_reallocation_lines_differ")
+        ledger = _ledger(facts["credit_gl"], facts["precision"])
+        if ledger != p["expected_ledger"]:
+            raise ValueError("credit_reallocation_ledger_differs")
+        booked, required = booked_balance(**facts)
+        if booked != required:
+            raise ValueError("credit_reallocation_order_still_differs")
+        return {
+            "status": "verified",
+            "record_type": "creditmemo",
+            "record_id": p["record_id"],
+            "credit_memo_id": p["record_id"],
+            "after": {"body": {"total": credit.get("total"), "taxtotal": "0.00"}, "lines": p["lines"]},
+            "ledger": ledger,
+            "balance": {"booked": booked, "source": required},
+            "related_records_unchanged": True,
+            "retry_allowed": False,
+            "cash_settlement": "not_verified",
+            "case_settlement": "not_verified",
+        }
+    except RefusalError as exc:
+        return {"status": "needs_review", "reason": f"credit_reallocation_readback:{exc.code}", "retry_allowed": False}
+    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+        return {"status": "needs_review", "reason": str(exc), "retry_allowed": False}
+
+
+def project(p, report, current, *, verified_at, now):
+    """The post-verification recheck: the order's posted balance (invoices less credits), not the
+    unchanged sales order, decides whether the case reconciles."""
+    from datetime import datetime, timedelta
+
+    facts, context = current
+    if (
+        str(facts["credit"]["id"]) != p["record_id"]
+        or str(facts["invoices"][0][0]["id"]) != p["invoice_id"]
+        or str(context["order"]["id"]) != p["sales_order_id"]
+        or report.get("order_reference") != p["order_reference"]
+        or _identity(facts, context) != p["support"]["identity"]
+    ):
+        raise ValueError("credit_recheck_identity_changed")
+    amounts = (report.get("balance") or {}).get("amounts") or {}
+    if not all(isinstance(amounts.get(m), dict) and "source" in amounts[m] for m in ("order_total", "tax")):
+        raise ValueError("credit_recheck_incomplete_report")
+    source = facts["source"]
+    if Decimal(str(amounts["order_total"]["source"])) != Decimal(str(source["total"])) or Decimal(
+        str(amounts["tax"]["source"])
+    ) != Decimal(str(source["tax_total"])):
+        raise ValueError("credit_recheck_source_changed")
+    stamp = (report.get("source") or {}).get("observed_at")
+    if not stamp or not verified_at <= datetime.fromisoformat(stamp) <= now or now - verified_at > timedelta(days=1):
+        raise ValueError("credit_recheck_stale_evidence")
+    booked, required = booked_balance(**facts)
+
+    def metric(key):
+        delta = Decimal(required[key]) - Decimal(booked[key])
+        return {"source": required[key], "target": booked[key], "delta": _q(delta, facts["precision"])}
+
+    posting = {
+        "version": 1,
+        "status": "matched" if booked == required else "difference",
+        "basis": "verified_invoice_less_owned_credits",
+        "currency": source.get("currency"),
+        "amounts": {"order_total": metric("gross"), "tax": metric("tax"), "net": metric("net")},
+        "records": {"invoice": p["invoice_id"], "creditmemo": p["record_id"]},
+    }
+    refunds = amounts.get("refunds")
+    return {
+        **report,
+        "balance": {
+            **report["balance"],
+            "status": posting["status"],
+            "reason": "verified_invoice_less_existing_credit",
+            "amounts": {
+                "order_total": posting["amounts"]["order_total"],
+                "tax": posting["amounts"]["tax"],
+                **({"refunds": refunds} if refunds else {}),
+            },
+            "missing_metrics": [],
+            "original_order_comparison": report["balance"],
+            "posting_reconciliation": posting,
+        },
+    }

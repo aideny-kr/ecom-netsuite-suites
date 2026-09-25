@@ -17,6 +17,17 @@ from app.services.transaction_ops.netsuite_reader import authenticated_reader
 from app.services.transaction_ops.resolution_plan import fingerprint
 
 
+def _reallocation(p):
+    """The agent-proposed line reallocation shares this transport but has its own checks.
+
+    Every MCP credit proposal reaches the card binding, approval revalidation, readback and
+    recheck through the four functions below, so routing it here reaches every call site.
+    """
+    from app.services.transaction_ops import credit_line_reallocation
+
+    return credit_line_reallocation if (p or {}).get("kind") == credit_line_reallocation.KIND else None
+
+
 def _json(value):
     """Persist exact decimals as strings, consistently on prepare and re-read."""
     return json.loads(json.dumps(value, default=str))
@@ -121,6 +132,8 @@ def review_for_card(db, tenant_id, tool_name, record_type, normalized, *, check_
     from app.services.chat.tools import parse_external_tool_name
 
     p = db.info.get("accounting_correction_candidate") or {}
+    if other := _reallocation(p):
+        return other.review_for_card(db, tenant_id, tool_name, record_type, normalized, check_age=check_age)
     parsed = parse_external_tool_name(tool_name)
     if not p or p.get("execution_transport") != "mcp_record_api":
         raise ValueError("fresh_credit_api_evidence_required")
@@ -140,6 +153,8 @@ def review_for_card(db, tenant_id, tool_name, record_type, normalized, *, check_
 
 
 async def fresh(db, tenant_id, p):
+    if other := _reallocation(p):
+        return await other.fresh(db, tenant_id, p)
     from app.services.transaction_ops.accounting_evidence import collect_accounting_evidence
     from app.services.transaction_ops.accounting_review import accounting_context
     from app.services.transaction_ops.case_service import get_case
@@ -173,6 +188,8 @@ async def fresh(db, tenant_id, p):
 
 
 async def validate_approved(db, tenant_id, tool_name, tool_input, p):
+    if other := _reallocation(p):
+        return await other.validate_approved(db, tenant_id, tool_name, tool_input, p)
     from app.services.chat.write_payload import normalize_write_payload
 
     db.info["accounting_correction_candidate"] = p
@@ -251,6 +268,8 @@ def verify_evidence(p, support):
 
 
 async def verify_after(db, tenant_id, p, receipt=None):
+    if other := _reallocation(p):
+        return await other.verify_after(db, tenant_id, p, receipt)
     try:
         if isinstance(receipt, dict) and any(
             str(receipt[k]) != p["record_id"] for k in ("id", "recordId", "internalId") if receipt.get(k)
