@@ -240,6 +240,7 @@ class _Reader:
         self.slots = asyncio.Semaphore(max_concurrent_calls)
         self.active_calls = self.peak_concurrency = 0
         self.throttled = False
+        self.aborted = False
         self.client, self.base = client, base
         self.headers = {"Authorization": f"Bearer {token}", "Prefer": "transient"}
         self.calls = 0
@@ -263,6 +264,8 @@ class _Reader:
         async with self.slots:
             # Claim spend only after obtaining a wire slot. No await separates
             # the shared budget check/increment, even across concurrent tasks.
+            if self.aborted:
+                raise NetSuiteEvidenceError("bulk_read_aborted")
             if self.throttled:
                 raise NetSuiteEvidenceError("upstream_http_429")
             if self.calls >= self.max_api_calls:
@@ -503,6 +506,13 @@ async def authenticated_reader(
         await set_tenant_context(db, str(tenant))
     if not token:
         raise NetSuiteEvidenceError("authentication_failed")
+    # A bulk caller may request parallelism, but only an explicitly configured
+    # selected connection can enable it. Invalid/absent settings fail closed.
+    metadata = getattr(connection, "metadata_json", None)
+    configured = metadata.get("recon_bulk_concurrency", 1) if isinstance(metadata, dict) else 1
+    if type(configured) is not int or not 1 <= configured <= 7:
+        configured = 1
+    max_concurrent_calls = min(max_concurrent_calls, configured)
     base = f"https://{account}.suitetalk.api.netsuite.com/services/rest"
 
     # Partition even identical accounts by tenant, connection and current credential.

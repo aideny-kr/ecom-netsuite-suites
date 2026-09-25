@@ -159,6 +159,8 @@ async def test_failure_drains_every_branch_before_meter_is_settled(stop):
             assert wire.peak <= 7
             if stop == "429":
                 assert reader.throttled and count == 8  # Queued calls never reach the wire.
+            if stop == "503":
+                assert reader.aborted and count == 8
             if stop == "budget":
                 assert count == 5
 
@@ -175,7 +177,12 @@ async def test_invalid_concurrency_is_rejected_before_authorization(value):
 @pytest.fixture
 def auth(monkeypatch):
     connection = SimpleNamespace(
-        id=CONNECTION, tenant_id=TENANT, provider="netsuite", status="active", encrypted_credentials="sealed"
+        id=CONNECTION,
+        tenant_id=TENANT,
+        provider="netsuite",
+        status="active",
+        encrypted_credentials="sealed",
+        metadata_json={"recon_bulk_concurrency": 7},
     )
     db = SimpleNamespace(execute=AsyncMock(return_value=Mock(scalar_one_or_none=Mock(return_value=connection))))
     monkeypatch.setattr(native, "decrypt_credentials", Mock(return_value={"account_id": ACCOUNT}))
@@ -216,21 +223,17 @@ async def test_authenticated_bulk_order_and_refund_paths_use_seven_without_share
             task = asyncio.create_task(bulk.read_refunds(db, TENANT, CONNECTION, ACCOUNT, SUBSIDIARY, targets))
             await asyncio.wait_for(wire.seven.wait(), 2)
             wire.release.set()
-            if failure == "429":
-                with pytest.raises(native.NetSuiteEvidenceError, match="upstream_http_429"):
-                    await task
-            else:
-                refunds = await task
-                assert refunds["concurrency_peak"] == 7
-                expected = REFS[1:] if failure else REFS
-                assert list(refunds["refunds"]) == expected
-                for ref in expected:
-                    value = refunds["refunds"][ref]
-                    i = REFS.index(ref)
-                    assert value["complete"] and value["amount"] == str(i + 1)
-                    assert value["record_ids"] == [str(300 + i)]
-                    assert value["api_calls"] == 1
-                assert meter.calls == refunds["api_calls"] == 14  # Four shared queries and ten records.
+            refunds = await task
+            assert refunds["concurrency_peak"] == 7
+            expected = REFS[1:7] if failure == "429" else REFS[1:] if failure else REFS
+            assert list(refunds["refunds"]) == expected
+            for ref in expected:
+                value = refunds["refunds"][ref]
+                i = REFS.index(ref)
+                assert value["complete"] and value["amount"] == str(i + 1)
+                assert value["record_ids"] == [str(300 + i)]
+                assert value["api_calls"] == 1
+            assert meter.calls == refunds["api_calls"] == (11 if failure == "429" else 14)
         assert wire.active == 0 and wire.peak == 7
         assert db.execute.await_count == 2
         connection.tenant_id = CONNECTION  # Another tenant cannot authorize a new batch.
@@ -238,3 +241,58 @@ async def test_authenticated_bulk_order_and_refund_paths_use_seven_without_share
         with pytest.raises(native.NetSuiteEvidenceError, match="invalid_connection"):
             await bulk.read_orders(db, TENANT, CONNECTION, ACCOUNT, SUBSIDIARY, REFS, "tranid")
         assert sum(wire.calls.values()) == before
+
+
+@pytest.mark.parametrize(
+    "setting,expected",
+    [
+        (None, 1),
+        ({}, 1),
+        ({"recon_bulk_concurrency": 7}, 7),
+        ({"recon_bulk_concurrency": 3}, 3),
+        ({"recon_bulk_concurrency": True}, 1),
+        ({"recon_bulk_concurrency": "7"}, 1),
+        ({"recon_bulk_concurrency": 8}, 1),
+    ],
+)
+async def test_parallelism_requires_valid_selected_connection_opt_in(auth, setting, expected):
+    db, connection = auth
+    connection.metadata_json = setting
+    async with httpx.AsyncClient() as client:
+        async with native.authenticated_reader(
+            db, TENANT, CONNECTION, ACCOUNT, client=client, max_concurrent_calls=7
+        ) as reader:
+            assert reader.max_concurrent_calls == expected
+        async with native.authenticated_reader(db, TENANT, CONNECTION, ACCOUNT, client=client) as reader:
+            assert reader.max_concurrent_calls == 1  # Non-bulk callers remain serial.
+
+
+async def test_refund_budget_finishes_same_proofs_as_serial(auth, monkeypatch):
+    db, connection = auth
+    original = native.authenticated_reader
+    results = []
+    for concurrency in (1, 7):
+        wire = Wire()
+        # Three refunds per order require 30 GETs after four shared graph queries.
+        for i in range(10):
+            for extra in (10, 20):
+                row = copy.deepcopy(wire.edges[i * 2 + 1])
+                row["nextdoc"] = str(300 + i + extra)
+                wire.edges.append(row)
+        connection.metadata_json = {"recon_bulk_concurrency": concurrency}
+        async with httpx.AsyncClient(transport=httpx.MockTransport(wire)) as client:
+
+            @asynccontextmanager
+            async def authenticated(*args, **kwargs):
+                async with original(*args, client=client, **kwargs) as reader:
+                    yield reader
+
+            monkeypatch.setattr(bulk, "authenticated_reader", authenticated)
+            orders = await bulk.read_orders(db, TENANT, CONNECTION, ACCOUNT, SUBSIDIARY, REFS, "tranid")
+            with metered() as meter:
+                refunds = await bulk.read_refunds(db, TENANT, CONNECTION, ACCOUNT, SUBSIDIARY, orders["orders"])
+            assert refunds["api_calls"] == meter.calls == 32
+            assert refunds["concurrency_peak"] == 1
+            assert list(refunds["refunds"]) == REFS[:9]
+            results.append(normalized(refunds["refunds"]))
+    assert results[0] == results[1]
