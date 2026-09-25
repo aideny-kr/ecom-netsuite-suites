@@ -10,6 +10,7 @@ _STATES = frozenset(
         "settle_budget",
         "update_progress",
         "record_finding",
+        "record_finding_batch",
         "propose",
     }
 )
@@ -20,6 +21,8 @@ _READS = frozenset(
         "source_refunds",
         "netsuite_order",
         "netsuite_refunds",
+        "netsuite_orders_batch",
+        "netsuite_refunds_batch",
         "commercial_credit",
         "create_preview",
         "guard_snapshot",

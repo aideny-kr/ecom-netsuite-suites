@@ -51,3 +51,13 @@ def test_snapshot_preserves_counters_after_validated_checkpoint_replaces_progres
     assert progress["active_ms"] == 7000
     assert progress["timing_ms"]["netsuite_order"] == {"calls": 2, "total": 3000, "max": 2000}
     assert checkpoint.progress_json["timing_ms"]["netsuite_order"]["calls"] == 1
+
+
+def test_native_batches_and_batch_writes_have_separate_timing_labels():
+    progress = {}
+    timing = RunTiming(progress)
+    for stage in ("netsuite_orders_batch", "netsuite_refunds_batch", "record_finding_batch"):
+        with timing.measure(stage):
+            pass
+        assert progress["timing_ms"][stage]["calls"] == 1
+    assert "other" not in progress["timing_ms"]

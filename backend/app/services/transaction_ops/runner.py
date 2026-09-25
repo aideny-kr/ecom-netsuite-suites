@@ -6,6 +6,7 @@ the cursor is committed before reads and after each persisted observation.
 """
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -402,6 +403,36 @@ async def run_investigation(
     reference_reads = ReferenceReads()
     transport = CollectionTransport()
     previous_reference_hits = progress.get("reference_cache_hits", 0)
+    finding_batch = []
+    batch_baseline = None
+    staged_source = {}
+
+    async def flush_findings():
+        nonlocal batch_baseline
+        if not finding_batch:
+            return
+        progress["finding_batch_orders"] = progress.get("finding_batch_orders", 0) + len(finding_batch)
+        progress["finding_batch_commits"] = progress.get("finding_batch_commits", 0) + 1
+        snapshot_progress()
+        await state.record_finding_batch(
+            db,
+            tenant_id,
+            run_id,
+            finding_batch,
+            lease_token=token,
+            checkpoint=ProgressUpdate(progress_json=progress),
+            now=clock(),
+        )
+        finding_batch.clear()
+        batch_baseline = None
+
+    def discard_findings():
+        nonlocal batch_baseline
+        if batch_baseline is not None:
+            progress.clear()
+            progress.update(batch_baseline)
+        finding_batch.clear()
+        batch_baseline = None
 
     def snapshot_progress():
         timing.snapshot()
@@ -427,12 +458,14 @@ async def run_investigation(
         )
 
     async def save():
+        await flush_findings()
         snapshot_progress()
         await state.update_progress(
             db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
         )
 
     async def finish(reason):
+        await flush_findings()
         await state.finish_run(db, tenant_id, run_id, reason, lease_token=token, now=clock())
         return {
             "run_id": str(run_id),
@@ -450,10 +483,12 @@ async def run_investigation(
         # ownership. Use the captured deadline because rollback expires ORM rows.
         if db is not None:
             await db.rollback()
+        discard_findings()
         reason = "budget" if clock() >= deadline_at else "error"
         return await finish(reason)
 
     async def reserve(calls, orders=0, *, hold=False):
+        await flush_findings()
         with timing.measure("enablement"):
             active = await (_enabled or enabled)(db, tenant_id)
         if not active:
@@ -463,6 +498,7 @@ async def run_investigation(
         )
 
     async def bounded_read(stage, factory, *, retry_calls=0, reserve_retry=None):
+        await flush_findings()
         with timing.measure(stage), collection_transport(transport):
             return await read_with_recovery(
                 factory,
@@ -811,6 +847,67 @@ async def run_investigation(
                 await save()
                 continue
             reference = progress["pending_refs"][0]
+            # Validate a small group before comparing it. Calls and order work
+            # are paid before prefetch; only durable source snapshots survive a
+            # crash. Credits are invocation-local, never trusted from progress.
+            chunk_path = (
+                _state is None
+                and _source_reader is None
+                and _order_mirror is None
+                and snapshot_floor is not None
+                and staged is not None
+                and progress.get("phase") == "orders"
+                and not settlement
+            )
+            if chunk_path and reference not in staged_source:
+                await flush_findings()
+                count = min(10, len(progress["pending_refs"]), run.max_orders - run.orders_used)
+                # Leave the existing target batch/fallback headroom untouched.
+                count = min(
+                    count, max(0, (run.max_api_calls - run.api_calls_used - (run.api_calls_held or 0) - 91) // 2)
+                )
+                if count > 1:
+                    refs = progress["pending_refs"][:count]
+                    if not await reserve(0, count):
+                        return await finish("budget")
+                    from app.services.transaction_ops.source_validation import read_validated_order
+
+                    for ref in refs:
+                        if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
+                            return await finish("stall")
+                        with timing.measure("source_snapshot"):
+                            observed = await source_snapshot.load(
+                                db,
+                                tenant_id,
+                                direct_source["source_connection_id"],
+                                ref,
+                                since=snapshot_floor,
+                                now=clock(),
+                                minimum_version=_time(progress.get("pending_source_versions", {}).get(ref)),
+                            )
+                        reused = observed is not None
+                        if not reused:
+                            if not await reserve(2):
+                                return await finish("budget")
+                            observed = await bounded_read(
+                                "source_order",
+                                lambda ref=ref: read_validated_order(
+                                    db, tenant_id, source_step_id, ref, **direct_source
+                                ),
+                                retry_calls=2,
+                            )
+                            counter = (
+                                "source_body_validations"
+                                if observed.get("source_validation") == "etag_not_modified"
+                                else "source_detail_reads"
+                            )
+                            progress[counter] = progress.get(counter, 0) + 1
+                            with timing.measure("source_snapshot"):
+                                await source_snapshot.save(
+                                    db, tenant_id, direct_source["source_connection_id"], ref, observed, now=clock()
+                                )
+                        staged_source[ref] = (reused, observed["read_at"])
+                    progress["source_staged_groups"] = progress.get("source_staged_groups", 0) + 1
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
             can_validate = snapshot_floor is not None
             can_reuse = can_validate and progress.get("phase") == "orders"
@@ -827,9 +924,16 @@ async def run_investigation(
                         minimum_version=_time(progress.get("pending_source_versions", {}).get(reference)),
                     )
             source_reused = source is not None
-            if not await reserve(0 if source_reused else 2, 1):
+            prepaid = staged_source.pop(reference, None)
+            if prepaid and source is not None:
+                # A freshly staged detail still permits the existing proposal
+                # preflight. A replaced snapshot is only cached evidence.
+                source_reused = prepaid[0] or source["read_at"] != prepaid[1]
+            if (not prepaid or source is None) and not await reserve(
+                0 if source is not None else 2, 0 if prepaid else 1
+            ):
                 return await finish("budget")
-            if source_reused:
+            if source is not None:
                 progress["source_snapshot_hits"] = progress.get("source_snapshot_hits", 0) + 1
             else:
                 validating_reader = source_reader
@@ -881,6 +985,7 @@ async def run_investigation(
                         **({"reused": True} if source_reused else {}),
                     )
             if payment_failed(orders[0]):
+                await flush_findings()
                 await state.record_finding(
                     db, tenant_id, run_id, reference, exclusion_report(source), lease_token=token, now=clock()
                 )
@@ -944,6 +1049,7 @@ async def run_investigation(
                 async def preserve_order_evidence():
                     nonlocal partial_saved, partial_attempted
                     if not partial_saved:
+                        await flush_findings()
                         partial_attempted = True
                         await state.record_finding(
                             db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
@@ -1078,6 +1184,7 @@ async def run_investigation(
             ):
                 # Preserve detection even when extra action evidence is unavailable
                 # or its budget cannot fit. Models never manufacture this proof.
+                await flush_findings()
                 await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
                 current_config = await state.get_config(db, tenant_id, run.config_id)
                 guard = celigo = creation = None
@@ -1127,6 +1234,23 @@ async def run_investigation(
                     raise
                 except Exception:
                     report = {**report, "automation": {"status": "blocked", "code": "action_evidence_unavailable"}}
+            if (
+                chunk_path
+                and prepaid
+                and (mapping.action_mode == "detect_only" or action in {"human_review", "gather_evidence"})
+            ):
+                if not finding_batch:
+                    batch_baseline = deepcopy(progress)
+                finding_batch.append(deepcopy(report))
+                progress.update(completed_progress(report).progress_json)
+                if (
+                    len(finding_batch) >= 10
+                    or not progress["pending_refs"]
+                    or progress["pending_refs"][0] not in staged_source
+                ):
+                    await flush_findings()
+                continue
+            await flush_findings()
             finding = await state.record_finding(
                 db,
                 tenant_id,
@@ -1159,6 +1283,10 @@ async def run_investigation(
     except TimeoutError:
         return await finish_after_failure()
     except state_service.StateError as exc:
+        if exc.code == "batch_disabled":
+            await db.rollback()
+            discard_findings()
+            return await finish("stall")
         if exc.code == "run_lease_lost":
             if clock() >= deadline_at:
                 try:

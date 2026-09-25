@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 
 from pydantic import ValidationError
-from sqlalchemy import BigInteger, and_, cast, func, select, update
+from sqlalchemy import BigInteger, and_, cast, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.core.database import set_tenant_context
 from app.models.celigo import CeligoFlow, CeligoFlowStep
 from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
+from app.models.feature_flag import TenantFeatureFlag
 from app.models.tenant import Tenant
 from app.models.transaction_ops import (
     TransactionConfig,
@@ -877,14 +878,81 @@ async def record_finding(
     now = _clock(now)
     if checkpoint is not None and (not final or not isinstance(checkpoint, ProgressUpdate)):
         raise ValueError("Only a final finding may commit a validated progress checkpoint")
+    run = await get_run(db, tenant_id, run_id, lock=True)
+    _lease(run, lease_token, now)
+    row = await _record_finding(db, tenant_id, run, order_reference, report_json, now=now, final=final)
+    if checkpoint is not None:
+        run.progress_json = checkpoint.progress_json
+    await _commit(db, tenant_id)
+    return row
+
+
+async def record_finding_batch(db, tenant_id, run_id, reports, *, lease_token, checkpoint, now=None):
+    """Publish a bounded, contiguous prefix and its case/audit history atomically.
+
+    No provider work may occur inside this transaction. Review findings use
+    set-based writes; other lifecycle rules retain their single writer.
+    """
+    if not isinstance(reports, list) or not 1 <= len(reports) <= 10 or not isinstance(checkpoint, ProgressUpdate):
+        raise ValueError("invalid_finding_batch")
+    references = [report["order_reference"] for report in reports]
+    if len(set(references)) != len(references):
+        raise ValueError("duplicate_finding_batch_reference")
+    now = _clock(now)
+    run = await get_run(db, tenant_id, run_id, lock=True)
+    _lease(run, lease_token, now)
+    config = await get_config(db, tenant_id, run.config_id)
+    active = await db.scalar(
+        select(
+            exists().where(
+                Tenant.id == tenant_id,
+                Tenant.is_active.is_(True),
+                *(
+                    exists().where(
+                        TenantFeatureFlag.tenant_id == tenant_id,
+                        TenantFeatureFlag.flag_key == key,
+                        TenantFeatureFlag.enabled.is_(True),
+                    )
+                    for key in ("celigo", "reconciliation")
+                ),
+            )
+        )
+    )
+    if not config.enabled or not active:
+        raise StateError("batch_disabled")
+    if run.origin == "recovery":
+        raise ValueError("recovery_cannot_batch_findings")
+    pending = (run.progress_json or {}).get("pending_refs", [])
+    if (
+        pending[: len(references)] != references
+        or checkpoint.progress_json.get("pending_refs") != pending[len(references) :]
+        or checkpoint.progress_json.get("processed") != (run.progress_json or {}).get("processed", 0) + len(references)
+    ):
+        raise ValueError("noncontiguous_finding_batch")
+    from app.services.transaction_ops import finding_batch
+
+    if finding_batch.eligible(reports, now):
+        rows = await finding_batch.persist(db, tenant_id, run, reports, now=now)
+        run.lease_until = min(run.deadline_at, now + _LEASE)
+    else:
+        # Cleared/excluded findings retain their existing operation checks.
+        rows = []
+        for report in sorted(reports, key=lambda item: item["order_reference"]):
+            rows.append(
+                await _record_finding(db, tenant_id, run, report["order_reference"], report, now=now, final=True)
+            )
+    run.progress_json = checkpoint.progress_json
+    await _commit(db, tenant_id)
+    return rows
+
+
+async def _record_finding(db, tenant_id, run, order_reference, report_json, *, now, final):
     request = FindingReport(order_reference=order_reference, report_json=report_json)
     if request.report_json.get("order_reference", order_reference) != order_reference:
         raise StateError("finding_order_mismatch", 422)
     request = request.model_copy(
         update={"report_json": {k: v for k, v in request.report_json.items() if k not in {"case_id", "_observation"}}}
     )
-    run = await get_run(db, tenant_id, run_id, lock=True)
-    _lease(run, lease_token, now)
     if run.origin == "recovery" and run.params_json.get("approval_message_id"):
         from app.services.transaction_ops.accounting_recheck import bound_report
 
@@ -913,7 +981,7 @@ async def record_finding(
         )
     # The run lock serializes writers. Upsert returns the existing finding ID
     # and refreshes its ORM state in one round trip, including partial -> final.
-    statement = insert(TransactionFinding).values(tenant_id=tenant_id, run_id=run_id, **request.model_dump())
+    statement = insert(TransactionFinding).values(tenant_id=tenant_id, run_id=run.id, **request.model_dump())
     row = await db.scalar(
         statement.on_conflict_do_update(
             index_elements=["tenant_id", "run_id", "order_reference"],
@@ -946,11 +1014,6 @@ async def record_finding(
                 **row.report_json["source_eligibility"],
             },
         )
-    if checkpoint is not None:
-        # Advancing past an order and publishing its final evidence are one
-        # transaction. A failed finding must never leave a skipped reference.
-        run.progress_json = checkpoint.progress_json
-    await _commit(db, tenant_id)
     return row
 
 
