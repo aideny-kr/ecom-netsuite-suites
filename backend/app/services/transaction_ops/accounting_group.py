@@ -142,6 +142,18 @@ def build_group_card(members, selection, session_id):
     return card
 
 
+def reallocation_reason(code):
+    """What a member's skipped reason says about the existing-credit reallocation, if anything."""
+    if not code or code in {"no_difference", "gross_not_reconciled"}:
+        return None
+    if code == "no_verified_exemplar":
+        return (
+            "Existing-credit reallocation needs one approved and verified correction of this kind for this "
+            "configuration first; group preparation then applies the same treatment."
+        )
+    return f"Existing-credit reallocation not prepared: {code}."
+
+
 async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, **_):
     from app.mcp.tools.transaction_ops_tools import execute_accounting_evidence
     from app.services.transaction_ops.group_investigation import handoff, summarize
@@ -199,6 +211,11 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         except Exception as exc:  # a failed attempt must not discard the member's evidence
                             child_db.info.pop("accounting_correction_candidate", None)
                             reallocation_refusal = f"error:{type(exc).__name__}"
+                            print(
+                                f"accounting_group: reallocation attempt failed case={member['case_id']} "
+                                f"{type(exc).__name__}: {str(exc)[:200]}",
+                                flush=True,
+                            )
                     prepared = (
                         await candidate_confirmation(
                             db=child_db,
@@ -228,8 +245,8 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         if collected.get("resolution_intents")
                         else "No validated correction is ready. Continue investigation using the recorded evidence."
                     )
-                    if reallocation_refusal and reallocation_refusal not in {"no_difference", "gross_not_reconciled"}:
-                        reason += f" Existing-credit reallocation not prepared: {reallocation_refusal}."
+                    if note := reallocation_reason(reallocation_refusal):
+                        reason += " " + note
             except Exception as exc:
                 await child_db.rollback()
                 await set_tenant_context(child_db, str(tenant_id))

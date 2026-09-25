@@ -152,16 +152,9 @@ def review_for_card(db, tenant_id, tool_name, record_type, normalized, *, check_
     return p
 
 
-async def fresh(db, tenant_id, p):
-    if other := _reallocation(p):
-        return await other.fresh(db, tenant_id, p)
-    from app.services.transaction_ops.accounting_evidence import collect_accounting_evidence
-    from app.services.transaction_ops.accounting_review import accounting_context
-    from app.services.transaction_ops.case_service import get_case
-    from app.services.transaction_ops.tax_correction import refresh_source
-
-    case = await get_case(db, tenant_id, UUID(p["case_id"]))
-    review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
+def assert_binding_unchanged(review, p):
+    """The approved write goes to the proposal's connection and connector. Both MCP credit
+    treatments refuse, before any write, when the case's current binding is not that one."""
     if any(
         review.get(k) != value
         for k, value in {
@@ -173,6 +166,19 @@ async def fresh(db, tenant_id, p):
         }.items()
     ):
         raise ValueError("credit_api_connection_scope_changed")
+
+
+async def fresh(db, tenant_id, p):
+    if other := _reallocation(p):
+        return await other.fresh(db, tenant_id, p)
+    from app.services.transaction_ops.accounting_evidence import collect_accounting_evidence
+    from app.services.transaction_ops.accounting_review import accounting_context
+    from app.services.transaction_ops.case_service import get_case
+    from app.services.transaction_ops.tax_correction import refresh_source
+
+    case = await get_case(db, tenant_id, UUID(p["case_id"]))
+    review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
+    assert_binding_unchanged(review, p)
     source = _json(
         await refresh_source(db, tenant_id, p["scope"], p["order_reference"], include_accounting_detail=True)
     )

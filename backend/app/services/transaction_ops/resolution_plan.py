@@ -116,9 +116,8 @@ def proposal_plan(proposal, report):
         raise ValueError("unsupported_accounting_plan")
     order_step = kind in DEPENDENT_KINDS
     # An amendment of an existing credit: the invoice it reconciles stays the plan's anchor.
-    existing_credit = (
-        treatment_of(proposal).family == "amendment" and treatment_of(proposal).record_type == "creditmemo"
-    )
+    treatment = treatment_of(proposal)
+    existing_credit = treatment.family == "amendment" and treatment.record_type == "creditmemo"
     before = proposal["before"]
     order_id = (
         proposal["record_id"]

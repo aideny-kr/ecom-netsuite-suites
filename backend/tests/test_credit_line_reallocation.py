@@ -414,5 +414,60 @@ class TestReviewRoundOne:
         expected = {"debit": {"783": "185.95", "846": "39.05"}, "credit": {"119": "225.00"}}
         sub_cent = _gl(("119", "credit", "225"), ("783", "debit", "185.946"), ("846", "debit", "39.054"))
         exact = _gl(("119", "credit", "225"), ("783", "debit", "185.95"), ("846", "debit", "39.05"))
-        assert not reallocation._ledger_matches(sub_cent, expected)
+        try:
+            accepted = reallocation._ledger_matches(sub_cent, expected)
+        except reallocation.RefusalError:  # the shared ledger reader rejects sub-cent postings outright
+            accepted = False
+        assert not accepted
         assert reallocation._ledger_matches(exact, expected)
+
+
+class TestReviewRoundTwo:
+    """Findings of the 2026-09-25 T2 gate round 2 (wf_67359078-97c)."""
+
+    def test_an_existing_line_may_keep_its_own_item_that_posts_to_a_tax_account(self):
+        facts = _bv()
+        credit = facts["credit"]
+        credit["total"] = credit["subtotal"] = "235.0"
+        credit["application_evidence"]["lines"][0]["amount"] = "235.0"
+        vat_line = {
+            "line": 2,
+            "item": {"id": "7777"},
+            "itemType": {"id": "NonInvtPart"},
+            "quantity": "1.0",
+            "rate": "10.0",
+            "amount": "10.0",
+            "taxCode": {"id": "4059"},
+        }
+        credit["line_evidence"]["lines"].append(vat_line)
+        facts["credit_gl"] = _gl(("119", "credit", "235"), ("783", "debit", "225"), ("846", "debit", "10"))
+        facts["profile"]["tax_accounts"] = ["846"]
+        facts["items"]["7777"] = {"id": "7777", "isInactive": False, "incomeAccount": {"id": "846"}}
+        facts["source"] = {
+            **facts["source"],
+            "total": "2584.0",
+            "payment_total": "2584.0",
+            "tax_total": "440.2",
+            "included_tax_total": "440.2",
+        }
+        lines = [*BV_FIX, {"line": 2, "item_id": "7777", "amount": "10.00"}]
+        reallocation.assess(lines=lines, **facts)
+        # ...but a new line may not introduce that unconfigured item.
+        extra = [
+            {"line": 1, "item_id": "1603", "amount": "185.95"},
+            {"line": 2, "item_id": "7777", "amount": "10.00"},
+            {"item_id": "7777", "amount": "39.05"},
+        ]
+        assert _refused(facts, extra) == "item_not_allowed"
+
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            (("119", "credit", "2.8"), ("783", "debit", "2.7")),  # unbalanced
+            (("119", "credit", "2.8"), ("783", "debit", "3.8"), ("783", "credit", "-1.0")),  # negative
+        ],
+    )
+    def test_malformed_gl_is_incomplete_evidence(self, rows):
+        facts = _us()
+        facts["credit_gl"] = _gl(*rows)
+        assert _refused(facts, US_FIX) == "evidence_incomplete"

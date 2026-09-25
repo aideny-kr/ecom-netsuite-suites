@@ -66,9 +66,18 @@ def _tax_accounts(profile):
 
 
 def _gl_rows(gl):
+    """A document's posting rows, after the shared ledger reader has proven the section complete,
+    single-book, non-negative and balanced."""
+    from app.services.transaction_ops.posting_balance import _ledger as validated_ledger
+
     rows = [r for r in (gl or {}).get("rows") or [] if r.get("debit") is not None or r.get("credit") is not None]
-    if (gl or {}).get("complete") is not True or len({str(r.get("accountingbook")) for r in rows}) > 1:
-        raise RefusalError("evidence_incomplete", {"reason": "gl_incomplete_or_multi_book"})
+    books = {str(r.get("accountingbook")) for r in (gl or {}).get("rows") or []}
+    try:
+        if len(books) != 1:
+            raise ValueError("different_book")
+        validated_ledger(gl or {}, books.pop())
+    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+        raise RefusalError("evidence_incomplete", {"reason": f"gl:{exc}"}) from None
     return rows
 
 
@@ -227,7 +236,8 @@ def _lines(lines, credit, profile, items, taxed, precision):
         configured = (profile.get("tax_item_accounts") or {}).get(item_id)
         if configured is not None and account != str(configured):
             raise RefusalError("tax_item_account_mismatch", {"item_id": item_id, "configured": str(configured)})
-        if configured is None and account in taxed:
+        keeps_own_item = number is not None and _ref(existing[number], "item") == item_id
+        if configured is None and account in taxed and not keeps_own_item:
             raise RefusalError("item_not_allowed", {"item_id": item_id, "reason": "unconfigured_item_posts_to_tax"})
         parsed.append({"line": number, "item_id": item_id, "amount": amount, "account": account})
     if not parsed:
@@ -365,9 +375,11 @@ CARD_MAX_AGE_SECONDS = 300
 
 
 def _json(value):
-    from app.services.transaction_ops.credit_api_correction import _json as exact_json
+    """The one exact-decimal serializer (credit_api_correction._json), imported lazily: that module
+    imports this one."""
+    from app.services.transaction_ops import credit_api_correction
 
-    return exact_json(value)
+    return credit_api_correction._json(value)
 
 
 async def _suiteql(reader, query, limit):
@@ -672,11 +684,12 @@ def review_for_card(db, tenant_id, tool_name, record_type, normalized, *, check_
 
 
 async def fresh(db, tenant_id, p):
+    from app.services.transaction_ops.credit_api_correction import assert_binding_unchanged
+
     facts, context = await gather(db, tenant_id, p["case_id"], p["record_id"])
+    assert_binding_unchanged(context["review"], p)
     if _json(facts["source"]) != p["source"]:
         raise ValueError("credit_reallocation_source_changed")
-    if context["review"]["scope"] != p["scope"] or context["review"]["config_id"] != p["config_id"]:
-        raise ValueError("credit_reallocation_scope_changed")
     return facts, context
 
 
@@ -732,10 +745,10 @@ def _ledger_matches(gl, expected):
 def _lines_match(credit, p):
     """The saved lines are the approved ones, compared by content: NetSuite may renumber a sublist
     on save, and the exact GL comparison already pins which accounts received what."""
-    saved = sorted(
-        (_ref(line, "item"), _dec(line.get("amount")))
-        for line in (credit.get("line_evidence") or {}).get("lines") or []
-    )
+    lines = (credit.get("line_evidence") or {}).get("lines") or []
+    if any(_dec(line.get("quantity")) != 1 for line in lines):
+        return False
+    saved = sorted((_ref(line, "item"), _dec(line.get("amount"))) for line in lines)
     approved = sorted(
         (entry["item"]["id"], Decimal(entry["amount"])) for entry in p["proposed_fields"]["item"]["items"]
     )

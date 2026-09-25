@@ -63,6 +63,7 @@ def _context(facts):
             "config_id": str(uuid4()),
             "netsuite_connection_id": str(uuid4()),
             "native_mcp_connector_id": CONNECTOR,
+            "connection_active": True,
         },
         "order": {"id": facts["invoices"][0][0]["createdFrom"]["id"], "tranId": facts["source"]["number"]},
         "catalog": _catalog(),
@@ -415,8 +416,12 @@ class TestGroup:
             assert card.accounting_group["members"][0].get("card") and not skipped
         else:
             reason = skipped[0]["payload"]["reason"]
-            expected = "no_verified_exemplar" if outcome == "refused" else "error:RuntimeError"
-            assert f"Existing-credit reallocation not prepared: {expected}" in reason
+            expected = (
+                "needs one approved and verified correction of this kind"
+                if outcome == "refused"
+                else "Existing-credit reallocation not prepared: error:RuntimeError"
+            )
+            assert expected in reason
             assert "Preparation needs review" not in reason
 
 
@@ -512,3 +517,28 @@ class TestReviewRoundOneFlow:
             out["correction_candidate"]["params"]["data"]
             == db.info["accounting_correction_candidate"]["wire_record_json"]
         )
+
+
+class TestReviewRoundTwoFlow:
+    """Findings of the 2026-09-25 T2 gate round 2 (wf_67359078-97c)."""
+
+    @pytest.mark.parametrize("key", ["native_mcp_connector_id", "netsuite_connection_id"])
+    async def test_approval_refuses_when_the_connection_binding_changed(self, order, key):
+        db, p = await _proposed(order)
+        order["context"]["review"][key] = str(uuid4())
+        params = {"recordType": "creditMemo", "recordId": p["record_id"], "data": p["wire_record_json"]}
+        with pytest.raises(ValueError, match="connection_scope_changed"):
+            await tax_correction.validate_approved(db, TENANT, _tool_name(), params, p)
+
+    async def test_readback_refuses_a_saved_line_with_another_quantity(self, order):
+        _, p = await _proposed(order)
+        written = _written(order["facts"], p)
+        written["credit"]["line_evidence"]["lines"][0]["quantity"] = "2.0"
+        order["facts"] = written
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "needs_review"
+
+    async def test_group_explains_the_first_correction_rule(self, order, monkeypatch):
+        from app.services.transaction_ops import accounting_group as group
+
+        assert "verified" in group.reallocation_reason("no_verified_exemplar").lower()
+        assert group.reallocation_reason("no_difference") is None
