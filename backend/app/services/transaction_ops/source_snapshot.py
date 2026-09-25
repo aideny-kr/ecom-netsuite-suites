@@ -133,23 +133,22 @@ async def _load(db, tenant_id, connection_id, reference, *, since, now, minimum_
             TransactionSourceSnapshot.connection_fingerprint == fingerprint,
             *([TransactionSourceSnapshot.observed_at >= max(since, now - MAX_AGE)] if since is not None else []),
             TransactionSourceSnapshot.observed_at <= now,
+            ~select(Order.id)
+            .where(
+                Order.tenant_id == tenant_id,
+                Order.source_connection_id == connection_id,
+                Order.source == "solidus",
+                Order.order_number == reference,
+                Order.source_updated_at > TransactionSourceSnapshot.source_updated_at,
+            )
+            .exists(),
         )
     )
     if row is None or (minimum_version is not None and row.source_updated_at < minimum_version):
         return None
-    # An incremental mirror may already know the saved detail is obsolete.
-    newer = await db.scalar(
-        select(Order.id)
-        .where(
-            Order.tenant_id == tenant_id,
-            Order.source_connection_id == connection_id,
-            Order.source == "solidus",
-            Order.order_number == reference,
-            Order.source_updated_at > row.source_updated_at,
-        )
-        .limit(1)
-    )
-    if newer or not isinstance(row.evidence_json, dict) or row.evidence_json.get("version") != VERSION:
+    # The correlated anti-join above rejects detail invalidated by the mirror
+    # in the same statement that loads it, without a second database round trip.
+    if not isinstance(row.evidence_json, dict) or row.evidence_json.get("version") != VERSION:
         return None
     evidence = _project(row.evidence_json.get("evidence"), connection_id, reference)
     if evidence is None or _time(evidence["read_at"]) != row.observed_at:

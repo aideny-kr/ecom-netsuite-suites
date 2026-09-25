@@ -20,7 +20,7 @@ class StagedNetSuite:
         c = self.config
         return self.db, self.tenant, UUID(c["netsuite_connection_id"]), c["netsuite_account_id"], c["subsidiary_id"]
 
-    async def get(self, kind, reference, context, factory, *, can_fetch=True):
+    async def get(self, kind, reference, context, factory, *, can_fetch=True, before_fetch=None):
         now = self.clock()
         since = max(_time(self.progress.get("continuation_started_at")) or self.run.created_at, now - store.MAX_AGE)
         key = (kind, context)
@@ -43,6 +43,8 @@ class StagedNetSuite:
             remaining = self.run.max_api_calls - self.run.api_calls_used - (self.run.api_calls_held or 0)
             if remaining < bulk.MAX_CALLS + 3 + fallback:
                 return None
+            if before_fetch is not None:
+                await before_fetch()
             if await self.reserve(bulk.MAX_CALLS + 3, hold=True):
                 self.attempted.add(key)
                 started = self.clock()
@@ -114,7 +116,7 @@ class StagedNetSuite:
             self.progress["native_orders_batch_hits"] = self.progress.get("native_orders_batch_hits", 0) + 1
         return result
 
-    async def refund(self, reference, target, *, source_observed_at=None):
+    async def refund(self, reference, target, *, source_observed_at=None, before_fetch=None):
         phase = self.progress.get("phase")
         entry = self.cache.get(("orders", store.context_hash(self.config, phase)))
         if not entry or not self.order_id or entry[1].get(reference) != target:
@@ -138,6 +140,7 @@ class StagedNetSuite:
                 if self.mapping.refund_adjustments
                 else None,
             ),
+            before_fetch=before_fetch,
         )
         if result and source_observed_at and _time(result.get("observed_at")) < source_observed_at:
             return None  # A newer source-refund read has no event version to compare.

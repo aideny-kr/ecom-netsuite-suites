@@ -172,3 +172,28 @@ async def test_delayed_continuation_does_not_reuse_old_financial_observation(ada
     assert result["observed_at"] == adapter.clock().isoformat()
     assert staged.bulk.read_orders.await_count == 2
     assert staged.store.load.call_args.kwargs["since"] == NOW + timedelta(minutes=6)
+
+
+async def test_partial_evidence_is_saved_before_batch_spend_but_not_on_cache_hit(adapter):
+    first = await adapter.order(REFS[0])
+    order_reservations = adapter.reserve.await_count
+
+    async def preserve():
+        assert adapter.reserve.await_count == order_reservations
+        staged.bulk.read_refunds.assert_not_awaited()
+
+    before = AsyncMock(side_effect=preserve)
+    assert await adapter.refund(REFS[0], first, before_fetch=before)
+    assert before.await_count == 1
+    assert await adapter.refund(REFS[0], first, before_fetch=before)
+    assert before.await_count == 1 and staged.bulk.read_refunds.await_count == 1
+
+
+async def test_failed_partial_commit_prevents_batch_reservation_or_remote_read(adapter):
+    first = await adapter.order(REFS[0])
+    order_reservations = adapter.reserve.await_count
+    before = AsyncMock(side_effect=RuntimeError("checkpoint failed"))
+    with pytest.raises(RuntimeError, match="checkpoint failed"):
+        await adapter.refund(REFS[0], first, before_fetch=before)
+    assert adapter.reserve.await_count == order_reservations
+    staged.bulk.read_refunds.assert_not_awaited()

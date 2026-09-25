@@ -936,12 +936,22 @@ async def run_investigation(
                     targets["commercial_credit_evidence"] = commercial
                     report["balance"] = reconcile_order(source, targets, config)
             if mapping.solidus_refund_step_id:
-                # Preserve known amounts before extra reads. An exhausted refund
-                # budget must not discard the already-collected order evidence.
-                # Collection checkpoints do not create or resolve exception cases.
-                await state.record_finding(
-                    db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
-                )
+                # Cache-only comparisons need just the final atomic finding and
+                # cursor commit. Preserve partial order evidence before any new
+                # provider work or reservation that could exhaust the budget.
+                partial_saved = partial_attempted = False
+
+                async def preserve_order_evidence():
+                    nonlocal partial_saved, partial_attempted
+                    if not partial_saved:
+                        partial_attempted = True
+                        await state.record_finding(
+                            db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
+                        )
+                        partial_saved = True
+
+                if settlement or mapping.action_mode != "detect_only":
+                    await preserve_order_evidence()
                 refunds = {}
                 try:
                     # A run-local batch retains actual observation times and
@@ -966,6 +976,7 @@ async def run_investigation(
                         refunds["source"] = cached
                         progress["source_refund_batch_hits"] = progress.get("source_refund_batch_hits", 0) + 1
                     else:
+                        await preserve_order_evidence()
                         references = list(dict.fromkeys(progress["pending_refs"][:MAX_BATCH_ORDERS]))
                         if use_batch and len(references) > 1:
                             if not await reserve(2):
@@ -999,10 +1010,15 @@ async def run_investigation(
                 except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                     raise
                 except Exception:
+                    if partial_attempted and not partial_saved:
+                        raise  # A failed DB checkpoint is not missing provider evidence.
                     refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
                 if staged and _target_refunds_reader is None:
                     staged_refund = await staged.refund(
-                        reference, targets, source_observed_at=_time(refunds.get("source", {}).get("observed_at"))
+                        reference,
+                        targets,
+                        source_observed_at=_time(refunds.get("source", {}).get("observed_at")),
+                        before_fetch=preserve_order_evidence,
                     )
                     if staged_refund is not None:
                         refunds["target"] = staged_refund
@@ -1011,6 +1027,7 @@ async def run_investigation(
                     and len(targets.get("orders") or []) == 1
                     and targets["orders"][0].get("header_complete") is True
                 ):
+                    await preserve_order_evidence()
                     if not await reserve(MAX_REFUND_CALLS + 3, hold=True):
                         return await finish("budget")
                     try:
