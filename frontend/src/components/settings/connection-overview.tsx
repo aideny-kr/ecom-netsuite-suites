@@ -11,6 +11,7 @@ import { useAuth } from "@/providers/auth-provider";
 import { AddConnectionDialog } from "@/components/add-connection-dialog";
 import { AddMcpConnectorDialog } from "@/components/add-mcp-connector-dialog";
 import CeligoConnectorCard from "@/components/settings/celigo-connector-card";
+import JevConnectorCard from "@/components/settings/jev-connector-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -41,7 +42,7 @@ function ConnectionsContent() {
   const canManage = hasPermission("connections.manage");
   const removing = removeApi.isPending || removeMcp.isPending;
   const cards: ConnectorCard[] = [
-    ...(connections.data || []).filter((item) => item.status !== "revoked" && item.provider !== "celigo").map((item) => ({
+    ...(connections.data || []).filter((item) => item.status !== "revoked" && item.provider !== "celigo" && item.provider !== "typesafe").map((item) => ({
       id: item.id, label: item.label, provider: item.provider, status: item.status, kind: "api" as const,
       detail: typeof item.metadata_json?.base_url === "string" ? item.metadata_json.base_url : undefined, error: item.error_reason,
     })),
@@ -100,6 +101,7 @@ function ConnectionsContent() {
       )}
       {!connections.isLoading && !mcp.isLoading && !connections.isError && !mcp.isError && !cards.length && <div className="rounded-xl border border-dashed p-8 text-center"><Plug className="mx-auto mb-3 h-6 w-6 text-muted-foreground" /><p className="text-[15px]">No API or MCP connections yet</p><p className="mt-2 text-[13px] text-muted-foreground">Add Solidus, another platform, a custom API, or an MCP server above.</p></div>}
       {showCeligo && <ConnectionGroup title="Celigo" description="Integration inventory and optional agent access."><CeligoConnectorCard /></ConnectionGroup>}
+      <ConnectionGroup title="TypeSafe" description="Decision model for reconciliation exceptions: mode and key."><JevConnectorCard /></ConnectionGroup>
       <Dialog open={!!deleting} onOpenChange={(open) => { if (!open && !removing) setDeleting(null); }}><DialogContent><DialogHeader><DialogTitle>Delete {deleting?.label}?</DialogTitle><DialogDescription>This stops future access through this connection. Saved investigation and audit records are retained. Scopes using it will need a new connection.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={removing} onClick={() => setDeleting(null)}>Cancel</Button><Button variant="destructive" disabled={removing} onClick={() => void remove()}>{removing ? "Deleting…" : "Delete connection"}</Button></DialogFooter></DialogContent></Dialog>
     </div>
   );

@@ -30,6 +30,7 @@ vi.mock("@/hooks/use-features", () => ({ useFeature: () => true }));
 vi.mock("@/hooks/use-mcp-connectors", () => ({ useMcpConnectors: () => ({ data: [] }), useDeleteMcpConnector: () => ({ mutateAsync: vi.fn() }), useTestMcpConnector: () => ({ mutateAsync: vi.fn() }) }));
 vi.mock("@/components/add-mcp-connector-dialog", () => ({ AddMcpConnectorDialog: () => null }));
 vi.mock("@/components/settings/celigo-connector-card", () => ({ default: () => <div>Celigo connection management</div> }));
+vi.mock("@/components/settings/jev-connector-card", () => ({ default: () => <div>Jev management</div> }));
 import { ConnectionOverview as ConnectionsPage } from "@/components/settings/connection-overview";
 
 function celigoConnection(over: Partial<Connection> = {}): Connection {
