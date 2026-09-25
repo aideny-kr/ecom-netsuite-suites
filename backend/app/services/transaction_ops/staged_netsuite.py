@@ -77,6 +77,13 @@ class StagedNetSuite:
                     self.cache[key] = (None, {}, started)
                     return None
                 data = result[kind]
+                peak = result.get("concurrency_peak")
+                if type(peak) is int and 1 <= peak <= bulk.MAX_CONCURRENT_CALLS:
+                    counter = "native_" + kind + "_concurrency_peak"
+                    self.progress[counter] = max(self.progress.get(counter, 0), peak)
+                    if peak > 1:
+                        counter = "native_" + kind + "_concurrent_batches"
+                        self.progress[counter] = self.progress.get(counter, 0) + 1
                 self.cache[key] = (identifier, data, started)
                 self.progress["native_" + kind + "_batch"] = identifier
                 counter = "native_" + kind + "_batches"
