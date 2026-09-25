@@ -430,3 +430,101 @@ async def test_scope_error_plus_revocation_does_not_escape_exception_cleanup(db,
     assert result["termination_reason"] == "stall"
     assert result["processed"] == 0
     assert (await state.get_run(db, tenant, run_id)).progress_json["pending_refs"] == refs
+
+
+@pytest.mark.parametrize("cached", [False, True])
+async def test_fresh_staging_accepts_framework_millisecond_detail_for_microsecond_page(
+    db, admin_user, monkeypatch, cached
+):
+    from uuid import UUID
+
+    from app.services.transaction_ops import source_snapshot
+
+    actor, _ = admin_user
+    run, refs, reader, writer, _ = await setup(db, actor, monkeypatch, size=3)
+    detail_version = datetime.now(timezone.utc).replace(microsecond=458000) - timedelta(days=1)
+    page_version = detail_version + timedelta(microseconds=810)
+    run.progress_json = {
+        **run.progress_json,
+        "pending_source_versions": dict.fromkeys(refs, page_version.isoformat()),
+    }
+    await db.commit()
+    original = reader.side_effect
+
+    async def detail(*args, **kwargs):
+        value = await original(*args, **kwargs)
+        value["orders"][0]["updated_at"] = detail_version.isoformat(timespec="milliseconds")
+        return value
+
+    reader.side_effect = detail
+    if cached:
+        connection = UUID(run.config_snapshot["source_connection_id"])
+        for ref in refs:
+            value = await detail(db, actor.tenant_id, None, ref)
+            assert await source_snapshot.save(
+                db, actor.tenant_id, connection, ref, value, now=datetime.now(timezone.utc)
+            )
+
+    result = await run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done"
+    # Existing rounded snapshots still need a paid fresh read. The exact fresh
+    # observation is then consumed once, without another provider call.
+    assert reader.await_count == len(refs)
+    assert writer.await_count == 1
+    current = await state.get_run(db, actor.tenant_id, run.id)
+    assert current.progress_json["source_staged_hits"] == len(refs)
+    assert current.progress_json.get("source_snapshot_hits", 0) == 0
+    assert current.api_calls_used == 2 * len(refs)
+    rows = (
+        await db.scalars(
+            select(TransactionSourceSnapshot).where(TransactionSourceSnapshot.tenant_id == actor.tenant_id)
+        )
+    ).all()
+    assert all(row.source_updated_at == detail_version for row in rows)
+    assert all(
+        row.evidence_json["evidence"]["orders"][0]["updated_at"] == detail_version.isoformat(timespec="milliseconds")
+        for row in rows
+    )
+
+
+@pytest.mark.parametrize("reason", ["next_millisecond", "submillisecond_detail", "replaced_snapshot"])
+async def test_fresh_staging_precision_exception_cannot_admit_other_versions(db, admin_user, monkeypatch, reason):
+    from app.services.transaction_ops import source_snapshot
+
+    actor, _ = admin_user
+    run, refs, reader, _, _ = await setup(db, actor, monkeypatch, size=3)
+    detail_version = datetime.now(timezone.utc).replace(microsecond=458000) - timedelta(days=1)
+    page_version = detail_version + timedelta(microseconds=810)
+    if reason == "next_millisecond":
+        page_version = detail_version + timedelta(milliseconds=1)
+    elif reason == "submillisecond_detail":
+        detail_version += timedelta(microseconds=800)
+    run.progress_json = {
+        **run.progress_json,
+        "pending_source_versions": dict.fromkeys(refs, page_version.isoformat()),
+    }
+    await db.commit()
+    original = reader.side_effect
+
+    async def detail(*args, **kwargs):
+        value = await original(*args, **kwargs)
+        value["orders"][0]["updated_at"] = detail_version.isoformat()
+        return value
+
+    reader.side_effect = detail
+    if reason == "replaced_snapshot":
+        original_load = source_snapshot.load
+
+        async def replaced(*args, **kwargs):
+            value = await original_load(*args, **kwargs)
+            if value:
+                value["read_at"] = datetime.now(timezone.utc).isoformat()
+            return value
+
+        monkeypatch.setattr(source_snapshot, "load", replaced)
+    result = await run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done"
+    assert reader.await_count == 2 * len(refs)
+    current = await state.get_run(db, actor.tenant_id, run.id)
+    assert current.progress_json.get("source_staged_hits", 0) == 0
+    assert current.api_calls_used == 4 * len(refs)
