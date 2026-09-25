@@ -18,7 +18,12 @@ Spec: docs/superpowers/specs/2026-09-08-scheduled-jobs-and-inventory-aging-desig
     and the page badge are the notification). WRITE steps: audit `started` with the
     idempotency key before the call.
 
-THE AGENT NEVER RUNS HERE. This module only ever replays an already-compiled,
+The sole bounded agent exception is registry-owned agent.review_saved_case.
+It reads saved evidence and synthesizes one advisory assessment with explicit
+identity/context/token/time bounds; it never dispatches model-returned tools.
+The scheduler itself does not compile prompts or select authority.
+
+For the original deterministic steps, This module only ever replays an already-compiled,
 already-approved `plan_json` (or, for a "run once with this change" manual trigger,
 `pending_plan_json`) — no LLM call anywhere below. That boundary is enforced by
 construction: nothing in this file imports `app.services.jobs.compiler`.
@@ -524,6 +529,9 @@ async def _run_steps(
     usage = {"bytes_scanned": 0, "seconds": 0.0, "usd": 0.0}
     started_at = time.monotonic()
 
+    if len(steps) != 1 and any(s.get("type") == "agent.review_saved_case" for s in steps):
+        return REASON_BLOCKED, outputs, "agent.review_saved_case must be the only step"
+
     for step in steps:
         # Tenant context unconditionally, EVERY step — read and write alike
         # (review finding, MAJOR). The caller commits right before the loop
@@ -596,6 +604,16 @@ async def _run_steps(
 
         ctx.artifacts[step_id] = artifact
         outputs[step_id] = _distill_artifact(artifact)
+        if step_type == "agent.review_saved_case":
+            receipt = artifact.get("agent_receipt") or {}
+            reason = receipt.get("status")
+            if reason != REASON_DONE:
+                await db.rollback()
+                return (
+                    (reason if reason in {REASON_BLOCKED, REASON_BUDGET, REASON_ERROR} else REASON_ERROR),
+                    outputs,
+                    receipt.get("code", "invalid_agent_outcome"),
+                )
 
         # Item 2 (delta gate fix E): a successful step's writes are durable
         # BEFORE the next step runs -- only flushed until this commit, so a

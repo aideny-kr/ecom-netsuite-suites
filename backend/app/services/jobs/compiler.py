@@ -16,9 +16,10 @@ decides a required detail cannot be derived from the instruction (the mock's
 exactly that; both tools are offered every call via ``tool_choice: any`` so
 the model always picks whichever fits.
 
-The agent runs ONLY here — at compile time, on creation or an instruction
-edit — never inside the executor (Task 4), which only ever replays
-``plan_json``. That boundary is why this module returns data (``CompiledPlan``
+Plans are compiled only here. The worker replays ``plan_json``; the
+registry-owned ``agent.review_saved_case`` step is the bounded synthesis
+exception, with explicit principal/context/token/time contracts and no model
+tool execution. That boundary is why this module returns data (``CompiledPlan``
 | ``Clarification``) rather than writing anything to the ``schedules`` table
 itself: persisting the compiled plan, bumping ``plan_version``, and deciding
 ``plan_json`` vs. ``pending_plan_json`` are the API layer's job (§B5, Task
@@ -66,7 +67,7 @@ _CLARIFY_TOOL_NAME = "ask_clarification"
 
 _SYSTEM_PROMPT = """You compile a plain-language scheduled-job instruction into an explicit, \
 deterministic plan of steps. This plan is what actually runs, every time, unattended — you \
-are never in the loop again once it is approved, so it must not guess at anything the \
+do not recompile it at run time, so it must not guess at anything the \
 instruction does not say.
 
 Every step must be exactly one of the registry's allow-listed types, given to you as the \
@@ -96,6 +97,11 @@ these four steps, in order, with no bigquery_sql step: report.compose(playbook_k
 params={"locations": [...]}, mode="period") -> report.render_pdf(report_step=<the compose \
 step's id>) -> report.build_xlsx(report_step=<the same compose step's id>) -> \
 drive.upload(report_step=<the same compose step's id>).
+
+The agent.review_saved_case step reviews only saved case evidence, with one bounded synthesis. \
+It must be the only step. Never invent principal/tenant/case/config identifiers or skill/context \
+versions, scope or budgets. Ask for missing exact bindings; never infer authority from prose. \
+It does not collect fresh evidence or approve/backfill/post transactions.
 
 Call compile_plan when every required param can be derived from the instruction and the \
 tenant context below. Call ask_clarification with exactly ONE question when a required detail \
@@ -508,7 +514,7 @@ async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict
 
 
 async def _validate_and_preflight(
-    db: AsyncSession, tenant_id: uuid.UUID, tool_input: dict
+    db: AsyncSession, tenant_id: uuid.UUID, tool_input: dict, actor_id: uuid.UUID | None = None
 ) -> tuple[ValidatedPlan | None, list[str]]:
     """``registry.validate_plan``, then — only for a structurally valid plan —
     the BigQuery preflight above (item 1, brief H): a plan can satisfy every
@@ -522,6 +528,18 @@ async def _validate_and_preflight(
         validated = validate_plan(tool_input)
     except PlanInvalid as exc:
         return None, exc.errors
+    for step in validated.steps:
+        if step.type == "agent.review_saved_case":
+            from pydantic import ValidationError
+
+            from app.services.jobs.agent_step import AgentStepRequest
+
+            try:
+                request = AgentStepRequest.model_validate(step.params)
+            except ValidationError:
+                return None, ["invalid agent contract"]
+            if request.principal_id != actor_id or request.tenant_id != tenant_id:
+                return None, ["agent principal must be the current plan author in this company"]
     preflight_errors = await _bigquery_preflight(db, tenant_id, tool_input)
     if preflight_errors:
         return None, preflight_errors
@@ -577,7 +595,7 @@ async def compile_instruction(
     errors: list[str]
     if tool_name == _COMPILE_TOOL_NAME:
         try:
-            validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+            validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input, actor_id=actor_id)
         except PreflightUnavailable as exc:
             return await _preflight_unavailable_outcome(
                 db, tenant_id, actor_id, instruction, llm.model, plan_version, exc
@@ -614,7 +632,7 @@ async def compile_instruction(
 
         if tool_name == _COMPILE_TOOL_NAME:
             try:
-                validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+                validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input, actor_id=actor_id)
             except PreflightUnavailable as exc:
                 return await _preflight_unavailable_outcome(
                     db, tenant_id, actor_id, instruction, llm.model, plan_version, exc
