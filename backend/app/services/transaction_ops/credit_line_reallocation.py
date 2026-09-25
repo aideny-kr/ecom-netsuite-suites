@@ -359,7 +359,7 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
     from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile
     from app.services.transaction_ops.tax_correction import refresh_source
 
-    if not _id(str(credit_memo_id)):
+    if credit_memo_id is not None and not _id(str(credit_memo_id)):
         raise RefusalError("credit_not_in_case", {"credit_memo_id": str(credit_memo_id)})
     case = await get_case(db, tenant_id, UUID(str(case_id)))
     review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
@@ -389,7 +389,11 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
         raise RefusalError("evidence_incomplete", {"reason": "order_or_posting_documents_unsupported"})
     related = sections.get("related_refund_documents") or {}
     credits = [d for d in related.get("documents") or [] if str(d.get("record_type", "")).lower() == "creditmemo"]
-    target = next((c for c in credits if str(c.get("id")) == str(credit_memo_id)), None)
+    if credit_memo_id is None:
+        # Group preparation names no credit: only an order with exactly one credit qualifies.
+        target = credits[0] if len(credits) == 1 else None
+    else:
+        target = next((c for c in credits if str(c.get("id")) == str(credit_memo_id)), None)
     if target is None:
         raise RefusalError("credit_not_in_case", {"credit_memo_ids": [str(c.get("id")) for c in credits]})
     gl = sections.get("gl") or {}
@@ -762,3 +766,53 @@ def project(p, report, current, *, verified_at, now):
             "posting_reconciliation": posting,
         },
     }
+
+
+async def verified_exemplar(db, tenant_id, config_id):
+    """The latest approved, independently verified correction of this kind on the same configuration.
+
+    A group is never the first use of this treatment for a configuration: one case is proposed,
+    approved and verified first, then members of the same shape can follow.
+    """
+    from sqlalchemy import select
+
+    from app.models.chat import ChatMessage
+
+    so = ChatMessage.structured_output
+    return await db.scalar(
+        select(ChatMessage.id)
+        .where(
+            ChatMessage.tenant_id == tenant_id,
+            so["status"].astext == "approved",
+            so["accounting_review"]["kind"].astext == KIND,
+            so["accounting_review"]["config_id"].astext == str(config_id),
+            so["accounting_verification"]["status"].astext == "verified",
+        )
+        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+        .limit(1)
+    )
+
+
+async def prepare_group_member(db, tenant_id, case_id):
+    """Group preparation: the same treatment, derived from this member's own figures by the server
+    (no model arithmetic) and accepted by the same outcome check. Sets the case's candidate."""
+    from app.services.transaction_ops.resolution_plan import proposal_plan
+
+    facts, context = await gather(db, tenant_id, case_id, None)
+    exemplar = await verified_exemplar(db, tenant_id, context["review"]["config_id"])
+    if exemplar is None:
+        raise RefusalError("no_verified_exemplar", {"config_id": context["review"]["config_id"]})
+    lines = derive(**facts)
+    result = assess(lines=lines, **facts)
+    proposal = _proposal(
+        tenant_id,
+        facts,
+        context,
+        result,
+        lines,
+        f"Same treatment as verified correction {exemplar}, derived from this order's own source and GL.",
+    )
+    proposal["exemplar_confirmation_id"] = str(exemplar)
+    proposal["resolution_plan"] = proposal_plan(proposal, context["report"])
+    db.info["accounting_correction_candidate"] = proposal
+    return proposal

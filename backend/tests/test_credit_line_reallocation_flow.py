@@ -319,3 +319,102 @@ class TestTool:
         definition = next(t for t in build_local_tool_definitions() if t["name"] == name.replace(".", "_"))
         assert definition["input_schema"]["properties"]["lines"]["items"]["required"] == ["item_id", "amount"]
         assert set(definition["input_schema"]["required"]) == {"case_id", "credit_memo_id", "lines"}
+
+
+class TestGroup:
+    async def test_member_is_derived_by_the_server_after_a_verified_exemplar(self, order, monkeypatch):
+        async def exemplar(db, tenant_id, config_id):
+            return "11111111-1111-1111-1111-111111111111"
+
+        monkeypatch.setattr(reallocation, "verified_exemplar", exemplar)
+        db = _db()
+        p = await reallocation.prepare_group_member(db, TENANT, CASE)
+        assert db.info["accounting_correction_candidate"] is p
+        assert p["lines"] == US_FIX and p["exemplar_confirmation_id"].startswith("1111")
+        assert "derived from this order's own source" in p["reason"]
+
+    async def test_no_group_member_before_one_verified_correction(self, order, monkeypatch):
+        async def none(db, tenant_id, config_id):
+            return None
+
+        monkeypatch.setattr(reallocation, "verified_exemplar", none)
+        db = _db()
+        with pytest.raises(reallocation.RefusalError, match="no_verified_exemplar"):
+            await reallocation.prepare_group_member(db, TENANT, CASE)
+        assert "accounting_correction_candidate" not in db.info
+
+    @pytest.mark.parametrize("outcome", ["prepared", "refused", "crashed"])
+    async def test_group_preparation_uses_the_reallocation_when_no_recipe_fits(self, monkeypatch, outcome):
+        import asyncio
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.services.chat.write_confirmation_service import WriteConfirmationPayload
+        from app.services.transaction_ops import accounting_group as group
+        from tests.test_accounting_group import group_fixture
+
+        so, session = group_fixture(1)
+        member = so["accounting_group"]["members"][0]
+        selection = {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": member["case_id"], "order_reference": member["order_reference"]}],
+        }
+        db = AsyncMock()
+        db.add = MagicMock()
+        db.info = {"accounting_group_selection": selection}
+
+        @asynccontextmanager
+        async def factory():
+            child = AsyncMock()
+            child.add = MagicMock()
+            child.info = {}
+            yield child
+
+        async def evidence(*args, **kwargs):
+            return {"success": True, "accounting_evidence": {}}
+
+        async def derive(child_db, tenant_id, case_id):
+            if outcome == "refused":
+                raise reallocation.RefusalError("no_verified_exemplar")
+            if outcome == "crashed":
+                raise RuntimeError("provider timeout")
+            child_db.info["accounting_correction_candidate"] = {"case_id": case_id}
+
+        async def candidate(**kwargs):
+            if not kwargs["db"].info.get("accounting_correction_candidate"):
+                return None
+            return WriteConfirmationPayload(**member["card"]), "test"
+
+        monkeypatch.setattr(group, "async_session_factory", factory)
+        monkeypatch.setattr(group, "set_tenant_context", AsyncMock())
+        monkeypatch.setattr(group, "log_event", AsyncMock())
+        monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
+        monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
+        monkeypatch.setattr(reallocation, "prepare_group_member", derive)
+        monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+        result = await asyncio.wait_for(
+            group.prepare_group_confirmation(
+                db=db,
+                tenant_id=session.tenant_id,
+                actor_id=session.user_id,
+                session_id=str(session.id),
+                correlation_id="t",
+                tools=[],
+                policy=None,
+            ),
+            5,
+        )
+        skipped = [
+            c.kwargs
+            for c in group.log_event.await_args_list
+            if c.kwargs.get("action") == "accounting_group.case.skipped"
+        ]
+        if outcome == "prepared":
+            card, _ = result
+            assert card.accounting_group["members"][0].get("card") and not skipped
+        else:
+            reason = skipped[0]["payload"]["reason"]
+            expected = "no_verified_exemplar" if outcome == "refused" else "error:RuntimeError"
+            assert f"Existing-credit reallocation not prepared: {expected}" in reason
+            assert "Preparation needs review" not in reason

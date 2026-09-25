@@ -27,4 +27,6 @@ Use this when the gross amount and the refunds reconcile but net and tax do not,
    The card shows the exact amounts, so do not restate them.
 7. **Report the outcome from the server.** After approval, the server re-reads the credit's saved lines and GL and rechecks the order. Report the correction as verified only when the server says so. Proposed, approved, executed and verified are separate states.
 
+For a group, correct one case this way first and let it be approved and verified. Preparing corrections for the issue group (`transaction_ops_accounting_group`) then derives the same treatment for every member from that member's own figures. The server checks each member the same way, and members that do not fit stay listed with their refusal code. The first correction for a configuration is never a group.
+
 Do not use this for amounts that do not reconcile in gross, missing refunds, or tax charged in error on an unpaid invoice. Those need their own treatment.

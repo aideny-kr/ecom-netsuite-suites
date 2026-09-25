@@ -185,6 +185,20 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                     collected = evidence.get("accounting_evidence") or {}
                     routes = collected.get("investigation_routes", [])
                     investigation_evidence = summarize(collected)
+                    reallocation_refusal = None
+                    if evidence.get("success") and not child_db.info.get("accounting_correction_candidate"):
+                        # No preset recipe fits: an existing credit reallocation, derived by the
+                        # server from this member's own figures, once one has been verified.
+                        from app.services.transaction_ops import credit_line_reallocation
+
+                        try:
+                            await credit_line_reallocation.prepare_group_member(child_db, tenant_id, member["case_id"])
+                            timing["reallocation_ms"] = elapsed()
+                        except credit_line_reallocation.RefusalError as exc:
+                            reallocation_refusal = exc.code
+                        except Exception as exc:  # a failed attempt must not discard the member's evidence
+                            child_db.info.pop("accounting_correction_candidate", None)
+                            reallocation_refusal = f"error:{type(exc).__name__}"
                     prepared = (
                         await candidate_confirmation(
                             db=child_db,
@@ -214,6 +228,8 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         if collected.get("resolution_intents")
                         else "No validated correction is ready. Continue investigation using the recorded evidence."
                     )
+                    if reallocation_refusal and reallocation_refusal not in {"no_difference", "gross_not_reconciled"}:
+                        reason += f" Existing-credit reallocation not prepared: {reallocation_refusal}."
             except Exception as exc:
                 await child_db.rollback()
                 await set_tenant_context(child_db, str(tenant_id))
