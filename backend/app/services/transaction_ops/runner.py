@@ -950,7 +950,10 @@ async def run_investigation(
                         )
                         partial_saved = True
 
-                if settlement or mapping.action_mode != "detect_only":
+                if settlement or (
+                    mapping.action_mode != "detect_only"
+                    and report["comparison"]["recommended_action"] not in {"human_review", "gather_evidence"}
+                ):
                     await preserve_order_evidence()
                 refunds = {}
                 try:
