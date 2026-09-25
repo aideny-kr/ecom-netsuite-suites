@@ -15,7 +15,7 @@ from app.models.audit import AuditEvent
 from app.models.transaction_netsuite_dependency import TransactionNetSuiteDependency
 from app.models.transaction_ops import TransactionCase, TransactionCaseObservation, TransactionFinding
 from app.schemas.transaction_runs import FindingReport
-from app.services.transaction_ops.case_service import _cleared, observation_time
+from app.services.transaction_ops.case_service import _cleared, case_scope, observation_time
 from app.services.transaction_ops.dependency_index import observed_dependencies
 from app.services.transaction_ops.netsuite_reader import _account
 from app.services.transaction_ops.source_eligibility import excluded_report
@@ -31,11 +31,7 @@ def eligible(reports, now):
 async def persist(db, tenant_id, run, reports, *, now):
     from app.services.transaction_ops.state_service import business_digest
 
-    scope = {
-        key: run.config_snapshot.get(key)
-        for key in ("source_connection_id", "source_step_id", "netsuite_account_id", "subsidiary_id", "record_type")
-    }
-    scope["netsuite_account_id"] = _account(scope["netsuite_account_id"])
+    scope = case_scope(run)
     prepared = {}
     for raw in reports:
         request = FindingReport(order_reference=raw["order_reference"], report_json=raw)

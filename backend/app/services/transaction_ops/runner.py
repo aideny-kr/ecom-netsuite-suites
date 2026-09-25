@@ -10,10 +10,6 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import exists, select
-
-from app.models.feature_flag import TenantFeatureFlag
-from app.models.tenant import Tenant
 from app.schemas.transaction_ops import TransactionLookup, TransactionSnapshot
 from app.schemas.transaction_runs import ProgressUpdate, _bounded_json
 from app.services.transaction_ops import state_service
@@ -33,15 +29,7 @@ from app.services.transaction_ops.source_reader import SourceReadError
 
 
 async def enabled(db, tenant_id):
-    flags = [
-        exists().where(
-            TenantFeatureFlag.tenant_id == tenant_id,
-            TenantFeatureFlag.flag_key == key,
-            TenantFeatureFlag.enabled.is_(True),
-        )
-        for key in ("celigo", "reconciliation")
-    ]
-    return bool(await db.scalar(select(exists().where(Tenant.id == tenant_id, Tenant.is_active.is_(True), *flags))))
+    return await state_service.enabled_for_run(db, tenant_id)
 
 
 class ScanChangedError(ValueError):
@@ -487,6 +475,39 @@ async def run_investigation(
         reason = "budget" if clock() >= deadline_at else "error"
         return await finish(reason)
 
+    async def finish_stalled(**details):
+        # This is also called from exception handlers: a failed buffer fence
+        # must not escape cleanup merely because another error came first.
+        try:
+            await flush_findings()
+            progress.update(details)
+            await save()
+            return await finish("stall")
+        except state_service.StateError as error:
+            if error.code not in {"batch_disabled", "run_lease_lost"}:
+                raise
+            await db.rollback()
+            discard_findings()
+            if error.code == "run_lease_lost":
+                return await finish_lost_lease()
+        return await finish("stall")
+
+    async def finish_lost_lease():
+        if db is not None:
+            await db.rollback()
+        discard_findings()
+        if clock() >= deadline_at:
+            try:
+                current = await state.get_run(db, tenant_id, run_id, lock=True)
+                if current.status == "running" and current.lease_token == token:
+                    return await finish("budget")
+            except state_service.StateError as error:
+                if error.code != "run_lease_lost":
+                    raise
+        if db is not None:
+            await db.rollback()  # Never leave a rejected owner's row lock open.
+        return {"run_id": str(run_id), "status": "yielded", "termination_reason": "stall"}
+
     async def reserve(calls, orders=0, *, hold=False):
         await flush_findings()
         with timing.measure("enablement"):
@@ -856,7 +877,6 @@ async def run_investigation(
                 and _order_mirror is None
                 and snapshot_floor is not None
                 and staged is not None
-                and progress.get("phase") == "orders"
                 and not settlement
             )
             if chunk_path and reference not in staged_source:
@@ -875,16 +895,21 @@ async def run_investigation(
                     for ref in refs:
                         if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
                             return await finish("stall")
-                        with timing.measure("source_snapshot"):
-                            observed = await source_snapshot.load(
-                                db,
-                                tenant_id,
-                                direct_source["source_connection_id"],
-                                ref,
-                                since=snapshot_floor,
-                                now=clock(),
-                                minimum_version=_time(progress.get("pending_source_versions", {}).get(ref)),
-                            )
+                        observed = None
+                        # Later phases still obtain fresh source evidence. The
+                        # staging boundary changes ordering, never their reuse
+                        # policy. Only orders may reuse earlier cycle evidence.
+                        if progress.get("phase") == "orders":
+                            with timing.measure("source_snapshot"):
+                                observed = await source_snapshot.load(
+                                    db,
+                                    tenant_id,
+                                    direct_source["source_connection_id"],
+                                    ref,
+                                    since=snapshot_floor,
+                                    now=clock(),
+                                    minimum_version=_time(progress.get("pending_source_versions", {}).get(ref)),
+                                )
                         reused = observed is not None
                         if not reused:
                             if not await reserve(2):
@@ -910,7 +935,8 @@ async def run_investigation(
                     progress["source_staged_groups"] = progress.get("source_staged_groups", 0) + 1
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
             can_validate = snapshot_floor is not None
-            can_reuse = can_validate and progress.get("phase") == "orders"
+            prepaid = staged_source.pop(reference, None)
+            can_reuse = can_validate and (progress.get("phase") == "orders" or prepaid)
             source = None
             if can_reuse:
                 with timing.measure("source_snapshot"):
@@ -919,12 +945,11 @@ async def run_investigation(
                         tenant_id,
                         direct_source["source_connection_id"],
                         reference,
-                        since=snapshot_floor,
+                        since=max(snapshot_floor, _time(prepaid[1])) if prepaid else snapshot_floor,
                         now=clock(),
                         minimum_version=_time(progress.get("pending_source_versions", {}).get(reference)),
                     )
             source_reused = source is not None
-            prepaid = staged_source.pop(reference, None)
             if prepaid and source is not None:
                 # A freshly staged detail still permits the existing proposal
                 # preflight. A replaced snapshot is only cached evidence.
@@ -934,7 +959,8 @@ async def run_investigation(
             ):
                 return await finish("budget")
             if source is not None:
-                progress["source_snapshot_hits"] = progress.get("source_snapshot_hits", 0) + 1
+                counter = "source_staged_hits" if prepaid and not source_reused else "source_snapshot_hits"
+                progress[counter] = progress.get(counter, 0) + 1
             else:
                 validating_reader = source_reader
                 if can_validate and _source_reader is None:
@@ -968,6 +994,7 @@ async def run_investigation(
                     and progress.get("phase") != "destination"
                     and reference in progress.get("unscoped_replica_refs", [])
                 ):
+                    await flush_findings()
                     progress["outside_scope"] = progress.get("outside_scope", 0) + 1
                     progress["pending_refs"] = progress["pending_refs"][1:]
                     await save()
@@ -1273,13 +1300,9 @@ async def run_investigation(
     except FeatureRevokedError:
         return await finish("stall")
     except SourceScopeError:
-        progress["reason"] = "source_subsidiary_unproven"
-        await save()
-        return await finish("stall")
+        return await finish_stalled(reason="source_subsidiary_unproven")
     except ScanChangedError:
-        progress["restart_scan"] = True
-        await save()
-        return await finish("stall")
+        return await finish_stalled(restart_scan=True)
     except TimeoutError:
         return await finish_after_failure()
     except state_service.StateError as exc:
@@ -1288,18 +1311,7 @@ async def run_investigation(
             discard_findings()
             return await finish("stall")
         if exc.code == "run_lease_lost":
-            if clock() >= deadline_at:
-                try:
-                    # A progress write can meet the deadline before the next
-                    # budget reservation. Keep this row lock through finish:
-                    # its idempotent terminal-row path does not check ownership.
-                    current = await state.get_run(db, tenant_id, run_id, lock=True)
-                    if current.status == "running" and current.lease_token == token:
-                        return await finish("budget")
-                except state_service.StateError as finish_exc:
-                    if finish_exc.code != "run_lease_lost":
-                        raise
-            return {"run_id": str(run_id), "status": "yielded", "termination_reason": "stall"}
+            return await finish_lost_lease()
         raise
     except Exception:
         # Provider helpers use safe error codes, but unexpected library/DB

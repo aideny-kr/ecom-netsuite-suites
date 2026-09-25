@@ -123,7 +123,9 @@ async def test_failed_batch_leaves_no_finding_or_cursor_and_can_retry(db, batch_
     assert len(await publish(db, setup)) == 3
 
 
-@pytest.mark.parametrize("failure", ["noncontiguous", "counter", "duplicate", "lease", "config", "feature", "tenant"])
+@pytest.mark.parametrize(
+    "failure", ["noncontiguous", "counter", "duplicate", "lease", "config", "feature", "tenant", "inactive"]
+)
 async def test_invalid_or_revoked_batch_never_advances(db, batch_setup, failure):
     actor, config, run, token, refs, reports = batch_setup
     options = {}
@@ -147,6 +149,10 @@ async def test_invalid_or_revoked_batch_never_advances(db, batch_setup, failure)
             )
             .values(enabled=False)
         )
+    elif failure == "inactive":
+        from app.models.tenant import Tenant
+
+        await db.execute(update(Tenant).where(Tenant.id == actor.tenant_id).values(is_active=False))
     else:
         from types import SimpleNamespace
 
@@ -154,7 +160,7 @@ async def test_invalid_or_revoked_batch_never_advances(db, batch_setup, failure)
     with pytest.raises((ValueError, state.StateError)):
         await publish(db, batch_setup, **options)
     assert await count(db, actor.tenant_id, TransactionFinding) == 0
-    assert run.progress_json["pending_refs"] == refs
+    assert (await state.get_run(db, actor.tenant_id, run.id)).progress_json["pending_refs"] == refs
 
 
 async def test_batch_reopens_cases_and_older_evidence_does_not_replace_newer(db, batch_setup):
@@ -203,11 +209,28 @@ async def test_batch_reopens_cases_and_older_evidence_does_not_replace_newer(db,
 
 
 async def test_unsupported_lifecycle_uses_existing_writer(db, batch_setup, monkeypatch):
+    from tests.test_transaction_cases import report as case_report
+
+    actor, _, run, token, refs, reports = batch_setup
+    await publish(db, batch_setup)
+    await state.update_progress(
+        db,
+        actor.tenant_id,
+        run.id,
+        ProgressUpdate(progress_json={"pending_refs": refs, "processed": 0}),
+        lease_token=token,
+    )
+    mixed = deepcopy(reports)
+    mixed[0] = {**case_report("matched", datetime.now(timezone.utc)), "order_reference": refs[0]}
     spy = AsyncMock(wraps=state._record_finding)
     monkeypatch.setattr(state, "_record_finding", spy)
-    monkeypatch.setattr(finding_batch, "eligible", lambda *args: False)
-    await publish(db, batch_setup)
+    await publish(db, batch_setup, reports=mixed)
     assert spy.await_count == 3
+    cases = {
+        c.order_reference: c.status
+        for c in await db.scalars(select(TransactionCase).where(TransactionCase.tenant_id == actor.tenant_id))
+    }
+    assert cases == {refs[0]: "reconciled", refs[1]: "open", refs[2]: "open"}
 
 
 async def test_batch_reduces_database_roundtrips_for_complete_case_history(db, batch_setup, record_property):

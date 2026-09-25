@@ -902,23 +902,7 @@ async def record_finding_batch(db, tenant_id, run_id, reports, *, lease_token, c
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
     config = await get_config(db, tenant_id, run.config_id)
-    active = await db.scalar(
-        select(
-            exists().where(
-                Tenant.id == tenant_id,
-                Tenant.is_active.is_(True),
-                *(
-                    exists().where(
-                        TenantFeatureFlag.tenant_id == tenant_id,
-                        TenantFeatureFlag.flag_key == key,
-                        TenantFeatureFlag.enabled.is_(True),
-                    )
-                    for key in ("celigo", "reconciliation")
-                ),
-            )
-        )
-    )
-    if not config.enabled or not active:
+    if not config.enabled or not await enabled_for_run(db, tenant_id):
         raise StateError("batch_disabled")
     if run.origin == "recovery":
         raise ValueError("recovery_cannot_batch_findings")
@@ -944,6 +928,28 @@ async def record_finding_batch(db, tenant_id, run_id, reports, *, lease_token, c
     run.progress_json = checkpoint.progress_json
     await _commit(db, tenant_id)
     return rows
+
+
+async def enabled_for_run(db, tenant_id):
+    """Uncached enablement shared by provider reservations and chunk commits."""
+    return bool(
+        await db.scalar(
+            select(
+                exists().where(
+                    Tenant.id == tenant_id,
+                    Tenant.is_active.is_(True),
+                    *(
+                        exists().where(
+                            TenantFeatureFlag.tenant_id == tenant_id,
+                            TenantFeatureFlag.flag_key == key,
+                            TenantFeatureFlag.enabled.is_(True),
+                        )
+                        for key in ("celigo", "reconciliation")
+                    ),
+                )
+            )
+        )
+    )
 
 
 async def _record_finding(db, tenant_id, run, order_reference, report_json, *, now, final):
