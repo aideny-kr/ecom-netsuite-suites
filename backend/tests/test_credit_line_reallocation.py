@@ -24,6 +24,9 @@ ACCOUNT_TYPES = {
     "846": "OthCurrLiab",
     "906": "OthCurrLiab",
     "999": "OthCurrLiab",
+    "500": "COGS",
+    "130": "OthCurrAsset",
+    "2100": "LongTermLiab",
 }
 
 
@@ -111,8 +114,8 @@ def _us():
         "profile": {"subsidiary_id": "1", "tax_accounts": ["210", "866", "905"], "tax_item_accounts": {"5005": "210"}},
         "account_types": ACCOUNT_TYPES,
         "items": {
-            "1603": {"id": "1603", "isInactive": False, "incomeAccount": {"id": "783"}},
-            "5005": {"id": "5005", "isInactive": False, "incomeAccount": {"id": "210"}},
+            "1603": {"id": "1603", "isInactive": False, "incomeAccount": {"id": "783"}, "itemType": "NonInvtPart"},
+            "5005": {"id": "5005", "isInactive": False, "incomeAccount": {"id": "210"}, "itemType": "NonInvtPart"},
         },
         "period": {"id": "171", "closed": False, "arLocked": False, "allLocked": False},
         "subsidiary_id": "1",
@@ -198,8 +201,8 @@ def _bv():
         },
         "account_types": ACCOUNT_TYPES,
         "items": {
-            "1603": {"id": "1603", "isInactive": False, "incomeAccount": {"id": "783"}},
-            "4699": {"id": "4699", "isInactive": False, "incomeAccount": {"id": "846"}},
+            "1603": {"id": "1603", "isInactive": False, "incomeAccount": {"id": "783"}, "itemType": "NonInvtPart"},
+            "4699": {"id": "4699", "isInactive": False, "incomeAccount": {"id": "846"}, "itemType": "NonInvtPart"},
         },
         "period": {"id": "171", "closed": False, "arLocked": False, "allLocked": False},
         "subsidiary_id": "2",
@@ -289,7 +292,12 @@ class TestRefuses:
 
     def test_item_not_configured_for_the_subsidiary(self):
         facts = _us()
-        facts["items"]["4699"] = {"id": "4699", "isInactive": False, "incomeAccount": {"id": "846"}}
+        facts["items"]["4699"] = {
+            "id": "4699",
+            "isInactive": False,
+            "incomeAccount": {"id": "846"},
+            "itemType": "NonInvtPart",
+        }
         assert _refused(facts, [{"line": 1, "item_id": "4699", "amount": "2.80"}]) == "item_not_allowed"
 
     def test_tax_item_whose_account_is_not_the_configured_one(self):
@@ -382,7 +390,12 @@ class TestReviewRoundOne:
     def test_tax_must_go_to_an_account_the_invoice_actually_credited(self):
         facts = _bv()
         facts["profile"]["tax_item_accounts"] = {"4699": "846", "9999": "999"}
-        facts["items"]["9999"] = {"id": "9999", "isInactive": False, "incomeAccount": {"id": "999"}}
+        facts["items"]["9999"] = {
+            "id": "9999",
+            "isInactive": False,
+            "incomeAccount": {"id": "999"},
+            "itemType": "NonInvtPart",
+        }
         lines = [{"line": 1, "item_id": "1603", "amount": "185.95"}, {"item_id": "9999", "amount": "39.05"}]
         assert _refused(facts, lines) == "tax_account_not_on_invoice"
 
@@ -401,7 +414,12 @@ class TestReviewRoundOne:
             )
         ]
         facts["profile"]["tax_item_accounts"] = {"4699": "846", "4700": "906"}
-        facts["items"]["4700"] = {"id": "4700", "isInactive": False, "incomeAccount": {"id": "906"}}
+        facts["items"]["4700"] = {
+            "id": "4700",
+            "isInactive": False,
+            "incomeAccount": {"id": "906"},
+            "itemType": "NonInvtPart",
+        }
         assert _refused(facts, BV_FIX) == "tax_reversal_exceeds_posted"
         ok = [{"line": 1, "item_id": "1603", "amount": "185.95"}, {"item_id": "4700", "amount": "39.05"}]
         reallocation.assess(lines=ok, **facts)
@@ -460,7 +478,12 @@ class TestReviewRoundTwo:
         credit["line_evidence"]["lines"].append(vat_line)
         facts["credit_gl"] = _gl(("119", "credit", "235"), ("783", "debit", "225"), ("846", "debit", "10"))
         facts["profile"]["tax_accounts"] = ["846"]
-        facts["items"]["7777"] = {"id": "7777", "isInactive": False, "incomeAccount": {"id": "846"}}
+        facts["items"]["7777"] = {
+            "id": "7777",
+            "isInactive": False,
+            "incomeAccount": {"id": "846"},
+            "itemType": "NonInvtPart",
+        }
         facts["source"] = {
             **facts["source"],
             "total": "2584.0",
@@ -546,3 +569,43 @@ class TestReviewRoundThree:
     def test_a_credit_with_its_own_location_keeps_it(self):
         result = reallocation.assess(lines=US_FIX, **_us())
         assert "location" not in result["proposed_fields"] and "location" not in result["expected_after"]
+
+
+class TestReviewRoundFour:
+    """Findings of the 2026-09-25 T2 gate round 4 (wf_667216d4-61f): allowlists, not denylists."""
+
+    @pytest.mark.parametrize("account", ["2100", "500", "130"])  # long-term liability, COGS, inventory asset
+    def test_only_income_accounts_count_as_net(self, account):
+        facts = _us()
+        facts["credit_gl"] = _gl(
+            ("119", "credit", "2.8"), ("783", "debit", "2.8"), (account, "debit", "1"), (account, "credit", "1")
+        )
+        assert _refused(facts, US_FIX) == "account_not_supported"
+
+    def test_an_inventory_item_on_the_credit_is_unsupported(self):
+        facts = _us()
+        facts["items"]["1603"]["itemType"] = "InvtPart"
+        assert _refused(facts, US_FIX) == "credit_lines_unsupported"
+
+    def test_a_tax_refund_item_must_be_non_inventory_too(self):
+        facts = _us()
+        facts["items"]["5005"]["itemType"] = "InvtPart"
+        assert _refused(facts, US_FIX) == "item_not_allowed"
+
+
+def test_a_profile_is_only_used_for_its_own_account_and_subsidiary():
+    from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile
+
+    profile = RefundAdjustmentProfile.model_validate(
+        {
+            "schema_version": 1,
+            "account_id": "6738075",
+            "subsidiary_id": "2",
+            "tax_item_accounts": {"4699": "846"},
+            "tax_reversal_reason_ids": ["102"],
+            "correction_location_id": "81",
+        }
+    )
+    assert reallocation.profile_matches_scope(profile, {"netsuite_account_id": "6738075", "subsidiary_id": "2"})
+    assert not reallocation.profile_matches_scope(profile, {"netsuite_account_id": "6738075_SB1", "subsidiary_id": "2"})
+    assert not reallocation.profile_matches_scope(profile, {"netsuite_account_id": "6738075", "subsidiary_id": "5"})

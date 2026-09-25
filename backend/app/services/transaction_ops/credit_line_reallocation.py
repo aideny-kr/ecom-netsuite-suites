@@ -81,9 +81,11 @@ def _gl_rows(gl):
     return rows
 
 
-# A tax account is a liability; any liability the subsidiary has not declared as a tax account could
-# be tax the check cannot see, so it refuses rather than counting it as net.
-LIABILITY_TYPES = frozenset({"OthCurrLiab"})
+# Allowlists, not denylists. A GL row counts as net only on an income account; any other account
+# the subsidiary has not declared (a liability that may be tax, inventory/COGS, anything else) is a
+# posting this check cannot account for, so it refuses. Only non-inventory items may be moved.
+NET_ACCOUNT_TYPES = frozenset({"Income", "OthIncome"})
+LINE_ITEM_TYPES = frozenset({"NonInvtPart", "OthCharge", "Service"})
 
 
 def _posted(document, gl, taxed, sign, account_types):
@@ -100,12 +102,16 @@ def _posted(document, gl, taxed, sign, account_types):
             gross += (debit - credit) * sign
         elif account in taxed:
             by_account[account] = by_account.get(account, Decimal(0)) + (credit - debit) * sign
-        else:
+        elif debit or credit:
             kind = (account_types or {}).get(account)
             if kind is None or kind == "AcctRec":
                 raise RefusalError("evidence_incomplete", {"reason": "account_type_unknown", "account": account})
-            if kind in LIABILITY_TYPES:
+            if kind == "OthCurrLiab":
                 raise RefusalError("tax_account_not_configured", {"account": account, "record_id": document.get("id")})
+            if kind not in NET_ACCOUNT_TYPES:
+                raise RefusalError(
+                    "account_not_supported", {"account": account, "type": kind, "record_id": document.get("id")}
+                )
     if gross != _dec(document.get("total")):
         raise RefusalError(
             "evidence_incomplete", {"reason": "gl_total_differs_from_header", "record_id": document.get("id")}
@@ -162,6 +168,8 @@ def _facts(
     credit_lines = credit["line_evidence"]["lines"]
     if any(not _ref(line, "item") for line in credit_lines):
         raise RefusalError("credit_lines_unsupported", {"reason": "line_without_item"})
+    if any((items.get(_ref(line, "item")) or {}).get("itemType") not in LINE_ITEM_TYPES for line in credit_lines):
+        raise RefusalError("credit_lines_unsupported", {"reason": "inventory_or_unknown_item_type"})
     if sum((_dec(line.get("amount")) or Decimal(0) for line in credit_lines), Decimal(0)) != _dec(credit.get("total")):
         raise RefusalError("credit_has_non_item_charges")
     if _dec(credit.get("unapplied")) != 0 or _dec(credit.get("applied")) != _dec(credit.get("total")):
@@ -262,6 +270,8 @@ def _lines(lines, credit, profile, items, taxed, precision):
         item = items.get(item_id) or {}
         if item.get("isInactive") is not False:
             raise RefusalError("item_inactive", {"item_id": item_id})
+        if item.get("itemType") not in LINE_ITEM_TYPES:
+            raise RefusalError("item_not_allowed", {"item_id": item_id, "reason": "item_type"})
         account = _ref(item, "incomeAccount")
         configured = (profile.get("tax_item_accounts") or {}).get(item_id)
         if configured is not None and account != str(configured):
@@ -458,6 +468,19 @@ async def _suiteql(reader, query, limit):
     return rows
 
 
+def profile_matches_scope(profile, scope):
+    """As refund_adjustments.verified_tax_adjustments: a profile describes one NetSuite account and
+    one subsidiary, and only that case scope may use it."""
+    from app.services.transaction_ops.netsuite_reader import _account
+
+    try:
+        return profile.account_id == _account(scope["netsuite_account_id"]) and str(profile.subsidiary_id) == str(
+            scope["subsidiary_id"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 async def gather(db, tenant_id, case_id, credit_memo_id):
     """Fresh, complete evidence for one credit of one case: ``(facts, context)``.
 
@@ -498,6 +521,8 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
         profile = RefundAdjustmentProfile.model_validate(((config and config.mapping_json) or {})["refund_adjustments"])
     except (KeyError, TypeError, ValidationError):
         raise RefusalError("tax_refund_items_not_configured", {"subsidiary_id": str(scope["subsidiary_id"])}) from None
+    if not profile_matches_scope(profile, scope):
+        raise RefusalError("configuration_unavailable", {"reason": "profile_account_differs_from_case"})
     source = _json(await refresh_source(db, tenant_id, scope, case.order_reference, include_accounting_detail=True))
     evidence = _json(await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json))
     sections = evidence.get("sections") or {}
@@ -561,10 +586,13 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
             str(r["id"]): {
                 "id": str(r["id"]),
                 "isInactive": r.get("isinactive") != "F",
+                "itemType": r.get("itemtype"),
                 "incomeAccount": {"id": str(r["incomeaccount"])} if r.get("incomeaccount") is not None else None,
             }
             for r in await _suiteql(
-                reader, f"SELECT id, isinactive, incomeaccount FROM item WHERE id IN ({','.join(item_ids)})", 50
+                reader,
+                f"SELECT id, isinactive, incomeaccount, itemtype FROM item WHERE id IN ({','.join(item_ids)})",
+                50,
             )
         }
         account_types = {
@@ -619,7 +647,18 @@ def _identity(facts, context):
         {
             "credit": {
                 k: credit.get(k)
-                for k in ("id", "entity", "account", "subsidiary", "currency", "postingPeriod", "tranDate", "total")
+                for k in (
+                    "id",
+                    "entity",
+                    "account",
+                    "subsidiary",
+                    "currency",
+                    "postingPeriod",
+                    "tranDate",
+                    "total",
+                    "department",
+                    "class",
+                )
             },
             "applications": credit.get("application_evidence"),
             "invoices": [(d, g) for d, g in facts["invoices"]],
@@ -646,6 +685,7 @@ def _preimage(facts, context):
             ],
             "credit_gl": facts["credit_gl"],
             "items": facts["items"],
+            "location": facts["credit"].get("location"),
         }
     )
 
@@ -833,10 +873,17 @@ def _lines_match(credit, p):
     lines = (credit.get("line_evidence") or {}).get("lines") or []
     if any(_dec(line.get("quantity")) != 1 for line in lines):
         return False
-    saved = sorted((_ref(line, "item"), _dec(line.get("amount"))) for line in lines)
-    approved = sorted(
-        (entry["item"]["id"], Decimal(entry["amount"])) for entry in p["proposed_fields"]["item"]["items"]
-    )
+    approved_entries = p["proposed_fields"]["item"]["items"]
+    # The tax fields the approval set are compared too: same item and amount under another tax code
+    # is not the approved save.
+    tax_keys = [k for k in ("taxCode", "isTaxable") if any(k in entry for entry in approved_entries)]
+
+    def key(line, item, amount):
+        tax = tuple((line.get(k) or {}).get("id") if isinstance(line.get(k), dict) else line.get(k) for k in tax_keys)
+        return (item, amount, tax)
+
+    saved = sorted(key(line, _ref(line, "item"), _dec(line.get("amount"))) for line in lines)
+    approved = sorted(key(entry, entry["item"]["id"], Decimal(entry["amount"])) for entry in approved_entries)
     return saved == approved
 
 
@@ -857,8 +904,11 @@ async def verify_after(db, tenant_id, p, receipt=None):
             raise ValueError("credit_reallocation_lines_differ")
         if not _ledger_matches(facts["credit_gl"], p["expected_ledger"]):
             raise ValueError("credit_reallocation_ledger_differs")
-        if "location" in p["expected_after"] and _ref(credit, "location") != p["expected_after"]["location"]:
+        expected_location = p["expected_after"].get("location") or _ref(p["support"]["credit"], "location")
+        if _ref(credit, "location") != expected_location:
             raise ValueError("credit_reallocation_location_differs")
+        if (_dec(credit.get("taxTotal")) or Decimal(0)) != 0:
+            raise ValueError("credit_reallocation_tax_engine_posted")
         ledger = {
             side: {a: str(v) for a, v in accounts.items()} for side, accounts in _ledger(facts["credit_gl"]).items()
         }

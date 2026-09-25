@@ -117,6 +117,8 @@ def _written(facts, p):
             "quantity": "1.0",
             "rate": entry["rate"],
             "amount": entry["amount"],
+            # The record API reads back the tax fields the save set (SB1, 2026-09-25).
+            **{k: entry[k] for k in ("taxCode", "isTaxable") if k in entry},
         }
         for entry in p["proposed_fields"]["item"]["items"]
     ]
@@ -601,3 +603,35 @@ class TestReviewRoundThreeFlow:
         assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "verified"
         written["credit"].pop("location")
         assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "needs_review"
+
+
+class TestReviewRoundFourFlow:
+    """Findings of the 2026-09-25 T2 gate round 4 (wf_667216d4-61f)."""
+
+    @pytest.mark.parametrize(
+        "change", [{"location": {"id": "46"}}, {"department": {"id": "18"}}, {"class": {"id": "3"}}]
+    )
+    async def test_readback_refuses_a_changed_dimension(self, order, change):
+        _, p = await _proposed(order)
+        written = _written(order["facts"], p)
+        written["credit"].update(change)
+        order["facts"] = written
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "needs_review"
+
+    async def test_readback_refuses_tax_engine_tax_or_another_tax_code(self, order):
+        order["facts"] = _bv()
+        order["context"] = _context(order["facts"])
+        _, p = await _proposed(order, BV_FIX)
+        written = _written(order["facts"], p)
+        for line in written["credit"]["line_evidence"]["lines"]:
+            line["taxCode"] = {"id": "4059"}
+        order["facts"] = written
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "verified"
+        written["credit"]["line_evidence"]["lines"][1]["taxCode"] = {"id": "9999"}
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "needs_review"
+        written["credit"]["line_evidence"]["lines"][1]["taxCode"] = {"id": "4059"}
+        written["credit"]["taxTotal"] = "1.00"
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "needs_review"
+
+    def test_refusal_figures_are_marked_for_correction_only(self):
+        assert "not show" in tools._REALLOCATION_GUIDANCE["outcome_does_not_match_source"].lower()

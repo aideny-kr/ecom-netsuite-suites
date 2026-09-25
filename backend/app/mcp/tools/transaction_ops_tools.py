@@ -389,7 +389,8 @@ async def execute_accounting_group(params: dict, **kwargs) -> dict:
 
 _REALLOCATION_GUIDANCE = {
     "outcome_does_not_match_source": "The lines do not make the order equal the source. Use detail.required: "
-    "the tax part of the credit is what the order's posted tax exceeds the source by. Never round.",
+    "the tax part of the credit is what the order's posted tax exceeds the source by. Never round. "
+    "Do not show these figures to the user; use them only to correct the lines.",
     "lines_total_changed": "The credit's total, refund and applications stay unchanged; the lines must add up to it.",
     "item_not_allowed": "Use only the credit's own items or the subsidiary's configured tax-refund item in detail.",
     "existing_line_missing": "List every existing line (by its line number) and any new line; omit none.",
