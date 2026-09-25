@@ -536,6 +536,24 @@ async def run_investigation(
             {"source_connection_id": UUID(config["source_connection_id"])} if config.get("source_connection_id") else {}
         )
         mapping = TransactionMapping.model_validate(config["mapping_json"])
+        from app.services.transaction_ops.staged_netsuite import StagedNetSuite
+
+        staged = (
+            StagedNetSuite(
+                db,
+                tenant_id,
+                run,
+                config,
+                mapping,
+                progress,
+                clock=clock,
+                reserve=reserve,
+                read=metered_read,
+                checkpoint=save,
+            )
+            if not settlement and _target_reader is None
+            else None
+        )
         snapshot_floor = source_snapshot.scan_floor(run, clock()) if direct_source and not settlement else None
         if mapping.line_identity_mode == "inventory_units":
             snapshot_floor = None  # Create-input projections are deliberately not shared.
@@ -857,23 +875,27 @@ async def run_investigation(
                 progress["pending_refs"] = progress["pending_refs"][1:]
                 await save()
                 continue
-            if not await reserve(10, hold=True):  # NETSUITE_READ_CALLS data reads plus OAuth maintenance.
-                return await finish("budget")
-            targets = await metered_read(
-                "netsuite_order",
-                lambda: target_reader(
-                    db,
-                    tenant_id,
-                    UUID(config["netsuite_connection_id"]),
-                    config["netsuite_account_id"],
-                    config["subsidiary_id"],
-                    reference,
-                    mapping.reference_field,
-                ),
-                held=10,
-                data_calls=NETSUITE_READ_CALLS,
-                retry_calls=10,
+            targets = (
+                await staged.order(reference, source_updated_at=_time(orders[0].get("updated_at"))) if staged else None
             )
+            if targets is None:
+                if not await reserve(10, hold=True):  # NETSUITE_READ_CALLS data reads plus OAuth maintenance.
+                    return await finish("budget")
+                targets = await metered_read(
+                    "netsuite_order",
+                    lambda: target_reader(
+                        db,
+                        tenant_id,
+                        UUID(config["netsuite_connection_id"]),
+                        config["netsuite_account_id"],
+                        config["subsidiary_id"],
+                        reference,
+                        mapping.reference_field,
+                    ),
+                    held=10,
+                    data_calls=NETSUITE_READ_CALLS,
+                    retry_calls=10,
+                )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
             from app.services.transaction_ops.commercial_credits import (
                 MAX_CREDIT_READS,
@@ -965,7 +987,17 @@ async def run_investigation(
                     raise
                 except Exception:
                     refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
-                if len(targets.get("orders") or []) == 1 and targets["orders"][0].get("header_complete") is True:
+                if staged and _target_refunds_reader is None:
+                    staged_refund = await staged.refund(
+                        reference, targets, source_observed_at=_time(refunds.get("source", {}).get("observed_at"))
+                    )
+                    if staged_refund is not None:
+                        refunds["target"] = staged_refund
+                if (
+                    "target" not in refunds
+                    and len(targets.get("orders") or []) == 1
+                    and targets["orders"][0].get("header_complete") is True
+                ):
                     if not await reserve(MAX_REFUND_CALLS + 3, hold=True):
                         return await finish("budget")
                     try:

@@ -329,6 +329,12 @@ class _Reader:
             "'" + order_reference.replace("'", "''") + "' ORDER BY t.id"
         )
         raw = await self.request("POST", "/query/v1/suiteql", params={"limit": 2, "offset": 0}, body={"q": query})
+        return await self.read_matches(
+            raw, order_reference=order_reference, reference_field=reference_field, subsidiary_id=subsidiary_id
+        )
+
+    async def read_matches(self, raw, *, order_reference, reference_field, subsidiary_id):
+        """Expand an exact identity collection, including locally partitioned bulk results."""
         matches, complete = _collection(raw)
         if len(matches) > 2:
             raise NetSuiteEvidenceError("identity_result_budget")
@@ -467,10 +473,14 @@ async def authenticated_reader(db, tenant_id, connection_id, account_id, *, clie
     if client is None and (transport := current_transport()) is not None:
         client = await transport.get(read_scope, _TIMEOUT)
     if client is not None:
-        yield _Reader(client, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
+        worker = _Reader(client, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
+        worker.credential_fingerprint = hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest()
+        yield worker
     else:
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as owned:
-            yield _Reader(owned, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
+            worker = _Reader(owned, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
+            worker.credential_fingerprint = hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest()
+            yield worker
 
 
 async def read_netsuite_order(

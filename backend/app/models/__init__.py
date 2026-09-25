@@ -139,3 +139,4 @@ __all__ = [
     "CeligoErrorSignature",
     "CeligoFlowError",
 ]
+from app.models.transaction_evidence_batch import TransactionEvidenceBatch  # noqa: F401
