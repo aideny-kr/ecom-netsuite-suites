@@ -937,6 +937,8 @@ async def run_investigation(
             can_validate = snapshot_floor is not None
             prepaid = staged_source.pop(reference, None)
             can_reuse = can_validate and (progress.get("phase") == "orders" or prepaid)
+            minimum_version = _time(progress.get("pending_source_versions", {}).get(reference))
+            freshly_staged = prepaid is not None and not prepaid[0]
             source = None
             if can_reuse:
                 with timing.measure("source_snapshot"):
@@ -947,8 +949,21 @@ async def run_investigation(
                         reference,
                         since=max(snapshot_floor, _time(prepaid[1])) if prepaid else snapshot_floor,
                         now=clock(),
-                        minimum_version=_time(progress.get("pending_source_versions", {}).get(reference)),
+                        minimum_version=None if freshly_staged else minimum_version,
                     )
+                if source is not None and freshly_staged and minimum_version is not None:
+                    source_version = _time(source["orders"][0]["updated_at"])
+                    # Framework's page retains microseconds while direct detail
+                    # serializes milliseconds. Only this invocation's exact
+                    # fresh read can satisfy that same-millisecond page version.
+                    # Older/replaced cache entries retain the strict comparison;
+                    # observation time and stored versions are never changed.
+                    same_fresh_read = source["read_at"] == prepaid[1]
+                    page_millisecond = minimum_version.replace(microsecond=minimum_version.microsecond // 1000 * 1000)
+                    if source_version < minimum_version and not (
+                        same_fresh_read and source_version == page_millisecond
+                    ):
+                        source = None
             source_reused = source is not None
             if prepaid and source is not None:
                 # A freshly staged detail still permits the existing proposal
