@@ -148,23 +148,28 @@ async def read_change_page(
     account = _account(account_id)
     after = after if after is not None else ([0, 0] if stream == "transaction_links" else [0])
     query = change_query(stream, subsidiary_id, reference_field, start, end, after)
-    if type(page_size) is not int or not 1 <= page_size <= 100:
+    if type(page_size) is not int or not 1 <= page_size <= 250:
         raise NetSuiteEvidenceError("invalid_dependency_change_scope")
-    async with asyncio.timeout(80):
-        async with authenticated_reader(
-            db,
-            tenant_id,
-            connection_id,
-            account,
-            client=client,
-            max_api_calls=1,
-        ) as reader:
-            body = await reader.request(
-                "POST",
-                "/query/v1/suiteql",
-                params={"limit": page_size + 1, "offset": 0},
-                body={"q": query},
-            )
+    try:
+        async with asyncio.timeout(80):
+            async with authenticated_reader(
+                db,
+                tenant_id,
+                connection_id,
+                account,
+                client=client,
+                max_api_calls=1,
+            ) as reader:
+                body = await reader.request(
+                    "POST",
+                    "/query/v1/suiteql",
+                    params={"limit": page_size + 1, "offset": 0},
+                    body={"q": query},
+                )
+    except (TimeoutError, NetSuiteEvidenceError) as exc:
+        if page_size > 20 and (isinstance(exc, TimeoutError) or str(exc) == "read_timeout"):
+            raise NetSuiteEvidenceError("dependency_change_batch_timeout") from None
+        raise
     changes, previous = [], tuple(after)
     try:
         for row in _items(body, page_size):

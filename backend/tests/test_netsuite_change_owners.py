@@ -31,9 +31,10 @@ class Reader:
         self.requests = []
         self.calls = []
         self.partial = False
+        self.limit = 201
 
     async def request(self, method, path, *, params, body):
-        assert method == "POST" and path == "/query/v1/suiteql" and params["limit"] == 201
+        assert method == "POST" and path == "/query/v1/suiteql" and params["limit"] == self.limit
         sql = body["q"]
         self.calls.append(sql)
         # Execute the actual ownership SQL against representative native tables;
@@ -245,3 +246,31 @@ async def test_combined_lookup_applies_completeness_cap_after_union():
         row["order_reference"] = "R000000002"
     with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_page_incomplete"):
         await owners(reader, ("1",), references=("R000000002",))
+
+
+async def test_bulk_graph_matches_small_batches_with_shared_and_outside_owners():
+    reader = Reader()
+    reader.records = [record(i, "SalesOrd", "3" if i == 9 else "2") for i in range(1, 11)]
+    reader.records += [record(i, "CustCred") for i in range(100, 220)]
+    reader.edges = [edge(1 + i % 10, i, "SalesOrd", "CustCred") for i in range(100, 220)]
+    reader.edges += [edge(2, 101, "SalesOrd", "CustCred")]
+    expected = set()
+    ids = [str(i) for i in range(100, 220)]
+    for offset in range(0, len(ids), 20):
+        expected.update((await owners(reader, ids[offset : offset + 20]))["order_references"])
+    old_calls = len(reader.calls)
+    reader.calls = []
+    reader.limit = 1000
+    bulk = await collect_order_candidates(reader.request, "2", "custbody_fw_order_number", ids, (), (), bulk=True)
+    assert set(bulk["order_references"]) == expected
+    assert bulk["outside_subsidiary_ids"] == ["9"]
+    assert len(reader.calls) < old_calls
+    assert bulk["inventory"] and all("amount" not in row for rows in bulk["inventory"] for row in rows)
+
+
+async def test_incomplete_bulk_graph_never_returns_partial_candidates():
+    reader = Reader()
+    reader.limit = 1000
+    reader.partial = True
+    with pytest.raises(NetSuiteEvidenceError, match="dependency_owner_page_incomplete"):
+        await collect_order_candidates(reader.request, "2", "custbody_fw_order_number", ("4",), (), (), bulk=True)

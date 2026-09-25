@@ -554,6 +554,17 @@ async def run_investigation(
             if not settlement and _target_reader is None
             else None
         )
+        from app.services.transaction_ops.dependency_staging import DependencyStaging
+
+        dependency_staging = (
+            DependencyStaging(db, tenant_id, run, config, progress, clock)
+            if db is not None
+            and _dependency_page_reader is None
+            and _dependency_owner_reader is None
+            and run.params_json.get("window_start")
+            and run.params_json.get("window_end")
+            else None
+        )
         snapshot_floor = source_snapshot.scan_floor(run, clock()) if direct_source and not settlement else None
         if mapping.line_identity_mode == "inventory_units":
             snapshot_floor = None  # Create-input projections are deliberately not shared.
@@ -693,7 +704,7 @@ async def run_investigation(
                                     _time(run.params_json["window_start"]),
                                     _time(run.params_json["window_end"]),
                                     after=after,
-                                    page_size=20,
+                                    page_size=progress.get("dependency_page_size", 250) if dependency_staging else 20,
                                 ),
                                 held=2,
                                 data_calls=1,
@@ -714,6 +725,7 @@ async def run_investigation(
                                     config["subsidiary_id"],
                                     mapping.reference_field,
                                     **options,
+                                    **({"bulk": True} if dependency_staging else {}),
                                 ),
                                 held=calls,
                                 data_calls=MAX_OWNER_CALLS,
@@ -738,6 +750,7 @@ async def run_investigation(
                             read_owners=dependency_owners,
                             indexed_owners=indexed_owners,
                             unobserved=unobserved,
+                            staging=dependency_staging,
                         )
                         progress["dependency_step_count"] = progress.get("dependency_step_count", 0) + 1
                         await save()

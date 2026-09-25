@@ -155,7 +155,7 @@ async def test_inconsistent_or_short_page_cannot_claim_complete(transport, chang
 
 
 @pytest.mark.parametrize(
-    "kwargs", [{"after": [True]}, {"after": ["1 OR 1=1"]}, {"after": [1, 2]}, {"page_size": 101}, {"page_size": True}]
+    "kwargs", [{"after": [True]}, {"after": ["1 OR 1=1"]}, {"after": [1, 2]}, {"page_size": 251}, {"page_size": True}]
 )
 async def test_invalid_page_never_reaches_provider(transport, kwargs):
     with pytest.raises(reader.NetSuiteEvidenceError, match="invalid_dependency_change_scope"):
@@ -179,3 +179,11 @@ async def test_wrong_tenant_is_rejected_before_provider_read(db, admin_user, ten
             START,
             END,
         )
+
+
+async def test_bulk_page_retains_probe_row_and_exact_cursor(transport):
+    transport.return_value = response([row(i) for i in range(1, 252)], True)
+    value = await read(page_size=250)
+    assert len(value["changes"]) == 250
+    assert value["next_cursor"] == [250] and not value["scan_complete"]
+    assert transport.call_args.kwargs["params"]["limit"] == 251
