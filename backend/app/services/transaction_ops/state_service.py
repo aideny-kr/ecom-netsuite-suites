@@ -17,6 +17,7 @@ from decimal import Decimal, localcontext
 
 from pydantic import ValidationError
 from sqlalchemy import BigInteger, and_, cast, func, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -910,22 +911,18 @@ async def record_finding(
                 }
             }
         )
-    row = (
-        await db.execute(
-            select(TransactionFinding).where(
-                TransactionFinding.tenant_id == tenant_id,
-                TransactionFinding.run_id == run_id,
-                TransactionFinding.order_reference == order_reference,
-            )
+    # The run lock serializes writers. Upsert returns the existing finding ID
+    # and refreshes its ORM state in one round trip, including partial -> final.
+    statement = insert(TransactionFinding).values(tenant_id=tenant_id, run_id=run_id, **request.model_dump())
+    row = await db.scalar(
+        statement.on_conflict_do_update(
+            index_elements=["tenant_id", "run_id", "order_reference"],
+            set_={"report_json": statement.excluded.report_json, "updated_at": func.now()},
         )
-    ).scalar_one_or_none()
-    if row is None:
-        row = TransactionFinding(tenant_id=tenant_id, run_id=run_id, **request.model_dump())
-        db.add(row)
-    else:
-        row.report_json = request.report_json
+        .returning(TransactionFinding)
+        .execution_options(populate_existing=True)
+    )
     run.lease_until = min(run.deadline_at, now + _LEASE)
-    await db.flush()
     from app.services.transaction_ops.dependency_index import record_dependencies
 
     await record_dependencies(db, tenant_id, run, row)
