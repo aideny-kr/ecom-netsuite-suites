@@ -10,6 +10,7 @@ import copy
 import re
 from datetime import datetime, timezone
 
+from app.services.transaction_ops.call_meter import observed_calls
 from app.services.transaction_ops.netsuite_reader import (
     NetSuiteEvidenceError,
     _account,
@@ -22,9 +23,27 @@ from app.services.transaction_ops.netsuite_refunds import _PARENTS, MAX_DEPTH, _
 
 MAX_ORDERS = 10
 MAX_CALLS = 32
+MAX_CONCURRENT_CALLS = 7  # Per authenticated bulk collection, not the account's other integrations.
 MAX_ROWS = 1000
 _REFERENCE = re.compile(r"R[0-9]{9}(?:-[A-Z0-9]+)?\Z")
 _FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
+
+
+async def _collect_concurrent(worker, values):
+    """At most ten bounded branches; the shared reader caps actual wire calls.
+
+    Drain every child before propagating failure/cancellation so the caller's
+    reservation cannot settle while an orphan is still spending it. Preserve
+    the original provider exception for the existing retry/fallback classifier.
+    """
+    tasks = [asyncio.create_task(worker(value)) for value in values]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 def collection(rows):
@@ -73,18 +92,21 @@ async def collect_orders(reader, refs, reference_field, subsidiary_id):
             raise NetSuiteEvidenceError("invalid_bulk_identity")
         seen.add(identifier)
         grouped[ref].append(row)
-    results = {}
-    for ref, matches in grouped.items():
+
+    async def expand(item):
+        ref, matches = item
         # Preserve the single-reader's two-match cap and incomplete lookup marker.
         raw = collection(matches[:2])
         if len(matches) > 2:
             raw.update(totalResults=len(matches), hasMore=True)
-        before = reader.calls
-        results[ref] = await reader.read_matches(
-            raw, order_reference=ref, reference_field=reference_field, subsidiary_id=subsidiary_id
-        )
-        results[ref]["api_calls"] = reader.calls - before
-    return results
+        with observed_calls() as calls:
+            result = await reader.read_matches(
+                raw, order_reference=ref, reference_field=reference_field, subsidiary_id=subsidiary_id
+            )
+        result["api_calls"] = calls.calls
+        return ref, result
+
+    return dict(await _collect_concurrent(expand, grouped.items()))
 
 
 class RefundGraphBatch:
@@ -173,7 +195,14 @@ async def read_orders(db, tenant_id, connection_id, account_id, subsidiary_id, r
     account = _account(account_id)
     try:
         async with asyncio.timeout(90):
-            async with authenticated_reader(db, tenant_id, connection_id, account, max_api_calls=MAX_CALLS) as reader:
+            async with authenticated_reader(
+                db,
+                tenant_id,
+                connection_id,
+                account,
+                max_api_calls=MAX_CALLS,
+                max_concurrent_calls=MAX_CONCURRENT_CALLS,
+            ) as reader:
                 results = await collect_orders(reader, refs, reference_field, subsidiary_id)
                 for value in results.values():
                     value["scope"] = {
@@ -186,6 +215,7 @@ async def read_orders(db, tenant_id, connection_id, account_id, subsidiary_id, r
                     "orders": results,
                     "api_calls": reader.calls,
                     "credential_fingerprint": reader.credential_fingerprint,
+                    "concurrency_peak": reader.peak_concurrency,
                 }
     except TimeoutError:
         raise NetSuiteEvidenceError("bulk_read_timeout") from None
@@ -202,23 +232,31 @@ async def read_refunds(db, tenant_id, connection_id, account_id, subsidiary_id, 
     }
     try:
         async with asyncio.timeout(90):
-            async with authenticated_reader(db, tenant_id, connection_id, account, max_api_calls=MAX_CALLS) as reader:
+            async with authenticated_reader(
+                db,
+                tenant_id,
+                connection_id,
+                account,
+                max_api_calls=MAX_CALLS,
+                max_concurrent_calls=MAX_CONCURRENT_CALLS,
+            ) as reader:
                 batch = await RefundGraphBatch.collect(reader, {ref: scope[0] for ref, scope in scopes.items()})
-                results = {}
-                for ref, (order, currency_id, currency) in scopes.items():
-                    before = reader.calls
+
+                async def expand(item):
+                    ref, (order, currency_id, currency) = item
                     try:
-                        result = await collect_refunds(
-                            reader,
-                            order["record_id"],
-                            subsidiary_id,
-                            currency_id,
-                            order_reference=ref,
-                            adjustment_profile=adjustment_profile,
-                            request_links_reader=batch.links,
-                            graph_reader=batch.graph,
-                        )
-                        results[ref] = {
+                        with observed_calls() as calls:
+                            result = await collect_refunds(
+                                reader,
+                                order["record_id"],
+                                subsidiary_id,
+                                currency_id,
+                                order_reference=ref,
+                                adjustment_profile=adjustment_profile,
+                                request_links_reader=batch.links,
+                                graph_reader=batch.graph,
+                            )
+                        return ref, {
                             **result,
                             "amount": str(result["amount"]),
                             "complete": True,
@@ -228,17 +266,22 @@ async def read_refunds(db, tenant_id, connection_id, account_id, subsidiary_id, 
                             "connection_id": str(connection_id),
                             "order_reference": ref,
                             "currency": currency,
-                            "api_calls": reader.calls - before,
+                            "api_calls": calls.calls,
                             "observed_at": datetime.now(timezone.utc).isoformat(),
                         }
-                    except (ValueError, NetSuiteEvidenceError):
+                    except (ValueError, NetSuiteEvidenceError) as error:
+                        if isinstance(error, NetSuiteEvidenceError) and str(error) == "upstream_http_429":
+                            raise  # Stop siblings/queued sends; use the existing paid single-read fallback.
                         # Keep sibling successes. The runner explicitly falls back for
                         # failed orders, with a new reservation; no negative caching.
-                        continue
+                        return ref, None
+
+                results = dict(await _collect_concurrent(expand, scopes.items()))
                 return {
-                    "refunds": results,
+                    "refunds": {ref: value for ref, value in results.items() if value is not None},
                     "api_calls": reader.calls,
                     "credential_fingerprint": reader.credential_fingerprint,
+                    "concurrency_peak": reader.peak_concurrency,
                 }
     except TimeoutError:
         raise NetSuiteEvidenceError("bulk_read_timeout") from None

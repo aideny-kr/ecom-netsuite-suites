@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 _meter: ContextVar["CallMeter | None"] = ContextVar("provider_call_meter", default=None)
+_observers: ContextVar[tuple] = ContextVar("provider_call_observers", default=())
 
 
 class CallMeter:
@@ -31,8 +32,21 @@ def metered():
         _meter.reset(token)
 
 
+@contextmanager
+def observed_calls():
+    """Attribute one concurrent branch's sends without replacing the run's meter."""
+    observer = CallMeter()
+    token = _observers.set((*_observers.get(), observer))
+    try:
+        yield observer
+    finally:
+        _observers.reset(token)
+
+
 def note_call():
     """Record one provider request, at the point it is committed to the wire."""
     meter = _meter.get()
     if meter is not None:
         meter.calls += 1
+    for observer in _observers.get():
+        observer.calls += 1
