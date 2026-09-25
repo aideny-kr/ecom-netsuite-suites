@@ -16,7 +16,7 @@ class TransactionEvidenceBatch(Base, UUIDPrimaryKeyMixin):
         ForeignKeyConstraint(
             ["tenant_id", "run_id"], ["transaction_ops_runs.tenant_id", "transaction_ops_runs.id"], ondelete="CASCADE"
         ),
-        CheckConstraint("kind IN ('orders','refunds')", name="ck_tx_evidence_batch_kind"),
+        CheckConstraint("kind IN ('orders','refunds','dependencies')", name="ck_tx_evidence_batch_kind"),
         CheckConstraint("completed_at >= started_at", name="ck_tx_evidence_batch_times"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)

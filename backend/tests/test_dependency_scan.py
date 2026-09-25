@@ -114,3 +114,88 @@ async def test_all_empty_streams_must_be_read_before_completion():
     assert [c.args[0] for c in calls["read_page"].call_args_list] == list(dependency_scan.STREAMS)
     calls["read_owners"].assert_not_awaited()
     calls["indexed_owners"].assert_not_awaited()
+
+
+class Staging:
+    def __init__(self):
+        self.values = {}
+
+    async def put(self, value):
+        key = str(len(self.values))
+        self.values[key] = deepcopy(value)
+        return {"stage_ref": key}
+
+    async def get(self, value):
+        return (
+            deepcopy(self.values[value["stage_ref"]])
+            if isinstance(value, dict) and "stage_ref" in value
+            else deepcopy(value)
+        )
+
+
+async def test_bulk_page_restart_and_local_consumption_keep_checkpoint_small():
+    from app.schemas.transaction_runs import _bounded_json
+
+    value = page(more=True)
+    value["changes"] = [{"record_keys": [["transaction", str(i)]], "padding": "x" * 300} for i in range(1, 251)]
+    value["next_cursor"] = [250]
+    calls, progress, staging = ports(value), {}, Staging()
+    for _ in range(3):
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        progress = _bounded_json(deepcopy(progress))
+    assert progress["pending_refs"] == [A, B, C]
+    assert progress["dependency_scan"]["after"] is None
+    assert len(calls["read_owners"].call_args.kwargs["document_ids"]) == 250
+    progress["pending_refs"] = []
+    await dependency_scan.advance(progress, staging=staging, **calls)
+    assert progress["dependency_scan"]["after"] == [250]
+    calls["read_page"].assert_awaited_once()
+    calls["read_owners"].assert_awaited_once()
+
+
+async def test_incomplete_bulk_splits_without_skipping_or_refetching_source_page():
+    value = page(more=True)
+    value["changes"] = [{"record_keys": [["transaction", str(i)]]} for i in range(1, 6)]
+    value["next_cursor"] = [5]
+    calls, progress, staging = ports(value), {}, Staging()
+    seen = []
+
+    async def owners(**options):
+        ids = options["document_ids"]
+        if len(ids) > 2:
+            raise NetSuiteEvidenceError("dependency_owner_page_incomplete")
+        seen.extend(ids)
+        return {"order_references": [A]}
+
+    calls["read_owners"].side_effect = owners
+    for _ in range(30):
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        progress = deepcopy(progress)
+        progress["pending_refs"] = []
+        if progress["dependency_scan"]["after"] == [5]:
+            break
+    assert seen == ["1", "2", "3", "4", "5"]
+    assert progress["dependency_batch_splits"] == 1
+    assert progress["dependency_scan"]["after"] == [5]
+    calls["read_page"].assert_awaited_once()
+
+
+async def test_single_record_failure_and_auth_failure_do_not_split_forever():
+    for error in ("upstream_http_401", "dependency_owner_identity_unproven"):
+        calls, progress, staging = ports(), {}, Staging()
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        calls["read_owners"].side_effect = NetSuiteEvidenceError(error)
+        with pytest.raises(NetSuiteEvidenceError, match=error):
+            await dependency_scan.advance(progress, staging=staging, **calls)
+        assert progress["dependency_scan"]["after"] is None
+
+
+async def test_bulk_page_timeout_saves_smaller_retry_without_cursor_change():
+    calls, progress, staging = ports(), {}, Staging()
+    calls["read_page"].side_effect = NetSuiteEvidenceError("dependency_change_batch_timeout")
+    await dependency_scan.advance(progress, staging=staging, **calls)
+    assert progress["dependency_page_size"] == 125
+    assert progress["dependency_scan"]["after"] is None
+    assert "page" not in progress["dependency_scan"]
+    assert "destination_scan_count" not in progress
+    calls["read_owners"].assert_not_awaited()

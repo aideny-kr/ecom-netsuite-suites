@@ -279,6 +279,10 @@ class _Reader:
                 )
         except NetSuiteEvidenceError:
             raise
+        except httpx.ReadTimeout:
+            # Preserve size-sensitive query timeouts for dependency batch splitting.
+            # Other transport failures retain ordinary bounded retry behavior.
+            raise NetSuiteEvidenceError("read_timeout") from None
         except (
             httpx.TimeoutException,
             httpx.ConnectError,

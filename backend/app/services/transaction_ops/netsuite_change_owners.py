@@ -24,8 +24,8 @@ MAX_ROWS = 200
 MAX_DEPTH = 6
 
 
-def _ids(values):
-    if not isinstance(values, (list, tuple, set)) or len(values) > MAX_DOCUMENTS:
+def _ids(values, limit=MAX_DOCUMENTS):
+    if not isinstance(values, (list, tuple, set)) or len(values) > limit:
         raise NetSuiteEvidenceError("dependency_owner_scope_invalid")
     result = set()
     for value in values:
@@ -73,17 +73,23 @@ def _owner_query(frontier):
     )
 
 
-async def collect_order_candidates(request, subsidiary_id, reference_field, document_ids, order_ids, references):
-    documents, roots = _ids(document_ids), _ids(order_ids)
+async def collect_order_candidates(
+    request, subsidiary_id, reference_field, document_ids, order_ids, references, *, bulk=False
+):
+    # Bulk mode stays below SuiteQL IN/REST response limits; incomplete graphs
+    # are split by the durable scan, never accepted as a negative result.
+    document_limit, row_limit = (1000, 999) if bulk else (MAX_DOCUMENTS, MAX_ROWS)
+    documents, roots = _ids(document_ids, document_limit), _ids(order_ids, document_limit)
+    inventory = []
     if (
         not _id(subsidiary_id)
         or int(subsidiary_id) <= 0
         or not isinstance(reference_field, str)
         or not _FIELD.fullmatch(reference_field)
         or not isinstance(references, (list, tuple, set))
-        or len(references) > MAX_DOCUMENTS
+        or len(references) > document_limit
         or any(not isinstance(value, str) or not _REFERENCE.fullmatch(value) for value in references)
-        or len(documents | roots) > MAX_DOCUMENTS
+        or len(documents | roots) > document_limit
     ):
         raise NetSuiteEvidenceError("dependency_owner_scope_invalid")
     references = set(references)
@@ -93,12 +99,14 @@ async def collect_order_candidates(request, subsidiary_id, reference_field, docu
             await request(
                 "POST",
                 "/query/v1/suiteql",
-                params={"limit": MAX_ROWS + 1, "offset": 0},
+                params={"limit": row_limit + 1, "offset": 0},
                 body={"q": sql},
             )
         )
-        if not complete or len(rows) > MAX_ROWS:
+        if not complete or len(rows) > row_limit:
             raise NetSuiteEvidenceError("dependency_owner_page_incomplete")
+        if bulk:
+            inventory.append(rows)
         return rows
 
     async def records(identifiers, refs):
@@ -189,7 +197,7 @@ async def collect_order_candidates(request, subsidiary_id, reference_field, docu
                 parents.add(previous)
         visited.update(frontier)
         frontier = parents - visited
-        if len(visited | frontier | native_roots) > MAX_DOCUMENTS:
+        if len(visited | frontier | native_roots) > document_limit:
             raise NetSuiteEvidenceError("dependency_owner_budget")
     if frontier:
         raise NetSuiteEvidenceError("dependency_owner_depth")
@@ -211,14 +219,17 @@ async def collect_order_candidates(request, subsidiary_id, reference_field, docu
             if not _id(row.get("id")):
                 raise NetSuiteEvidenceError("dependency_owner_identity_unproven")
             if row.get("order_id") is not None:
-                custom_roots.update(_ids([row["order_id"]]))
+                custom_roots.update(_ids([row["order_id"]], document_limit))
             ref = row.get("order_reference")
             if isinstance(ref, str) and _REFERENCE.fullmatch(ref):
                 custom_refs.add(ref)
-    if len(native_roots | custom_roots) > MAX_DOCUMENTS or len(custom_refs) > MAX_DOCUMENTS:
+    if len(native_roots | custom_roots) > document_limit or len(custom_refs) > document_limit:
         raise NetSuiteEvidenceError("dependency_owner_budget")
     accept_roots(await records(native_roots | custom_roots, custom_refs))
-    return {"order_references": sorted(candidates), "outside_subsidiary_ids": sorted(outside, key=int)}
+    result = {"order_references": sorted(candidates), "outside_subsidiary_ids": sorted(outside, key=int)}
+    if bulk:
+        result["inventory"] = inventory  # Native rows retained for replay/audit; no monetary fields.
+    return result
 
 
 async def read_order_candidates(
@@ -233,25 +244,32 @@ async def read_order_candidates(
     order_ids=(),
     references=(),
     client=None,
+    bulk=False,
 ):
     account = _account(account_id)
-    async with asyncio.timeout(170):
-        async with authenticated_reader(
-            db,
-            tenant_id,
-            connection_id,
-            account,
-            client=client,
-            max_api_calls=MAX_OWNER_CALLS,
-        ) as reader:
-            candidates = await collect_order_candidates(
-                reader.request,
-                subsidiary_id,
-                reference_field,
-                document_ids,
-                order_ids,
-                references,
-            )
+    try:
+        async with asyncio.timeout(90 if bulk else 170):
+            async with authenticated_reader(
+                db,
+                tenant_id,
+                connection_id,
+                account,
+                client=client,
+                max_api_calls=MAX_OWNER_CALLS,
+            ) as reader:
+                candidates = await collect_order_candidates(
+                    reader.request,
+                    subsidiary_id,
+                    reference_field,
+                    document_ids,
+                    order_ids,
+                    references,
+                    bulk=bulk,
+                )
+    except (TimeoutError, NetSuiteEvidenceError) as exc:
+        if bulk and (isinstance(exc, TimeoutError) or str(exc) == "read_timeout"):
+            raise NetSuiteEvidenceError("dependency_owner_batch_timeout") from None
+        raise
     return {
         **candidates,
         "provider": "netsuite",
