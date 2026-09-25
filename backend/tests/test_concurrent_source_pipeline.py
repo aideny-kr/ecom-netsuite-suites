@@ -75,9 +75,10 @@ async def parallel_setup(committed, monkeypatch, **options):
     return run, refs, reader, writer, events, target_started
 
 
-async def test_four_isolated_sources_overlap_target_then_commit_once(committed, monkeypatch):
+@pytest.mark.parametrize("phase", ["orders", "refunds", "destination"])
+async def test_four_isolated_sources_overlap_target_then_commit_once(committed, monkeypatch, phase):
     db, actor, _ = committed
-    run, refs, reader, writer, events, target = await parallel_setup(committed, monkeypatch)
+    run, refs, reader, writer, events, target = await parallel_setup(committed, monkeypatch, phase=phase)
     original = reader.side_effect
     started, release = asyncio.Event(), asyncio.Event()
     active = peak = 0
@@ -174,16 +175,20 @@ async def test_failure_drains_workers_preserves_snapshots_and_cursor(committed, 
     )
 
 
-async def test_transient_failure_retries_only_failed_work_with_new_spend(committed, monkeypatch):
+@pytest.mark.parametrize("failure", ["transport", "timeout"])
+async def test_transient_failure_retries_only_failed_work_with_new_spend(committed, monkeypatch, failure):
     db, actor, _ = committed
     run, refs, reader, writer, _, _ = await parallel_setup(committed, monkeypatch)
     original = reader.side_effect
     attempts = {}
+    monkeypatch.setattr(source_preparation, "READ_TIMEOUT_SECONDS", 0.05)
 
     async def source(*args, **kwargs):
         ref = args[3]
         attempts[ref] = attempts.get(ref, 0) + 1
         if ref == refs[0] and attempts[ref] == 1:
+            if failure == "timeout":
+                await asyncio.Event().wait()
             raise SourceReadError("source_transport_failed")
         return await original(*args, **kwargs)
 
@@ -356,3 +361,76 @@ async def test_nested_cancellation_waits_for_every_async_finalizer(cancel_parent
     with pytest.raises(asyncio.CancelledError if cancel_parent else RuntimeError):
         await task
     assert sorted(finalized) == [0, 1, 2, 3]
+
+
+async def test_worker_connection_failure_falls_back_without_cancelling_target(committed, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    db, actor, _ = committed
+    run, refs, reader, writer, _, target = await parallel_setup(committed, monkeypatch)
+    setups = 0
+
+    @asynccontextmanager
+    async def unavailable(**kwargs):
+        nonlocal setups
+        setups += 1
+        raise OSError("injected connection unavailable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(source_preparation, "worker_async_session", unavailable)
+    result = await run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done" and result["processed"] == 10
+    assert setups == 4 and target.is_set()
+    assert reader.await_count == 10
+    current = await state.get_run(db, actor.tenant_id, run.id)
+    assert current.api_calls_used == 20 and current.api_calls_held == 0
+    assert current.progress_json["pending_refs"] == []
+    writer.assert_awaited_once()
+
+
+async def test_target_failure_drains_inflight_sources_without_advancing_cursor(committed, monkeypatch):
+    db, actor, _ = committed
+    run, refs, reader, writer, _, _ = await parallel_setup(committed, monkeypatch)
+    started = asyncio.Event()
+    active = 0
+
+    async def blocked_source(*args, **kwargs):
+        nonlocal active
+        active += 1
+        if active == 4:
+            started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            active -= 1
+
+    async def target_failure(self, reference):
+        await started.wait()
+        raise RuntimeError("injected target failure")
+
+    run_id, tenant = run.id, actor.tenant_id
+    reader.side_effect = blocked_source
+    monkeypatch.setattr(staged_netsuite.StagedNetSuite, "prefetch_orders", target_failure)
+    result = await run_investigation(db, tenant, run_id)
+    assert result["termination_reason"] == "error" and active == 0
+    current = await state.get_run(db, tenant, run_id)
+    assert current.progress_json["pending_refs"] == refs and current.progress_json["processed"] == 0
+    writer.assert_not_awaited()
+
+
+async def test_mixed_cached_chunk_prepays_only_missing_source_reads(committed, monkeypatch):
+    from app.services.transaction_ops import source_snapshot
+
+    db, actor, _ = committed
+    run, refs, reader, writer, _, _ = await parallel_setup(committed, monkeypatch)
+    connection_id = UUID(run.config_snapshot["source_connection_id"])
+    for ref in refs[:3]:
+        evidence = await reader.side_effect(db, actor.tenant_id, None, ref)
+        await source_snapshot.save(db, actor.tenant_id, connection_id, ref, evidence, now=datetime.now(timezone.utc))
+    result = await run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done" and result["processed"] == 10
+    assert reader.await_count == 7
+    current = await state.get_run(db, actor.tenant_id, run.id)
+    assert current.api_calls_used == 14 and current.progress_json["source_staged_hits"] == 7
+    assert current.progress_json["source_snapshot_hits"] == 3
+    writer.assert_awaited_once()

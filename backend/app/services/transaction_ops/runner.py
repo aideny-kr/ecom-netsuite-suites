@@ -627,12 +627,14 @@ async def run_investigation(
                     workers=workers,
                     check_active=check_active,
                     clock=clock,
+                    deadline_at=deadline_at,
                 )
 
         # Only the NetSuite branch uses the coordinator session. Source branches
         # have separate sessions and cannot mutate the run, its budget or cursor.
-        async with asyncio.timeout(max(0, min(170, (deadline_at - clock()).total_seconds()))):
-            (results, peak), _ = await source_preparation.joined(fetch(), staged.prefetch_orders(refs[0]))
+        # Each provider read retains its own paid timeout/retry policy. Do not
+        # time out the join: target evidence and checkpoint commits must finish.
+        (results, peak), _ = await source_preparation.joined(fetch(), staged.prefetch_orders(refs[0]))
         progress["source_prepare_concurrency_peak"] = max(progress.get("source_prepare_concurrency_peak", 0), peak)
         progress["pipeline_prepare_batches"] = progress.get("pipeline_prepare_batches", 0) + 1
         for ref in refs:

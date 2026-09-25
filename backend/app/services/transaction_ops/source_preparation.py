@@ -13,6 +13,7 @@ from app.services.transaction_ops.read_transport import CollectionTransport, col
 from app.services.transaction_ops.source_reader import direct_connection
 
 MAX_WORKERS = 4
+READ_TIMEOUT_SECONDS = 170
 
 
 async def concurrency(db, tenant_id, connection_id):
@@ -37,7 +38,7 @@ async def joined(*operations):
         raise
 
 
-async def collect(tenant_id, connection_id, references, *, workers, check_active, clock):
+async def collect(tenant_id, connection_id, references, *, workers, check_active, clock, deadline_at):
     if type(workers) is not int or not 1 <= workers <= MAX_WORKERS:
         raise ValueError("invalid_source_preparation_concurrency")
     if not 1 <= len(references) <= 10 or len(set(references)) != len(references):
@@ -50,9 +51,11 @@ async def collect(tenant_id, connection_id, references, *, workers, check_active
     async def worker():
         nonlocal stopped, active, peak
         transport = CollectionTransport()
+        ready = False
         try:
             async with worker_async_session(pin_connection=True) as db:
                 await set_tenant_context_session(db, str(tenant_id))
+                ready = True
                 with collection_transport(transport):
                     while not stopped:
                         ref = next(queue, None)
@@ -62,9 +65,11 @@ async def collect(tenant_id, connection_id, references, *, workers, check_active
                         peak = max(peak, active)
                         try:
                             await check_active(db)
-                            observed = await source_validation.read_validated_order(
-                                db, tenant_id, None, ref, source_connection_id=connection_id
-                            )
+                            seconds = min(READ_TIMEOUT_SECONDS, (deadline_at - clock()).total_seconds())
+                            async with asyncio.timeout(max(0, seconds)):
+                                observed = await source_validation.read_validated_order(
+                                    db, tenant_id, None, ref, source_connection_id=connection_id
+                                )
                             await source_snapshot.save(db, tenant_id, connection_id, ref, observed, now=clock())
                             results[ref] = observed
                         except Exception as error:
@@ -72,6 +77,12 @@ async def collect(tenant_id, connection_id, references, *, workers, check_active
                             stopped = True  # Do not start queued reads after a failure/revocation.
                         finally:
                             active -= 1
+        except Exception:
+            if ready:
+                raise
+            # No provider read started on this branch. Keep the target stage
+            # running; the coordinator can use prepaid serial first attempts.
+            stopped = True
         finally:
             await transport.aclose()
 
