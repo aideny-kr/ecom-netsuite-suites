@@ -300,8 +300,9 @@ async def test_wire_failures_reach_retry_layer_as_transport_failures(context, er
 
     with pytest.raises(reader.NetSuiteEvidenceError) as error:
         await read(context, [error_type("SECRET upstream URL/response")])
-    assert str(error.value) == "read_transport_failed"
-    assert transient_read_code(error.value) == "netsuite_read_transport_failed"
+    expected = "read_timeout" if error_type is httpx.ReadTimeout else "read_transport_failed"
+    assert str(error.value) == expected
+    assert transient_read_code(error.value) == "netsuite_" + expected
     assert "SECRET" not in str(error.value)
 
 
@@ -454,3 +455,51 @@ async def test_collection_transport_reuses_connections_but_reauthorizes_and_part
         await pool.aclose()
     assert first_client.is_closed and rotated.client.is_closed
     assert not pool.clients
+
+
+@pytest.mark.parametrize("operation", ["changes", "owners"])
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ReadError])
+async def test_dependency_transport_timeout_splits_only_bulk_read_queries(context, operation, bulk, error_type):
+    from datetime import datetime, timezone
+
+    from app.services.transaction_ops.netsuite_change_owners import read_order_candidates
+    from app.services.transaction_ops.netsuite_dependency_changes import read_change_page
+
+    def fail(request):
+        raise error_type("SECRET upstream URL/response")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail)) as client:
+        with pytest.raises(reader.NetSuiteEvidenceError) as error:
+            if operation == "changes":
+                await read_change_page(
+                    context[0],
+                    TENANT,
+                    CONNECTION,
+                    ACCOUNT,
+                    SUBSIDIARY,
+                    "tranid",
+                    "transactions",
+                    datetime(2026, 9, 8, tzinfo=timezone.utc),
+                    datetime(2026, 9, 10, tzinfo=timezone.utc),
+                    page_size=250 if bulk else 20,
+                    client=client,
+                )
+            else:
+                await read_order_candidates(
+                    context[0],
+                    TENANT,
+                    CONNECTION,
+                    ACCOUNT,
+                    SUBSIDIARY,
+                    "tranid",
+                    document_ids=["100"],
+                    bulk=bulk,
+                    client=client,
+                )
+    if error_type is httpx.ReadTimeout:
+        prefix = "change" if operation == "changes" else "owner"
+        expected = f"dependency_{prefix}_batch_timeout" if bulk else "read_timeout"
+    else:
+        expected = "read_transport_failed"
+    assert str(error.value) == expected
