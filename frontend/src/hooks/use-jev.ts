@@ -11,6 +11,8 @@ export interface JevStatus {
   /** What reconciliation will actually do: capped by the deployment, and off without a key. */
   effective_mode: JevMode;
   deployment_cap: JevMode;
+  transaction_ops_mode?: JevMode;
+  transaction_ops_config_count?: number;
   key_source: "tenant" | "platform" | "none";
   /** Last four characters of the workspace's own key; never set for the platform key. */
   key_hint: string | null;

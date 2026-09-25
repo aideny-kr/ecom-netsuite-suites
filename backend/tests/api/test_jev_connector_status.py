@@ -70,6 +70,8 @@ async def test_on_by_default_with_the_platform_key(client, admin_user):
     r = await client.get(URL, headers=headers)
     assert r.status_code == 200
     assert r.json() == {
+        "transaction_ops_mode": "off",
+        "transaction_ops_config_count": 0,
         "mode": "live",
         "effective_mode": "live",
         "deployment_cap": "live",

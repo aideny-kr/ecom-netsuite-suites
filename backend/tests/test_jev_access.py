@@ -146,3 +146,17 @@ async def test_the_platform_key_is_never_hinted(db, tenant_a, platform_key):
     setting = await load_setting(db, tenant_a.id)
 
     assert (setting.key_source, setting.key_hint, setting.effective_mode) == ("platform", None, "live")
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "live"])
+async def test_transaction_workflow_honors_tenant_mode_independently_of_resolution(
+    db, tenant_a, platform_key, monkeypatch, mode
+):
+    monkeypatch.setattr(settings, "JEV_RECON_RESOLUTION_MODE", "shadow")
+    monkeypatch.setattr(settings, "JEV_TRANSACTION_OPS_MODE", "live")
+    await _connect(db, tenant_a, api_key="tenant-key-9876", mode=mode)
+    access = await resolve_access(db, tenant_a.id, workflow="transaction_ops")
+    assert (access.mode if access else "off") == mode
+    if access:
+        assert access.api_key == "tenant-key-9876"
+    assert (await load_setting(db, tenant_a.id)).effective_mode == ("off" if mode == "off" else "shadow")

@@ -51,13 +51,19 @@ beforeEach(() => {
 });
 
 describe("JevConnectorCard", () => {
+  it("distinguishes live Inc hybrid from shadow resolution", async () => {
+    mocks.status.mockReturnValue(status({effective_mode: "shadow", deployment_cap: "shadow", transaction_ops_mode: "live", transaction_ops_config_count: 1}));
+    await renderCard();
+    expect(screen.getByText(/Resolution workflow: Shadow. Inc exception workflow: Live/)).toBeVisible();
+    expect(screen.getByText(/1 enabled configuration/)).toBeVisible();
+  });
   it("is on by default with the deployment's key and says what Jev sees", async () => {
     mocks.status.mockReturnValue(status());
     await renderCard();
     expect(screen.getByRole("heading", { name: "TypeSafe Jev" })).toBeVisible();
-    expect(screen.getByRole("status", { name: "Jev is live" })).toBeVisible();
+    expect(screen.getByRole("status", { name: "Resolution workflow is live" })).toBeVisible();
     expect(screen.getByText(/using this deployment's key/i)).toBeVisible();
-    expect(screen.getByText(/no amounts, text or identifiers/i)).toBeVisible();
+    expect(screen.getByText(/without customer identifiers or free-form source text/i)).toBeVisible();
     expect(screen.getByRole("radio", { name: /live/i })).toHaveAttribute("aria-checked", "true");
   });
 
@@ -90,13 +96,13 @@ describe("JevConnectorCard", () => {
     mocks.status.mockReturnValue(status({ key_source: "none", effective_mode: "off" }));
     await renderCard();
     expect(screen.getByText(/no jev key is configured/i)).toBeVisible();
-    expect(screen.getByRole("status", { name: "Jev is off" })).toBeVisible();
+    expect(screen.getByRole("status", { name: "Resolution workflow is off" })).toBeVisible();
   });
 
   it("explains when the deployment limits the mode", async () => {
     mocks.status.mockReturnValue(status({ deployment_cap: "shadow", effective_mode: "shadow" }));
     await renderCard();
-    expect(screen.getByText(/this deployment limits jev to shadow/i)).toBeVisible();
+    expect(screen.getByText(/resolution workflow is limited to shadow/i)).toBeVisible();
   });
 
   it("flags a stored key that cannot be read", async () => {
@@ -117,7 +123,7 @@ describe("JevConnectorCard", () => {
     mocks.manage = false;
     mocks.status.mockReturnValue(status());
     await renderCard();
-    expect(screen.getByRole("status", { name: "Jev is live" })).toBeVisible();
+    expect(screen.getByRole("status", { name: "Resolution workflow is live" })).toBeVisible();
     expect(screen.queryByRole("radio", { name: /shadow/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /save key/i })).not.toBeInTheDocument();
   });

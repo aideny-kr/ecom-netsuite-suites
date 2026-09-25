@@ -64,6 +64,7 @@ class JevResult:
     model: str
     input_tokens: int
     elapsed_ms: int
+    output_tokens: int | None = None
 
 
 def _number(value, low: float | None = None, high: float | None = None) -> bool:
@@ -169,6 +170,7 @@ async def ask(
         model=str(body.get("model", "")),
         input_tokens=int(tokens) if _number(tokens) else 0,
         elapsed_ms=int((time.monotonic() - start) * 1000),
+        output_tokens=int(usage["output_tokens"]) if _number(usage.get("output_tokens"), 0) else None,
     )
 
 

@@ -66,6 +66,7 @@ async def test_success_sends_pinned_model_and_returns_typed_answers(enabled):
     assert result.answers["yes"]["noul"] == 0.95
     assert result.model == "jev-1.13.0"
     assert result.input_tokens == 120
+    assert result.output_tokens == 10
     assert result.elapsed_ms >= 0
 
 

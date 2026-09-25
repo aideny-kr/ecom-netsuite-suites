@@ -6,7 +6,9 @@ Decided 2026-09-24: Jev is on by default in every deployment.
   connection) wins; otherwise the deployment's ``TYPESAFE_API_KEY``. With no key anywhere
   Jev is off and callers run their existing path unchanged, so the service stays optional.
 * Mode: the tenant chooses ``live`` (the default), ``shadow`` or ``off`` on the Jev card.
-  ``JEV_RECON_RESOLUTION_MODE`` caps every tenant (``live`` = no cap, ``off`` = kill switch).
+  ``JEV_RECON_RESOLUTION_MODE`` caps the resolution workflow for every tenant;
+  ``off`` also kills transaction-operations calls. Transaction operations has its own
+  default-off cap, plus a configuration allowlist enforced by its caller.
 * A tenant key that cannot be decrypted means OFF, not the platform key: a tenant that
   brought its own key must not have its data sent under ours without knowing.
 
@@ -64,8 +66,13 @@ def _mode(value: object, default: Mode) -> Mode:
     return value if value in MODES else default  # type: ignore[return-value]
 
 
-def deployment_cap() -> Mode:
-    return _mode(settings.JEV_RECON_RESOLUTION_MODE, "off")
+def deployment_cap(workflow="resolution") -> Mode:
+    cap = _mode(settings.JEV_RECON_RESOLUTION_MODE, "off")
+    if workflow == "resolution" or cap == "off":
+        return cap
+    if workflow == "transaction_ops":
+        return _mode(settings.JEV_TRANSACTION_OPS_MODE, "off")
+    raise ValueError("unknown_jev_workflow")
 
 
 async def tenant_connection(db: AsyncSession, tenant_id: uuid.UUID | str) -> Connection | None:
@@ -104,10 +111,10 @@ async def key_in_use(db: AsyncSession, tenant_id) -> tuple[str | None, Literal["
     return key, source
 
 
-async def _load(db: AsyncSession, tenant_id) -> tuple[JevSetting, str | None]:
+async def _load(db: AsyncSession, tenant_id, *, workflow="resolution") -> tuple[JevSetting, str | None]:
     connection = await tenant_connection(db, tenant_id)
     tenant_mode: Mode = _mode((connection.metadata_json or {}).get("mode") if connection else None, "live")
-    cap = deployment_cap()
+    cap = deployment_cap() if workflow == "resolution" else deployment_cap(workflow)
     key, source, unreadable = _key_of(connection, tenant_id)
     hint = key[-4:] if key and source == "tenant" and len(key) >= _HINT_MIN_KEY_LENGTH else None
     problem = "unreadable_key" if unreadable else None
@@ -124,14 +131,14 @@ async def _load(db: AsyncSession, tenant_id) -> tuple[JevSetting, str | None]:
     return setting, (key if effective != "off" else None)
 
 
-async def load_setting(db: AsyncSession, tenant_id) -> JevSetting:
-    setting, _ = await _load(db, tenant_id)
+async def load_setting(db: AsyncSession, tenant_id, *, workflow="resolution") -> JevSetting:
+    setting, _ = await _load(db, tenant_id, workflow=workflow)
     return setting
 
 
-async def resolve_access(db: AsyncSession, tenant_id) -> JevAccess | None:
+async def resolve_access(db: AsyncSession, tenant_id, *, workflow="resolution") -> JevAccess | None:
     """The key and mode to use for this tenant's Jev calls, or None when Jev is off."""
-    setting, key = await _load(db, tenant_id)
+    setting, key = await _load(db, tenant_id, workflow=workflow)
     if key is None or setting.effective_mode == "off" or setting.key_source == "none":
         return None
     return JevAccess(api_key=key, mode=setting.effective_mode, key_source=setting.key_source)  # type: ignore[arg-type]
