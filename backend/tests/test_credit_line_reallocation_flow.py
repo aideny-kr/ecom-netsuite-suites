@@ -36,6 +36,7 @@ def _catalog():
     }
     return {
         "properties": {
+            "location": {"type": "object"},  # as in the production creditMemo metadata catalog
             "item": {
                 "properties": {
                     "items": {
@@ -45,7 +46,7 @@ def _catalog():
                         }
                     }
                 }
-            }
+            },
         }
     }
 
@@ -119,6 +120,8 @@ def _written(facts, p):
         }
         for entry in p["proposed_fields"]["item"]["items"]
     ]
+    if "location" in p["proposed_fields"]:
+        credit["location"] = dict(p["proposed_fields"]["location"])  # NetSuite applies it to header and lines
     rows = [(a, "debit", v) for a, v in p["expected_ledger"]["debit"].items()]
     rows += [(a, "credit", v) for a, v in p["expected_ledger"]["credit"].items()]
     after["credit_gl"] = _gl(*rows)
@@ -542,3 +545,59 @@ class TestReviewRoundTwoFlow:
 
         assert "verified" in group.reallocation_reason("no_verified_exemplar").lower()
         assert group.reallocation_reason("no_difference") is None
+
+
+class TestReviewRoundThreeFlow:
+    """Findings of the 2026-09-25 T2 gate round 3 (wf_5430d9c2-780) and the SB1 sandbox write."""
+
+    @staticmethod
+    def _report(p, observed_at, refunds_delta="0.00"):
+        return {
+            "order_reference": p["order_reference"],
+            "source": {"observed_at": observed_at.isoformat()},
+            "balance": {
+                "status": "difference",
+                "missing_metrics": [],
+                "amounts": {
+                    "order_total": {"source": "799.0", "target": "801.8", "delta": "-2.8"},
+                    "tax": {"source": "0.0", "target": "2.8", "delta": "-2.8"},
+                    "refunds": {"source": "2.80", "target": "2.80", "delta": refunds_delta},
+                },
+            },
+        }
+
+    async def test_recheck_evidence_must_be_fresh_like_its_sibling(self, order):
+        from app.services.transaction_ops.accounting_credit_recheck import project
+
+        _, p = await _proposed(order)
+        written = {"precision": 2, **_written(order["facts"], p)}
+        now = datetime.now(timezone.utc)
+        with pytest.raises(ValueError, match="stale"):
+            project(
+                p,
+                self._report(p, now - timedelta(minutes=20)),
+                (written, order["context"]),
+                verified_at=now - timedelta(minutes=30),
+                now=now,
+            )
+
+    async def test_recheck_does_not_clear_a_refund_difference(self, order):
+        from app.services.transaction_ops.accounting_credit_recheck import project
+
+        _, p = await _proposed(order)
+        written = {"precision": 2, **_written(order["facts"], p)}
+        now = datetime.now(timezone.utc)
+        projected = project(
+            p, self._report(p, now, refunds_delta="0.01"), (written, order["context"]), verified_at=now, now=now
+        )
+        assert projected["balance"]["status"] == "difference"
+
+    async def test_bv_readback_requires_the_correction_location(self, order):
+        order["facts"] = _bv()
+        order["context"] = _context(order["facts"])
+        _, p = await _proposed(order, BV_FIX)
+        written = _written(order["facts"], p)
+        order["facts"] = written
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "verified"
+        written["credit"].pop("location")
+        assert (await tax_correction.verify_after(_db(), TENANT, p))["status"] == "needs_review"

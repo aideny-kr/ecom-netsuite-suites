@@ -24,6 +24,10 @@ class RefundAdjustmentProfile(EvidenceModel):
     # Defaults to the accounts the tax-item map already names, so an existing profile keeps
     # its current meaning.
     tax_accounts: tuple[Id, ...] = Field(default=(), max_length=20)
+    # NetSuite's record API refuses any save of a credit memo without a location. An existing-credit
+    # correction stamps this location (the subsidiary's virtual location) on such a credit. Unset,
+    # those credits are refused rather than given a guessed location.
+    correction_location_id: Id | None = None
 
     @property
     def taxed_accounts(self) -> frozenset[str]:

@@ -81,9 +81,15 @@ def _gl_rows(gl):
     return rows
 
 
-def _posted(document, gl, taxed, sign):
+# A tax account is a liability; any liability the subsidiary has not declared as a tax account could
+# be tax the check cannot see, so it refuses rather than counting it as net.
+LIABILITY_TYPES = frozenset({"OthCurrLiab"})
+
+
+def _posted(document, gl, taxed, sign, account_types):
     """(gross, tax, tax by account) a document posts, as positive amounts: an invoice debits AR and
-    credits tax (sign 1); a credit credits AR and debits tax (sign -1). Callers subtract credits."""
+    credits tax (sign 1); a credit credits AR and debits tax (sign -1). Callers subtract credits.
+    Every other row must be on an account of known, non-liability, non-receivable type (net)."""
     ar = _ref(document, "account")
     gross = Decimal(0)
     by_account = {}
@@ -94,6 +100,12 @@ def _posted(document, gl, taxed, sign):
             gross += (debit - credit) * sign
         elif account in taxed:
             by_account[account] = by_account.get(account, Decimal(0)) + (credit - debit) * sign
+        else:
+            kind = (account_types or {}).get(account)
+            if kind is None or kind == "AcctRec":
+                raise RefusalError("evidence_incomplete", {"reason": "account_type_unknown", "account": account})
+            if kind in LIABILITY_TYPES:
+                raise RefusalError("tax_account_not_configured", {"account": account, "record_id": document.get("id")})
     if gross != _dec(document.get("total")):
         raise RefusalError(
             "evidence_incomplete", {"reason": "gl_total_differs_from_header", "record_id": document.get("id")}
@@ -129,6 +141,7 @@ def _facts(
     items,
     period,
     subsidiary_id,
+    account_types=None,
     precision=2,
     require_difference=True,
 ):
@@ -144,6 +157,22 @@ def _facts(
         or not (credit.get("line_evidence") or {}).get("lines")
     ):
         raise RefusalError("evidence_incomplete", {"reason": "credit_lines_or_applications_incomplete"})
+    # The only credit this treatment edits: every line an item, the lines are the whole total (no
+    # shipping/handling/discount on the side), and it is applied, i.e. it represents a settled refund.
+    credit_lines = credit["line_evidence"]["lines"]
+    if any(not _ref(line, "item") for line in credit_lines):
+        raise RefusalError("credit_lines_unsupported", {"reason": "line_without_item"})
+    if sum((_dec(line.get("amount")) or Decimal(0) for line in credit_lines), Decimal(0)) != _dec(credit.get("total")):
+        raise RefusalError("credit_has_non_item_charges")
+    if _dec(credit.get("unapplied")) != 0 or _dec(credit.get("applied")) != _dec(credit.get("total")):
+        raise RefusalError("credit_not_applied")
+    # NetSuite's record API refuses any save of a credit without a location; such a credit gets the
+    # subsidiary's configured correction location, stamped on the header (and so on every line).
+    correction_location = None
+    if not _ref(credit, "location"):
+        correction_location = profile.get("correction_location_id")
+        if not correction_location:
+            raise RefusalError("credit_location_required", {"subsidiary_id": str(subsidiary_id)})
     invoice = invoices[0][0]
     if (
         len({_ref(d, "subsidiary") for d in documents} | {str(profile.get("subsidiary_id")), str(subsidiary_id)}) != 1
@@ -178,15 +207,15 @@ def _facts(
     gross = tax = Decimal(0)
     invoice_by_account, other_by_account = {}, {}
     for document, gl in invoices:
-        g, t, by = _posted(document, gl, taxed, 1)
+        g, t, by = _posted(document, gl, taxed, 1, account_types)
         gross, tax = gross + g, tax + t
         _add(invoice_by_account, by)
     other_gross = other_tax = Decimal(0)
     for document, gl in other_credits:
-        g, t, by = _posted(document, gl, taxed, -1)
+        g, t, by = _posted(document, gl, taxed, -1, account_types)
         other_gross, other_tax = other_gross + g, other_tax + t
         _add(other_by_account, by)
-    credit_gross, credit_tax, _ = _posted(credit, credit_gl, taxed, -1)
+    credit_gross, credit_tax, _ = _posted(credit, credit_gl, taxed, -1, account_types)
     before = (gross - other_gross - credit_gross, tax - other_tax - credit_tax)
     required = (total, source_tax)
     if before[0] != required[0]:
@@ -206,6 +235,7 @@ def _facts(
         "before": before,
         "required": required,
         "credit_total": _dec(credit.get("total")),
+        "correction_location": correction_location,
     }
 
 
@@ -248,7 +278,19 @@ def _lines(lines, credit, profile, items, taxed, precision):
 
 
 def assess(
-    *, lines, credit, credit_gl, invoices, other_credits, source, profile, items, period, subsidiary_id, precision=2
+    *,
+    lines,
+    credit,
+    credit_gl,
+    invoices,
+    other_credits,
+    source,
+    profile,
+    items,
+    period,
+    subsidiary_id,
+    account_types=None,
+    precision=2,
 ):
     """Accept the agent's lines only if the order then equals the source; return the exact card data."""
     facts = _facts(
@@ -261,6 +303,7 @@ def assess(
         items=items,
         period=period,
         subsidiary_id=subsidiary_id,
+        account_types=account_types,
         precision=precision,
     )
     parsed, existing = _lines(lines, credit, profile, items, facts["taxed"], precision)
@@ -293,21 +336,29 @@ def assess(
             {"required": _balance(*facts["required"], precision), "proposed": _balance(*after, precision)},
         )
     template = existing[min(existing)]
-    carried = {k: template[k] for k in ("isTaxable", "taxCode") if k in template}
     wire, debit = [], {}
     for line in parsed:
         amount = _q(line["amount"], precision)
         source_line = existing.get(line["line"], template)
         entry = {"item": {"id": line["item_id"]}, "quantity": 1, "rate": amount, "amount": amount}
-        entry.update({k: source_line[k] for k in ("isTaxable", "taxCode") if k in source_line} or carried)
+        for key in ("isTaxable", "taxCode"):  # each from the line itself, else from the template line
+            if key in source_line:
+                entry[key] = source_line[key]
+            elif key in template:
+                entry[key] = template[key]
         if line["line"] is not None:
             entry = {"line": line["line"], **entry}
         wire.append(entry)
         debit[line["account"]] = debit.get(line["account"], Decimal(0)) + line["amount"]
+    proposed_fields = {"item": {"items": wire}}
+    expected_after = {"total": _q(total, precision), "taxTotal": _q(0, precision)}
+    if facts["correction_location"]:
+        proposed_fields = {"location": {"id": str(facts["correction_location"])}, **proposed_fields}
+        expected_after["location"] = str(facts["correction_location"])
     return {
         "kind": KIND,
-        "proposed_fields": {"item": {"items": wire}},
-        "expected_after": {"total": _q(total, precision), "taxTotal": _q(0, precision)},
+        "proposed_fields": proposed_fields,
+        "expected_after": expected_after,
         "expected_ledger": {
             "debit": {account: _q(value, precision) for account, value in sorted(debit.items())},
             "credit": {_ref(credit, "account"): _q(total, precision)},
@@ -320,7 +371,20 @@ def assess(
     }
 
 
-def derive(*, credit, credit_gl, invoices, other_credits, source, profile, items, period, subsidiary_id, precision=2):
+def derive(
+    *,
+    credit,
+    credit_gl,
+    invoices,
+    other_credits,
+    source,
+    profile,
+    items,
+    period,
+    subsidiary_id,
+    account_types=None,
+    precision=2,
+):
     """The same fix computed by the server for a group member: the tax part of this credit is
     whatever the order's posted tax exceeds the source by. One existing line, one tax item."""
     facts = _facts(
@@ -333,6 +397,7 @@ def derive(*, credit, credit_gl, invoices, other_credits, source, profile, items
         items=items,
         period=period,
         subsidiary_id=subsidiary_id,
+        account_types=account_types,
         precision=precision,
     )
     tax_items = sorted(
@@ -370,7 +435,7 @@ def booked_balance(**facts):
 # the three can never check different things. No function here sends a write: the signed
 # confirmation dispatcher behind the one-use permit owns execution.
 
-READ_CALLS = 31  # refund graph (<= 25) + transaction types + items + period + currency + metadata
+READ_CALLS = 32  # refund graph (<= 25) + transaction types + items + account types + period + currency + metadata
 CARD_MAX_AGE_SECONDS = 300
 
 
@@ -452,9 +517,21 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
         raise RefusalError("credit_not_in_case", {"credit_memo_ids": [str(c.get("id")) for c in credits]})
     gl = sections.get("gl") or {}
     lines = (target.get("line_evidence") or {}).get("lines") or []
+    if any(not _ref(line, "item") for line in lines):
+        raise RefusalError("credit_lines_unsupported", {"reason": "line_without_item"})
     item_ids = sorted({_ref(line, "item") for line in lines} | {str(k) for k in profile.tax_item_accounts})
     if not all(_id(i) for i in item_ids) or not _id(_ref(target, "postingPeriod") or ""):
         raise RefusalError("evidence_incomplete", {"reason": "credit_references_unreadable"})
+    account_ids = sorted(
+        {
+            str(row.get("account"))
+            for document in [*invoices, *credits]
+            for row in (gl.get(str(document.get("id"))) or {}).get("rows") or []
+            if row.get("account") is not None
+        }
+    )
+    if not account_ids or not all(_id(a) for a in account_ids):
+        raise RefusalError("evidence_incomplete", {"reason": "gl_accounts_unreadable"})
     async with authenticated_reader(
         db, tenant_id, review["netsuite_connection_id"], scope["netsuite_account_id"], max_api_calls=READ_CALLS
     ) as reader:
@@ -490,6 +567,12 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
                 reader, f"SELECT id, isinactive, incomeaccount FROM item WHERE id IN ({','.join(item_ids)})", 50
             )
         }
+        account_types = {
+            str(r["id"]): r.get("accttype")
+            for r in await _suiteql(
+                reader, f"SELECT id, accttype FROM account WHERE id IN ({','.join(account_ids)})", 100
+            )
+        }
         period = await reader.request("GET", f"/record/v1/accountingPeriod/{_ref(target, 'postingPeriod')}")
         currency = await reader.request("GET", f"/record/v1/currency/{_ref(target, 'currency')}")
         catalog = await reader.request("GET", "/record/v1/metadata-catalog/creditMemo")
@@ -506,7 +589,9 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
             "subsidiary_id": profile.subsidiary_id,
             "tax_accounts": list(profile.tax_accounts),
             "tax_item_accounts": dict(profile.tax_item_accounts),
+            "correction_location_id": profile.correction_location_id,
         },
+        "account_types": account_types,
         "items": items,
         "period": {k: period.get(k) for k in ("id", "closed", "arLocked", "allLocked")},
         "subsidiary_id": str(scope["subsidiary_id"]),
@@ -772,6 +857,8 @@ async def verify_after(db, tenant_id, p, receipt=None):
             raise ValueError("credit_reallocation_lines_differ")
         if not _ledger_matches(facts["credit_gl"], p["expected_ledger"]):
             raise ValueError("credit_reallocation_ledger_differs")
+        if "location" in p["expected_after"] and _ref(credit, "location") != p["expected_after"]["location"]:
+            raise ValueError("credit_reallocation_location_differs")
         ledger = {
             side: {a: str(v) for a, v in accounts.items()} for side, accounts in _ledger(facts["credit_gl"]).items()
         }
@@ -820,7 +907,10 @@ def project(p, report, current, *, verified_at, now):
     ) != Decimal(str(source["tax_total"])):
         raise ValueError("credit_recheck_source_changed")
     stamp = (report.get("source") or {}).get("observed_at")
-    if not stamp or not verified_at <= datetime.fromisoformat(stamp) <= now or now - verified_at > timedelta(days=1):
+    observed = datetime.fromisoformat(stamp) if stamp else None
+    # As accounting_credit_recheck.project: the report must describe NetSuite after the write,
+    # observed within the last 15 minutes (this module's facts are read live by fresh()).
+    if not observed or not verified_at <= observed <= now or now - observed > timedelta(minutes=15):
         raise ValueError("credit_recheck_stale_evidence")
     booked, required = booked_balance(**facts)
 
@@ -837,18 +927,23 @@ def project(p, report, current, *, verified_at, now):
         "records": {"invoice": p["invoice_id"], "creditmemo": p["record_id"]},
     }
     refunds = amounts.get("refunds")
+    refunds_agree = not refunds or Decimal(str(refunds.get("delta") or "0")) == 0
+    status = "matched" if posting["status"] == "matched" and refunds_agree else "difference"
     return {
         **report,
         "balance": {
             **report["balance"],
-            "status": posting["status"],
+            "status": status,
             "reason": "verified_invoice_less_existing_credit",
             "amounts": {
                 "order_total": posting["amounts"]["order_total"],
                 "tax": posting["amounts"]["tax"],
                 **({"refunds": refunds} if refunds else {}),
             },
-            "missing_metrics": [],
+            # Only the two metrics this projection re-derived are no longer missing.
+            "missing_metrics": [
+                m for m in (report["balance"].get("missing_metrics") or []) if m not in ("order_total", "tax")
+            ],
             "original_order_comparison": report["balance"],
             "posting_reconciliation": posting,
         },

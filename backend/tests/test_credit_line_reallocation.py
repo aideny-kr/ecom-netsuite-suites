@@ -16,6 +16,16 @@ import pytest
 from app.services.transaction_ops import credit_line_reallocation as reallocation
 from app.services.transaction_ops.credit_line_reallocation import RefusalError
 
+ACCOUNT_TYPES = {
+    "119": "AcctRec",
+    "54": "Income",
+    "783": "Income",
+    "210": "OthCurrLiab",
+    "846": "OthCurrLiab",
+    "906": "OthCurrLiab",
+    "999": "OthCurrLiab",
+}
+
 
 def _gl(*rows):
     return {"complete": True, "rows": [{"account": a, "accountingbook": "1", side: v} for a, side, v in rows]}
@@ -48,6 +58,7 @@ def _us():
         "subsidiary": {"id": "1"},
         "entity": {"id": "5685197"},
         "account": {"id": "119"},
+        "location": {"id": "30"},
         "postingPeriod": {"id": "171"},
         "applied": "2.8",
         "unapplied": "0.0",
@@ -98,6 +109,7 @@ def _us():
             "included_tax_total": "0.0",
         },
         "profile": {"subsidiary_id": "1", "tax_accounts": ["210", "866", "905"], "tax_item_accounts": {"5005": "210"}},
+        "account_types": ACCOUNT_TYPES,
         "items": {
             "1603": {"id": "1603", "isInactive": False, "incomeAccount": {"id": "783"}},
             "5005": {"id": "5005", "isInactive": False, "incomeAccount": {"id": "210"}},
@@ -178,7 +190,13 @@ def _bv():
             "included_tax_total": "450.2",
         },
         # BV's active config declares only the item map; its account counts as a tax account.
-        "profile": {"subsidiary_id": "2", "tax_accounts": [], "tax_item_accounts": {"4699": "846"}},
+        "profile": {
+            "subsidiary_id": "2",
+            "tax_accounts": [],
+            "tax_item_accounts": {"4699": "846"},
+            "correction_location_id": "81",
+        },
+        "account_types": ACCOUNT_TYPES,
         "items": {
             "1603": {"id": "1603", "isInactive": False, "incomeAccount": {"id": "783"}},
             "4699": {"id": "4699", "isInactive": False, "incomeAccount": {"id": "846"}},
@@ -428,7 +446,7 @@ class TestReviewRoundTwo:
     def test_an_existing_line_may_keep_its_own_item_that_posts_to_a_tax_account(self):
         facts = _bv()
         credit = facts["credit"]
-        credit["total"] = credit["subtotal"] = "235.0"
+        credit["total"] = credit["subtotal"] = credit["applied"] = "235.0"
         credit["application_evidence"]["lines"][0]["amount"] = "235.0"
         vat_line = {
             "line": 2,
@@ -471,3 +489,60 @@ class TestReviewRoundTwo:
         facts = _us()
         facts["credit_gl"] = _gl(*rows)
         assert _refused(facts, US_FIX) == "evidence_incomplete"
+
+
+class TestReviewRoundThree:
+    """Findings of the 2026-09-25 T2 gate round 3 (wf_5430d9c2-780) and the SB1 sandbox write."""
+
+    def test_tax_on_an_unconfigured_liability_account_is_refused(self):
+        facts = _bv()
+        invoice, _ = facts["invoices"][0]
+        facts["invoices"] = [
+            (
+                invoice,
+                _gl(
+                    ("119", "debit", "2819"),
+                    ("54", "credit", "2329.75"),
+                    ("846", "credit", "450.20"),
+                    ("906", "credit", "39.05"),
+                ),
+            )
+        ]
+        assert _refused(facts, BV_FIX) == "tax_account_not_configured"
+
+    def test_an_account_of_unknown_type_is_incomplete_evidence(self):
+        facts = _us()
+        facts["account_types"] = {k: v for k, v in ACCOUNT_TYPES.items() if k != "783"}
+        assert _refused(facts, US_FIX) == "evidence_incomplete"
+
+    def test_a_line_without_an_item_is_unsupported(self):
+        facts = _us()
+        facts["credit"]["line_evidence"]["lines"][0].pop("item")
+        assert _refused(facts, US_FIX) == "credit_lines_unsupported"
+
+    def test_a_credit_with_non_item_charges_is_refused(self):
+        facts = _us()
+        facts["credit"]["line_evidence"]["lines"][0].update(amount="2.5", rate="2.5")  # 0.30 of shipping
+        assert _refused(facts, US_FIX) == "credit_has_non_item_charges"
+
+    def test_an_unapplied_credit_is_refused(self):
+        facts = _us()
+        facts["credit"].update(applied="0.0", unapplied="2.8")
+        assert _refused(facts, US_FIX) == "credit_not_applied"
+
+    def test_each_tax_field_is_carried_from_the_template_when_a_line_lacks_it(self):
+        facts = _bv()
+        result = reallocation.assess(lines=BV_FIX, **facts)
+        assert all(entry["taxCode"] == {"id": "4059"} for entry in result["proposed_fields"]["item"]["items"])
+
+    def test_a_credit_without_location_needs_the_configured_correction_location(self):
+        facts = _bv()
+        result = reallocation.assess(lines=BV_FIX, **facts)
+        assert result["proposed_fields"]["location"] == {"id": "81"}
+        assert result["expected_after"]["location"] == "81"
+        facts["profile"].pop("correction_location_id")
+        assert _refused(facts, BV_FIX) == "credit_location_required"
+
+    def test_a_credit_with_its_own_location_keeps_it(self):
+        result = reallocation.assess(lines=US_FIX, **_us())
+        assert "location" not in result["proposed_fields"] and "location" not in result["expected_after"]
