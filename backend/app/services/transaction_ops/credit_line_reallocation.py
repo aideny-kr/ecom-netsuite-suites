@@ -244,6 +244,7 @@ def _facts(
         "required": required,
         "credit_total": _dec(credit.get("total")),
         "correction_location": correction_location,
+        "credit_tax": credit_tax,
     }
 
 
@@ -361,7 +362,14 @@ def assess(
         wire.append(entry)
         debit[line["account"]] = debit.get(line["account"], Decimal(0)) + line["amount"]
     proposed_fields = {"item": {"items": wire}}
-    expected_after = {"total": _q(total, precision), "taxTotal": _q(0, precision)}
+    # The credit's allocation, not its header: "subtotal" is the part posted to sales adjustments,
+    # "taxTotal" the part posted to tax accounts (via the tax-refund item). The header tax stays 0,
+    # which the readback checks on its own. This is what the approval card shows.
+    expected_after = {
+        "total": _q(total, precision),
+        "subtotal": _q(total - new_tax, precision),
+        "taxTotal": _q(new_tax, precision),
+    }
     if facts["correction_location"]:
         proposed_fields = {"location": {"id": str(facts["correction_location"])}, **proposed_fields}
         expected_after["location"] = str(facts["correction_location"])
@@ -372,6 +380,11 @@ def assess(
         "expected_ledger": {
             "debit": {account: _q(value, precision) for account, value in sorted(debit.items())},
             "credit": {_ref(credit, "account"): _q(total, precision)},
+        },
+        "allocation_before": {
+            "total": _q(facts["credit_total"], precision),
+            "subtotal": _q(facts["credit_total"] - facts["credit_tax"], precision),
+            "taxTotal": _q(facts["credit_tax"], precision),
         },
         "balance": {
             "before": _balance(*facts["before"], precision),
@@ -743,7 +756,7 @@ def _proposal(tenant_id, facts, context, result, lines, reason):
             "expected_after": result["expected_after"],
             "expected_ledger": result["expected_ledger"],
             "balance": balance,
-            "before": {"total": str(credit.get("total")), "taxTotal": "0.00", "lines": before_lines},
+            "before": {**result["allocation_before"], "lines": before_lines},
             "source": source,
             "support": {
                 "invoice": invoice,
@@ -753,6 +766,26 @@ def _proposal(tenant_id, facts, context, result, lines, reason):
             },
             "protected_sales_order": context["order"],
             "ar_account": _ref(credit, "account"),
+            # Shown on the existing-credit approval card.
+            "period": dict(facts["period"]),
+            "accounting_book": next(
+                (
+                    str(r.get("accountingbook"))
+                    for r in (facts["credit_gl"] or {}).get("rows") or []
+                    if r.get("accountingbook")
+                ),
+                None,
+            ),
+            "sales_adjustment_account": ",".join(
+                sorted(
+                    {
+                        _ref(facts["items"].get(_ref(line, "item")) or {}, "incomeAccount")
+                        for line in credit["line_evidence"]["lines"]
+                    }
+                    - _tax_accounts(facts["profile"])
+                    - {None}
+                )
+            ),
             "tax_account": ",".join(sorted(_tax_accounts(facts["profile"]))),
             "reason": str(reason or "")[:500],
             "approval_basis": (
@@ -915,12 +948,29 @@ async def verify_after(db, tenant_id, p, receipt=None):
         booked, required = booked_balance(**facts)
         if booked != required:
             raise ValueError("credit_reallocation_order_still_differs")
+        precision = facts.get("precision", 2)
+        _, saved_tax, _ = _posted(
+            credit, facts["credit_gl"], _tax_accounts(facts["profile"]), -1, facts.get("account_types")
+        )
+        saved_total = _dec(credit.get("total"))
+        booked_credit = {
+            "total": _q(saved_total, precision),
+            "subtotal": _q(saved_total - saved_tax, precision),
+            "taxTotal": _q(saved_tax, precision),
+        }
         return {
             "status": "verified",
             "record_type": "creditmemo",
             "record_id": p["record_id"],
             "credit_memo_id": p["record_id"],
-            "after": {"body": {"total": credit.get("total"), "taxtotal": "0.00"}, "lines": p["lines"]},
+            "after": {
+                "body": {
+                    "total": booked_credit["total"],
+                    "subtotal": booked_credit["subtotal"],
+                    "taxtotal": booked_credit["taxTotal"],
+                },
+                "lines": p["lines"],
+            },
             "ledger": ledger,
             "balance": {"booked": booked, "source": required},
             "related_records_unchanged": True,
