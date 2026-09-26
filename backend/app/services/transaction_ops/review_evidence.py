@@ -1,6 +1,6 @@
 """Refresh a fixed review cohort without changing its historical findings."""
 
-from sqlalchemy import DateTime, and_, any_, case, cast, column, func, literal, or_, select, true, tuple_
+from sqlalchemy import DateTime, and_, any_, case, cast, column, func, literal, or_, select, true, tuple_, union_all
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
@@ -161,7 +161,7 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
         .lateral()
     )
     report = {key: facts.c[key] for key in ("source", "targets", "_observation", "balance", "source_eligibility")}
-    readings = (
+    reading_query = (
         select(
             f.id,
             f.run_id,
@@ -177,12 +177,21 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
         .join(facts, true())
         .where(
             f.tenant_id == tenant_id,
-            run_ids_match(f.run_id, sorted(set(cohort_ids + replacement_ids))),
             final_evidence(report),
         )
-        .cte(f"{name}_readings")
+    )
+    cohort_readings = (
+        reading_query.where(run_ids_match(f.run_id, cohort_ids))
+        .cte(f"{name}_cohort_readings")
         .prefix_with("MATERIALIZED")
     )
+    # Rechecks may refresh the fixed cohort, never enlarge it. Do not decode
+    # unrelated orders as history grows, or decode cohort findings twice.
+    other_readings = reading_query.where(
+        run_ids_match(f.run_id, sorted(set(replacement_ids) - set(cohort_ids))),
+        f.order_reference.in_(select(cohort_readings.c.order_reference)),
+    )
+    readings = union_all(select(cohort_readings), other_readings).cte(f"{name}_readings").prefix_with("MATERIALIZED")
     cohort = (
         select(readings)
         .where(run_ids_match(readings.c.run_id, cohort_ids))

@@ -299,3 +299,17 @@ async def test_empty_review_page_retains_unfiltered_summary_and_filtered_count(
     assert result["items"] == [] and result["has_next"] is False
     assert result["summary"] == {"checked": 4, "matched": 1, "needs_review": 3, "not_verified": 0}
     assert result["total"] == (0 if search else 3)
+
+
+async def test_review_never_decodes_unrelated_replacement_history(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    first, second, cases = await fixture_rows(db, actor, monkeypatch, count=4)
+    later = await recheck(db, actor, first)
+    await linked(db, actor, later, cases[0], status="matched", at=first.created_at + timedelta(seconds=2))
+    unrelated = await evidence(db, actor, later, "R-unrelated", "difference", first.created_at)
+    # Historical data outside the fixed cohort must not be parsed at all.
+    unrelated.report_json = {**unrelated.report_json, "_observation": {"final": True, "observed_at": "malformed"}}
+    await db.flush()
+    result = await review_page(db, actor.tenant_id, [first.id, second.id])
+    assert result["summary"] == {"checked": 4, "matched": 1, "needs_review": 3, "not_verified": 0}
+    assert {row["order_reference"] for row in result["items"]} == {case.order_reference for case in cases}
