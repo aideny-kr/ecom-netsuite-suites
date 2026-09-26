@@ -965,6 +965,7 @@ interface NativeAccountingReviewBase extends AccountingReviewBase {
 
 export type NativeAccountingReview =
   | (NativeAccountingReviewBase & { kind: "credit_tax_reallocation" })
+  | (NativeAccountingReviewBase & { kind: "credit_line_reallocation" })
   | (NativeAccountingReviewBase & { kind: "sales_order_line_alignment" });
 
 export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview | NativeAccountingReview;
