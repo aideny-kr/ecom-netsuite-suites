@@ -154,6 +154,11 @@ async def completed_observation_windows(db, root, span, *, daily_only=False, sou
             cast(r.progress_json["continuation_started_at"].astext, DateTime(timezone=True)), r.created_at
         )
         query = query.where(
+            # Explicit retries and cross-cycle scheduled resumes reset their
+            # scan clock while retaining old cursors. Without walking that
+            # lineage, they cannot prove every original read met this floor.
+            r.progress_json["review_attempt"].astext.is_(None),
+            r.progress_json["evidence_root_id"].astext.is_(None),
             observed_since >= scheduled_observation_floor(root),
             r.finished_at >= observed_since,
             func.coalesce(r.config_snapshot["destination_discovery_version"].astext, "1")

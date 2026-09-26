@@ -297,3 +297,66 @@ def test_shared_coverage_preserves_local_settle_hour_across_dst(end, cutoff):
         },
     )
     assert daily_evidence.scheduled_observation_floor(root) == datetime.fromisoformat(cutoff)
+
+
+@pytest.mark.parametrize("origin", ["manual", "schedule"])
+async def test_resume_cannot_refresh_original_observation_clock_for_daily_reuse(db, admin_user, monkeypatch, origin):
+    from app.schemas.transaction_runs import RunCreate
+    from app.services.transaction_ops import state_service
+
+    actor = admin_user[0]
+    config, _, second, target = await completed_review_and_daily(db, actor, monkeypatch)
+    # Replace the second day's successful source with a real retry of an early,
+    # partially collected scan. The first day's coverage remains valid.
+    db.expunge(second)
+    floor = daily_evidence.scheduled_observation_floor(target)
+    params = (
+        second.params_json
+        if origin == "manual"
+        else {
+            "origin": "schedule",
+            "evaluation_key": str(uuid4()),
+            "order_references": [],
+            "window_start": second.params_json["window_start"],
+            "window_end": second.params_json["window_end"],
+        }
+    )
+    params = RunCreate(**params).model_dump(
+        mode="json", exclude={"window_basis", "review"} if origin == "schedule" else set()
+    )
+    old = TransactionRun(
+        id=uuid4(),
+        tenant_id=actor.tenant_id,
+        config_id=config.id,
+        origin=origin,
+        work_key=uuid4().hex,
+        params_json=params,
+        config_snapshot=second.config_snapshot,
+        max_api_calls=100,
+        max_orders=100,
+        deadline_at=floor,
+        status="finished",
+        termination_reason="error" if origin == "manual" else "budget",
+        created_at=floor - timedelta(days=1),
+        finished_at=floor - timedelta(hours=1),
+        progress_json={"processed": 1, "scan_count": 10, "last_source_id": 1234, "pending_refs": []},
+    )
+    db.add(old)
+    await db.flush()
+    retried = await state_service.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(**{**params, "evaluation_key": str(uuid4())}),
+        actor=actor if origin == "manual" else None,
+        now=datetime.now(timezone.utc),
+        resume_from_run_id=old.id,
+        human_retry=origin == "manual",
+    )
+    assert retried.progress_json["last_source_id"] == 1234
+    assert "continuation_started_at" not in retried.progress_json
+    assert retried.created_at >= floor
+    retried.progress_json = {**retried.progress_json, **second.progress_json}
+    retried.status, retried.termination_reason, retried.finished_at = "finished", "done", datetime.now(timezone.utc)
+    await db.flush()
+    assert await daily_evidence.coverage_receipt(db, target, span(target)) is None
