@@ -279,5 +279,23 @@ async def test_each_selected_cohort_materializes_under_its_own_name(db, admin_us
     latest, _ = await selected_evidence(db, actor.tenant_id, [first.id, second.id])
     sql = str(select(latest).compile(dialect=postgresql.dialect()))
     assert "WITH anon_" not in sql
-    assert f"WITH review_identities_{first.id.hex} AS MATERIALIZED" in sql
-    assert f"WITH review_identities_{second.id.hex} AS MATERIALIZED" in sql
+    for root in (first, second):
+        for suffix in ("readings", "cohort", "candidates"):
+            # One top-level definition, even though both winner branches reuse it.
+            assert sql.count(f"review_{root.id.hex}_{suffix} AS MATERIALIZED") == 1
+
+
+@pytest.mark.parametrize("search,offset", [("R-does-not-exist", 0), ("", 10000)])
+async def test_empty_review_page_retains_unfiltered_summary_and_filtered_count(
+    db, admin_user, monkeypatch, search, offset
+):
+    actor = admin_user[0]
+    first, second, cases = await fixture_rows(db, actor, monkeypatch, count=4)
+    later = await recheck(db, actor, first)
+    await linked(db, actor, later, cases[0], status="matched", at=first.created_at + timedelta(seconds=2))
+    result = await review_page(
+        db, actor.tenant_id, [first.id, second.id], status="needs_review", search=search, offset=offset
+    )
+    assert result["items"] == [] and result["has_next"] is False
+    assert result["summary"] == {"checked": 4, "matched": 1, "needs_review": 3, "not_verified": 0}
+    assert result["total"] == (0 if search else 3)
