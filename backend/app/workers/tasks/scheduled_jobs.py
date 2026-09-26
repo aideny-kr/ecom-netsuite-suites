@@ -921,6 +921,7 @@ async def _run_schedule_now_locked(
     existing_job_id: uuid.UUID | None = None,
     retry_on_error: bool = False,
     period_key: str | None = None,
+    recovering: bool = False,
 ) -> RunOutcome:
     """Run one schedule ONE time: one `jobs` row, plan steps replayed in order,
     schedule bookkeeping updated, one commit at the end (plus the write-step
@@ -1057,6 +1058,23 @@ async def _run_schedule_now_locked(
         if existing_job is None:
             return RunOutcome(REASON_BLOCKED, None, {})
         saved = existing_job.parameters or {}
+        if recovering and existing_job.status == "pending" and saved.get("recovery_version") != 1:
+            _stamp_blocked_existing_job(existing_job, "legacy dispatch has no saved recovery identity; not replayed")
+            row.last_run_status = REASON_BLOCKED
+            await audit_service.log_event(
+                db,
+                tenant_id=tenant_id,
+                category="jobs",
+                action="jobs.run.blocked",
+                actor_type="system",
+                resource_type="job",
+                resource_id=str(existing_job.id),
+                job_id=existing_job.id,
+                payload={"reason": "legacy_dispatch_not_replayed"},
+                status="error",
+            )
+            await db.commit()
+            return RunOutcome(REASON_BLOCKED, existing_job_id, {})
         attempt = saved.get("attempt", attempt)
         use_pending = saved.get("use_pending", use_pending)
         due_at = datetime.fromisoformat(saved["due_at"]) if saved.get("due_at") else due_at
@@ -1587,13 +1605,22 @@ async def _run_schedule_now_locked(
 
 
 def _recoverable_jobs(tenant_id, now):
+    scheduled_retry = (
+        select(Schedule.id)
+        .where(
+            Schedule.tenant_id == tenant_id,
+            Schedule.retry_job_id == Job.id,
+        )
+        .correlate(Job, Tenant)
+        .exists()
+    )
     # A committed pending row is the outbox. Wait a minute so ordinary broker
     # delivery wins; future retries retain their original due time.
     return (
         Job.tenant_id == tenant_id,
         Job.job_type == "scheduled_job",
         Job.status.in_(["pending", "running"]),
-        or_(Job.status == "running", Job.parameters["dispatch_ready"].as_boolean().is_(True)),
+        or_(Job.status == "running", Job.parameters["dispatch_ready"].as_boolean().is_(True), ~scheduled_retry),
         Job.created_at < now - timedelta(minutes=1),
     )
 
@@ -1623,6 +1650,7 @@ async def _recover_interrupted_jobs(db, tenant_id, now):
                 due_at=due,
                 now=now,
                 existing_job_id=jid,
+                recovering=True,
             )
         except Exception:
             await db.rollback()

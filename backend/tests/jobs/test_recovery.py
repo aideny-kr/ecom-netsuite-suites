@@ -348,3 +348,34 @@ async def test_nullable_budget_survives_retry_without_losing_bounded_limits(db, 
     schedule = await db.get(Schedule, sid)
     retry = await db.get(Job, schedule.retry_job_id)
     assert retry.parameters["remaining_budget"] == {"seconds": None, "bytes_scanned": 10, "usd": None}
+
+
+async def test_legacy_pending_dispatch_is_retired_without_replay_or_blocking_new_work(db, monkeypatch):
+    calls = []
+
+    async def execute(ctx, params):
+        calls.append(ctx.run_id)
+        return {"ok": True}
+
+    tid, sid = await seed(db, monkeypatch, execute)
+    schedule = await db.get(Schedule, sid)
+    schedule.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    legacy = Job(
+        tenant_id=tid,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={"schedule_id": str(sid)},
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    db.add(legacy)
+    await db.commit()
+    legacy_id = legacy.id
+    result = await jobs.run_due_jobs(db, tid)
+    assert result["ran"] == 1
+    assert len(calls) == 1
+    assert legacy_id not in calls
+    retired = await db.get(Job, legacy_id)
+    assert retired.status == "completed"
+    assert retired.result_summary["reason"] == "blocked"
+    await jobs.run_schedule_now(db, sid, tenant_id=tid, actor_id=None, existing_job_id=legacy_id)
+    assert len(calls) == 1
