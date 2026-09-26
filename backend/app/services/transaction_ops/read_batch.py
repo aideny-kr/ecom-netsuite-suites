@@ -11,7 +11,10 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-_REFERENCE = re.compile(r"/record/v1/(?:currency|salesTaxItem|accountingPeriod)/[0-9]{1,30}")
+# The metadata catalog is the same for every order of a group and the largest reference read.
+_REFERENCE = re.compile(
+    r"/record/v1/(?:(?:currency|salesTaxItem|accountingPeriod)/[0-9]{1,30}|metadata-catalog/[A-Za-z][A-Za-z0-9_]{0,127})"
+)
 _batch = ContextVar("accounting_reference_read_batch", default=None)
 
 

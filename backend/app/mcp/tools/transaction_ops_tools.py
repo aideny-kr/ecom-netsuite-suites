@@ -552,18 +552,14 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         # Recipe eligibility is not an evidence boundary. In particular, a paid
         # repriced order needs its existing credit/GL evidence before a treatment
         # can be selected. The collector's native call budget remains enforced.
-        evidence = json.loads(
-            json.dumps(
-                await collect_accounting_evidence(
-                    db,
-                    tenant_id,
-                    review,
-                    case.latest_report_json,
-                    **({"field_map": native_fields} if native_fields else {}),
-                ),
-                default=str,
-            )
+        collected = await collect_accounting_evidence(
+            db,
+            tenant_id,
+            review,
+            case.latest_report_json,
+            **({"field_map": native_fields} if native_fields else {}),
         )
+        evidence = json.loads(json.dumps(collected, default=str))
 
         integration = await db.scalar(
             select(AuditEvent)
@@ -597,6 +593,10 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 )
             )
             evidence["source_refresh"] = source
+            if context.get("group_preparation") is True:
+                from app.services.transaction_ops.credit_line_reallocation import keep_group_preparation_reads
+
+                keep_group_preparation_reads(db, case, review, collected, source, field_map=native_fields)
             from app.services.transaction_ops.line_evidence import compare_source_lines, source_revision_delta
 
             evidence["line_comparison"] = compare_source_lines(source, evidence, field_map=native_fields)

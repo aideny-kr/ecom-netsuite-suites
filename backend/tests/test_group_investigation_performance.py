@@ -35,6 +35,19 @@ async def test_reference_reads_coalesce_concurrent_cases_and_return_independent_
     assert fetch.await_count == 2
 
 
+async def test_the_credit_memo_field_catalog_is_read_once_per_preparation():
+    # Identical for every order of a group, and the largest reference read: fetched per
+    # order until 2026-09-26. Final approval preflight stays outside the batch.
+    fetch = AsyncMock(return_value={"properties": {"item": {}}})
+    scope = ("tenant", "connection", "account", "credential")
+    path = "/record/v1/metadata-catalog/creditMemo"
+    with reference_read_batch() as batch:
+        await asyncio.gather(*[reference_read(scope, "GET", path, None, None, fetch) for _ in range(10)])
+        assert fetch.await_count == 1 and batch.hits == 9
+    await reference_read(scope, "GET", path, None, None, fetch)
+    assert fetch.await_count == 2
+
+
 @pytest.mark.parametrize("field", range(4))
 async def test_reference_cache_partitions_tenant_connection_account_and_credentials(field):
     fetch = AsyncMock(return_value={"id": "1"})
@@ -303,6 +316,54 @@ async def test_actual_evidence_tool_uses_full_reads_for_supported_shapes_and_ref
     # Unsupported recipes still require posting evidence to choose a treatment.
     assert collect.await_args.kwargs == {}
     assert result["accounting_evidence"]["source_refresh"] == source
+
+
+@pytest.mark.parametrize("group_preparation", [True, False])
+async def test_group_preparation_keeps_its_own_reads_for_the_reallocation_step(group_preparation, monkeypatch):
+    # Measured 2026-09-26: the reallocation step re-read the same source and NetSuite evidence
+    # seconds after this tool read them (12.8 s + 10.9 s per order at 3 in flight).
+    from copy import deepcopy
+
+    from app.mcp.tools import transaction_ops_tools as tool
+    from app.services.transaction_ops.credit_line_reallocation import GROUP_PREPARATION_READS
+    from tests.test_accounting_approval_flow import kind_proposal
+    from tests.test_tax_correction import fixture
+
+    e, report, review, _ = fixture()
+    source = deepcopy(kind_proposal("credit")["source"])
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    db.scalar.return_value = None
+    case = SimpleNamespace(id=uuid4(), scope_json={}, latest_report_json=report, order_reference=source["number"])
+    monkeypatch.setattr(tool, "_authorize", AsyncMock(return_value=(db, uuid4(), SimpleNamespace(id=uuid4()))))
+    monkeypatch.setattr("app.services.transaction_ops.case_service.get_case", AsyncMock(return_value=case))
+    monkeypatch.setattr(
+        "app.services.transaction_ops.accounting_review.accounting_context", AsyncMock(return_value=review)
+    )
+    collected = {**deepcopy(e), "blockers": [], "assessment": {}}
+    monkeypatch.setattr(
+        "app.services.transaction_ops.accounting_evidence.collect_accounting_evidence",
+        AsyncMock(return_value=deepcopy(collected)),
+    )
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.refresh_source", AsyncMock(return_value=source))
+    monkeypatch.setattr("app.services.transaction_ops.commercial_credits.collect_commercial_credits", AsyncMock())
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate", lambda *args: None)
+    monkeypatch.setattr(
+        "app.services.transaction_ops.resolution_assessment.reference_provenance", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr("app.services.audit_service.log_event", AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    result = await tool.execute_accounting_evidence(
+        {"case_id": str(case.id)}, context={"group_preparation": group_preparation}
+    )
+    assert result["success"], result
+    kept = db.info.get(GROUP_PREPARATION_READS)
+    if not group_preparation:
+        assert kept is None  # a chat read is never handed to a later step
+        return
+    assert kept["case_id"] == str(case.id) and kept["field_map"] is None
+    assert kept["review"] == review and kept["report"] == report
+    # The reads exactly as collected, before this tool annotated its own copy of them.
+    assert kept["source"] == source and kept["evidence"] == collected
 
 
 def test_representative_reads_bound_work_and_preserve_exact_case_observation_pairs():
