@@ -635,3 +635,93 @@ class TestReviewRoundFourFlow:
 
     def test_refusal_figures_are_marked_for_correction_only(self):
         assert "not show" in tools._REALLOCATION_GUIDANCE["outcome_does_not_match_source"].lower()
+
+
+class TestAgentLoop:
+    """Live staging 2026-09-26: the agent's proposal was verified but no card appeared, because the
+    agent loop showed the server-built card only after the evidence/group tools. The propose tool
+    must reach the same card, in the same turn, without the model repeating the payload."""
+
+    async def test_a_verified_proposal_produces_the_real_card_without_a_second_model_hop(self, order):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from app.services.chat.agents.base_agent import BaseSpecialistAgent
+        from app.services.chat.agents.unified_agent import UnifiedAgent
+        from app.services.chat.llm_adapter import ToolUseBlock
+        from app.services.chat.write_validator import ValidationResult
+        from tests.test_accounting_approval_flow import inputs
+        from tests.test_mutation_intercept import _llm_response
+        from tests.test_write_confirm_orchestrator import _TENANT_ID, _USER_ID
+
+        global TENANT
+        saved, TENANT = TENANT, _TENANT_ID
+        try:
+            _, p = await _proposed(order)
+        finally:
+            TENANT = saved
+        name, params = inputs(p)
+        db = AsyncMock(spec=AsyncSession)
+        db.info = {}
+        db.scalar.return_value = None
+        agent = UnifiedAgent(tenant_id=_TENANT_ID, user_id=_USER_ID, correlation_id="loop")
+        tool = "transaction_ops_propose_credit_reallocation"
+        agent._tool_defs = [{"name": tool}, {"name": name}]
+        adapter = MagicMock()
+        hops = []
+
+        async def stream(**kwargs):
+            hops.append(kwargs)
+            assert len(hops) == 1, "a verified proposal must not need another model hop to show its card"
+            yield (
+                "response",
+                _llm_response(
+                    tool_blocks=[
+                        ToolUseBlock(
+                            id="p1",
+                            name=tool,
+                            input={"case_id": CASE, "credit_memo_id": p["record_id"], "lines": US_FIX},
+                        )
+                    ]
+                ),
+            )
+
+        adapter.stream_message = stream
+        adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+        adapter.build_tool_result_message.return_value = {"role": "user", "content": []}
+
+        async def propose(**kwargs):
+            assert kwargs["tool_name"] == tool
+            db.info["accounting_correction_candidate"] = p
+            return json.dumps({"success": True, "case_id": CASE, "financial_writes": 0})
+
+        with (
+            patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+            patch(
+                "app.services.chat.write_validation.validate_mutation",
+                AsyncMock(return_value=ValidationResult(ok=True)),
+            ),
+            patch("app.services.chat.record_metadata_service.prefetch_scoped_invoice_metadata", AsyncMock()),
+            patch("app.services.chat.tools.execute_tool_call", AsyncMock(side_effect=propose)),
+            patch("app.services.policy_service.evaluate_tool_call", return_value={"allowed": True}),
+            patch(
+                "app.services.mcp_connector_service.get_mcp_connector",
+                AsyncMock(return_value=MagicMock(provider="netsuite_mcp")),
+            ),
+        ):
+            events = [
+                e
+                async for e in BaseSpecialistAgent.run_streaming(
+                    agent,
+                    task="Prepare supported exact fixes for my approval",
+                    context={},
+                    db=db,
+                    adapter=adapter,
+                    model="m",
+                )
+            ]
+        cards = [v for k, v in events if k == "confirmation_required"]
+        assert len(cards) == 1 and len(hops) == 1
+        assert cards[0]["accounting_review"] == p
+        assert cards[0]["tool_input"] == params

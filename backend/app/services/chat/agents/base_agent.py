@@ -2382,10 +2382,18 @@ class BaseSpecialistAgent(abc.ABC):
                         "transaction_ops_status",
                         "transaction_ops_accounting_evidence",
                         "transaction_ops_accounting_group",
+                        "transaction_ops_propose_credit_reallocation",
                     }:
                         self._transaction_workflow = True
+                    # Every tool that can leave a server-verified candidate is followed by the
+                    # server's own card: the model never has to (and may decline to) repeat it.
                     if (
-                        block.name in {"transaction_ops_accounting_evidence", "transaction_ops_accounting_group"}
+                        block.name
+                        in {
+                            "transaction_ops_accounting_evidence",
+                            "transaction_ops_accounting_group",
+                            "transaction_ops_propose_credit_reallocation",
+                        }
                         and not _had_error
                     ):
                         from app.services.transaction_ops.accounting_group import prepare_group_confirmation
