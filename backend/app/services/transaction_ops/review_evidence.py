@@ -150,10 +150,11 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
     cohort_ids = [row.id for row in runs if row.cohort]
     replacement_ids = [row.id for row in runs if row.replacement]
     name = f"review_{root.id.hex}"
-    # Extract small identity/read-clock values once. Repeated JSONB lookups on
-    # large, compressed evidence previously dominated both sorting and joins.
+    # The trigger-maintained projection avoids repeatedly decompressing full
+    # financial reports for counts and winner selection. NULL legacy rows keep
+    # the original behavior until backfilled; full reports still supply rows.
     facts = (
-        func.jsonb_to_record(f.report_json)
+        func.jsonb_to_record(func.coalesce(f.review_metadata_json, f.report_json))
         .table_valued(
             *(column(key, JSONB) for key in ("source", "targets", "_observation", "balance", "source_eligibility"))
         )
