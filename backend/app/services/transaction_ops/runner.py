@@ -709,29 +709,58 @@ async def run_investigation(
             snapshot_floor = None  # Create-input projections are deliberately not shared.
         if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
             return await finish("stall")
-        if run.params_json.get("review"):
-            from app.schemas.transaction_runs import ReviewSpan
-            from app.services.transaction_ops.daily_evidence import (
-                completed_daily_windows,
-                completed_observation_windows,
-                covered_until,
-            )
-
-            span = ReviewSpan.model_validate(run.params_json["review"])
-            saved = await completed_observation_windows(db, run, span)
-            start, end = (_time(run.params_json[k]) for k in ("window_start", "window_end"))
-            if covered_until(start, end, saved) == end:
-                daily = await completed_daily_windows(db, run, span)
-                progress.update(
-                    scan_complete=True,
-                    refund_scan_complete=True,
-                    destination_scan_complete=True,
-                    pending_refs=[],
-                    reused_daily_run_ids=[row[2] for row in daily],
-                    reused_observation_run_ids=[row[2] for row in saved],
-                    review_coverage_complete=covered_until(span.start, span.end, saved) == span.end,
+        # Daily catch-up shares the review coverage proof. Never abandon a
+        # partially collected scan/continuation to replace it with older work.
+        scheduled_reuse = (
+            getattr(run, "origin", None) == "schedule"
+            and run.params_json.get("window_start")
+            and run.params_json.get("window_end")
+            and run.api_calls_used == 0
+            and not any(
+                progress.get(key)
+                for key in (
+                    "continuation_of",
+                    "continuation_baseline",
+                    "continuation_started_at",
+                    "evidence_root_id",
+                    "processed",
+                    "pending_refs",
+                    "scan_count",
+                    "refund_scan_count",
+                    "destination_scan_count",
+                    "dependency_step_count",
+                    "scan_complete",
+                    "refund_scan_complete",
+                    "destination_scan_complete",
+                    "dependency_scan_complete",
+                    "last_source_id",
+                    "refund_after_id",
+                    "destination_after_id",
                 )
+            )
+        )
+        if run.params_json.get("review") or scheduled_reuse:
+            from app.schemas.transaction_runs import ReviewSpan
+            from app.services.transaction_ops.daily_evidence import coverage_receipt
+
+            span = (
+                ReviewSpan.model_validate(run.params_json["review"])
+                if run.params_json.get("review")
+                else ReviewSpan(
+                    id=run.id, start=_time(run.params_json["window_start"]), end=_time(run.params_json["window_end"])
+                )
+            )
+            receipt = await coverage_receipt(db, run, span, now=clock())
+            if receipt is not None:
+                progress.update(receipt)
                 await save()
+                await state._audit(
+                    db,
+                    tenant_id,
+                    "run.evidence_reused",
+                    run,
+                    payload={"source_run_ids": receipt["reused_observation_run_ids"], "fresh_provider_reads": 0},
+                )
                 return await finish("done")
         await save()
         while True:

@@ -118,25 +118,17 @@ async def _complete_saved_review(db, tenant_id, run):
     """
     if run.status != "pending":
         return run
-    from app.services.transaction_ops.daily_evidence import completed_observation_windows, covered_until
+    from app.services.transaction_ops.daily_evidence import coverage_receipt
     from app.services.transaction_ops.runner import enabled
 
     span = ReviewSpan.model_validate(run.params_json["review"])
-    windows = await completed_observation_windows(db, run, span)
-    if covered_until(span.start, span.end, windows) != span.end or not await enabled(db, tenant_id):
+    receipt = await coverage_receipt(db, run, span, whole_span=True)
+    if receipt is None or not await enabled(db, tenant_id):
         return run
     token = await state.claim_run(db, tenant_id, run.id)
     if token is None:
         return await state.get_run(db, tenant_id, run.id)
-    progress = {
-        **(run.progress_json or {}),
-        "scan_complete": True,
-        "refund_scan_complete": True,
-        "destination_scan_complete": True,
-        "pending_refs": [],
-        "reused_observation_run_ids": [row[2] for row in windows],
-        "review_coverage_complete": True,
-    }
+    progress = {**(run.progress_json or {}), **receipt}
     await state.update_progress(db, tenant_id, run.id, ProgressUpdate(progress_json=progress), lease_token=token)
     await state._audit(
         db,

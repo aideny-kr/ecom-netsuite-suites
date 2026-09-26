@@ -1,6 +1,7 @@
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -11,6 +12,7 @@ from app.api.v1.transaction_ops import router
 from app.models.audit import AuditEvent
 from app.models.transaction_ops import TransactionCase
 from app.services.transaction_ops.case_groups import list_groups
+from app.services.transaction_ops.excel_report import build_workbook
 from app.services.transaction_ops.workspace_results import record_page, review_page
 from tests.conftest import enable_feature_flag
 from tests.test_transaction_review_results import evidence, recheck
@@ -157,6 +159,21 @@ async def test_export_contains_all_pages_exact_amounts_safe_text_and_audit(clien
     assert ws["F2"].value == "123456789012345.123456" and ws["F2"].data_type == "s"
     assert ws["K2"].value == -0.02 and ws["L2"].value == "—" and ws["M2"].value == 0
     assert ws["N2"].value == "1e-20"
+    # Formatting is shared across cells/workbooks, but the saved report must
+    # retain its header, alternating rows and exact monetary display formats.
+    assert ws["A1"].font.name == "Arial" and ws["A1"].font.bold
+    assert ws["A1"].font.color.rgb == "00FFFFFF"
+    assert ws["A1"].fill.fgColor.rgb == "00C94213"
+    assert ws["A1"].alignment.wrap_text and ws["A1"].alignment.vertical == "center"
+    assert ws["A2"].font.name == "Arial" and ws["A2"].font.sz == 10
+    assert ws["A2"].fill.fgColor.rgb == "00F4F4F5" and ws["A3"].fill.patternType is None
+    assert ws["K2"].number_format == "#,##0.00;[Red]-#,##0.00;0.00"
+    assert ws["K2"].alignment.horizontal == "right"
+    assert ws.row_dimensions[1].height == 34 and ws.row_dimensions[2].height == 20
+    assert ws.auto_filter.ref == "A1:AG76" and ws.print_title_rows == "$1:$1"
+    assert ws.page_setup.orientation == "landscape" and ws.page_setup.fitToWidth == 1
+    assert wb["Report"]["B2"].alignment.wrap_text and wb["Report"].row_dimensions[2].height == 32
+    assert wb["Report"].freeze_panes == "B2" and wb["Report"].auto_filter.ref is None
     assert all(cell.data_type != "f" for sheet in wb for row in sheet for cell in row)
     assert sum(row[5].value for row in wb["Issue groups"].iter_rows(min_row=2)) == 75
     events = (
@@ -230,6 +247,48 @@ async def test_export_refuses_oversize_without_truncation_and_audits_failure(cli
     assert event.actor_id == actor_id and event.status == "error"
 
 
+@pytest.mark.parametrize("failure", [None, "cell", "save"])
+def test_streamed_export_removes_temporary_evidence_files(monkeypatch, failure):
+    from openpyxl import Workbook
+    from openpyxl.utils.exceptions import IllegalCharacterError
+    from openpyxl.worksheet import _writer
+
+    paths = []
+    original = _writer.create_temporary_file
+
+    def tracked(*args, **kwargs):
+        path = original(*args, **kwargs)
+        paths.append(path)
+        return path
+
+    monkeypatch.setattr(_writer, "create_temporary_file", tracked)
+    if failure == "save":
+
+        def failed_save(*args, **kwargs):
+            raise OSError("export serialization failed")
+
+        monkeypatch.setattr(Workbook, "save", failed_save)
+
+    kwargs = dict(
+        status=None,
+        search="",
+        generated_at=datetime.now(timezone.utc),
+        report_id="invalid\x00text" if failure == "cell" else str(uuid4()),
+    )
+    if failure:
+        with pytest.raises(IllegalCharacterError if failure == "cell" else OSError):
+            build_workbook([], [], **kwargs)
+    else:
+        content, count, groups = build_workbook([], [], **kwargs)
+        wb = load_workbook(BytesIO(content))
+        assert count == groups == 0
+        assert wb["Reconciliation"].max_row == 1
+        assert wb["Reconciliation"].auto_filter.ref == "A1:AG1"
+        wb.close()
+    assert paths and all(not Path(path).exists() for path in paths)
+    assert all(path not in _writer.ALL_TEMP_FILES for path in paths)
+
+
 async def test_page_sizes_50_100_500_have_no_hidden_entity_multiplier(client, db, admin_user, monkeypatch):
     actor, headers = admin_user
     first, second, _ = await fixture_rows(db, actor, monkeypatch, count=501)
@@ -279,5 +338,37 @@ async def test_each_selected_cohort_materializes_under_its_own_name(db, admin_us
     latest, _ = await selected_evidence(db, actor.tenant_id, [first.id, second.id])
     sql = str(select(latest).compile(dialect=postgresql.dialect()))
     assert "WITH anon_" not in sql
-    assert f"WITH review_identities_{first.id.hex} AS MATERIALIZED" in sql
-    assert f"WITH review_identities_{second.id.hex} AS MATERIALIZED" in sql
+    for root in (first, second):
+        for suffix in ("readings", "cohort", "candidates"):
+            # One top-level definition, even though both winner branches reuse it.
+            assert sql.count(f"review_{root.id.hex}_{suffix} AS MATERIALIZED") == 1
+
+
+@pytest.mark.parametrize("search,offset", [("R-does-not-exist", 0), ("", 10000)])
+async def test_empty_review_page_retains_unfiltered_summary_and_filtered_count(
+    db, admin_user, monkeypatch, search, offset
+):
+    actor = admin_user[0]
+    first, second, cases = await fixture_rows(db, actor, monkeypatch, count=4)
+    later = await recheck(db, actor, first)
+    await linked(db, actor, later, cases[0], status="matched", at=first.created_at + timedelta(seconds=2))
+    result = await review_page(
+        db, actor.tenant_id, [first.id, second.id], status="needs_review", search=search, offset=offset
+    )
+    assert result["items"] == [] and result["has_next"] is False
+    assert result["summary"] == {"checked": 4, "matched": 1, "needs_review": 3, "not_verified": 0}
+    assert result["total"] == (0 if search else 3)
+
+
+async def test_review_never_decodes_unrelated_replacement_history(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    first, second, cases = await fixture_rows(db, actor, monkeypatch, count=4)
+    later = await recheck(db, actor, first)
+    await linked(db, actor, later, cases[0], status="matched", at=first.created_at + timedelta(seconds=2))
+    unrelated = await evidence(db, actor, later, "R-unrelated", "difference", first.created_at)
+    # Historical data outside the fixed cohort must not be parsed at all.
+    unrelated.report_json = {**unrelated.report_json, "_observation": {"final": True, "observed_at": "malformed"}}
+    await db.flush()
+    result = await review_page(db, actor.tenant_id, [first.id, second.id])
+    assert result["summary"] == {"checked": 4, "matched": 1, "needs_review": 3, "not_verified": 0}
+    assert {row["order_reference"] for row in result["items"]} == {case.order_reference for case in cases}

@@ -2,10 +2,10 @@
 
 from uuid import UUID
 
-from sqlalchemy import String, and_, func, literal, or_, select, union_all
+from sqlalchemy import String, and_, func, literal, or_, select, true, union_all
 
 from app.core.database import set_tenant_context
-from app.models.transaction_ops import TransactionCase, TransactionProposal, TransactionRun
+from app.models.transaction_ops import TransactionCase, TransactionFinding, TransactionProposal, TransactionRun
 from app.schemas.transaction_runs import CaseOut, ProposalOut, RunOut
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.review_evidence import period_evidence, result_category
@@ -20,10 +20,21 @@ async def selected_evidence(db, tenant_id, run_ids):
         ids = sorted({UUID(str(value)) for value in run_ids})
     except (TypeError, ValueError, AttributeError):
         raise state.StateError("invalid_review_selection", 422) from None
+    await set_tenant_context(db, str(tenant_id))
+    roots = (
+        await db.scalars(
+            select(TransactionRun)
+            .where(TransactionRun.tenant_id == tenant_id, TransactionRun.id.in_(ids))
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    if len(roots) != len(ids):
+        raise state.StateError("not_found", 404)
+    by_id = {run.id: run for run in roots}
     queries, scopes = [], []
     for run_id in ids:
-        latest, span = await period_evidence(db, tenant_id, run_id)
-        run = await state.get_run(db, tenant_id, run_id)
+        run = by_id[run_id]
+        latest, span = await period_evidence(db, tenant_id, run_id, root=run)
         queries.append(
             select(
                 latest,
@@ -77,46 +88,56 @@ def result_item(row):
 
 async def review_page(db, tenant_id, run_ids, *, limit=50, offset=0, status=None, search=""):
     latest, _ = await selected_evidence(db, tenant_id, run_ids)
-    category = result_category(latest)
-    # Count before filtering, then count the filtered result before paging. One
-    # evidence evaluation supplies both summary cards and the visible page.
-    counted = select(
-        latest,
-        func.count().over().label("checked"),
-        *[func.count().filter(category == name).over().label(name) for name in CATEGORIES],
-    ).subquery()
-    filtered = filtered_query(counted, status, search).subquery()
+    # A single compact materialization supplies counts and the page, including
+    # searches with no matches. Full reports are loaded only for returned IDs.
+    evidence = (
+        select(
+            *(
+                latest.c[key]
+                for key in (
+                    "id",
+                    "run_id",
+                    "order_reference",
+                    "updated_at",
+                    "review_run_id",
+                    "config_id",
+                    "balance_status",
+                )
+            )
+        )
+        .cte("review_page_evidence")
+        .prefix_with("MATERIALIZED")
+    )
+    category = result_category(evidence)
+    filtered = filtered_query(evidence, status, search).subquery()
+    totals = (
+        select(
+            func.count().label("checked"),
+            *[func.count().filter(category == name).label(name) for name in CATEGORIES],
+            select(func.count()).select_from(filtered).scalar_subquery().label("total"),
+        )
+        .select_from(evidence)
+        .subquery()
+    )
+    page = select(filtered).order_by(filtered.c.order_reference, filtered.c.id).offset(offset).limit(limit).subquery()
     rows = (
         (
             await db.execute(
-                select(filtered, func.count().over().label("total"))
-                .order_by(filtered.c.order_reference, filtered.c.id)
-                .offset(offset)
-                .limit(limit)
+                select(totals, page, TransactionFinding.report_json)
+                .select_from(totals.outerjoin(page, true()))
+                .outerjoin(
+                    TransactionFinding,
+                    (TransactionFinding.id == page.c.id) & (TransactionFinding.tenant_id == tenant_id),
+                )
+                .order_by(page.c.order_reference, page.c.id)
             )
         )
         .mappings()
         .all()
     )
-    if rows:
-        summary = {key: rows[0][key] for key in ("checked", *CATEGORIES)}
-        total = rows[0]["total"]
-    else:
-        # An empty or out-of-range page cannot carry window counts. Keep its
-        # summary explicit and its filtered total accurate, never guess zero.
-        summary = dict(
-            (
-                await db.execute(
-                    select(
-                        func.count().label("checked"),
-                        *[func.count().filter(category == name).label(name) for name in CATEGORIES],
-                    ).select_from(latest)
-                )
-            )
-            .mappings()
-            .one()
-        )
-        total = await db.scalar(select(func.count()).select_from(filtered_query(latest, status, search).subquery()))
+    summary = {key: rows[0][key] for key in ("checked", *CATEGORIES)}
+    total = rows[0]["total"]
+    rows = [row for row in rows if row["id"] is not None]
     from app.services.transaction_ops.accounting_projection import project_rows
 
     projected = await project_rows(db, tenant_id, rows)

@@ -233,6 +233,10 @@ class TransactionFinding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     order_reference: Mapped[str] = mapped_column(String(100))
     report_json: Mapped[dict] = mapped_column(JSONB)
 
+    # Maintained by a database trigger, including writes from older workers.
+    # NULL historical rows use the original report path until backfilled.
+    review_metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
 
 class TransactionCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "transaction_cases"
