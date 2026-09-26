@@ -17,7 +17,28 @@ def reuses_coverage(run):
 
 
 def observation_basis(root):
-    return root.params_json.get("window_basis", "updated_at" if root.origin == "schedule" else "completed_at")
+    return root.params_json.get(
+        "window_basis", "updated_at" if getattr(root, "origin", None) == "schedule" else "completed_at"
+    )
+
+
+def scheduled_observation_floor(root):
+    """Original reads must be no earlier than this daily window's settle cutoff.
+
+    The whole overlap is rechecked at that cutoff. A scan that started before
+    it cannot replace this check merely because it finished afterwards.
+    """
+    end = datetime.fromisoformat(root.params_json["window_end"])
+    value = root.config_snapshot.get("mapping_json", {}).get("reconciliation_policy")
+    if value is None:
+        return end
+    from app.services.transaction_ops.periods import ReconciliationPolicy
+
+    policy = ReconciliationPolicy.model_validate(value)
+    settled = end.astimezone(ZoneInfo(policy.timezone_name)).replace(
+        hour=policy.daily_check_hour, minute=0, second=0, microsecond=0
+    )
+    return max(end, settled.astimezone(timezone.utc))
 
 
 def compatible_scope(root):
@@ -125,11 +146,16 @@ async def completed_observation_windows(db, root, span, *, daily_only=False, sou
     )
     if observation_basis(root) == "updated_at":
         query = query.where(r.progress_json["destination_scan_complete"].astext == "true")
-    if root.origin == "schedule":
+    if getattr(root, "origin", None) == "schedule":
         # Reusing historical coverage advances discovery, never the observation
         # clock. A daily job must meet its own exact discovery contract, and the
         # original scan must have finished after the closed window it covers.
+        observed_since = func.coalesce(
+            cast(r.progress_json["continuation_started_at"].astext, DateTime(timezone=True)), r.created_at
+        )
         query = query.where(
+            observed_since >= scheduled_observation_floor(root),
+            r.finished_at >= observed_since,
             func.coalesce(r.config_snapshot["destination_discovery_version"].astext, "1")
             == str(root.config_snapshot.get("destination_discovery_version", 1)),
             r.finished_at >= cast(r.params_json["window_end"].astext, DateTime(timezone=True)),
@@ -139,7 +165,9 @@ async def completed_observation_windows(db, root, span, *, daily_only=False, sou
         query = query.where(r.id.in_([UUID(str(value)) for value in source_ids]))
     # V2 daily receipts require every dependency stream; historical report
     # reuse still preserves the old observation contract without claiming a new scan.
-    if (daily_only or root.origin == "schedule") and root.config_snapshot.get("destination_discovery_version", 1) >= 2:
+    if (daily_only or getattr(root, "origin", None) == "schedule") and root.config_snapshot.get(
+        "destination_discovery_version", 1
+    ) >= 2:
         query = query.where(
             r.progress_json["dependency_scan_complete"].astext == "true",
             r.progress_json["dependency_index_seed"]["complete"].astext == "true",

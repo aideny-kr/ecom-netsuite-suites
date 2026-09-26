@@ -41,6 +41,7 @@ async def completed_review_and_daily(db, actor, monkeypatch):
         progress_json=dict(root.progress_json),
         status="finished",
         termination_reason="done",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=1),
         finished_at=datetime.now(timezone.utc),
     )
     scheduled = TransactionRun(
@@ -144,6 +145,9 @@ async def test_daily_reuses_complete_custom_slices_without_provider_or_jev_calls
         "exact_order",
         "future",
         "before_window_closed",
+        "before_overlap_settled",
+        "started_before_overlap_settled",
+        "continuation_started_before_overlap_settled",
     ],
 )
 async def test_daily_coverage_fails_closed_for_incompatible_or_incomplete_evidence(db, admin_user, monkeypatch, change):
@@ -189,8 +193,19 @@ async def test_daily_coverage_fails_closed_for_incompatible_or_incomplete_eviden
         second.params_json = {**second.params_json, "order_references": ["R123456789"]}
     elif change == "future":
         second.finished_at = datetime.now(timezone.utc) + timedelta(days=1)
-    else:
+    elif change == "before_window_closed":
         second.finished_at = span(second).end - timedelta(seconds=1)
+    else:
+        cutoff = daily_evidence.scheduled_observation_floor(run)
+        if change == "before_overlap_settled":
+            second.created_at, second.finished_at = span(second).end, cutoff - timedelta(seconds=1)
+        elif change == "started_before_overlap_settled":
+            second.created_at, second.finished_at = cutoff - timedelta(seconds=1), cutoff + timedelta(hours=2)
+        else:
+            second.progress_json = {
+                **second.progress_json,
+                "continuation_started_at": (cutoff - timedelta(seconds=1)).isoformat(),
+            }
     await db.flush()
     assert await daily_evidence.coverage_receipt(db, run, span(run)) is None
 
@@ -232,7 +247,7 @@ async def test_receipt_health_revalidates_original_proof_and_falls_back_to_real_
     )
 
 
-@pytest.mark.parametrize("mode", ["uncovered", "already_collecting"])
+@pytest.mark.parametrize("mode", ["uncovered", "already_collecting", "resumed_empty_scan"])
 async def test_daily_still_reads_uncovered_windows_and_preserves_started_work(db, admin_user, monkeypatch, mode):
     from app.services.transaction_ops import metabase_reader
 
@@ -240,6 +255,13 @@ async def test_daily_still_reads_uncovered_windows_and_preserves_started_work(db
     _, _, _, run = await completed_review_and_daily(db, actor, monkeypatch)
     if mode == "uncovered":
         run.params_json = {**run.params_json, "window_end": (span(run).end + timedelta(days=1)).isoformat()}
+    elif mode == "resumed_empty_scan":
+        run.progress_json = {
+            **run.progress_json,
+            "scan_count": 10,
+            "continuation_baseline": {"processed": 0},
+            "evidence_root_id": str(uuid4()),
+        }
     else:
         run.api_calls_used = 1
         run.progress_json = {**run.progress_json, "processed": 1}
@@ -252,5 +274,26 @@ async def test_daily_still_reads_uncovered_windows_and_preserves_started_work(db
     assert "reused_observation_run_ids" not in run.progress_json
     if mode == "already_collecting":
         assert run.progress_json["processed"] == 1
+    elif mode == "resumed_empty_scan":
+        assert run.progress_json["scan_count"] == 10
     else:
         assert run.params_json["window_end"] == (span(run).start + timedelta(days=3)).isoformat()
+
+
+@pytest.mark.parametrize(
+    "end,cutoff",
+    [
+        ("2026-03-08T08:00:00+00:00", "2026-03-08T16:00:00+00:00"),
+        ("2026-11-01T07:00:00+00:00", "2026-11-01T17:00:00+00:00"),
+    ],
+)
+def test_shared_coverage_preserves_local_settle_hour_across_dst(end, cutoff):
+    from types import SimpleNamespace
+
+    root = SimpleNamespace(
+        params_json={"window_end": end},
+        config_snapshot={
+            "mapping_json": {"reconciliation_policy": {"timezone_name": "America/Los_Angeles", "daily_check_hour": 9}}
+        },
+    )
+    assert daily_evidence.scheduled_observation_floor(root) == datetime.fromisoformat(cutoff)
