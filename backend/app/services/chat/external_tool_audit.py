@@ -27,8 +27,27 @@ def redact(value):
     return value
 
 
-async def append_event(**kwargs):
-    async with async_session_factory() as audit_db:
+class ExternalCallNotSentError(RuntimeError):
+    """The request could not be recorded, so the external system was never called.
+
+    A caller that holds a one-use send permit can end its attempt as refused before effect
+    instead of unknown: nothing left this process, which a later readback could never prove.
+    """
+
+
+def session_factory_for(db):
+    """The session factory a caller prepared for this event loop, if it prepared one.
+
+    A Celery task runs in its own event loop. The app-wide pool keeps connections opened by an
+    earlier task's loop, and touching one fails with "Event loop is closed" (six times during
+    one group dispatch on 2026-09-26). The group dispatcher already prepares a factory on its
+    own engine for exactly this (accounting_dispatch); the audit rows use it too.
+    """
+    return getattr(db, "info", {}).get("accounting_authorization_session_factory") if db is not None else None
+
+
+async def append_event(*, session_factory=None, **kwargs):
+    async with (session_factory or async_session_factory)() as audit_db:
         await set_tenant_context(audit_db, str(kwargs["tenant_id"]))
         await log_event(db=audit_db, **kwargs)
         await audit_db.commit()
@@ -47,6 +66,7 @@ async def audited_external_call(
     params,
     human_approved,
     approval_context=None,
+    session_factory=None,
 ):
     call_id = str(uuid.uuid4())
     common = dict(
@@ -69,7 +89,12 @@ async def audited_external_call(
         "approval": approval_context if human_approved else None,
     }
     # Fail closed before invoking an external system if the durable request cannot be recorded.
-    await append_event(**common, action="tool.requested", payload=payload, status="pending")
+    try:
+        await append_event(
+            **common, action="tool.requested", payload=payload, status="pending", session_factory=session_factory
+        )
+    except Exception as exc:
+        raise ExternalCallNotSentError("request_audit_unavailable") from exc
     try:
         result = await execute()
     except asyncio.CancelledError:
@@ -80,6 +105,7 @@ async def audited_external_call(
                 payload=payload,
                 status="unknown",
                 error_message="Cancelled while awaiting external response; request may have reached provider.",
+                session_factory=session_factory,
             )
         )
         raise
@@ -90,6 +116,7 @@ async def audited_external_call(
             payload=payload,
             status="error",
             error_message="External execution raised; consult correlated application log.",
+            session_factory=session_factory,
         )
         raise
     body = result if isinstance(result, dict) else {}
@@ -112,6 +139,7 @@ async def audited_external_call(
             action="tool.failed" if failed else "tool.executed",
             payload=payload,
             status="error" if failed else "success",
+            session_factory=session_factory,
         )
     except Exception:
         # Do not turn a completed write into a retryable transport error.

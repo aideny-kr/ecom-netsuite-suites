@@ -114,6 +114,20 @@ async def test_a_provider_rejection_is_before_effect_with_the_permit_spent(db, c
     assert adapter.readback.await_count == 0
 
 
+async def test_a_request_that_never_reached_the_provider_is_refused_before_effect(db, claimed):
+    # R619946522 (2026-09-26): the request audit failed, so nothing was sent, but the
+    # exception after the permit made the row "unknown" and locked the credit memo.
+    from app.services.chat.external_tool_audit import ExternalCallNotSentError
+
+    _, message, _ = claimed
+    adapter = build(message, dispatch=AsyncMock(side_effect=ExternalCallNotSentError("request_audit_unavailable")))
+    result, row = await _run(db, claimed, adapter)
+    assert result["status"] == "rejected_before_effect" and row.status == "rejected_before_effect"
+    assert row.result_json["code"] == "request_not_sent" and state.permit_consumed(row)
+    assert adapter.readback.await_count == 0
+    assert "Nothing was sent" in adapter.refusal
+
+
 @pytest.mark.parametrize("raw", [json.dumps({"outcome_indeterminate": True, "error": "timeout"}), "unreadable receipt"])
 async def test_an_indeterminate_send_is_recovered_only_by_the_readback(db, claimed, raw):
     _, message, _ = claimed
