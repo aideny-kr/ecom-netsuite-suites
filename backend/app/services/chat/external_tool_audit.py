@@ -43,7 +43,8 @@ def session_factory_for(db):
     one group dispatch on 2026-09-26). The group dispatcher already prepares a factory on its
     own engine for exactly this (accounting_dispatch); the audit rows use it too.
     """
-    return getattr(db, "info", {}).get("accounting_authorization_session_factory") if db is not None else None
+    info = getattr(db, "info", None)
+    return info.get("accounting_authorization_session_factory") if isinstance(info, dict) else None
 
 
 async def append_event(*, session_factory=None, **kwargs):

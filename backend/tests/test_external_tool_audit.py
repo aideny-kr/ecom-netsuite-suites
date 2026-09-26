@@ -145,3 +145,7 @@ def test_the_callers_factory_is_the_one_the_dispatcher_prepared():
     assert mod.session_factory_for(prepared) is factory
     assert mod.session_factory_for(SimpleNamespace(info={})) is None
     assert mod.session_factory_for(None) is None
+    # A stand-in session (a test double) never supplies a factory by accident.
+    from unittest.mock import MagicMock
+
+    assert mod.session_factory_for(MagicMock()) is None
