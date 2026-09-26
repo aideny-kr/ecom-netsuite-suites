@@ -3,11 +3,14 @@
 import hashlib
 import io
 import json
+import os
+from contextlib import suppress
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy import String, cast, literal, select
@@ -21,6 +24,15 @@ from app.services.transaction_ops.workspace_results import filtered_query, selec
 
 MAX_EXPORT_ROWS = 50000
 REVIEW_STATUSES = {"difference", "mismatch", "missing_in_netsuite", "ambiguous", "currency_mismatch"}
+
+# openpyxl shares assigned styles. Reuse these unchanged components instead of
+# constructing equivalent objects for every cell in a potentially 50,000-row report.
+_HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
+_HEADER_FILL = PatternFill("solid", fgColor="C94213")
+_WRAPPED_ALIGNMENT = Alignment(wrap_text=True, vertical="center")
+_BODY_FONT = Font(name="Arial", size=10)
+_STRIPE_FILL = PatternFill("solid", fgColor="F4F4F5")
+_MONEY_ALIGNMENT = Alignment(horizontal="right")
 
 
 def _text(cell, value):
@@ -47,43 +59,77 @@ def _money(cell, value):
         cell.value = amount
         places = min(12, max(2, -amount.as_tuple().exponent))
         cell.number_format = "#,##0." + "0" * places + ";[Red]-#,##0." + "0" * places + ";0." + "0" * places
-    cell.alignment = Alignment(horizontal="right")
+    cell.alignment = _MONEY_ALIGNMENT
 
 
-def _sheet(wb, name, columns, rows, *, money_columns=(), numeric_columns=()):
+def _sheet(wb, name, columns, rows, *, money_columns=(), numeric_columns=(), overview=False):
     ws = wb.create_sheet(name)
-    ws.append(columns)
-    for cell in ws[1]:
-        cell.font = Font(name="Arial", bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="C94213")
-        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    # Write-only sheets emit their column/pane settings with the first row.
+    # Configure those first, then release each row as it is written to XML.
+    for index, header in enumerate(columns, start=1):
+        width = max(len(header), *(len(str(row[index - 1] or "")) for row in rows[:100])) if rows else len(header)
+        ws.column_dimensions[get_column_letter(index)].width = min(48, max(16, width + 2))
+    ws.freeze_panes = "B2" if overview else "C2"
+    if overview:
+        ws.column_dimensions["A"].width = 28
+        ws.column_dimensions["B"].width = 110
+    else:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(rows) + 1}"
+    ws.print_title_rows = "1:1"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    header_cells = []
+    for value in columns:
+        cell = WriteOnlyCell(ws, value=value)
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = _WRAPPED_ALIGNMENT
+        header_cells.append(cell)
     ws.row_dimensions[1].height = 34
+    ws.append(header_cells)
     for index, row in enumerate(rows, start=2):
+        cells = []
         for col, value in enumerate(row, start=1):
-            cell = ws.cell(index, col)
+            cell = WriteOnlyCell(ws)
             if col in money_columns:
                 _money(cell, value)
             elif col in numeric_columns and type(value) is int:
                 cell.value = value
             else:
                 _text(cell, value)
-            cell.font = Font(name="Arial", size=10)
+            cell.font = _BODY_FONT
             if index % 2 == 0:
-                cell.fill = PatternFill("solid", fgColor="F4F4F5")
-        ws.row_dimensions[index].height = 20
-    for index, header in enumerate(columns, start=1):
-        width = max(len(header), *(len(str(row[index - 1] or "")) for row in rows[:100])) if rows else len(header)
-        ws.column_dimensions[get_column_letter(index)].width = min(48, max(16, width + 2))
-    ws.freeze_panes = "C2"
-    ws.auto_filter.ref = ws.dimensions
-    ws.print_title_rows = "1:1"
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToWidth = 1
+                cell.fill = _STRIPE_FILL
+            if overview and col == 2:
+                cell.alignment = _WRAPPED_ALIGNMENT
+            cells.append(cell)
+        ws.row_dimensions[index].height = 32 if overview else 20
+        ws.append(cells)
     return ws
 
 
 def build_workbook(rows, scopes, *, status, search, generated_at, report_id):
+    wb = Workbook(write_only=True)
+    try:
+        return _build_workbook(
+            wb, rows, scopes, status=status, search=search, generated_at=generated_at, report_id=report_id
+        )
+    finally:
+        # save() normally removes each sheet's temporary XML. Workbook.close()
+        # does not remove write-only files after a cell/serialization failure.
+        for sheet in wb.worksheets:
+            writer = sheet._writer
+            if writer is None:
+                continue
+            if not sheet.closed:
+                with suppress(Exception):
+                    sheet.close()
+            if os.path.exists(writer.out):
+                writer.cleanup()
+
+
+def _build_workbook(wb, rows, scopes, *, status, search, generated_at, report_id):
     scope_map = {item["run_id"]: item for item in scopes}
     details, groups = [], {}
     for row in rows:
@@ -139,8 +185,6 @@ def build_workbook(rows, scopes, *, status, search, generated_at, report_id):
                 posting.get("observed_at") if verified_posting else None,
             ]
         )
-    wb = Workbook()
-    wb.remove(wb.active)
     info = [
         ["Report", "Transaction reconciliation"],
         ["Report ID", report_id],
@@ -178,14 +222,7 @@ def build_workbook(rows, scopes, *, status, search, generated_at, report_id):
                 f"source date basis: {scope.get('window_basis', 'completed_at')}; review run {scope['run_id']}",
             ]
         )
-    overview = _sheet(wb, "Report", ["Field", "Value"], info, numeric_columns=(2,))
-    overview.column_dimensions["A"].width = 28
-    overview.column_dimensions["B"].width = 110
-    overview.freeze_panes = "B2"
-    overview.auto_filter.ref = None
-    for row in overview.iter_rows(min_row=2):
-        row[1].alignment = Alignment(wrap_text=True, vertical="center")
-        overview.row_dimensions[row[0].row].height = 32
+    _sheet(wb, "Report", ["Field", "Value"], info, numeric_columns=(2,), overview=True)
     columns = ["Order number", "Entity", "Source currency", "ERP currency", "Finding"]
     columns += [
         f"{metric} — {side}"
