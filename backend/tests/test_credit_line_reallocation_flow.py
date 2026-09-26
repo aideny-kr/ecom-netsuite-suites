@@ -828,3 +828,13 @@ class TestKeptReads:
         }[change]
         source, evidence = await reallocation._order_reads(None, TENANT, case, review, kept)
         assert source["fresh"] and evidence["fresh"] and reads == {"source": 1, "evidence": 1}
+
+    def test_nothing_is_kept_for_a_native_field_map(self):
+        # _order_reads never reuses reads taken under a native field map, so keeping them
+        # would only cost a copy per member.
+        case, review = self._member()
+        db = SimpleNamespace(info={})
+        reallocation.keep_group_preparation_reads(db, case, review, {}, {}, field_map={"net": "amount"})
+        assert reallocation.GROUP_PREPARATION_READS not in db.info
+        reallocation.keep_group_preparation_reads(db, case, review, {}, {}, field_map=None)
+        assert db.info[reallocation.GROUP_PREPARATION_READS]["case_id"] == str(case.id)

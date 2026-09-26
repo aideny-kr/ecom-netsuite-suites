@@ -149,3 +149,16 @@ def test_the_callers_factory_is_the_one_the_dispatcher_prepared():
     from unittest.mock import MagicMock
 
     assert mod.session_factory_for(MagicMock()) is None
+
+
+@pytest.mark.parametrize(
+    "raised,action",
+    [(ValueError("provider down"), "tool.failed"), (asyncio.CancelledError(), "tool.interrupted")],
+)
+async def test_a_failed_outcome_row_never_hides_why_the_call_failed(audit, raised, action):
+    # The outcome row can hit the same dead connection as the request row; the caller must
+    # still see the call's own failure, and nothing may turn it into a "not sent".
+    audit.side_effect = [None, RuntimeError("Event loop is closed")]
+    with pytest.raises(type(raised)):
+        await call(AsyncMock(side_effect=raised))
+    assert audit.await_args_list[-1].kwargs["action"] == action

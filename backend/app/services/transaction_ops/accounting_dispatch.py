@@ -19,6 +19,7 @@ from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.models.chat import ChatMessage, ChatSession
 from app.services.audit_service import log_event
+from app.services.chat.external_tool_audit import WORKER_SESSION_FACTORY
 from app.services.chat.write_confirmation_service import validate_and_extract_confirmation
 from app.services.transaction_ops.accounting_group import GROUP_TOOL, bounded_map, digest
 
@@ -187,7 +188,7 @@ async def invoke_child(db, tenant_id, parent_id, auth, member):
     )
     if session is None:
         raise ValueError("group_session_unavailable")
-    db.info["accounting_authorization_session_factory"] = async_sessionmaker(db.bind, expire_on_commit=False)
+    db.info[WORKER_SESSION_FACTORY] = async_sessionmaker(db.bind, expire_on_commit=False)
     db.info["accounting_worker"] = True
     db.info["accounting_group_execution"] = {
         "group_approval_id": str(parent_id),
@@ -217,7 +218,7 @@ async def invoke_child(db, tenant_id, parent_id, auth, member):
         return error
     finally:
         db.info.pop("accounting_group_execution", None)
-        db.info.pop("accounting_authorization_session_factory", None)
+        db.info.pop(WORKER_SESSION_FACTORY, None)
         db.info.pop("accounting_worker", None)
 
 

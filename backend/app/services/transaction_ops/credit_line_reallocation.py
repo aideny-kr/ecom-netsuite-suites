@@ -476,10 +476,14 @@ def _json(value):
 GROUP_PREPARATION_READS = "credit_line_reallocation.group_preparation_reads"
 
 
-def keep_group_preparation_reads(db, case, review, evidence, source, *, field_map):
-    """Keep the evidence tool's reads of one group member for the reallocation step that follows."""
+def keep_group_preparation_reads(db, case, review, collected, source, *, field_map):
+    """Keep the evidence tool's reads of one group member (as collected, before the tool annotates
+    its own copy) for the reallocation step that follows. Reads taken under a native field map
+    are never reused (:func:`_order_reads`), so they are not kept."""
     import copy
 
+    if field_map is not None:
+        return
     db.info[GROUP_PREPARATION_READS] = copy.deepcopy(
         {
             "case_id": str(case.id),
@@ -487,7 +491,7 @@ def keep_group_preparation_reads(db, case, review, evidence, source, *, field_ma
             "report": case.latest_report_json,
             "field_map": field_map,
             "source": source,
-            "evidence": evidence,
+            "evidence": collected,
         }
     )
 
