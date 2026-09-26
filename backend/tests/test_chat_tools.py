@@ -298,6 +298,30 @@ class TestExecuteToolCall:
         requested = [c for c in _mock_external_tool_audit.await_args_list if c.kwargs["action"] == "tool.requested"]
         assert requested, "external call never reached external_tool_audit.append_event"
 
+    @pytest.mark.asyncio
+    async def test_external_call_audits_through_the_dispatchers_worker_session(self, db, _mock_external_tool_audit):
+        """A group dispatch runs in a Celery task's own event loop: its audit rows must use the
+        session factory the dispatcher prepared, never the app-wide pool."""
+        from app.services.chat.external_tool_audit import WORKER_SESSION_FACTORY
+
+        factory = object()
+        db.info[WORKER_SESSION_FACTORY] = factory
+        try:
+            with patch("app.services.chat.tools._execute_external_tool", new_callable=AsyncMock) as mock_ext:
+                mock_ext.return_value = {"data": "ok"}
+                await execute_tool_call(
+                    tool_name=_make_ext_tool_name(uuid.uuid4(), "test_tool"),
+                    tool_input={},
+                    tenant_id=uuid.uuid4(),
+                    actor_id=uuid.uuid4(),
+                    correlation_id="test-corr",
+                    db=db,
+                )
+        finally:
+            db.info.pop(WORKER_SESSION_FACTORY, None)
+        calls = _mock_external_tool_audit.await_args_list
+        assert calls and all(c.kwargs["session_factory"] is factory for c in calls)
+
 
 # ---------------------------------------------------------------------------
 # _LOCAL_NAME_MAP

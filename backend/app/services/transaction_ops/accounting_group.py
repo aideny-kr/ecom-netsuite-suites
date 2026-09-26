@@ -18,6 +18,7 @@ from sqlalchemy import select, text
 from app.core.database import async_session_factory, engine, set_tenant_context
 from app.models.chat import ChatMessage
 from app.services.audit_service import log_event
+from app.services.chat.external_tool_audit import session_factory_for
 from app.services.chat.write_confirmation_service import (
     WriteConfirmationPayload,
     mint_confirmation_token,
@@ -421,7 +422,7 @@ async def authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_in
     # An independent session plus uncached flags reads the current persisted grants.
     # Celery owns disposable event-loop-local engines. Never borrow the app's
     # global pool from a worker loop.
-    factory = getattr(db, "info", {}).get("accounting_authorization_session_factory", _authorization_session_factory)
+    factory = session_factory_for(db) or _authorization_session_factory
     async with factory() as auth_db:
         await set_tenant_context(auth_db, str(tenant_id))
         await _authorize({"db": auth_db, "tenant_id": tenant_id, "actor_id": actor_id}, create=True, fresh=True)

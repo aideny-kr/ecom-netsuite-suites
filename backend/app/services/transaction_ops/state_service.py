@@ -108,6 +108,19 @@ def permit_consumed(operation) -> bool:
     return (operation.result_json or {}).get("dispatch_reserved") is True
 
 
+# The write never left: its request row could not be recorded, so the provider was not called.
+REQUEST_NOT_SENT = "request_not_sent"
+# Codes that prove nothing was written although the permit was spent.
+NO_WRITE_CODES = frozenset({"provider_rejected_without_save", REQUEST_NOT_SENT})
+
+
+def known_no_write(operation) -> bool:
+    """A refused attempt that provably wrote nothing, so identical work may get a fresh approval."""
+    return operation.status in ("failed", "rejected_before_effect") and (
+        not permit_consumed(operation) or (operation.result_json or {}).get("code") in NO_WRITE_CODES
+    )
+
+
 @dataclass(frozen=True)
 class ApprovedIntent:
     """What an approval source hands the ledger to claim: the approval's identity, the
@@ -1130,11 +1143,7 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
             await _commit(db, tenant_id)
             return existing
         if attempted is not None:
-            known_no_write = attempted.status in ("failed", "rejected_before_effect") and (
-                not permit_consumed(attempted)
-                or (attempted.result_json or {}).get("code") == "provider_rejected_without_save"
-            )
-            if not known_no_write or attempt_number == 2:
+            if not known_no_write(attempted) or attempt_number == 2:
                 await _commit(db, tenant_id)
                 return existing
             previous_attempt = attempted.id

@@ -78,8 +78,9 @@ def order(monkeypatch):
     state = {"facts": _us()}
     state["context"] = _context(state["facts"])
 
-    async def gather(db, tenant_id, case_id, credit_memo_id):
+    async def gather(db, tenant_id, case_id, credit_memo_id, *, prefetched=None):
         # The real gather always reads the currency's precision.
+        state.setdefault("prefetched", []).append(prefetched)
         return {"precision": 2, **deepcopy(state["facts"])}, deepcopy(state["context"])
 
     async def unrestricted(*args, **kwargs):
@@ -338,6 +339,26 @@ class TestGroup:
         assert db.info["accounting_correction_candidate"] is p
         assert p["lines"] == US_FIX and p["exemplar_confirmation_id"].startswith("1111")
         assert "derived from this order's own source" in p["reason"]
+
+    async def test_a_member_takes_the_group_steps_own_reads_once(self, order, monkeypatch):
+        async def exemplar(db, tenant_id, config_id):
+            return "11111111-1111-1111-1111-111111111111"
+
+        monkeypatch.setattr(reallocation, "verified_exemplar", exemplar)
+        kept = {"case_id": CASE}
+        db = SimpleNamespace(info={reallocation.GROUP_PREPARATION_READS: kept})
+        await reallocation.prepare_group_member(db, TENANT, CASE)
+        assert order["prefetched"] == [kept]
+        assert reallocation.GROUP_PREPARATION_READS not in db.info  # single use
+
+    async def test_the_agents_proposal_and_every_approval_check_read_fresh(self, order):
+        # A kept read exists only for the group member that took it; the agent's proposal,
+        # the card's freshness check and approval-time revalidation always read NetSuite.
+        _, p = await _proposed(order)
+        db = SimpleNamespace(info={reallocation.GROUP_PREPARATION_READS: {"case_id": CASE}})
+        await reallocation.fresh(db, TENANT, p)
+        assert order["prefetched"] == [None, None]
+        assert reallocation.GROUP_PREPARATION_READS in db.info  # untouched by a non-group read
 
     async def test_no_group_member_before_one_verified_correction(self, order, monkeypatch):
         async def none(db, tenant_id, config_id):
@@ -748,3 +769,72 @@ class TestCardFields:
         result = await tax_correction.verify_after(_db(), TENANT, p)
         assert result["status"] == "verified"
         assert result["after"]["body"] == {"total": "2.80", "subtotal": "0.00", "taxtotal": "2.80"}
+
+
+class TestKeptReads:
+    """Group preparation reads each order once; the reallocation step takes those reads only
+    when they were taken for exactly this member, context and saved report."""
+
+    @pytest.fixture
+    def reads(self, monkeypatch):
+        calls = {"source": 0, "evidence": 0}
+
+        async def refresh(db, tenant_id, scope, reference, *, include_accounting_detail=False):
+            calls["source"] += 1
+            return {"number": reference, "fresh": True}
+
+        async def collect(db, tenant_id, review, report, **kwargs):
+            calls["evidence"] += 1
+            return {"sections": {}, "fresh": True}
+
+        monkeypatch.setattr("app.services.transaction_ops.tax_correction.refresh_source", refresh)
+        monkeypatch.setattr("app.services.transaction_ops.accounting_evidence.collect_accounting_evidence", collect)
+        return calls
+
+    @staticmethod
+    def _member():
+        case = SimpleNamespace(id=CASE, order_reference="R1", latest_report_json={"balance": {"status": "difference"}})
+        return case, {"scope": {"subsidiary_id": "1"}, "config_id": "c"}
+
+    @staticmethod
+    def _kept(case, review, **changes):
+        kept = {
+            "case_id": str(case.id),
+            "review": deepcopy(review),
+            "report": deepcopy(case.latest_report_json),
+            "field_map": None,
+            "source": {"number": "R1", "kept": True},
+            "evidence": {"sections": {}, "kept": True},
+        }
+        return {**kept, **changes}
+
+    async def test_reads_kept_for_exactly_this_member_are_used(self, reads):
+        case, review = self._member()
+        kept = self._kept(case, review)
+        source, evidence = await reallocation._order_reads(None, TENANT, case, review, kept)
+        assert source["kept"] and evidence["kept"] and reads == {"source": 0, "evidence": 0}
+        source["number"] = "changed"
+        assert kept["source"]["number"] == "R1"  # a copy, never the kept object itself
+
+    @pytest.mark.parametrize("change", ["case", "review", "report", "field_map", "nothing_kept"])
+    async def test_any_difference_reads_fresh(self, reads, change):
+        case, review = self._member()
+        kept = {
+            "case": self._kept(case, review, case_id=str(uuid4())),
+            "review": self._kept(case, {**review, "config_id": "other"}),
+            "report": self._kept(case, review, report={"balance": {"status": "matched"}}),
+            "field_map": self._kept(case, review, field_map={"net": "amount"}),
+            "nothing_kept": None,
+        }[change]
+        source, evidence = await reallocation._order_reads(None, TENANT, case, review, kept)
+        assert source["fresh"] and evidence["fresh"] and reads == {"source": 1, "evidence": 1}
+
+    def test_nothing_is_kept_for_a_native_field_map(self):
+        # _order_reads never reuses reads taken under a native field map, so keeping them
+        # would only cost a copy per member.
+        case, review = self._member()
+        db = SimpleNamespace(info={})
+        reallocation.keep_group_preparation_reads(db, case, review, {}, {}, field_map={"net": "amount"})
+        assert reallocation.GROUP_PREPARATION_READS not in db.info
+        reallocation.keep_group_preparation_reads(db, case, review, {}, {}, field_map=None)
+        assert db.info[reallocation.GROUP_PREPARATION_READS]["case_id"] == str(case.id)

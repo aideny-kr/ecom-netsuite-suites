@@ -79,3 +79,18 @@ async def test_a_settled_outcome_cannot_be_replanned_into_a_new_attempt(db, exec
     assert (await fixtures.execute(db, case))["status"] == "committed_unverified"
     assert (await replan(db, case, "unknown-retry-blocked")).id == case.proposal.id
     case.case.dispatch.assert_awaited_once()
+
+
+def test_every_code_that_proves_nothing_was_written_allows_a_fresh_approval():
+    # The one place a spent permit may still count as "nothing written": the provider refused
+    # atomically, or the request never left because it could not be recorded (2026-09-26).
+    from types import SimpleNamespace
+
+    def row(status, code, sent=True):
+        return SimpleNamespace(status=status, result_json={"code": code, "dispatch_reserved": sent})
+
+    assert state.known_no_write(row("rejected_before_effect", "provider_rejected_without_save"))
+    assert state.known_no_write(row("rejected_before_effect", state.REQUEST_NOT_SENT))
+    assert state.known_no_write(row("rejected_before_effect", "evidence_revalidation_failed", sent=False))
+    assert not state.known_no_write(row("rejected_before_effect", "evidence_revalidation_failed"))
+    assert not state.known_no_write(row("unknown", state.REQUEST_NOT_SENT))

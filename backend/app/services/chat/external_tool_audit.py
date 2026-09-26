@@ -1,6 +1,7 @@
 """Durable per-call audit for external MCP, independent of the chat transaction."""
 
 import asyncio
+import functools
 import hashlib
 import json
 import uuid
@@ -27,11 +28,44 @@ def redact(value):
     return value
 
 
-async def append_event(**kwargs):
-    async with async_session_factory() as audit_db:
+class ExternalCallNotSentError(RuntimeError):
+    """The request could not be recorded, so the external system was never called.
+
+    A caller that holds a one-use send permit can end its attempt as refused before effect
+    instead of unknown: nothing left this process, which a later readback could never prove.
+    """
+
+
+# Where a caller running in its own event loop puts a session factory on its own engine
+# (accounting_dispatch sets it for every group child). The one name every reader uses.
+WORKER_SESSION_FACTORY = "accounting_authorization_session_factory"
+
+
+def session_factory_for(db):
+    """The session factory a caller prepared for this event loop, if it prepared one.
+
+    A Celery task runs in its own event loop. The app-wide pool keeps connections opened by an
+    earlier task's loop, and touching one fails with "Event loop is closed" (six times during
+    one group dispatch on 2026-09-26). The audit rows use the caller's factory instead.
+    """
+    info = getattr(db, "info", None)
+    return info.get(WORKER_SESSION_FACTORY) if isinstance(info, dict) else None
+
+
+async def append_event(*, session_factory=None, **kwargs):
+    async with (session_factory or async_session_factory)() as audit_db:
         await set_tenant_context(audit_db, str(kwargs["tenant_id"]))
         await log_event(db=audit_db, **kwargs)
         await audit_db.commit()
+
+
+async def _record_failure(recording, call_id):
+    """Record a failed call's outcome without replacing why it failed: the caller must see the
+    call's own exception, never the audit connection's."""
+    try:
+        await recording
+    except Exception as exc:
+        print(f"external_tool_audit: outcome row not written call_id={call_id} {type(exc).__name__}", flush=True)
 
 
 async def audited_external_call(
@@ -47,6 +81,7 @@ async def audited_external_call(
     params,
     human_approved,
     approval_context=None,
+    session_factory=None,
 ):
     call_id = str(uuid.uuid4())
     common = dict(
@@ -68,28 +103,37 @@ async def audited_external_call(
         "approved_by": str(actor_id) if human_approved and actor_id else None,
         "approval": approval_context if human_approved else None,
     }
+    # Every row of this call goes through the caller's session factory.
+    record = functools.partial(append_event, **common, session_factory=session_factory)
     # Fail closed before invoking an external system if the durable request cannot be recorded.
-    await append_event(**common, action="tool.requested", payload=payload, status="pending")
+    try:
+        await record(action="tool.requested", payload=payload, status="pending")
+    except Exception as exc:
+        raise ExternalCallNotSentError("request_audit_unavailable") from exc
     try:
         result = await execute()
     except asyncio.CancelledError:
-        await asyncio.shield(
-            append_event(
-                **common,
-                action="tool.interrupted",
-                payload=payload,
-                status="unknown",
-                error_message="Cancelled while awaiting external response; request may have reached provider.",
-            )
+        await _record_failure(
+            asyncio.shield(
+                record(
+                    action="tool.interrupted",
+                    payload=payload,
+                    status="unknown",
+                    error_message="Cancelled while awaiting external response; request may have reached provider.",
+                )
+            ),
+            call_id,
         )
         raise
     except Exception:
-        await append_event(
-            **common,
-            action="tool.failed",
-            payload=payload,
-            status="error",
-            error_message="External execution raised; consult correlated application log.",
+        await _record_failure(
+            record(
+                action="tool.failed",
+                payload=payload,
+                status="error",
+                error_message="External execution raised; consult correlated application log.",
+            ),
+            call_id,
         )
         raise
     body = result if isinstance(result, dict) else {}
@@ -107,8 +151,7 @@ async def audited_external_call(
         "served_from_cache": body.get("served_from_cache"),
     }
     try:
-        await append_event(
-            **common,
+        await record(
             action="tool.failed" if failed else "tool.executed",
             payload=payload,
             status="error" if failed else "success",

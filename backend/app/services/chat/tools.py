@@ -639,7 +639,7 @@ async def _execute_tool_call_once(
     # An external (connector) tool
     if ext_parsed is not None:
         connector_id, raw_tool_name = ext_parsed
-        from app.services.chat.external_tool_audit import audited_external_call
+        from app.services.chat.external_tool_audit import audited_external_call, session_factory_for
 
         result = await audited_external_call(
             execute=lambda: _execute_external_tool(
@@ -655,6 +655,7 @@ async def _execute_tool_call_once(
             params=tool_input,
             human_approved=human_approved,
             approval_context=approval_context,
+            session_factory=session_factory_for(db),
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(

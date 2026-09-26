@@ -470,6 +470,55 @@ def _json(value):
     return credit_api_correction._json(value)
 
 
+# Group preparation reads each order once: the evidence tool keeps its own reads of the member
+# here, and the reallocation step right after takes them instead of repeating them (they cost
+# 10.9 s of a 24.7 s member, measured 2026-09-26). Single use, and only for group preparation.
+GROUP_PREPARATION_READS = "credit_line_reallocation.group_preparation_reads"
+
+
+def keep_group_preparation_reads(db, case, review, collected, source, *, field_map):
+    """Keep the evidence tool's reads of one group member (as collected, before the tool annotates
+    its own copy) for the reallocation step that follows. Reads taken under a native field map
+    are never reused (:func:`_order_reads`), so they are not kept."""
+    import copy
+
+    if field_map is not None:
+        return
+    db.info[GROUP_PREPARATION_READS] = copy.deepcopy(
+        {
+            "case_id": str(case.id),
+            "review": review,
+            "report": case.latest_report_json,
+            "field_map": field_map,
+            "source": source,
+            "evidence": collected,
+        }
+    )
+
+
+async def _order_reads(db, tenant_id, case, review, prefetched):
+    """The order's source and NetSuite evidence: the group step's own reads when they were taken
+    for exactly this case, context and saved report (and no native field map); else fresh."""
+    from app.services.transaction_ops.accounting_evidence import collect_accounting_evidence
+    from app.services.transaction_ops.tax_correction import refresh_source
+
+    if (
+        prefetched
+        and prefetched.get("case_id") == str(case.id)
+        and prefetched.get("field_map") is None
+        and prefetched.get("review") == review
+        and prefetched.get("report") == case.latest_report_json
+    ):
+        return _json(prefetched["source"]), _json(prefetched["evidence"])
+    if prefetched:
+        # The kept reads no longer describe this member (its context or saved report moved):
+        # correct to read fresh, and worth seeing, because it silently costs the saved time.
+        print(f"credit_line_reallocation: kept reads not reused case={case.id}", flush=True)
+    source = await refresh_source(db, tenant_id, review["scope"], case.order_reference, include_accounting_detail=True)
+    evidence = await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json)
+    return _json(source), _json(evidence)
+
+
 async def _suiteql(reader, query, limit):
     from app.services.transaction_ops.netsuite_reader import _collection
 
@@ -494,11 +543,13 @@ def profile_matches_scope(profile, scope):
         return False
 
 
-async def gather(db, tenant_id, case_id, credit_memo_id):
+async def gather(db, tenant_id, case_id, credit_memo_id, *, prefetched=None):
     """Fresh, complete evidence for one credit of one case: ``(facts, context)``.
 
     ``facts`` is exactly what :func:`assess` and :func:`derive` take. Every invoice and credit
     the order's refund graph reaches must be in the evidence, or nothing is proposed.
+    ``prefetched`` is only ever group preparation's own reads of this member (see
+    :func:`_order_reads`); the agent's proposal and every approval check read NetSuite.
     """
     from uuid import UUID
 
@@ -506,13 +557,11 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
     from sqlalchemy import select
 
     from app.models.transaction_ops import TransactionConfig
-    from app.services.transaction_ops.accounting_evidence import collect_accounting_evidence
     from app.services.transaction_ops.accounting_review import accounting_context
     from app.services.transaction_ops.case_service import get_case
     from app.services.transaction_ops.netsuite_reader import _id, authenticated_reader
     from app.services.transaction_ops.netsuite_refunds import collect_refunds
     from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile
-    from app.services.transaction_ops.tax_correction import refresh_source
 
     if credit_memo_id is not None and not _id(str(credit_memo_id)):
         raise RefusalError("credit_not_in_case", {"credit_memo_id": str(credit_memo_id)})
@@ -536,8 +585,7 @@ async def gather(db, tenant_id, case_id, credit_memo_id):
         raise RefusalError("tax_refund_items_not_configured", {"subsidiary_id": str(scope["subsidiary_id"])}) from None
     if not profile_matches_scope(profile, scope):
         raise RefusalError("configuration_unavailable", {"reason": "profile_account_differs_from_case"})
-    source = _json(await refresh_source(db, tenant_id, scope, case.order_reference, include_accounting_detail=True))
-    evidence = _json(await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json))
+    source, evidence = await _order_reads(db, tenant_id, case, review, prefetched)
     sections = evidence.get("sections") or {}
     order = sections.get("sales_order") or {}
     postings = sections.get("posting_documents") or []
@@ -1080,7 +1128,8 @@ async def prepare_group_member(db, tenant_id, case_id):
     (no model arithmetic) and accepted by the same outcome check. Sets the case's candidate."""
     from app.services.transaction_ops.resolution_plan import proposal_plan
 
-    facts, context = await gather(db, tenant_id, case_id, None)
+    prefetched = db.info.pop(GROUP_PREPARATION_READS, None)
+    facts, context = await gather(db, tenant_id, case_id, None, prefetched=prefetched)
     exemplar = await verified_exemplar(db, tenant_id, context["review"]["config_id"])
     if exemplar is None:
         raise RefusalError("no_verified_exemplar", {"config_id": context["review"]["config_id"]})
