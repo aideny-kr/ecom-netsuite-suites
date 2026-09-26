@@ -1,5 +1,6 @@
 """The new unattended surface is bounded independently of model instructions."""
 
+import copy
 import uuid
 
 import pytest
@@ -122,7 +123,7 @@ async def seed_agent_step(db, actor):
     )
     db.add(schedule)
     await db.flush()
-    return schedule, data, case, connection
+    return schedule, copy.deepcopy(data), case, connection
 
 
 async def test_real_worker_saved_review_and_receipt(db, admin_user, monkeypatch):
