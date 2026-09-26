@@ -226,7 +226,9 @@ class TestAccepts:
         assert result["balance"]["after"] == {"gross": "799.00", "net": "799.00", "tax": "0.00"}
         assert result["balance"]["source"] == {"gross": "799.00", "net": "799.00", "tax": "0.00"}
         assert result["expected_ledger"] == {"debit": {"210": "2.80"}, "credit": {"119": "2.80"}}
-        assert result["expected_after"] == {"total": "2.80", "taxTotal": "0.00"}
+        # The credit's allocation: all of it moves from sales adjustments to tax.
+        assert result["expected_after"] == {"total": "2.80", "subtotal": "0.00", "taxTotal": "2.80"}
+        assert result["allocation_before"] == {"total": "2.80", "subtotal": "2.80", "taxTotal": "0.00"}
         assert result["proposed_fields"] == {
             "item": {
                 "items": [

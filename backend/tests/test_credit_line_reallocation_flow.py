@@ -725,3 +725,26 @@ class TestAgentLoop:
         assert len(cards) == 1 and len(hops) == 1
         assert cards[0]["accounting_review"] == p
         assert cards[0]["tool_input"] == params
+
+
+class TestCardFields:
+    """Live staging 2026-09-26: the approval card crashed rendering this kind. It reuses codex's
+    existing-credit card (NativeAccountingConfirmationCard), which reads these fields."""
+
+    async def test_the_proposal_carries_what_the_existing_credit_card_reads(self, order):
+        _, p = await _proposed(order)
+        assert p["period"]["id"] == "171" and p["accounting_book"] == "1"
+        assert p["sales_adjustment_account"] == "783" and p["tax_account"]
+        assert p["ar_account"] == "119" and p["invoice_id"] and p["record_id"] and p["order_reference"]
+        assert p["source"]["currency"] == "USD" and p["scope"]["netsuite_account_id"]
+        for side in ("before", "expected_after"):
+            assert {"subtotal", "taxTotal", "total"} <= set(p[side])
+        assert (p["before"]["subtotal"], p["before"]["taxTotal"]) == ("2.80", "0.00")
+        assert (p["expected_after"]["subtotal"], p["expected_after"]["taxTotal"]) == ("0.00", "2.80")
+
+    async def test_the_verified_readback_shows_the_saved_allocation(self, order):
+        _, p = await _proposed(order)
+        order["facts"] = _written(order["facts"], p)
+        result = await tax_correction.verify_after(_db(), TENANT, p)
+        assert result["status"] == "verified"
+        assert result["after"]["body"] == {"total": "2.80", "subtotal": "0.00", "taxtotal": "2.80"}

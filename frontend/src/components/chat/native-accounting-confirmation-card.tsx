@@ -10,7 +10,7 @@ export function NativeAccountingConfirmationCard({ data, proposal: p, onConfirm,
   groupState?: WriteConfirmationData["status"];
 }) {
   const [acknowledged, setAcknowledged] = useState(false);
-  const credit = p.kind === "credit_tax_reallocation";
+  const credit = p.kind === "credit_tax_reallocation" || p.kind === "credit_line_reallocation";
   const verified = data.status === "approved" && data.accounting_verification?.status === "verified";
   const waitingGroup = data.status === "pending" && groupState && groupState !== "pending";
   const pending = data.status === "pending" && !waitingGroup;
@@ -78,7 +78,7 @@ export function NativeAccountingConfirmationCard({ data, proposal: p, onConfirm,
           <div><dt className="text-xs text-muted-foreground">AR account</dt><dd className="mt-1">{p.ar_account}</dd></div>
           <div><dt className="text-xs text-muted-foreground">Adjustment / tax accounts</dt><dd className="mt-1">{p.sales_adjustment_account} / {p.tax_account}</dd></div>
           <div><dt className="text-xs text-muted-foreground">Accounting book</dt><dd className="mt-1">{p.accounting_book}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">Posting period retained</dt><dd className="mt-1">#{String(p.period.id || "Not verified")} · {credit ? "Open period required" : "Non-posting amendment"}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">Posting period retained</dt><dd className="mt-1">#{String(p.period?.id || "Not verified")} · {credit ? "Open period required" : "Non-posting amendment"}</dd></div>
         </dl>
         <details className="rounded-lg border p-4"><summary className="cursor-pointer font-medium">Accounting basis and exact changes</summary>
           <p className="mt-3 leading-relaxed text-muted-foreground">{p.approval_basis}</p>

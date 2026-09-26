@@ -49,6 +49,27 @@ describe("native accounting approval",()=>{
     fireEvent.click(groupButton);
     expect(approve).toHaveBeenCalledTimes(2);
   });
+  it("reuses the existing-credit card for an agent-proposed line reallocation",()=>{
+    // Live staging 2026-09-26: this kind fell through to the invoice-tax layout and crashed on p.period.
+    const approve=vi.fn();
+    const realloc={...data,record_id:"15788939",target_account:"6738075",target_environment:"PRODUCTION",accounting_review:{...data.accounting_review,
+      kind:"credit_line_reallocation" as const,record_id:"15788939",invoice_id:"15407087",order_reference:"R094649369",
+      scope:{netsuite_account_id:"6738075",subsidiary_id:"1"},
+      before:{total:"2.80",subtotal:"2.80",taxTotal:"0.00"},expected_after:{total:"2.80",subtotal:"0.00",taxTotal:"2.80"},
+      period:{id:"171"},sales_adjustment_account:"783",tax_account:"210,866,905",ar_account:"119",
+      proposed_fields:{item:{items:[{line:1,item:{id:"5005"},quantity:1,rate:"2.80",amount:"2.80",isTaxable:false}]}},
+    }};
+    const {unmount}=render(<AccountingConfirmationCard data={realloc} onConfirm={approve} onReject={vi.fn()}/>);
+    expect(screen.getByRole("heading",{name:"Correct existing credit tax allocation"})).toBeInTheDocument();
+    expect(screen.queryByText("Correct invoice tax")).not.toBeInTheDocument();
+    expect(screen.getAllByText("$2.80").length).toBeGreaterThan(0);
+    const button=screen.getByRole("button",{name:"Approve correction"}); expect(button).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(button);expect(approve).toHaveBeenCalledTimes(1);
+    unmount();
+    const {period: _period, ...withoutPeriod}=realloc.accounting_review;
+    render(<AccountingConfirmationCard data={{...realloc,accounting_review:withoutPeriod as typeof realloc.accounting_review}} onConfirm={vi.fn()} onReject={vi.fn()}/>);
+    expect(screen.getByText(/Not verified/)).toBeInTheDocument();
+  });
   it("shows credit allocation accurately and requires explicit accounting acknowledgement",()=>{
     const approve=vi.fn(); render(<AccountingConfirmationCard data={data} onConfirm={approve} onReject={vi.fn()}/>);
     expect(screen.getByRole("heading",{name:"Correct existing credit tax allocation"})).toBeInTheDocument();
