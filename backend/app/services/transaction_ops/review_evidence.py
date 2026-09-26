@@ -1,9 +1,9 @@
 """Refresh a fixed review cohort without changing its historical findings."""
 
-from sqlalchemy import DateTime, and_, case, cast, func, literal, or_, select, tuple_
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import DateTime, and_, any_, case, cast, column, func, literal, or_, select, true, tuple_, union_all
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
-from app.models.transaction_ops import TransactionFinding as Finding
 from app.models.transaction_ops import TransactionRun as Run
 from app.services.transaction_ops.source_eligibility import eligible_reports
 
@@ -54,15 +54,14 @@ def final_evidence(report):
     return func.coalesce(report["_observation"]["final"].astext, "true") == "true"
 
 
-def current_review_evidence(cohort, tenant_id, snapshot, *, name="review_identities"):
-    """``name`` is the materialized CTE's: it must differ from any other cohort's in the
-    same statement (the review page unions one cohort per selected run)."""
+def replacement_scope(snapshot):
+    """Exact business identity of runs allowed to refresh a review."""
     # A configuration revision may change policy, but a different source,
     # account, entity, identity or currency cannot replace a finding.
     if not (snapshot.get("source_connection_id") or snapshot.get("source_step_id")) or not all(
         snapshot.get(key) for key in ("netsuite_account_id", "subsidiary_id", "record_type")
     ):
-        return cohort
+        return None
     scope = [
         Run.config_snapshot[key].astext == snapshot.get(key)
         for key in ("source_connection_id", "source_step_id", "subsidiary_id", "record_type")
@@ -73,115 +72,157 @@ def current_review_evidence(cohort, tenant_id, snapshot, *, name="review_identit
         func.coalesce(Run.config_snapshot["evidence_contract_version"].astext, "1")
         == str(snapshot.get("evidence_contract_version", 1))
     )
-    # Materialize only identity and winner keys. A per-order correlated lookup
-    # otherwise rescans the tenant's finding history thousands of times.
-    # The CTE is named explicitly: an anonymous alias takes its number from the
-    # Python object's id, and ``prefix_with`` returns a copy that keeps the freed
-    # original's id, which the next allocation (the candidates subquery) can reuse.
-    # CI then rendered both as ``anon_8`` and PostgreSQL refused the statement
-    # ("table name specified more than once"). A name never collides.
-    identities = (
-        select(
-            cohort.c.id,
-            cohort.c.order_reference,
-            cohort.c.updated_at,
-            evidence_time(cohort.c.report_json, cohort.c.updated_at).label("observed_at"),
-            cohort.c.report_json["source"]["record_id"].astext.label("source_id"),
-            cohort.c.report_json["balance"]["currency"].astext.label("currency"),
+    return scope
+
+
+def run_ids_match(column, run_ids):
+    # One array bind avoids the driver's parameter ceiling as scan history grows.
+    return column == any_(literal(run_ids, type_=ARRAY(PG_UUID(as_uuid=True))))
+
+
+def current_review_evidence(cohort, readings, run_ids, *, name):
+    """Select narrow winner keys; never copy financial reports through sorts."""
+    if not run_ids:
+        return select(cohort.c.id, cohort.c.order_reference).subquery()
+    candidates = (
+        select(cohort.c.id.label("cohort_id"), readings.c.id.label("finding_id"))
+        .select_from(cohort)
+        .join(readings, readings.c.order_reference == cohort.c.order_reference)
+        .where(
+            run_ids_match(readings.c.run_id, run_ids),
+            readings.c.source_id != "",
+            readings.c.source_id == cohort.c.source_id,
+            readings.c.currency != "",
+            readings.c.currency == cohort.c.currency,
+            tuple_(readings.c.observed_at, readings.c.updated_at, readings.c.id)
+            > tuple_(cohort.c.observed_at, cohort.c.updated_at, cohort.c.id),
         )
-        .cte(name, nesting=True)
+        .distinct(cohort.c.id)
+        .order_by(cohort.c.id, readings.c.observed_at.desc(), readings.c.updated_at.desc(), readings.c.id.desc())
+        .cte(f"{name}_candidates")
         .prefix_with("MATERIALIZED")
     )
-    candidates = (
-        select(identities.c.id.label("cohort_id"), Finding.id.label("finding_id"))
-        .select_from(identities)
-        .join(Finding, (Finding.tenant_id == tenant_id) & (Finding.order_reference == identities.c.order_reference))
-        .join(Run, (Run.id == Finding.run_id) & (Run.tenant_id == tenant_id))
-        .where(
-            *scope,
-            final_evidence(Finding.report_json),
-            Finding.report_json["source"]["record_id"].astext != "",
-            Finding.report_json["source"]["record_id"].astext == identities.c.source_id,
-            Finding.report_json["balance"]["currency"].astext != "",
-            Finding.report_json["balance"]["currency"].astext == identities.c.currency,
-            tuple_(evidence_time(Finding.report_json, Finding.updated_at), Finding.updated_at, Finding.id)
-            > tuple_(identities.c.observed_at, identities.c.updated_at, identities.c.id),
-        )
-        .distinct(identities.c.id)
-        .order_by(
-            identities.c.id,
-            evidence_time(Finding.report_json, Finding.updated_at).desc(),
-            Finding.updated_at.desc(),
-            Finding.id.desc(),
-        )
-        .subquery()
-    )
-    winners = (
-        select(
-            func.coalesce(candidates.c.finding_id, identities.c.id).label("id"),
-            identities.c.order_reference,
-        )
-        .select_from(identities.outerjoin(candidates, candidates.c.cohort_id == identities.c.id))
-        .subquery()
-    )
-    # Hydrate evidence only after selecting the latest compatible IDs. Keep the
-    # actual finding/run links, exact amounts and observation timestamps intact.
     return (
         select(
-            Finding.id,
-            Finding.run_id,
-            winners.c.order_reference,
-            Finding.report_json,
-            Finding.updated_at,
+            func.coalesce(candidates.c.finding_id, cohort.c.id).label("id"),
+            cohort.c.order_reference,
         )
-        .join(winners, (Finding.id == winners.c.id) & (Finding.tenant_id == tenant_id))
+        .select_from(cohort.outerjoin(candidates, candidates.c.cohort_id == cohort.c.id))
         .subquery()
     )
 
 
-async def period_evidence(db, tenant_id, run_id):
+async def period_evidence(db, tenant_id, run_id, *, root=None):
     """One authorized period's cohort with compatible later rechecks."""
     from app.models.transaction_ops import TransactionFinding, TransactionRun
     from app.schemas.transaction_runs import ReviewSpan
     from app.services.transaction_ops import state_service as state
 
-    root = await state.get_run(db, tenant_id, run_id)
+    if root is None:
+        root = await state.get_run(db, tenant_id, run_id)
+    elif root.tenant_id != tenant_id or root.id != run_id:
+        raise state.StateError("not_found", 404)
     if not root.params_json.get("review"):
         raise state.StateError("not_a_period_review", 422)
     span = ReviewSpan.model_validate(root.params_json["review"])
     from app.services.transaction_ops.daily_evidence import compatible_observation_runs
 
     f, r = TransactionFinding, TransactionRun
-    cohort = (
-        select(f.id, f.run_id, f.order_reference, f.updated_at)
-        .join(r, (f.tenant_id == r.tenant_id) & (f.run_id == r.id))
+    cohort_scope = and_(
+        r.config_id == root.config_id,
+        or_(
+            r.params_json["review"] == span.model_dump(mode="json"),
+            and_(*compatible_observation_runs(root, span)),
+        ),
+    )
+    replacement = replacement_scope(root.config_snapshot)
+    replacement_filter = and_(*replacement) if replacement else literal(False)
+    # JSON scope predicates badly underestimate run cardinality. Resolve the
+    # immutable authorized run IDs first, so PostgreSQL can estimate findings
+    # from ordinary indexed run_id values instead of multiplying nested scans.
+    runs = (
+        await db.execute(
+            select(r.id, cohort_scope.label("cohort"), replacement_filter.label("replacement")).where(
+                r.tenant_id == tenant_id, or_(cohort_scope, replacement_filter)
+            )
+        )
+    ).all()
+    cohort_ids = [row.id for row in runs if row.cohort]
+    replacement_ids = [row.id for row in runs if row.replacement]
+    name = f"review_{root.id.hex}"
+    # Extract small identity/read-clock values once. Repeated JSONB lookups on
+    # large, compressed evidence previously dominated both sorting and joins.
+    facts = (
+        func.jsonb_to_record(f.report_json)
+        .table_valued(
+            *(column(key, JSONB) for key in ("source", "targets", "_observation", "balance", "source_eligibility"))
+        )
+        .render_derived(name=f"{name}_facts", with_types=True)
+        .lateral()
+    )
+    report = {key: facts.c[key] for key in ("source", "targets", "_observation", "balance", "source_eligibility")}
+    reading_query = (
+        select(
+            f.id,
+            f.run_id,
+            f.order_reference,
+            f.updated_at,
+            evidence_time(report, f.updated_at).label("observed_at"),
+            facts.c.source["record_id"].astext.label("source_id"),
+            facts.c.balance["currency"].astext.label("currency"),
+            facts.c.balance["status"].astext.label("balance_status"),
+            eligible_reports(report).label("eligible"),
+        )
+        .select_from(f)
+        .join(facts, true())
         .where(
             f.tenant_id == tenant_id,
-            r.tenant_id == tenant_id,
-            r.config_id == root.config_id,
-            final_evidence(f.report_json),
-            or_(
-                r.params_json["review"] == span.model_dump(mode="json"),
-                and_(*compatible_observation_runs(root, span)),
-            ),
+            final_evidence(report),
         )
-        .distinct(f.order_reference)
+    )
+    cohort_readings = (
+        reading_query.where(run_ids_match(f.run_id, cohort_ids))
+        .cte(f"{name}_cohort_readings")
+        .prefix_with("MATERIALIZED")
+    )
+    # Rechecks may refresh the fixed cohort, never enlarge it. Do not decode
+    # unrelated orders as history grows, or decode cohort findings twice.
+    other_readings = reading_query.where(
+        run_ids_match(f.run_id, sorted(set(replacement_ids) - set(cohort_ids))),
+        f.order_reference.in_(select(cohort_readings.c.order_reference)),
+    )
+    readings = union_all(select(cohort_readings), other_readings).cte(f"{name}_readings").prefix_with("MATERIALIZED")
+    cohort = (
+        select(readings)
+        .where(run_ids_match(readings.c.run_id, cohort_ids))
+        .distinct(readings.c.order_reference)
         .order_by(
-            f.order_reference, evidence_time(f.report_json, f.updated_at).desc(), f.updated_at.desc(), f.id.desc()
+            readings.c.order_reference,
+            readings.c.observed_at.desc(),
+            readings.c.updated_at.desc(),
+            readings.c.id.desc(),
         )
+        .cte(f"{name}_cohort")
+        .prefix_with("MATERIALIZED")
+    )
+    winners = current_review_evidence(cohort, readings, replacement_ids, name=name)
+    latest = (
+        select(f.id, f.run_id, winners.c.order_reference, f.report_json, f.updated_at, readings.c.balance_status)
+        .join(winners, (f.id == winners.c.id) & (f.tenant_id == tenant_id))
+        .join(readings, readings.c.id == winners.c.id)
+        .where(readings.c.eligible)
         .subquery()
     )
-    # Deduplicate narrow IDs before loading potentially large evidence blobs.
-    cohort = select(cohort, f.report_json).join(f, (f.id == cohort.c.id) & (f.tenant_id == tenant_id)).subquery()
-    latest = current_review_evidence(cohort, tenant_id, root.config_snapshot, name=f"review_identities_{root.id.hex}")
     # Filter after winner selection: never resurrect a superseded exception.
-    return select(latest).where(eligible_reports(latest.c.report_json)).subquery(), span
+    return latest, span
 
 
 def result_category(latest):
     from sqlalchemy import case
 
-    verdict = latest.c.report_json["balance"]["status"].astext
+    verdict = (
+        latest.c.balance_status if "balance_status" in latest.c else latest.c.report_json["balance"]["status"].astext
+    )
     return case(
         (verdict == "matched", "matched"),
         (
