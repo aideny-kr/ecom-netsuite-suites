@@ -2317,7 +2317,7 @@ async def test_early_blocked_return_resolves_a_pre_created_jobs_row_no_compiled_
     assert job.error_message == "no compiled plan to run"
 
 
-async def test_run_schedule_now_falls_back_to_inserting_when_existing_job_id_is_missing(db: AsyncSession, monkeypatch):
+async def test_missing_existing_job_is_blocked_instead_of_recreating_an_operation(db: AsyncSession, monkeypatch):
     """Defensive only (row deleted between enqueue and pickup) — must not crash."""
     tenant = await create_test_tenant(db, name="Missing Job Co")
     await set_tenant_context(db, str(tenant.id))
@@ -2345,8 +2345,8 @@ async def test_run_schedule_now_falls_back_to_inserting_when_existing_job_id_is_
         existing_job_id=missing_id,
     )
 
-    assert outcome.reason == REASON_DONE
+    assert outcome.reason == REASON_BLOCKED
     assert outcome.jobs_row_id != missing_id
 
     jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
-    assert len(jobs) == 1
+    assert len(jobs) == 0

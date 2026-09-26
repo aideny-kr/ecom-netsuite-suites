@@ -109,6 +109,8 @@ inserting a second one.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -119,11 +121,12 @@ from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import String, cast, or_, select, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.core.config import settings
 from app.core.database import set_tenant_context
+from app.models.audit import AuditEvent
 from app.models.job import Job
 from app.models.pipeline import Schedule
 from app.models.tenant import Tenant
@@ -261,7 +264,20 @@ _claim_sync_hook: Callable[[], Awaitable[None]] = _default_claim_sync_hook
 
 
 def _due_predicate(tenant_id: uuid.UUID, now: datetime):
+    active_occurrence = (
+        select(Job.id)
+        .where(
+            Job.tenant_id == tenant_id,
+            Job.job_type == "scheduled_job",
+            Job.parameters["schedule_id"].astext == cast(Schedule.id, String),
+            Job.status.in_(["pending", "running"]),
+            or_(Schedule.retry_job_id.is_(None), Job.id != Schedule.retry_job_id),
+        )
+        .correlate(Schedule, Tenant)
+        .exists()
+    )
     return (
+        ~active_occurrence,
         Schedule.tenant_id == tenant_id,
         Schedule.schedule_type == "job",
         Schedule.is_active.is_(True),
@@ -408,6 +424,7 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
                 # `run_schedule_now`'s retry-then-pause branch) -- reuse it
                 # rather than inserting a second one.
                 claim.job_id = retry_job_row.id
+                retry_job_row.parameters = {**(retry_job_row.parameters or {}), "dispatch_ready": True}
             else:
                 # The `jobs` row is created HERE, inside the SAME transaction
                 # as the claim (review finding, MAJOR): before this fix, the
@@ -426,7 +443,20 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
                     tenant_id=tenant_id,
                     job_type="scheduled_job",
                     status="pending",
-                    parameters={"schedule_id": str(row.id), "attempt": attempt, "due_at": due_at.isoformat()},
+                    parameters={
+                        "schedule_id": str(row.id),
+                        "attempt": attempt,
+                        "due_at": due_at.isoformat(),
+                        "plan": row.plan_json,
+                        "plan_version": row.plan_version,
+                        "control_version": row.plan_version,
+                        "budget": dict(row.budget_json or {}),
+                        "actor_type": "system",
+                        "actor_id": None,
+                        "recovery_version": 1,
+                        "retry_on_error": True,
+                        "dispatch_ready": True,
+                    },
                 )
                 db.add(pending_job)
                 pending_jobs.append((claim, pending_job))
@@ -521,6 +551,7 @@ async def _run_steps(
     tenant_id: uuid.UUID,
     actor_id: uuid.UUID | None,
     actor_type: str,
+    control_version: int | None = None,
 ) -> tuple[str, dict[str, Any], str | None]:
     """Replay `steps` in order. Returns (reason, outputs, detail)."""
     from app.services.report.report_delivery import DeliveryUnavailable
@@ -544,6 +575,36 @@ async def _run_steps(
         # it fresh at the top of every iteration means a step never depends
         # on what an earlier step (or the caller) happened to leave in scope.
         await set_tenant_context(db, str(tenant_id))
+
+        current = (
+            await db.execute(
+                select(Schedule)
+                .where(
+                    Schedule.id == ctx.job_id,
+                    Schedule.tenant_id == tenant_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        run = (
+            await db.execute(
+                select(Job)
+                .where(Job.id == job_id, Job.tenant_id == tenant_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if (
+            current is None
+            or run is None
+            or run.status != "running"
+            or current.paused_at is not None
+            or not current.is_active
+            or (control_version is not None and current.plan_version != control_version)
+        ):
+            return REASON_BLOCKED, outputs, "run cancelled, schedule stopped, or plan changed"
+        usage["seconds"] = time.monotonic() - started_at
+        if any(budget.get(k) is not None and usage[k] >= budget[k] for k in usage):
+            return REASON_BUDGET, outputs, "budget exhausted before next step"
 
         step_id = step.get("id")
         step_type = step.get("type")
@@ -579,7 +640,16 @@ async def _run_steps(
             await set_tenant_context(db, str(tenant_id))
 
         try:
-            artifact = await spec.executor(ctx, params)
+            remaining = (
+                None if budget.get("seconds") is None else max(0, budget["seconds"] - (time.monotonic() - started_at))
+            )
+            async with asyncio.timeout(remaining) as deadline:
+                artifact = await spec.executor(ctx, params)
+        except TimeoutError:
+            await db.rollback()
+            if deadline.expired():
+                return REASON_BUDGET, outputs, "step deadline exceeded; remote outcome may be unknown"
+            return REASON_ERROR, outputs, "executor transport timed out; remote outcome may be unknown"
         except DeliveryUnavailable as exc:
             # A DeliveryUnavailable-raising executor may still have touched
             # the DB before raising (e.g. a partial write attempt) -- roll
@@ -680,11 +750,18 @@ async def _finalize_run(
             select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id).with_for_update()
         )
     ).scalar_one()
-    job = await db.get(Job, job_id_value)
+    job = (
+        await db.execute(
+            select(Job)
+            .where(Job.id == job_id_value, Job.tenant_id == tenant_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
 
-    job.status = "completed" if reason in (REASON_DONE, REASON_BUDGET, REASON_BLOCKED) else "failed"
+    if job.status != "cancelled":
+        job.status = "completed" if reason in (REASON_DONE, REASON_BUDGET, REASON_BLOCKED) else "failed"
     job.completed_at = datetime.now(timezone.utc)
-    job.result_summary = {"reason": reason, "outputs": outputs, "detail": detail}
+    job.result_summary = {**(job.result_summary or {}), "reason": reason, "outputs": outputs, "detail": detail}
     if detail:
         job.error_message = detail
 
@@ -710,7 +787,127 @@ def _stamp_blocked_existing_job(job: Job | None, detail: str) -> uuid.UUID | Non
     return job.id
 
 
-async def run_schedule_now(
+async def run_schedule_now(db: AsyncSession, schedule_id: uuid.UUID, **kwargs) -> RunOutcome:
+    """A dedicated transaction lock survives executor commits and dies with the worker.
+
+    Serialize a schedule's effects, including distinct run-now requests. Never hold
+    a row lock while making remote calls. A duplicate delivery cannot reenter a
+    terminal job; a dead worker's running job is uncertain, never replayed.
+    """
+    tenant_id = kwargs["tenant_id"]
+    key = int.from_bytes(
+        hashlib.sha256(f"schedule:{tenant_id}:{schedule_id}".encode()).digest()[:8], "big", signed=True
+    )
+    bind = db.bind
+    engine = bind.engine if isinstance(bind, AsyncConnection) else bind
+    async with engine.connect() as lock:
+        acquired = await lock.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": key})
+        if not acquired:
+            return RunOutcome(REASON_BLOCKED, kwargs.get("existing_job_id"), {})
+        try:
+            return await _run_schedule_now_locked(db, schedule_id, **kwargs)
+        finally:
+            await lock.rollback()  # also releases the lock behind transaction poolers
+
+
+async def _effect_started(db, tenant_id, job_id) -> bool:
+    """Durable write intent or paid-model reservation; never infer absence from a timeout."""
+    await set_tenant_context(db, str(tenant_id))
+    return bool(
+        await db.scalar(
+            select(AuditEvent.id)
+            .where(
+                AuditEvent.tenant_id == tenant_id,
+                AuditEvent.job_id == job_id,
+                AuditEvent.category == "jobs",
+                or_(AuditEvent.resource_type == "schedule_step", AuditEvent.action == "agent.review.started"),
+                AuditEvent.action.endswith(".started"),
+            )
+            .limit(1)
+        )
+    )
+
+
+async def _settle_completed_receipt(db, row, job) -> bool:
+    summary = job.result_summary or {}
+    if not summary.get("execution_complete") or summary.get("reason") != REASON_DONE:
+        return False
+    job.status = "completed"
+    job.completed_at = datetime.now(timezone.utc)
+    row.last_run_status = REASON_DONE
+    await audit_service.log_event(
+        db,
+        tenant_id=row.tenant_id,
+        category="jobs",
+        action="jobs.run.recovered",
+        actor_type="system",
+        resource_type="job",
+        resource_id=str(job.id),
+        job_id=job.id,
+        payload={"reason": REASON_DONE, "source": "durable_execution_receipt"},
+    )
+    await db.commit()
+    return True
+
+
+async def _settle_interrupted(db, row, job) -> str:
+    if await _effect_started(db, row.tenant_id, job.id):
+        await _mark_uncertain(db, row, job, "worker interrupted; execution result unknown")
+        return REASON_BLOCKED
+    # No durable write/model intent: fail this occurrence, never silently replay
+    # a potentially billed read. Future independently approved occurrences remain usable.
+    job.status = "failed"
+    job.completed_at = datetime.now(timezone.utc)
+    job.result_summary = {
+        **(job.result_summary or {}),
+        "reason": REASON_ERROR,
+        "detail": "interrupted without durable effect intent; occurrence not replayed",
+    }
+    row.last_run_status = REASON_ERROR
+    await audit_service.log_event(
+        db,
+        tenant_id=row.tenant_id,
+        category="jobs",
+        action="jobs.run.interrupted",
+        actor_type="system",
+        resource_type="job",
+        resource_id=str(job.id),
+        job_id=job.id,
+        payload={"replayed": False},
+        status="error",
+    )
+    await db.commit()
+    return REASON_ERROR
+
+
+async def _mark_uncertain(db, row, job, detail):
+    job.status = "failed"
+    job.completed_at = datetime.now(timezone.utc)
+    job.result_summary = {
+        **(job.result_summary or {}),
+        "reason": REASON_BLOCKED,
+        "verification": "uncertain",
+        "detail": detail,
+    }
+    row.paused_at = datetime.now(timezone.utc)
+    row.pause_reason = "Uncertain operation: reconcile recorded effects before resuming"
+    row.last_run_status = REASON_BLOCKED
+    await audit_service.log_event(
+        db,
+        tenant_id=row.tenant_id,
+        category="jobs",
+        action="jobs.run.uncertain",
+        actor_type="system",
+        resource_type="job",
+        resource_id=str(job.id),
+        job_id=job.id,
+        payload={"detail": detail},
+        status="error",
+    )
+    await db.commit()
+
+
+async def _run_schedule_now_locked(
     db: AsyncSession,
     schedule_id: uuid.UUID,
     *,
@@ -724,6 +921,7 @@ async def run_schedule_now(
     existing_job_id: uuid.UUID | None = None,
     retry_on_error: bool = False,
     period_key: str | None = None,
+    recovering: bool = False,
 ) -> RunOutcome:
     """Run one schedule ONE time: one `jobs` row, plan steps replayed in order,
     schedule bookkeeping updated, one commit at the end (plus the write-step
@@ -809,8 +1007,34 @@ async def run_schedule_now(
 
     await set_tenant_context(db, str(tenant_id))
     row = (
-        await db.execute(select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id))
-    ).scalar_one()
+        await db.execute(
+            select(Schedule)
+            .where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        orphan = (
+            (
+                await db.execute(
+                    select(Job).where(
+                        Job.id == existing_job_id,
+                        Job.tenant_id == tenant_id,
+                        Job.job_type == "scheduled_job",
+                        Job.parameters["schedule_id"].astext == str(schedule_id),
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_job_id
+            else None
+        )
+        if orphan is not None and orphan.status in {"pending", "running"}:
+            was_running = orphan.status == "running"
+            _stamp_blocked_existing_job(orphan, "schedule unavailable; no execution or retry")
+            if was_running:
+                orphan.result_summary = {**orphan.result_summary, "verification": "uncertain"}
+            await db.commit()
+        return RunOutcome(REASON_BLOCKED, orphan.id if orphan else None, {})
 
     # Fetched ONCE, early, and reused for three things below: (1) the plan
     # snapshot check, (2) resolving a pre-created row on an early BLOCKED
@@ -819,7 +1043,94 @@ async def run_schedule_now(
     # function.
     existing_job: Job | None = None
     if existing_job_id is not None:
-        existing_job = await db.get(Job, existing_job_id)
+        existing_job = (
+            await db.execute(
+                select(Job)
+                .where(
+                    Job.id == existing_job_id,
+                    Job.tenant_id == tenant_id,
+                    Job.job_type == "scheduled_job",
+                    Job.parameters["schedule_id"].astext == str(schedule_id),
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if existing_job is None:
+            return RunOutcome(REASON_BLOCKED, None, {})
+        saved = existing_job.parameters or {}
+        if recovering and existing_job.status == "pending" and saved.get("recovery_version") != 1:
+            _stamp_blocked_existing_job(existing_job, "legacy dispatch has no saved recovery identity; not replayed")
+            row.last_run_status = REASON_BLOCKED
+            await audit_service.log_event(
+                db,
+                tenant_id=tenant_id,
+                category="jobs",
+                action="jobs.run.blocked",
+                actor_type="system",
+                resource_type="job",
+                resource_id=str(existing_job.id),
+                job_id=existing_job.id,
+                payload={"reason": "legacy_dispatch_not_replayed"},
+                status="error",
+            )
+            await db.commit()
+            return RunOutcome(REASON_BLOCKED, existing_job_id, {})
+        attempt = saved.get("attempt", attempt)
+        use_pending = saved.get("use_pending", use_pending)
+        due_at = datetime.fromisoformat(saved["due_at"]) if saved.get("due_at") else due_at
+        period_key = saved.get("period_key", period_key)
+        if "actor_type" in saved:
+            actor_type = saved["actor_type"]
+            actor_id = uuid.UUID(saved["actor_id"]) if saved.get("actor_id") else None
+        if existing_job.status == "running" and await _settle_completed_receipt(db, row, existing_job):
+            return RunOutcome(REASON_DONE, existing_job_id, (existing_job.result_summary or {}).get("outputs", {}))
+        if existing_job.status == "running":
+            reason = await _settle_interrupted(db, row, existing_job)
+            return RunOutcome(reason, existing_job_id, {})
+        if existing_job.status != "pending":
+            summary = existing_job.result_summary or {}
+            return RunOutcome(summary.get("reason", REASON_BLOCKED), existing_job_id, summary.get("outputs", {}))
+
+    interrupted = (
+        (
+            await db.execute(
+                select(Job)
+                .where(
+                    Job.tenant_id == tenant_id,
+                    Job.job_type == "scheduled_job",
+                    Job.status == "running",
+                    Job.parameters["schedule_id"].astext == str(schedule_id),
+                )
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for interrupted_job in interrupted:
+        if await _settle_completed_receipt(db, row, interrupted_job):
+            await set_tenant_context(db, str(tenant_id))
+            continue
+        await _settle_interrupted(db, row, interrupted_job)
+        await set_tenant_context(db, str(tenant_id))
+
+    unresolved = await db.scalar(
+        select(Job.id)
+        .where(
+            Job.tenant_id == tenant_id,
+            Job.job_type == "scheduled_job",
+            Job.parameters["schedule_id"].astext == str(schedule_id),
+            Job.result_summary["verification"].astext == "uncertain",
+        )
+        .limit(1)
+    )
+    if unresolved or row.paused_at is not None or not row.is_active:
+        row.last_run_status = REASON_BLOCKED
+        jid = _stamp_blocked_existing_job(
+            existing_job, "schedule stopped or unresolved operation requires reconciliation"
+        )
+        await db.commit()
+        return RunOutcome(REASON_BLOCKED, jid, {})
 
     # HITL gate (spec Goal line: "approved by a person, run deterministically"):
     # `use_pending=False` replays the schedule's live `plan_json`, which must
@@ -917,6 +1228,17 @@ async def run_schedule_now(
     job_parameters["use_pending"] = use_pending
     job_parameters.setdefault("plan_version", plan_version_used)
     job_parameters.setdefault("retry_of_job_id", None)
+    job_parameters.setdefault("plan", plan_json)
+    job_parameters.setdefault("budget", dict(row.budget_json or {}))
+    job_parameters.setdefault("control_version", row.plan_version)
+    job_parameters.setdefault("actor_type", actor_type)
+    job_parameters.setdefault("actor_id", str(actor_id) if actor_id else None)
+    job_parameters.setdefault("recovery_version", 1)
+    job_parameters["dispatch_ready"] = True
+    if attempt > 1 and job_parameters["control_version"] != row.plan_version:
+        jid = _stamp_blocked_existing_job(existing_job, "plan changed since original occurrence")
+        await db.commit()
+        return RunOutcome(REASON_BLOCKED, jid, {})
 
     job: Job | None = existing_job
     if job is not None:
@@ -941,6 +1263,9 @@ async def run_schedule_now(
     # and re-reading an expired attribute outside an awaited DB call raises
     # sqlalchemy.exc.MissingGreenlet.
     job_id_value = job.id
+    job.parameters = {**job_parameters, "operation_id": job_parameters.get("operation_id", str(job.id))}
+    run_budget = dict(job_parameters.get("remaining_budget", job_parameters["budget"]))
+    control_version = row.plan_version
 
     await audit_service.log_event(
         db,
@@ -962,23 +1287,47 @@ async def run_schedule_now(
         run_id=job.id,
         tenant_id=tenant_id,
         db=db,
-        budget=dict(row.budget_json or {}),
+        budget=run_budget,
         period_key=period_key,
         actor_type=actor_type,
         actor_id=actor_id,
     )
 
+    execution_started = time.monotonic()
     reason, outputs, detail = await _run_steps(
         db,
         ctx=ctx,
         steps=plan_json.get("steps") or [],
-        budget=row.budget_json or {},
+        budget=run_budget,
+        control_version=control_version,
         correlation_id=correlation_id,
         job_id=job.id,
         tenant_id=tenant_id,
         actor_id=actor_id,
         actor_type=actor_type,
     )
+
+    elapsed = time.monotonic() - execution_started
+    used_bytes = sum(int(out.get("bytes_processed") or 0) for out in outputs.values())
+    used = {"seconds": elapsed, "bytes_scanned": used_bytes, "usd": used_bytes * _BIGQUERY_USD_PER_BYTE}
+    effect_started = await _effect_started(db, tenant_id, job_id_value)
+    effect_uncertain = reason != REASON_DONE and effect_started
+    if effect_uncertain:
+        reason = REASON_BLOCKED
+        detail = "operation requires reconciliation: " + (detail or "execution interrupted after effect intent")
+
+    # Receipt is durable before finalization; a crash after this commit can
+    # settle a completed execution without repeating any external call.
+    await set_tenant_context(db, str(tenant_id))
+    receipt_job = await db.get(Job, job_id_value)
+    receipt_job.result_summary = {
+        "execution_complete": True,
+        "reason": reason,
+        "outputs": outputs,
+        "detail": detail,
+        "usage": used,
+    }
+    await db.commit()
 
     try:
         row, job = await _finalize_run(
@@ -1008,7 +1357,9 @@ async def run_schedule_now(
             await db.rollback()
         except Exception:
             logger.warning("scheduled_jobs.run_schedule_now.rollback_failed", exc_info=True)
-        reason, detail = REASON_ERROR, f"{type(exc).__name__}: {exc}"
+        effect_uncertain = effect_started
+        reason = REASON_BLOCKED if effect_uncertain else REASON_ERROR
+        detail = f"{type(exc).__name__}: {exc}"
         try:
             row, job = await _finalize_run(
                 db,
@@ -1043,29 +1394,46 @@ async def run_schedule_now(
 
             fallback_detail = f"{type(exc2).__name__}: {exc2}"
             fallback_now = datetime.now(timezone.utc)
-            fallback_summary = json.dumps({"reason": REASON_ERROR, "outputs": outputs, "detail": fallback_detail})
+            fallback_summary = json.dumps(
+                {
+                    "reason": REASON_BLOCKED if effect_started else REASON_ERROR,
+                    "outputs": outputs,
+                    "detail": fallback_detail,
+                    **({"verification": "uncertain"} if effect_started else {}),
+                }
+            )
             try:
+                await set_tenant_context(db, str(tenant_id))
                 await db.execute(
                     text(
                         "UPDATE jobs SET status = 'failed', "
                         "result_summary = CAST(:result_summary AS JSON), "
                         "error_message = :error_message, "
                         "completed_at = :completed_at "
-                        "WHERE id = :job_id"
+                        "WHERE id = :job_id AND tenant_id = :tenant_id"
                     ),
                     {
                         "result_summary": fallback_summary,
                         "error_message": fallback_detail[:1000],
                         "completed_at": fallback_now,
                         "job_id": job_id_value,
+                        "tenant_id": tenant_id,
                     },
                 )
                 await db.execute(
                     text(
                         "UPDATE schedules SET last_run_status = 'error', "
-                        "last_run_at = :last_run_at WHERE id = :schedule_id"
+                        "last_run_at = :last_run_at, "
+                        "paused_at = CASE WHEN :uncertain THEN :last_run_at ELSE paused_at END, "
+                        "pause_reason = CASE WHEN :uncertain THEN 'Uncertain operation requires reconciliation' "
+                        "ELSE pause_reason END WHERE id = :schedule_id AND tenant_id = :tenant_id"
                     ),
-                    {"last_run_at": fallback_now, "schedule_id": schedule_id},
+                    {
+                        "last_run_at": fallback_now,
+                        "schedule_id": schedule_id,
+                        "tenant_id": tenant_id,
+                        "uncertain": effect_started,
+                    },
                 )
                 await db.commit()
             except Exception:
@@ -1107,6 +1475,10 @@ async def run_schedule_now(
                     )
 
             return RunOutcome(reason=REASON_ERROR, jobs_row_id=job_id_value, outputs=outputs)
+
+    if effect_uncertain:
+        await _mark_uncertain(db, row, job, detail)
+        await set_tenant_context(db, str(tenant_id))
 
     if reason == REASON_ERROR and retry_on_error:
         if attempt >= RETRY_MAX_ATTEMPTS:
@@ -1187,6 +1559,18 @@ async def run_schedule_now(
                     "attempt": attempt + 1,
                     "period_key": period_key,
                     "retry_of_job_id": str(job.id),
+                    "operation_id": job.parameters["operation_id"],
+                    "plan": plan_json,
+                    "plan_version": job.parameters["plan_version"],
+                    "control_version": control_version,
+                    "budget": job.parameters["budget"],
+                    "remaining_budget": {
+                        k: None if v is None else max(0, v - used.get(k, 0)) for k, v in run_budget.items()
+                    },
+                    "recovery_version": 1,
+                    "actor_type": actor_type,
+                    "actor_id": str(actor_id) if actor_id else None,
+                    "retry_on_error": True,
                     "due_at": retry_due_at.isoformat(),
                 },
             )
@@ -1220,6 +1604,59 @@ async def run_schedule_now(
 # ---------------------------------------------------------------------------
 
 
+def _recoverable_jobs(tenant_id, now):
+    scheduled_retry = (
+        select(Schedule.id)
+        .where(
+            Schedule.tenant_id == tenant_id,
+            Schedule.retry_job_id == Job.id,
+        )
+        .correlate(Job, Tenant)
+        .exists()
+    )
+    # A committed pending row is the outbox. Wait a minute so ordinary broker
+    # delivery wins; future retries retain their original due time.
+    return (
+        Job.tenant_id == tenant_id,
+        Job.job_type == "scheduled_job",
+        Job.status.in_(["pending", "running"]),
+        or_(Job.status == "running", Job.parameters["dispatch_ready"].as_boolean().is_(True), ~scheduled_retry),
+        Job.created_at < now - timedelta(minutes=1),
+    )
+
+
+async def _recover_interrupted_jobs(db, tenant_id, now):
+    await set_tenant_context(db, str(tenant_id))
+    candidates = (
+        await db.execute(
+            select(Job.id, Job.parameters).where(*_recoverable_jobs(tenant_id, now)).order_by(Job.created_at).limit(100)
+        )
+    ).all()
+    for jid, params in candidates:
+        try:
+            due = datetime.fromisoformat(params["due_at"]) if params.get("due_at") else now
+            if due > now:
+                continue
+            await run_schedule_now(
+                db,
+                uuid.UUID(params["schedule_id"]),
+                tenant_id=tenant_id,
+                actor_id=uuid.UUID(params["actor_id"]) if params.get("actor_id") else None,
+                actor_type=params.get("actor_type", "system"),
+                use_pending=params.get("use_pending", False),
+                attempt=params.get("attempt", 1),
+                retry_on_error=params.get("retry_on_error", False),
+                period_key=params.get("period_key"),
+                due_at=due,
+                now=now,
+                existing_job_id=jid,
+                recovering=True,
+            )
+        except Exception:
+            await db.rollback()
+            logger.exception("scheduled_jobs.recovery_failed", extra={"job_id": str(jid)})
+
+
 async def run_due_jobs(db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime | None = None) -> dict:
     """Claim + run every due schedule of one tenant. Per-schedule isolation:
     one schedule's crash does not abort the rest of the tenant's batch
@@ -1234,6 +1671,8 @@ async def run_due_jobs(db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime 
     now = now or datetime.now(timezone.utc)
     stats = {"tenant_id": str(tenant_id), "due": 0, "ran": 0, "skipped": 0, "failed": 0, "reason": REASON_DONE}
 
+    await set_tenant_context(db, str(tenant_id))
+    await _recover_interrupted_jobs(db, tenant_id, now)
     await set_tenant_context(db, str(tenant_id))
     claims = await _claim_due_schedules(db, tenant_id, now)
     stats["due"] = len(claims)
@@ -1289,7 +1728,12 @@ async def collect_and_dispatch(db: AsyncSession, *, now: datetime | None = None)
         return {"enabled": False, "dispatched": 0}
     now = now or datetime.now(timezone.utc)
     due_schedule = select(Schedule.id).where(*_due_predicate(Tenant.id, now)).exists()
-    tenant_ids = (await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True), due_schedule))).scalars().all()
+    recoverable = select(Job.id).where(*_recoverable_jobs(Tenant.id, now)).exists()
+    tenant_ids = (
+        (await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True), or_(due_schedule, recoverable))))
+        .scalars()
+        .all()
+    )
     stats = {"enabled": True, "dispatched": 0, "failed": 0}
     for tenant_id in tenant_ids:
         try:
