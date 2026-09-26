@@ -169,8 +169,8 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
         mark("sent_at")
         if receipt["status"] == "failed":
             # A request that never left says so; anything else is the provider's own refusal.
-            if receipt.get("code") == "request_not_sent":
-                return "rejected_before_effect", "request_not_sent", {}
+            if receipt.get("code") == state.REQUEST_NOT_SENT:
+                return "rejected_before_effect", state.REQUEST_NOT_SENT, {}
             return "rejected_before_effect", "provider_rejected_without_save", {}
         if receipt["status"] == "accepted":
             # Saved by the provider's own account, not yet proven by an independent read:

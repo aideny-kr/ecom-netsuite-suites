@@ -102,7 +102,7 @@ REFUSALS = {
     "approver_not_session_owner": "Only the session owner can send this correction. No update was sent.",
     "dispatch_disabled": "Sending is switched off by the operator. No update was sent.",
     "operation_budget_exhausted": "The correction ran out of its read budget before sending. No update was sent.",
-    "request_not_sent": "Nothing was sent to NetSuite: the request could not be recorded first. "
+    state.REQUEST_NOT_SENT: "Nothing was sent to NetSuite: the request could not be recorded first. "
     "Prepare the correction again.",
 }
 
@@ -231,8 +231,8 @@ class AccountingCardAdapter:
         except ExternalCallNotSentError:
             # The request row could not be written, so the provider was never called. Refused
             # before effect (a fresh approval may retry), not an unknown no readback can settle.
-            self.refusal = REFUSALS["request_not_sent"]
-            return self._sent({"status": "failed", "code": "request_not_sent", "verified": False})
+            self.refusal = REFUSALS[state.REQUEST_NOT_SENT]
+            return self._sent({"status": "failed", "code": state.REQUEST_NOT_SENT, "verified": False})
         try:
             result = json.loads(raw)
         except (TypeError, ValueError):

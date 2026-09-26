@@ -510,6 +510,10 @@ async def _order_reads(db, tenant_id, case, review, prefetched):
         and prefetched.get("report") == case.latest_report_json
     ):
         return _json(prefetched["source"]), _json(prefetched["evidence"])
+    if prefetched:
+        # The kept reads no longer describe this member (its context or saved report moved):
+        # correct to read fresh, and worth seeing, because it silently costs the saved time.
+        print(f"credit_line_reallocation: kept reads not reused case={case.id}", flush=True)
     source = await refresh_source(db, tenant_id, review["scope"], case.order_reference, include_accounting_detail=True)
     evidence = await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json)
     return _json(source), _json(evidence)

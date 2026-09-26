@@ -302,8 +302,10 @@ class TestExecuteToolCall:
     async def test_external_call_audits_through_the_dispatchers_worker_session(self, db, _mock_external_tool_audit):
         """A group dispatch runs in a Celery task's own event loop: its audit rows must use the
         session factory the dispatcher prepared, never the app-wide pool."""
+        from app.services.chat.external_tool_audit import WORKER_SESSION_FACTORY
+
         factory = object()
-        db.info["accounting_authorization_session_factory"] = factory
+        db.info[WORKER_SESSION_FACTORY] = factory
         try:
             with patch("app.services.chat.tools._execute_external_tool", new_callable=AsyncMock) as mock_ext:
                 mock_ext.return_value = {"data": "ok"}
@@ -316,7 +318,7 @@ class TestExecuteToolCall:
                     db=db,
                 )
         finally:
-            db.info.pop("accounting_authorization_session_factory", None)
+            db.info.pop(WORKER_SESSION_FACTORY, None)
         calls = _mock_external_tool_audit.await_args_list
         assert calls and all(c.kwargs["session_factory"] is factory for c in calls)
 
