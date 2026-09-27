@@ -218,3 +218,17 @@ async def test_no_progress_write_after_reservation_finishes_run_at_budget():
             remaining=lambda: 60,
         )
     assert len(saved) == 1 and saved[0]["retryable"]
+
+
+@pytest.mark.parametrize("stage,reference", [("source_order", "R100000002"), ("netsuite_order", "R100000001")])
+def test_success_does_not_clear_another_evidence_failure(stage, reference):
+    from app.services.transaction_ops.read_recovery import resolve_read_failure
+
+    progress = {
+        "read_stop_reason": "retry_limit",
+        "read_stop_run_id": "old-run",
+        "last_read_failure": {"stage": "source_order", "order_reference": "R100000001", "resolved": False},
+    }
+    before = repr(progress)
+    resolve_read_failure(progress, stage=stage, reference=reference)
+    assert repr(progress) == before

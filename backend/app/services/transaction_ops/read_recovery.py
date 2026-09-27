@@ -92,9 +92,23 @@ def safe_read_code(exc):
     return "unclassified_read_failure"
 
 
-def read_failure(exc, progress, *, stage):
+def resolve_read_failure(progress, *, stage, reference):
+    """Only validated evidence for the failed operation resolves its diagnostic."""
+    previous = progress.get("last_read_failure") or {}
+    if previous.get("stage") != stage or previous.get("order_reference") != reference:
+        return
+    progress["last_read_failure"] = {
+        **previous,
+        "resolved": True,
+        "recovered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    for key in ("last_read_error_code", "last_read_error_type", "read_stop_reason", "read_stop_run_id"):
+        progress.pop(key, None)
+
+
+def read_failure(exc, progress, *, stage, reference=None):
     pending = progress.get("pending_refs")
-    reference = pending[0] if isinstance(pending, list) and pending else None
+    reference = reference if reference is not None else pending[0] if isinstance(pending, list) and pending else None
     return {
         "code": safe_read_code(exc),
         "retryable": transient_read_code(exc) is not None,
@@ -113,7 +127,17 @@ def read_failure(exc, progress, *, stage):
 
 
 async def read_with_recovery(
-    factory, *, retry_calls, progress, reserve, save, remaining, sleep=asyncio.sleep, stage="unknown"
+    factory,
+    *,
+    retry_calls,
+    progress,
+    reserve,
+    save,
+    remaining,
+    sleep=asyncio.sleep,
+    stage="unknown",
+    reference=None,
+    run_id=None,
 ):
     """The caller reserves the first read; every retry reserves its full cost.
 
@@ -127,16 +151,10 @@ async def read_with_recovery(
         try:
             async with asyncio.timeout(min(seconds, 170)):
                 result = await factory()
-            previous = progress.get("last_read_failure") or {}
             pending = progress.get("pending_refs") or []
-            if previous.get("stage") == stage and previous.get("order_reference") == (pending[0] if pending else None):
-                progress["last_read_failure"] = {
-                    **previous,
-                    "resolved": True,
-                    "recovered_at": datetime.now(timezone.utc).isoformat(),
-                }
-                for key in ("last_read_error_code", "last_read_error_type", "read_stop_reason"):
-                    progress.pop(key, None)
+            resolve_read_failure(
+                progress, stage=stage, reference=reference if reference is not None else pending[0] if pending else None
+            )
             return result
         except StateError:
             # Lease/tenant/state fencing is never a provider retry or a reason
@@ -147,7 +165,7 @@ async def read_with_recovery(
                 raise TimeoutError from None
             code = transient_read_code(exc)
             retries = progress.get("read_retry_count", 0)
-            progress["last_read_failure"] = read_failure(exc, progress, stage=stage)
+            progress["last_read_failure"] = read_failure(exc, progress, stage=stage, reference=reference)
             if not code or retry_calls <= 0 or type(retries) is not int or not 0 <= retries <= MAX_READ_RETRIES:
                 progress["last_read_error_code"] = safe_read_code(exc)
                 progress["last_read_error_type"] = type(exc).__name__[:80]
@@ -160,11 +178,15 @@ async def read_with_recovery(
                 progress["last_read_error_code"] = code
                 progress["last_read_error_type"] = type(exc).__name__[:80]
                 progress["read_stop_reason"] = "retry_limit"
+                if run_id is not None:
+                    progress["read_stop_run_id"] = str(run_id)
                 await save()
                 raise ReadBudgetExhaustedError from None
             delay = 2**retries
             if remaining() <= delay:
                 progress["read_stop_reason"] = "retry_deadline"
+                if run_id is not None:
+                    progress["read_stop_run_id"] = str(run_id)
                 await save()
                 raise ReadBudgetExhaustedError from None
             # A failed reservation can atomically finish the run. Persist the
