@@ -244,6 +244,18 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         if evidence.get("success")
                         else None
                     )
+                    blocked = None
+                    if prepared:
+                        from app.services.transaction_ops import chat_confirmation
+
+                        # A card for work the ledger already closed is refused at its claim and,
+                        # as an unconfirmed outcome, stops the whole group (R619946522,
+                        # 2026-09-27). Ask the claim's own question before anyone approves.
+                        blocked = await chat_confirmation.attempt_blocker(
+                            child_db, tenant_id, prepared[0].model_dump(mode="json").get("accounting_review")
+                        )
+                        if blocked:
+                            prepared = None
                     if prepared:
                         card, _note = prepared
                         value = {**card.model_dump(mode="json"), "accounting_group_child": True}
@@ -253,11 +265,18 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         await child_db.commit()
                         timing["total_ms"] = elapsed()
                         return {**member, "confirmation_id": str(uuid.uuid4()), "card": value, "timing": timing}
-                    reason = (
-                        "Solution identified. Account configuration, native preview and approval are still required."
-                        if collected.get("resolution_intents")
-                        else "No validated correction is ready. Continue investigation using the recorded evidence."
-                    )
+                    if blocked:
+                        reason = (
+                            f"This exact correction already has an execution record ({blocked}). "
+                            "A person decides what happens next; a new approval cannot send it."
+                        )
+                    elif collected.get("resolution_intents"):
+                        reason = (
+                            "Solution identified. Account configuration, native preview and approval "
+                            "are still required."
+                        )
+                    else:
+                        reason = "No validated correction is ready. Continue investigation using the recorded evidence."
                     if note := reallocation_reason(reallocation_refusal):
                         reason += " " + note
             except Exception as exc:

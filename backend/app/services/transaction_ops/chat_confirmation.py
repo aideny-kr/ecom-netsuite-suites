@@ -222,6 +222,16 @@ async def _config_for_scope(db, tenant_id, scope):
     return matching[0].id if len(matching) == 1 else None
 
 
+async def attempt_blocker(db, tenant_id, p):
+    """Why the claim will refuse a card for this work, asked before anyone approves it: the
+    status of the latest attempt on the same work when that attempt was not refused before
+    effect (the one state a lineage retry may follow). None when the card can run."""
+    if not p:
+        return None
+    latest = await state.latest_operation_for_base(db, tenant_id, operation_identity(p))
+    return None if latest is None or latest.status == "rejected_before_effect" else latest.status
+
+
 async def _retryable_attempt(db, tenant_id, so):
     """The latest ledger attempt on this business identity when, and only when, it was
     refused before any effect: that is the one state a lineage retry is allowed from
