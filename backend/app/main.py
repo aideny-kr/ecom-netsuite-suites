@@ -84,7 +84,7 @@ async def _cleanup_stale_jobs() -> None:
                     "UPDATE jobs SET status = 'failed', "
                     "completed_at = NOW(), "
                     "error_message = 'Auto-cleaned: marked stale on startup' "
-                    "WHERE status = 'running' "
+                    "WHERE status = 'running' AND job_type != 'scheduled_job' "
                     "AND started_at < NOW() - INTERVAL '10 minutes'"
                 )
             )

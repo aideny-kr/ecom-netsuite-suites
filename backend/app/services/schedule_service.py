@@ -251,6 +251,13 @@ async def enqueue_run(
             "plan_version": plan_version_used,
             "use_pending": use_pending,
             "plan": plan_to_run,
+            "budget": dict(schedule.budget_json or {}),
+            "control_version": schedule.plan_version,
+            "actor_type": "user",
+            "actor_id": str(actor_id) if actor_id else None,
+            "recovery_version": 1,
+            "dispatch_ready": True,
+            "due_at": datetime.now(timezone.utc).isoformat(),
         },
     )
     db.add(job)

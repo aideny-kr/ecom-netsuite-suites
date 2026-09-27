@@ -1311,3 +1311,24 @@ class TestScheduleRunsList:
         data = resp.json()
         assert len(data) == 1
         assert data[0]["id"] == str(real_run.id)
+
+
+async def test_resume_refuses_unresolved_effect_with_job_identity(client, admin_user, db):
+    user, headers = admin_user
+    tenant = await db.get(Tenant, user.tenant_id)
+    schedule = await _seed_job_schedule(db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved")
+    schedule.paused_at = datetime.now(timezone.utc)
+    uncertain = Job(
+        tenant_id=tenant.id,
+        job_type="scheduled_job",
+        status="failed",
+        parameters={"schedule_id": str(schedule.id)},
+        result_summary={"reason": "blocked", "verification": "uncertain"},
+    )
+    db.add(uncertain)
+    await db.commit()
+    response = await client.post(f"/api/v1/schedules/{schedule.id}/resume", headers=headers)
+    assert response.status_code == 409
+    assert str(uncertain.id) in response.json()["detail"]
+    await db.refresh(schedule)
+    assert schedule.paused_at is not None

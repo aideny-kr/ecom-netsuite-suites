@@ -429,6 +429,8 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
         actor_id=ctx.actor_id,
         period_key=period_key,
         identity=identity,
+        run_id=ctx.run_id,
+        step_id=ctx.current_step_id,
     )
     return {
         "pdf_file_id": result.pdf_file_id,

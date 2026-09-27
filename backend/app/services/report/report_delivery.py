@@ -53,6 +53,7 @@ written on failure.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
@@ -196,7 +197,9 @@ class DriveClient(Protocol):
         """Returns ``{"file_id": ..., "url": ...}``."""
         ...
 
-    async def update_existing(self, *, file_id: str, content: bytes, mime_type: str) -> dict[str, str]:
+    async def update_existing(
+        self, *, file_id: str, content: bytes, mime_type: str, app_properties: dict[str, str] | None = None
+    ) -> dict[str, str]:
         """Returns ``{"file_id": ..., "url": ...}`` (``file_id`` unchanged — this is an
         in-place content replace, never a new file)."""
         ...
@@ -268,6 +271,40 @@ class _GoogleDriveClient:
         )
         files = resp.get("files", [])
         return files[0]["id"] if files else None
+
+    async def find_unique(self, *, parent_id, mime_type, app_properties=None, name=None):
+        """Read-only evidence. Never choose the first of duplicate/incomplete results."""
+
+        def read():
+            clauses = ["trashed = false", f"mimeType = '{_escape_drive_query(mime_type)}'"]
+            if parent_id:
+                clauses.append(f"'{_escape_drive_query(parent_id)}' in parents")
+            if app_properties:
+                clauses.append(_app_properties_query(app_properties))
+            elif name:
+                clauses.append(f"name = '{_escape_drive_query(name)}'")
+            else:
+                raise ValueError("evidence requires identity")
+            response = (
+                self._service()
+                .files()
+                .list(
+                    q=" and ".join(clauses),
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                    corpora="drive" if self._shared_drive_id else "user",
+                    **({"driveId": self._shared_drive_id} if self._shared_drive_id else {}),
+                    pageSize=2,
+                    fields="nextPageToken,incompleteSearch,files(id,parents,appProperties,mimeType,size,sha256Checksum)",
+                )
+                .execute()
+            )
+            found = response.get("files", [])
+            if response.get("nextPageToken") or response.get("incompleteSearch") or len(found) > 1:
+                raise ValueError("ambiguous provider identity")
+            return found[0] if found else None
+
+        return await asyncio.to_thread(read)
 
     async def create_folder(
         self, *, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
@@ -362,17 +399,27 @@ class _GoogleDriveClient:
         )
         return {"file_id": result["id"], "url": result.get("webViewLink", "")}
 
-    async def update_existing(self, *, file_id: str, content: bytes, mime_type: str) -> dict[str, str]:
-        return await asyncio.to_thread(self._update_existing_sync, file_id, content, mime_type)
+    async def update_existing(
+        self, *, file_id: str, content: bytes, mime_type: str, app_properties: dict[str, str] | None = None
+    ) -> dict[str, str]:
+        return await asyncio.to_thread(self._update_existing_sync, file_id, content, mime_type, app_properties)
 
-    def _update_existing_sync(self, file_id: str, content: bytes, mime_type: str) -> dict[str, str]:
+    def _update_existing_sync(
+        self, file_id: str, content: bytes, mime_type: str, app_properties: dict[str, str] | None = None
+    ) -> dict[str, str]:
         from googleapiclient.http import MediaInMemoryUpload
 
         media = MediaInMemoryUpload(content, mimetype=mime_type)
         result = (
             self._service()
             .files()
-            .update(fileId=file_id, media_body=media, supportsAllDrives=True, fields="id,webViewLink")
+            .update(
+                fileId=file_id,
+                body={"appProperties": app_properties} if app_properties else {},
+                media_body=media,
+                supportsAllDrives=True,
+                fields="id,webViewLink",
+            )
             .execute()
         )
         return {"file_id": result["id"], "url": result.get("webViewLink", "")}
@@ -510,6 +557,11 @@ async def _find_or_create_folder(
     return await client.create_folder(name=name, parent_id=parent_id, app_properties=app_properties)
 
 
+def delivery_attempt_key(tenant_id, run_id, step_id, report_id, period_key):
+    """Provider marker written atomically with bytes; identity lookup stays stable."""
+    return hashlib.sha256(f"{tenant_id}:{run_id}:{step_id}:{report_id}:{period_key}".encode()).hexdigest()
+
+
 async def _upload_or_update(
     client: DriveClient,
     *,
@@ -518,12 +570,15 @@ async def _upload_or_update(
     content: bytes,
     mime_type: str,
     app_properties: dict[str, str] | None = None,
+    delivery_attempt: str | None = None,
 ) -> dict[str, str]:
     existing = await client.find_file(name=name, parent_id=parent_id, app_properties=app_properties)
+    evidence = {**(app_properties or {}), "delivery_attempt": delivery_attempt} if delivery_attempt else app_properties
     if existing:
-        return await client.update_existing(file_id=existing["file_id"], content=content, mime_type=mime_type)
+        extra = {"app_properties": evidence} if delivery_attempt else {}
+        return await client.update_existing(file_id=existing["file_id"], content=content, mime_type=mime_type, **extra)
     return await client.upload_new(
-        name=name, parent_id=parent_id, content=content, mime_type=mime_type, app_properties=app_properties
+        name=name, parent_id=parent_id, content=content, mime_type=mime_type, app_properties=evidence
     )
 
 
@@ -536,6 +591,8 @@ async def deliver_report_to_drive(
     actor_id: uuid.UUID | None,
     period_key: str,
     identity: DeliveryIdentity | None = None,
+    run_id: uuid.UUID | None = None,
+    step_id: str | None = None,
 ) -> DeliveryResult:
     """Upload ``report_id``'s PDF + Excel to
     ``<tenant Drive>/Reports/<report title>/``, idempotently keyed by ``period_key``.
@@ -640,6 +697,81 @@ async def deliver_report_to_drive(
         # commit does not, but re-asserting is a safe no-op there too).
         await set_tenant_context(db, str(tenant_id))
 
+        # Bind exact rendered bytes and connector authority to this attempt BEFORE
+        # any remote call. A same-period file identity alone proves nothing about
+        # its contents. Only scheduled calls carry the durable job/step binding.
+        # Gate fix #10: both renderers are CPU-bound (WeasyPrint / openpyxl) and were
+        # called synchronously inline — for a real render that blocks the event loop,
+        # and therefore every other concurrent request on this worker, for the
+        # duration. Same asyncio.to_thread pattern _GoogleDriveClient's own blocking
+        # googleapiclient calls already use.
+        pdf_bytes = await asyncio.to_thread(_render_pdf_bytes, report)
+        xlsx_bytes = await asyncio.to_thread(_render_xlsx_bytes, report)
+
+        pdf_name = f"{report.title} — {period_key}.pdf"
+        xlsx_name = f"{report.title} — {period_key}.xlsx"
+
+        # Item 9 (gate fix): `identity.file_props`, when given, replaces the
+        # default report/period-keyed appProperties entirely — `"kind"` is
+        # still merged in per file here (never carried by `identity` itself,
+        # since one identity covers both files). Item 1 (delta gate fix #2):
+        # `period_key` is ALWAYS merged in from THIS call's own argument —
+        # `identity.file_props` itself must never carry one (see
+        # DeliveryIdentity's own docstring) — so a recovered identity's file
+        # appProperties can never go stale across a later delivery with a
+        # different period.
+        base_file_properties = (
+            {**identity.file_props, "period_key": period_key}
+            if identity is not None
+            else {"report_id": str(report_id), "period_key": period_key}
+        )
+
+        folder_app_properties = (
+            identity.folder_props
+            if identity is not None
+            else ({"report_series_id": str(report.series_id)} if report.series_id else {"report_id": str(report_id)})
+        )
+        attempt = None
+        if run_id is not None and step_id is not None:
+            attempt = delivery_attempt_key(tenant_id, run_id, step_id, report_id, period_key)
+            await audit_service.log_event(
+                db,
+                tenant_id=tenant_id,
+                category="report",
+                action="report.delivery.prepared",
+                actor_id=actor_id,
+                actor_type=actor_type,
+                resource_type="report",
+                resource_id=str(report_id),
+                job_id=run_id,
+                payload={
+                    "step_id": step_id,
+                    "delivery_attempt": attempt,
+                    "period_key": period_key,
+                    "idempotency_key": idempotency_key,
+                    "connector_id": str(connector.id),
+                    "credential_binding": hashlib.sha256(connector.encrypted_credentials.encode()).hexdigest(),
+                    "shared_drive_id": shared_drive_id,
+                    "folder_properties": folder_app_properties,
+                    "file_properties": base_file_properties,
+                    "lock_key": identity.lock_key if identity is not None else str(report_id),
+                    "content": {
+                        "pdf": {
+                            "sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+                            "size": len(pdf_bytes),
+                            "mime": _PDF_MIME,
+                        },
+                        "xlsx": {
+                            "sha256": hashlib.sha256(xlsx_bytes).hexdigest(),
+                            "size": len(xlsx_bytes),
+                            "mime": _XLSX_MIME,
+                        },
+                    },
+                },
+            )
+            await db.commit()
+            await set_tenant_context(db, str(tenant_id))
+
         # Gate fix #7: a per-report Postgres advisory TRANSACTION lock, held for the
         # rest of this try block (released automatically at the commit/rollback
         # below — xact-scoped, never needs an explicit unlock). Without it, two
@@ -669,43 +801,8 @@ async def deliver_report_to_drive(
         # folder. `name` stays the human-readable title; only the appProperties
         # identity is load-bearing for find/create. Item 9 (gate fix): `identity`,
         # when given, replaces this entirely with the caller's own folder_props.
-        folder_app_properties = (
-            identity.folder_props
-            if identity is not None
-            else (
-                {"report_series_id": str(report.series_id)}
-                if report.series_id is not None
-                else {"report_id": str(report_id)}
-            )
-        )
         series_folder_id = await _find_or_create_folder(
             client, name=report.title, parent_id=reports_folder_id, app_properties=folder_app_properties
-        )
-
-        # Gate fix #10: both renderers are CPU-bound (WeasyPrint / openpyxl) and were
-        # called synchronously inline — for a real render that blocks the event loop,
-        # and therefore every other concurrent request on this worker, for the
-        # duration. Same asyncio.to_thread pattern _GoogleDriveClient's own blocking
-        # googleapiclient calls already use.
-        pdf_bytes = await asyncio.to_thread(_render_pdf_bytes, report)
-        xlsx_bytes = await asyncio.to_thread(_render_xlsx_bytes, report)
-
-        pdf_name = f"{report.title} — {period_key}.pdf"
-        xlsx_name = f"{report.title} — {period_key}.xlsx"
-
-        # Item 9 (gate fix): `identity.file_props`, when given, replaces the
-        # default report/period-keyed appProperties entirely — `"kind"` is
-        # still merged in per file here (never carried by `identity` itself,
-        # since one identity covers both files). Item 1 (delta gate fix #2):
-        # `period_key` is ALWAYS merged in from THIS call's own argument —
-        # `identity.file_props` itself must never carry one (see
-        # DeliveryIdentity's own docstring) — so a recovered identity's file
-        # appProperties can never go stale across a later delivery with a
-        # different period.
-        base_file_properties = (
-            {**identity.file_props, "period_key": period_key}
-            if identity is not None
-            else {"report_id": str(report_id), "period_key": period_key}
         )
 
         pdf_result = await _upload_or_update(
@@ -715,6 +812,7 @@ async def deliver_report_to_drive(
             content=pdf_bytes,
             mime_type=_PDF_MIME,
             app_properties={**base_file_properties, "kind": "pdf"},
+            delivery_attempt=attempt,
         )
         xlsx_result = await _upload_or_update(
             client,
@@ -723,6 +821,7 @@ async def deliver_report_to_drive(
             content=xlsx_bytes,
             mime_type=_XLSX_MIME,
             app_properties={**base_file_properties, "kind": "xlsx"},
+            delivery_attempt=attempt,
         )
 
         delivered_at = datetime.now(timezone.utc)

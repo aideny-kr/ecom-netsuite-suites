@@ -581,6 +581,18 @@ async def resume_schedule(
     `next_run_at` from now — a schedule paused for days must not immediately
     look "due" for every missed tick the moment it resumes."""
     schedule = await _get_or_404(db, schedule_id, user.tenant_id)
+    unresolved = await db.scalar(
+        select(Job.id)
+        .where(
+            Job.tenant_id == user.tenant_id,
+            Job.job_type == "scheduled_job",
+            Job.parameters["schedule_id"].astext == str(schedule_id),
+            Job.result_summary["verification"].astext == "uncertain",
+        )
+        .limit(1)
+    )
+    if unresolved:
+        raise HTTPException(status_code=409, detail=f"Reconcile uncertain operation {unresolved} before resuming")
     schedule.paused_at = None
     schedule.pause_reason = None
     if schedule.last_run_status == "paused":
@@ -610,6 +622,26 @@ async def resume_schedule(
 # ---------------------------------------------------------------------------
 # Runs
 # ---------------------------------------------------------------------------
+
+
+@router.post("/{schedule_id}/runs/{job_id}/reconcile")
+async def reconcile_schedule_run(
+    schedule_id: uuid.UUID,
+    job_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("schedules.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Verify recorded effects without sending another delivery or clearing pause."""
+    from app.services.jobs.recovery import reconcile_run
+
+    try:
+        return await reconcile_run(
+            db, tenant_id=user.tenant_id, schedule_id=schedule_id, job_id=job_id, actor_id=user.id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Scheduled run not found") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.get("/{schedule_id}/runs", response_model=list[ScheduleRunItem])
