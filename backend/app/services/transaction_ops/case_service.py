@@ -24,6 +24,15 @@ def refund_observation_times(report):
     ] + compacted
 
 
+def latest_observation(report):
+    """When the newest read of a report was made: the order, the NetSuite record and every refund
+    read alike. Refund ledger reads land seconds after the order read, so a reference time that
+    ignored them made them look "from the future" and failed every such case (2026-09-27)."""
+    times = [datetime.fromisoformat(snapshot["observed_at"]) for snapshot in [report["source"], *report["targets"]]]
+    times.extend(datetime.fromisoformat(value) for value in refund_observation_times(report))
+    return max(times)
+
+
 def observation_time(report, fallback):
     """Order evidence by its reads, not by when a slow job saved the result.
 

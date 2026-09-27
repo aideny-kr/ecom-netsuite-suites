@@ -268,3 +268,31 @@ async def test_a_verified_example_holds_for_a_card_whose_review_names_no_config(
     )
     assert accounting_history._claim(m) is not None
     assert accounting_history.verified_resolution(m, run, finding, case)
+
+
+async def test_refund_reads_after_the_order_read_still_count_as_reconciled(db, reconciled_credit):
+    # 2026-09-27: the refund ledger proof reads refunds a few seconds after the order and the
+    # NetSuite record. Measured against the order read, those later reads looked "from the
+    # future", so all 28 reconciled corrections of a group were reported partially resolved.
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    actor, _, case, message, run, finding = reconciled_credit
+    current = deepcopy(case.latest_report_json)
+    last = max(datetime.fromisoformat(s["observed_at"]) for s in [current["source"], *current["targets"]])
+    current["refund_observation_times"] = [
+        (last + timedelta(seconds=2)).isoformat(),
+        (last + timedelta(seconds=7)).isoformat(),
+    ]
+    later = SimpleNamespace(
+        id=case.id,
+        tenant_id=case.tenant_id,
+        scope_json=case.scope_json,
+        order_reference=case.order_reference,
+        status=case.status,
+        latest_report_json=current,
+    )
+    assert accounting_history.verified_resolution(message, run, finding, later)
+    # Still fails closed when the order read is stale against the newest read.
+    current["refund_observation_times"] = [(last + timedelta(minutes=20)).isoformat()]
+    assert not accounting_history.verified_resolution(message, run, finding, later)
