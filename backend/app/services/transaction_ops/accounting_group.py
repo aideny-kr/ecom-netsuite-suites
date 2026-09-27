@@ -390,24 +390,41 @@ async def prepare_group_confirmation(
                     flush=True,
                 )
             timing["total_ms"] = elapsed()
-            await log_event(
-                child_db,
-                tenant_id,
-                category="transaction_ops",
-                action="accounting_group.case.skipped",
-                actor_id=actor_id,
-                resource_type="transaction_case",
-                resource_id=member["case_id"],
-                correlation_id=correlation_id,
-                payload={
-                    "reason": reason,
-                    "investigation_routes": routes,
-                    "timing": timing,
-                    **({"error": error} if error else {}),
-                    "financial_writes": 0,
-                },
-            )
-            await child_db.commit()
+
+            async def record_skip():
+                await log_event(
+                    child_db,
+                    tenant_id,
+                    category="transaction_ops",
+                    action="accounting_group.case.skipped",
+                    actor_id=actor_id,
+                    resource_type="transaction_case",
+                    resource_id=member["case_id"],
+                    correlation_id=correlation_id,
+                    payload={
+                        "reason": reason,
+                        "investigation_routes": routes,
+                        "timing": timing,
+                        **({"error": error} if error else {}),
+                        "financial_writes": 0,
+                    },
+                )
+                await child_db.commit()
+
+            try:
+                await record_skip()
+            except Exception as exc:
+                # A handler above can leave this session unusable: a deadline that cancelled one
+                # of its queries, or a database error kept as the member's reason. Set the order
+                # aside anyway (its earlier evidence rows go with the transaction) rather than
+                # fail every other order in the group.
+                print(
+                    f"accounting_group: skip record retried case={member['case_id']} {type(exc).__name__}",
+                    flush=True,
+                )
+                await child_db.rollback()
+                await set_tenant_context(child_db, str(tenant_id))
+                await record_skip()
             return {
                 **member,
                 "reason": reason,

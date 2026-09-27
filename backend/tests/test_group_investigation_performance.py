@@ -851,6 +851,144 @@ async def test_a_slow_earlier_attempt_check_sets_the_order_aside_instead_of_cras
     assert snapshots[-1]["set_aside"] == [{"label": "could not confirm no earlier attempt", "count": 1}]
 
 
+async def test_an_earlier_attempt_check_cut_off_mid_query_still_records_the_order_as_set_aside(monkeypatch):
+    # The check reads the database between NetSuite reads. A deadline that cancels one of those
+    # queries invalidates the order's own session: its audit row and commit then failed outside
+    # the order's error handling and took the whole group preparation down with them.
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.services.chat.write_confirmation_service import WriteConfirmationPayload
+    from tests.conftest import _test_connect_args, _test_db_url
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(1)
+    member = so["accounting_group"]["members"][0]
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": member["case_id"], "order_reference": member["order_reference"]}],
+        }
+    }
+    engine = create_async_engine(_test_db_url, connect_args=_test_connect_args)
+
+    @asynccontextmanager
+    async def factory():
+        async with AsyncSession(engine) as child:
+            child.info["accounting_correction_candidate"] = {"case_id": member["case_id"]}
+            yield child
+
+    async def evidence(params, **kwargs):
+        return {"success": True, "accounting_evidence": {}}
+
+    async def candidate(**kwargs):
+        return WriteConfirmationPayload(**member["card"]), "test"
+
+    async def check_cut_off_mid_query(child_db, tenant_id, p):
+        await child_db.execute(text("SELECT pg_sleep(5)"))
+
+    recorded = []
+
+    async def audit(child_db, *args, payload, **kwargs):
+        # The real audit row is an INSERT on the same session.
+        await child_db.execute(text("SELECT 1"))
+        if "reason" in payload:
+            recorded.append(payload["reason"])
+
+    snapshots = []
+    monkeypatch.setattr(group, "ATTEMPT_CHECK_TIMEOUT", 0.2)
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "log_event", audit)
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
+    monkeypatch.setattr("app.services.transaction_ops.chat_confirmation.attempt_blocker", check_cut_off_mid_query)
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.handoff", lambda *a: {"status": "x"})
+    try:
+        await group.prepare_group_confirmation(
+            db=db,
+            tenant_id=session.tenant_id,
+            actor_id=session.user_id,
+            session_id=str(session.id),
+            correlation_id="t",
+            tools=[],
+            policy=None,
+            progress=snapshots.append,
+        )
+    finally:
+        await engine.dispose()
+    assert snapshots[-1]["set_aside"] == [{"label": "could not confirm no earlier attempt", "count": 1}]
+    assert recorded and recorded[0].startswith("Could not confirm in time")
+
+
+async def test_a_database_error_in_the_reallocation_attempt_still_records_the_order_as_set_aside(monkeypatch):
+    # Same shape, older handler: the reallocation attempt's database error is kept as the
+    # member's reason, but Postgres has aborted the member's transaction by then.
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from tests.conftest import _test_connect_args, _test_db_url
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(1)
+    member = so["accounting_group"]["members"][0]
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": member["case_id"], "order_reference": member["order_reference"]}],
+        }
+    }
+    engine = create_async_engine(_test_db_url, connect_args=_test_connect_args)
+
+    @asynccontextmanager
+    async def factory():
+        async with AsyncSession(engine) as child:
+            yield child
+
+    async def evidence(params, **kwargs):
+        return {"success": True, "accounting_evidence": {}}
+
+    async def reallocate(child_db, tenant_id, case_id):
+        await child_db.execute(text("SELECT * FROM no_such_reallocation_table"))
+
+    recorded = []
+
+    async def audit(child_db, *args, payload, **kwargs):
+        await child_db.execute(text("SELECT 1"))
+        if "reason" in payload:
+            recorded.append(payload["reason"])
+
+    snapshots = []
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "log_event", audit)
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
+    monkeypatch.setattr("app.services.transaction_ops.credit_line_reallocation.prepare_group_member", reallocate)
+    monkeypatch.setattr(
+        "app.services.transaction_ops.tax_correction.candidate_confirmation", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.handoff", lambda *a: {"status": "x"})
+    try:
+        await group.prepare_group_confirmation(
+            db=db,
+            tenant_id=session.tenant_id,
+            actor_id=session.user_id,
+            session_id=str(session.id),
+            correlation_id="t",
+            tools=[],
+            policy=None,
+            progress=snapshots.append,
+        )
+    finally:
+        await engine.dispose()
+    assert snapshots[-1]["checked"] == 1 and snapshots[-1]["ready"] == 0
+    assert recorded and "ProgrammingError" in recorded[0]
+
+
 async def test_a_preparation_failure_that_races_a_dropped_chat_is_logged(caplog):
     # Gate wf_f4fc4c7c round 3: preparation finished with an error just as the chat closed, so
     # the cleanup saw a done task and never retrieved (or logged) its exception.

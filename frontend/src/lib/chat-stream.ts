@@ -435,7 +435,12 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
   }
   if (type === "preparation_progress" && data.data && typeof data.data === "object") {
     const progress = data.data as PreparationProgressData;
-    if (typeof progress.checked === "number" && typeof progress.total === "number") {
+    if (
+      typeof progress.checked === "number" &&
+      typeof progress.total === "number" &&
+      Array.isArray(progress.set_aside) &&
+      Array.isArray(progress.now)
+    ) {
       return { type, data: progress };
     }
     return null;
