@@ -49,7 +49,9 @@ jobs:
 
       - name: Set variables
         id: vars
-        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "source_tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -79,6 +81,9 @@ jobs:
           file: ./backend/Dockerfile.prod
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            ai.suitestudio.source-tree=${{ steps.vars.outputs.source_tree }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -158,10 +163,33 @@ jobs:
       url: ${{ vars.STAGING_URL }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Prepare source history guard
+        id: source_guard
+        run: |
+          echo "history=$(python3 scripts/deploy_source_guard.py --history)" >> "$GITHUB_OUTPUT"
+          echo "script=$(base64 -w0 scripts/deploy_source_guard.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify staging source before migrations or rollout
+        uses: appleboy/ssh-action@v1
+        env:
+          DEPLOY_SOURCE_HISTORY: ${{ steps.source_guard.outputs.history }}
+          DEPLOY_SOURCE_GUARD: ${{ steps.source_guard.outputs.script }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script_stop: true
+          envs: DEPLOY_SOURCE_HISTORY,DEPLOY_SOURCE_GUARD
+          script: |
+            set -euo pipefail
+            printf '%s' "$DEPLOY_SOURCE_GUARD" | base64 -d | python3 -
 
       - name: Run Alembic migrations against staging DB
         env:
@@ -176,16 +204,22 @@ jobs:
         uses: appleboy/ssh-action@v1
         env:
           SHORT_SHA: ${{ needs.build-images.outputs.short_sha }}
+          DEPLOY_SOURCE_HISTORY: ${{ steps.source_guard.outputs.history }}
+          DEPLOY_SOURCE_GUARD: ${{ steps.source_guard.outputs.script }}
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           script_stop: true
-          envs: SHORT_SHA
+          envs: SHORT_SHA,DEPLOY_SOURCE_HISTORY,DEPLOY_SOURCE_GUARD
           script: |
             set -euo pipefail
             cd /opt/ecom-netsuite
+            exec 9>.recon-throughput-rollout.lock
+            flock -n 9
             : "${SHORT_SHA:?SHORT_SHA missing — build-images output not propagated}"
+            # Recheck after migrations in case another release advanced staging.
+            printf '%s' "$DEPLOY_SOURCE_GUARD" | base64 -d | python3 -
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             # Pull the immutable SHA-tagged image this workflow built, not :latest. :latest is
             # only published on the default branch, so workflow_dispatch deploys of feature

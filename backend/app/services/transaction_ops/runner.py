@@ -23,7 +23,11 @@ from app.services.transaction_ops.normalization import (
     source_entity_key,
 )
 from app.services.transaction_ops.order_reconciliation import reconcile_order
-from app.services.transaction_ops.read_recovery import ReadBudgetExhaustedError, read_with_recovery
+from app.services.transaction_ops.read_recovery import (
+    ReadBudgetExhaustedError,
+    read_with_recovery,
+    resolve_read_failure,
+)
 from app.services.transaction_ops.source_eligibility import exclusion_report, payment_failed
 from app.services.transaction_ops.source_reader import SourceReadError
 
@@ -518,12 +522,14 @@ async def run_investigation(
             db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, hold=hold, now=clock()
         )
 
-    async def bounded_read(stage, factory, *, retry_calls=0, reserve_retry=None):
+    async def bounded_read(stage, factory, *, retry_calls=0, reserve_retry=None, reference=None):
         await flush_findings()
         with timing.measure(stage), collection_transport(transport):
             return await read_with_recovery(
                 factory,
                 stage=stage,
+                reference=reference,
+                run_id=run_id,
                 retry_calls=retry_calls,
                 progress=progress,
                 reserve=reserve_retry or reserve,
@@ -653,7 +659,7 @@ async def run_investigation(
 
                     return await read_validated_order(db, tenant_id, source_step_id, ref, **direct_source)
 
-                observed = await bounded_read("source_order", read, retry_calls=2)
+                observed = await bounded_read("source_order", read, retry_calls=2, reference=ref)
                 with timing.measure("source_snapshot"):
                     await source_snapshot.save(db, tenant_id, connection_id, ref, observed, now=clock())
             if not reused:
@@ -1037,6 +1043,7 @@ async def run_investigation(
                                         db, tenant_id, source_step_id, ref, **direct_source
                                     ),
                                     retry_calls=2,
+                                    reference=ref,
                                 )
                                 counter = (
                                     "source_body_validations"
@@ -1120,6 +1127,9 @@ async def run_investigation(
             orders = source.get("orders") or []
             if len(orders) != 1 or orders[0].get("number") != reference:
                 raise ValueError("source_reference_mismatch")
+            # Concurrent preparation and validated snapshots bypass bounded_read.
+            # Resolve only after the exact order's identity has been checked.
+            resolve_read_failure(progress, stage="source_order", reference=reference)
             if mapping.business_entity_subsidiaries.get(source_entity_key(orders[0])) != config["subsidiary_id"]:
                 if progress.get("phase") == "refunds" or (
                     mapping.metabase_replica

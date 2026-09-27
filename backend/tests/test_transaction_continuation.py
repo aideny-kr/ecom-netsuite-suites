@@ -39,6 +39,8 @@ async def budget_run(db, user, *, reason="budget", progress=None, origin="manual
         "scan_complete": True,
         **(progress or {}),
     }
+    if run.progress_json.get("read_stop_reason"):
+        run.progress_json.setdefault("read_stop_run_id", str(run.id))
     await db.flush()
     return run, config
 
@@ -232,6 +234,7 @@ async def test_delayed_retries_stop_at_three_without_resetting_existing_caps(db,
         assert child.progress_json["continuation_read_retry_count"] == count
         assert child.progress_json["continuation_root_id"] == str(root)
         assert child.progress_json["read_retry_count"] == 3
+        child.progress_json = {**child.progress_json, "read_stop_run_id": str(child.id)}
         child.status, child.termination_reason, child.finished_at = "finished", "budget", due
         await db.flush()
         prior = child
@@ -291,3 +294,54 @@ async def test_delayed_retry_does_not_override_other_recorded_blocks(db, admin_u
         await continuation.continue_budget_run(db, user.tenant_id, prior.id, now=prior.finished_at + timedelta(hours=2))
         is None
     )
+
+
+@pytest.mark.parametrize("diagnostic", ["inherited", "legacy", "unrelated"])
+async def test_productive_legacy_stop_remains_recoverable_after_worker_exit(db, admin_user, diagnostic):
+    from app.services.transaction_ops.scheduler import _recovery_ids
+
+    user = admin_user[0]
+    failure = {
+        "code": "source_transport_failed",
+        "retryable": True,
+        "resolved": False,
+        "observed_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    }
+    if diagnostic == "unrelated":
+        failure.update(code="unclassified_read_failure", retryable=False)
+    prior, _ = await scheduled_failure(
+        db,
+        user,
+        progress={
+            "processed": 271,
+            "continuation_baseline": {"processed": 149, "scan_count": 0},
+            "continuation_read_retry_count": 2,
+            "last_read_failure": failure,
+            "read_stop_run_id": str(uuid4()) if diagnostic == "inherited" else None,
+        },
+    )
+    assert not continuation.scheduled_read_stop(prior)
+    assert prior.id in await _recovery_ids(db, user.tenant_id, prior.finished_at)
+    child = await continuation.continue_budget_run(db, user.tenant_id, prior.id, now=prior.finished_at)
+    assert child.progress_json["continuation_read_retry_count"] == 2
+    assert child.progress_json["last_read_failure"] == failure  # Don't erase unrelated diagnostics.
+
+
+async def test_legacy_real_stop_still_gets_bounded_retry(db, admin_user):
+    user = admin_user[0]
+    prior, _ = await scheduled_failure(db, user, progress={"read_stop_run_id": None})
+    # The default fixture is terminal; use a detached value to prove timestamp compatibility.
+    from types import SimpleNamespace
+
+    legacy = SimpleNamespace(
+        **{
+            k: getattr(prior, k)
+            for k in ("id", "origin", "status", "termination_reason", "created_at", "finished_at", "progress_json")
+        }
+    )
+    legacy.progress_json = {
+        **prior.progress_json,
+        "last_read_failure": {**prior.progress_json["last_read_failure"], "observed_at": prior.finished_at.isoformat()},
+    }
+    assert continuation.scheduled_read_stop(legacy)
+    assert continuation.read_retry_due(legacy, prior.finished_at + timedelta(minutes=5))
