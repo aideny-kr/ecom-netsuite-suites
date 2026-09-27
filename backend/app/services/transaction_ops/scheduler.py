@@ -104,6 +104,14 @@ async def _recovery_ids(db, tenant_id, now):
                     run.status == "finished",
                     run.termination_reason == "budget",
                     run.origin != "recovery",
+                    # Scheduled transient reads wake through the locked
+                    # candidate path below after backoff, not worker polling.
+                    ~and_(
+                        run.origin == "schedule",
+                        func.coalesce(
+                            run.progress_json["read_stop_reason"].astext.in_(("retry_limit", "retry_deadline")), False
+                        ),
+                    ),
                     run.finished_at > now - timedelta(days=1),
                     or_(
                         run.progress_json["processed"].astext.notin_(("0", "")),
@@ -383,14 +391,28 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             and latest is not None
                             and latest.termination_reason == "done"
                         )
+                        from app.services.transaction_ops.continuation import continue_budget_run, read_retry_due
+
+                        delayed_retry = already_due and read_retry_due(latest, now)
                         if (
                             not config.enabled
                             or not config.schedule_enabled
                             or active
-                            or (already_due and not policy_catchup)
+                            or (already_due and not policy_catchup and not delayed_retry)
                         ):
                             stats["skipped"] += 1
                             await db.commit()
+                            continue
+                        if delayed_retry:
+                            # continue_budget_run rechecks flags, active work,
+                            # scope and caps under this config lock. It creates
+                            # one idempotent child and preserves the checkpoint.
+                            child = await continue_budget_run(db, tenant_id, latest.id, now=now)
+                            if child is not None and child.status == "pending":
+                                stats["created"] += 1
+                                await _dispatch(tenant_id, child.id, stats, investigation_queue(child.origin))
+                            else:
+                                stats["skipped"] += 1
                             continue
                         scope, resume_id, reason = _scope(config, latest, now)
                         if reason == "waiting_for_daily_cutoff":
