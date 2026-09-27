@@ -1,10 +1,30 @@
 "use client";
 
 import { useState } from "react";
+import { groupProgress, LIVE_LABEL, liveState, type LiveState } from "@/lib/accounting-group-progress";
 import type { WriteConfirmationData } from "@/lib/types";
 import { AccountingConfirmationCard } from "./accounting-confirmation-card";
 import { creditAmount } from "./sales-credit-confirmation-card";
 import { AccountingOrderPlanCard } from "./accounting-order-plan-card";
+
+const PILL: Record<LiveState, string> = {
+  reconciled: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
+  further_review: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300",
+  rechecking: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300",
+  writing: "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200",
+  queued: "bg-muted text-muted-foreground",
+  refused: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
+  needs_review: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
+};
+
+function LivePill({ state }: { state: LiveState }) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold ${PILL[state]}`}>
+      {state === "writing" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" aria-hidden />}
+      {LIVE_LABEL[state]}
+    </span>
+  );
+}
 
 export function AccountingGroupCard({
   data,
@@ -32,8 +52,10 @@ export function AccountingGroupCard({
   const pending = data.status === "pending";
   const progress = data.accounting_plan_progress;
   const dispatch = data.accounting_group_dispatch;
-  const processed = Object.values(dispatch?.members || {}).filter((m) =>
-    m.status !== "queued" && m.status !== "dispatching").length;
+  // Live: each order's receipt when it has one, else the dispatch record (refreshed every 5 s).
+  const live = dispatch ? groupProgress(group.members, dispatch) : null;
+  const allReconciled =
+    eligible.length > 0 && eligible.every((m) => liveState(m, dispatch) === "reconciled");
   const blocked = Boolean(
     data.invariant_errors?.length || data.unfillable_line_fields?.length,
   );
@@ -48,7 +70,9 @@ export function AccountingGroupCard({
             <h3 className="text-xl font-semibold">
               {pending && eligible.length > 0
                 ? "Review group corrections"
-                : "Group correction results"}
+                : allReconciled
+                  ? `${eligible.length} of ${eligible.length} corrections reconciled`
+                  : "Group correction results"}
             </h3>
             <p className="mt-1 text-xs text-muted-foreground">
               {group.members.length} orders reviewed · {eligible.length} exact
@@ -61,7 +85,11 @@ export function AccountingGroupCard({
               ? blocked || !eligible.length
                 ? "Needs review"
                 : "Awaiting approval"
-              : data.status === "executing"
+              : data.status === "executing" && live
+                ? `${live.done} of ${live.total} done`
+                : allReconciled
+                  ? "Group reconciled"
+                  : data.status === "executing"
                 ? "Running · awaiting results"
                 : data.status === "rejected"
                   ? "Rejected"
@@ -70,12 +98,36 @@ export function AccountingGroupCard({
                     : `${verified} / ${eligible.length} verified`}
           </span>
         </div>
-        {dispatch && (
-          <p role="status" className="text-[13px] text-muted-foreground">
-            {processed} / {eligible.length} corrections processed · {verified} verified.
-            {(dispatch.status === "queued" || dispatch.status === "running") &&
-              " Processing continues in the background. You can leave this page."}
-          </p>
+        {live && live.total > 0 && (
+          <div className="space-y-2" aria-label="Live correction progress">
+            <div className="flex h-2.5 overflow-hidden rounded-full bg-muted" role="img"
+              aria-label={`${live.counts.reconciled} reconciled, ${live.counts.rechecking + live.counts.further_review} written, ${live.counts.writing} writing, ${live.counts.queued} queued`}>
+              <span className="h-full bg-emerald-600" style={{ width: `${(live.counts.reconciled / live.total) * 100}%` }} />
+              <span className="h-full bg-sky-600" style={{ width: `${((live.counts.rechecking + live.counts.further_review) / live.total) * 100}%` }} />
+              <span className="h-full bg-amber-500" style={{ width: `${(live.counts.writing / live.total) * 100}%` }} />
+              <span className="h-full bg-red-600" style={{ width: `${((live.counts.refused + live.counts.needs_review) / live.total) * 100}%` }} />
+            </div>
+            <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span><strong className="tabular-nums text-foreground">{live.counts.reconciled}</strong> reconciled</span>
+              <span><strong className="tabular-nums text-foreground">{live.counts.rechecking + live.counts.further_review}</strong> written · rechecking</span>
+              <span><strong className="tabular-nums text-foreground">{live.counts.writing}</strong> writing</span>
+              <span><strong className="tabular-nums text-foreground">{live.counts.queued}</strong> queued</span>
+              {live.counts.refused + live.counts.needs_review > 0 && (
+                <span><strong className="tabular-nums text-foreground">{live.counts.refused + live.counts.needs_review}</strong> stopped or need review</span>
+              )}
+            </p>
+            {live.writing.length > 0 && (
+              <p aria-label="Writing now" className="rounded-lg border bg-muted/30 px-3 py-2 text-[13px]">
+                <strong>Writing now</strong>{" "}
+                <span className="font-mono tabular-nums">{live.writing.join(" · ")}</span>
+              </p>
+            )}
+            {(dispatch?.status === "queued" || dispatch?.status === "running") && (
+              <p className="text-xs text-muted-foreground">
+                Each fix is read back from NetSuite, then the order is rechecked against the source. You can leave this page.
+              </p>
+            )}
+          </div>
         )}
         {progress && progress.results_ready > 0 && (
           <p role="status" className="text-[13px] font-medium">
@@ -151,8 +203,10 @@ export function AccountingGroupCard({
             const p = card?.accounting_review;
             const receipt = member.resolution_receipt || card?.accounting_receipt;
             const originalReceipt = card?.accounting_receipt;
+            const state = liveState(member, dispatch);
             if (card && (receipt?.plan || p?.resolution_plan)) {
               return <AccountingOrderPlanCard key={member.case_id} data={card} receipt={receipt} groupState={data.status}>
+                {state && <p className="mb-2"><LivePill state={state} /></p>}
                 {member.reason && <p className="mb-3 text-xs leading-relaxed">{member.reason}</p>}
                 <AccountingConfirmationCard data={card} onConfirm={() => {}} onReject={() => {}} readOnly groupState={data.status} />
               </AccountingOrderPlanCard>;
@@ -173,9 +227,11 @@ export function AccountingGroupCard({
                       : data.status === "executing"
                         ? "Awaiting result"
                         : "Not submitted"
-                    : member.reason
-                      ? "Needs review"
-                      : card?.status || "Needs investigation";
+                    : member.set_aside
+                      ? `Set aside · ${member.set_aside}`
+                      : member.reason
+                        ? "Needs review"
+                        : card?.status || "Needs investigation";
             return (
               <details key={member.case_id} className="rounded-lg border p-3">
                 <summary className="cursor-pointer text-[13px]">
@@ -183,7 +239,7 @@ export function AccountingGroupCard({
                     {member.order_reference}
                   </span>
                   <span className="ml-3 text-xs text-muted-foreground">
-                    {result}
+                    {state ? <LivePill state={state} /> : result}
                   </span>
                   {p?.kind === "sales_adjustment_credit" ? (
                     <span className="mt-1 block text-xs text-muted-foreground">

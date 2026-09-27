@@ -1,0 +1,83 @@
+/**
+ * Live state of each order in an approved group correction.
+ *
+ * The group card used to count "verified" from each order's preparation-time snapshot, which
+ * never changes during a run: it read "0 verified" while the dispatch record said 18 orders
+ * were written (2026-09-27). An order's receipt, once it exists, is its final word; before
+ * that, the live dispatch record says where it is.
+ */
+
+export type LiveState =
+  | "reconciled"
+  | "further_review"
+  | "rechecking"
+  | "writing"
+  | "queued"
+  | "refused"
+  | "needs_review";
+
+export const LIVE_LABEL: Record<LiveState, string> = {
+  reconciled: "Reconciled",
+  further_review: "Verified · further review",
+  rechecking: "Written · rechecking",
+  writing: "Writing",
+  queued: "Queued",
+  refused: "Refused · nothing sent",
+  needs_review: "Needs review",
+};
+
+interface GroupMember {
+  case_id?: string;
+  order_reference: string;
+  confirmation_id?: string;
+  card?: { accounting_receipt?: { status?: string } | null } | null;
+  resolution_receipt?: { status?: string } | null;
+}
+
+interface Dispatch {
+  members?: Record<string, { status?: string }>;
+}
+
+export function liveState(member: GroupMember, dispatch?: Dispatch | null): LiveState | null {
+  if (!member.card) return null;
+  const receipt = member.resolution_receipt || member.card.accounting_receipt;
+  if (receipt?.status === "reconciled") return "reconciled";
+  if (receipt?.status === "partially_resolved") return "further_review";
+  if (receipt?.status === "needs_review") return "needs_review";
+  const status = member.confirmation_id ? dispatch?.members?.[member.confirmation_id]?.status : undefined;
+  switch (status) {
+    case "verified":
+      return "rechecking";
+    case "dispatching":
+      return "writing";
+    case "queued":
+      return "queued";
+    case "rejected":
+      return "refused";
+    case "needs_review":
+    case "verification_pending":
+      return "needs_review";
+    default:
+      return null;
+  }
+}
+
+export function groupProgress(members: GroupMember[], dispatch?: Dispatch | null) {
+  const counts: Record<LiveState, number> = {
+    reconciled: 0, further_review: 0, rechecking: 0, writing: 0, queued: 0, refused: 0, needs_review: 0,
+  };
+  const writing: string[] = [];
+  let total = 0;
+  for (const member of members) {
+    if (!member.card) continue;
+    total += 1;
+    const state = liveState(member, dispatch);
+    if (!state) continue;
+    counts[state] += 1;
+    if (state === "writing") writing.push(member.order_reference);
+  }
+  // Done = every order with a known outcome: reconciled, rechecking, refused or needing review.
+  const known = Object.values(counts).reduce((sum, n) => sum + n, 0);
+  const done = known - counts.writing - counts.queued;
+  return { counts, writing, total, done };
+}
