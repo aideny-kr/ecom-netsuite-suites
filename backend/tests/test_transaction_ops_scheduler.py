@@ -627,6 +627,8 @@ async def test_real_interval_candidate_recovers_transient_stop_without_daily_pol
     prior.progress_json = {
         "processed": 7,
         "scan_count": 7,
+        # Use the injected clock for cycle age regardless of host time of day.
+        "continuation_started_at": (now - timedelta(minutes=10)).isoformat(),
         "continuation_baseline": {"processed": 7, "scan_count": 7},
         "pending_refs": ["R100000001"],
         "read_retry_count": 3,

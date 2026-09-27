@@ -150,6 +150,8 @@ async def _recovery_ids(db, tenant_id, now):
 
 
 async def _candidate_ids(db, tenant_id, now):
+    from app.services.transaction_ops.continuation import MAX_PARTS
+
     state, _, config, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     latest = (
@@ -176,6 +178,17 @@ async def _candidate_ids(db, tenant_id, now):
             _read_stop_clause(run),
         )
     )
+    legacy_part_stop = exists(
+        select(run.id).where(
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.created_at == latest.c.latest_at,
+            run.origin == "schedule",
+            run.status == "finished",
+            run.termination_reason == "budget",
+            run.progress_json["continuation_part"].astext == str(MAX_PARTS),
+        )
+    )
     query = (
         select(config.id)
         .outerjoin(latest, latest.c.config_id == config.id)
@@ -190,6 +203,7 @@ async def _candidate_ids(db, tenant_id, now):
                 extract("epoch", latest.c.latest_at) < bucket_epoch,
                 config.mapping_json["reconciliation_policy"].astext.is_not(None),
                 latest_read_stop,
+                legacy_part_stop,
             ),
         )
         .order_by(latest.c.latest_at.asc().nullsfirst(), config.created_at, config.id)
@@ -417,19 +431,25 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             and latest is not None
                             and latest.termination_reason == "done"
                         )
-                        from app.services.transaction_ops.continuation import continue_budget_run, read_retry_due
+                        from app.services.transaction_ops.continuation import (
+                            continue_budget_run,
+                            read_retry_due,
+                            scheduled_part_resume_candidate,
+                        )
 
-                        delayed_retry = already_due and read_retry_due(latest, now)
+                        resume_due = already_due and (
+                            read_retry_due(latest, now) or scheduled_part_resume_candidate(latest, now)
+                        )
                         if (
                             not config.enabled
                             or not config.schedule_enabled
                             or active
-                            or (already_due and not policy_catchup and not delayed_retry)
+                            or (already_due and not policy_catchup and not resume_due)
                         ):
                             stats["skipped"] += 1
                             await db.commit()
                             continue
-                        if delayed_retry:
+                        if resume_due:
                             # continue_budget_run rechecks flags, active work,
                             # scope and caps under this config lock. It creates
                             # one idempotent child and preserves the checkpoint.
