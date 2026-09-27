@@ -18,6 +18,8 @@ describe("live group progress", () => {
     expect(liveState(member("5"), dispatch)).toBe("needs_review");
     expect(liveState(member("1", { resolution_receipt: { status: "reconciled" } }), dispatch)).toBe("reconciled");
     expect(liveState(member("6"), dispatch)).toBeNull();
+    // Members held back when a group stops: finished for this run, nothing sent (gate round 3).
+    expect(liveState(member("7"), { members: { "c-7": { status: "blocked" } } })).toBe("held");
     expect(liveState({ case_id: "x", order_reference: "R9" }, dispatch)).toBeNull();
   });
 

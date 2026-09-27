@@ -794,3 +794,101 @@ async def test_a_failure_in_preparation_cleanup_after_a_dropped_chat_is_logged(c
         "interruption audit failed" in (r.exc_text or "") or "preparation cleanup" in r.getMessage()
         for r in caplog.records
     )
+
+
+async def test_a_slow_earlier_attempt_check_sets_the_order_aside_instead_of_crashing_it(monkeypatch):
+    # Gate wf_f4fc4c7c round 3: the earlier-attempt check can re-read NetSuite for a rejected
+    # prior card; inside the member's 120 s budget it could time the whole member out as a crash.
+    from app.services.chat.write_confirmation_service import WriteConfirmationPayload
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(1)
+    member = so["accounting_group"]["members"][0]
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": member["case_id"], "order_reference": member["order_reference"]}],
+        }
+    }
+
+    @asynccontextmanager
+    async def factory():
+        child = AsyncMock(spec=AsyncSession)
+        child.info = {"accounting_correction_candidate": {"case_id": member["case_id"]}}
+        yield child
+
+    async def evidence(params, **kwargs):
+        return {"success": True, "accounting_evidence": {}}
+
+    async def candidate(**kwargs):
+        return WriteConfirmationPayload(**member["card"]), "test"
+
+    async def slow_check(db, tenant_id, p):
+        await asyncio.sleep(5)
+
+    snapshots = []
+    monkeypatch.setattr(group, "ATTEMPT_CHECK_TIMEOUT", 0.05)
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(group, "log_event", AsyncMock())
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
+    monkeypatch.setattr("app.services.transaction_ops.chat_confirmation.attempt_blocker", slow_check)
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.handoff", lambda *a: {"status": "x"})
+    await group.prepare_group_confirmation(
+        db=db,
+        tenant_id=session.tenant_id,
+        actor_id=session.user_id,
+        session_id=str(session.id),
+        correlation_id="t",
+        tools=[],
+        policy=None,
+        progress=snapshots.append,
+    )
+    assert snapshots[-1]["set_aside"] == [{"label": "could not confirm no earlier attempt", "count": 1}]
+
+
+async def test_a_preparation_failure_that_races_a_dropped_chat_is_logged(caplog):
+    # Gate wf_f4fc4c7c round 3: preparation finished with an error just as the chat closed, so
+    # the cleanup saw a done task and never retrieved (or logged) its exception.
+    agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id=str(uuid4()))
+    agent._tool_defs = [{"name": "transaction_ops_accounting_evidence", "input_schema": {"type": "object"}}]
+    adapter = MagicMock()
+    adapter.stream_message = _stream_replay(
+        [
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="g", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            )
+        ]
+    )
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
+
+    async def prepare(**kwargs):
+        kwargs["progress"]({"checked": 1, "total": 1, "ready": 0, "set_aside": [], "now": []})
+        raise RuntimeError("preparation blew up")
+
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.policy_service.evaluate_tool_call", return_value={"allowed": True}),
+        patch("app.services.chat.tools.execute_tool_call", AsyncMock(return_value=json.dumps({"success": True}))),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        stream = BaseSpecialistAgent.run_streaming(
+            agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="m"
+        )
+        async for kind, _ in stream:
+            if kind == "progress":
+                break
+        await stream.aclose()
+    assert any(
+        r.name == "app.services.chat.agents.base_agent" and "preparation blew up" in (r.exc_text or "")
+        for r in caplog.records
+    )

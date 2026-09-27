@@ -16,6 +16,7 @@ const PILL: Record<LiveState, string> = {
   writing: "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200",
   queued: "bg-muted text-muted-foreground",
   refused: STOPPED,
+  held: "bg-muted text-muted-foreground",
   needs_review: STOPPED,
 };
 
@@ -116,6 +117,9 @@ export function AccountingGroupCard({
               <span><strong className="tabular-nums text-foreground">{live.counts.queued}</strong> queued</span>
               {live.counts.refused + live.counts.needs_review > 0 && (
                 <span><strong className="tabular-nums text-foreground">{live.counts.refused + live.counts.needs_review}</strong> stopped or need review</span>
+              )}
+              {live.counts.held > 0 && (
+                <span><strong className="tabular-nums text-foreground">{live.counts.held}</strong> held · not sent</span>
               )}
             </p>
             {live.writing.length > 0 && (

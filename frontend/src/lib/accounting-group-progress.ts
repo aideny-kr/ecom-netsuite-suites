@@ -14,6 +14,7 @@ export type LiveState =
   | "writing"
   | "queued"
   | "refused"
+  | "held"
   | "needs_review";
 
 export const LIVE_LABEL: Record<LiveState, string> = {
@@ -23,6 +24,7 @@ export const LIVE_LABEL: Record<LiveState, string> = {
   writing: "Writing",
   queued: "Queued",
   refused: "Refused · nothing sent",
+  held: "Held · not sent",
   needs_review: "Needs review",
 };
 
@@ -54,6 +56,8 @@ export function liveState(member: GroupMember, dispatch?: Dispatch | null): Live
       return "queued";
     case "rejected":
       return "refused";
+    case "blocked": // held back when the group stopped: finished for this run, nothing sent
+      return "held";
     case "needs_review":
     case "verification_pending":
       return "needs_review";
@@ -64,7 +68,7 @@ export function liveState(member: GroupMember, dispatch?: Dispatch | null): Live
 
 export function groupProgress(members: GroupMember[], dispatch?: Dispatch | null) {
   const counts: Record<LiveState, number> = {
-    reconciled: 0, further_review: 0, rechecking: 0, writing: 0, queued: 0, refused: 0, needs_review: 0,
+    reconciled: 0, further_review: 0, rechecking: 0, writing: 0, queued: 0, refused: 0, held: 0, needs_review: 0,
   };
   const writing: string[] = [];
   let total = 0;
@@ -76,8 +80,10 @@ export function groupProgress(members: GroupMember[], dispatch?: Dispatch | null
     counts[state] += 1;
     if (state === "writing") writing.push(member.order_reference);
   }
-  // Done = every order with an outcome: reconciled, written and rechecking, refused or needing review.
+  // Done = every order with an outcome for this run: reconciled, written and rechecking, refused,
+  // held back when the group stopped, or needing review.
   const done =
-    counts.reconciled + counts.further_review + counts.rechecking + counts.refused + counts.needs_review;
+    counts.reconciled + counts.further_review + counts.rechecking + counts.refused + counts.held +
+    counts.needs_review;
   return { counts, writing, total, done };
 }

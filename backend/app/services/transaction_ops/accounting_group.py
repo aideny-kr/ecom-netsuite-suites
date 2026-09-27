@@ -36,6 +36,10 @@ class AccountingCapacityBusyError(ValueError):
 
 
 PREPARATION_TIMEOUT = 450  # Leave time to publish an explicit result within the chat budget.
+# The earlier-attempt check can re-read NetSuite for a rejected prior card; bound it inside the
+# member's own budget and set the member aside when it cannot answer (fail closed, never a crash).
+ATTEMPT_CHECK_TIMEOUT = 20
+UNCONFIRMED_ATTEMPT = "unconfirmed"
 MAX_GROUP_BYTES = 4 * 1024 * 1024
 
 
@@ -174,6 +178,8 @@ _SET_ASIDE = {
 def set_aside_label(*, crashed=False, blocked=None, code=None, identified=False):
     if crashed:
         return "preparation error"
+    if blocked == UNCONFIRMED_ATTEMPT:
+        return "could not confirm no earlier attempt"
     if blocked:
         return "already has an execution record"
     if code in _SET_ASIDE:
@@ -325,27 +331,37 @@ async def prepare_group_confirmation(
                         else None
                     )
                     blocked = None
+                    value = None
                     if prepared:
                         from app.services.transaction_ops import chat_confirmation
 
                         # A card for work the ledger already closed is refused at its claim and,
                         # as an unconfirmed outcome, stops the whole group (R619946522,
                         # 2026-09-27). Ask the claim's own question before anyone approves.
-                        blocked = await chat_confirmation.attempt_blocker(
-                            child_db, tenant_id, prepared[0].model_dump(mode="json").get("accounting_review")
-                        )
+                        value = prepared[0].model_dump(mode="json")
+                        try:
+                            async with asyncio.timeout(ATTEMPT_CHECK_TIMEOUT):
+                                blocked = await chat_confirmation.attempt_blocker(
+                                    child_db, tenant_id, value.get("accounting_review")
+                                )
+                        except TimeoutError:
+                            blocked = UNCONFIRMED_ATTEMPT
                         if blocked:
                             prepared = None
                     if prepared:
-                        card, _note = prepared
-                        value = {**card.model_dump(mode="json"), "accounting_group_child": True}
+                        value = {**value, "accounting_group_child": True}
                         # Publish children only in the parent's transaction. A cancelled
                         # preparation must never leave independently actionable orphans.
                         # Keep the per-case evidence/candidate audit, without a ChatMessage.
                         await child_db.commit()
                         timing["total_ms"] = elapsed()
                         return {**member, "confirmation_id": str(uuid.uuid4()), "card": value, "timing": timing}
-                    if blocked:
+                    if blocked == UNCONFIRMED_ATTEMPT:
+                        reason = (
+                            "Could not confirm in time that this exact correction has no earlier execution "
+                            "record, so it was not prepared. Prepare it again."
+                        )
+                    elif blocked:
                         reason = (
                             f"This exact correction already has an execution record ({blocked}). "
                             "A person decides what happens next; a new approval cannot send it."

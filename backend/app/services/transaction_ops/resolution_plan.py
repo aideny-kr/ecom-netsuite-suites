@@ -297,10 +297,10 @@ async def previous_execution(db, tenant_id, message_id, proposal, *, record_rele
             # No card remembers this work; an audit row from the retired dispatcher may.
             return await _legacy_native_reservation(db, tenant_id, key)
         proof = await rejected_credit_unchanged(db, tenant_id, message, proposal) if attempt < 19 else None
-        if proof and not record_release:
-            released.append(message.id)
-            continue
         if proof:
+            released.append(message.id)
+            if not record_release:
+                continue
             await log_event(
                 db,
                 tenant_id,
@@ -311,7 +311,6 @@ async def previous_execution(db, tenant_id, message_id, proposal, *, record_rele
                 resource_id=str(message.id),
                 payload={**proof, "replacement_confirmation_id": str(message_id), "operation_key": key},
             )
-            released.append(message.id)
             continue
         so = message.structured_output
         return {
