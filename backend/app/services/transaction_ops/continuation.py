@@ -13,6 +13,9 @@ from app.services.transaction_ops import state_service
 from app.services.transaction_ops.runner import enabled
 
 MAX_PARTS = 16
+# Scheduled reads can use a full day of 15-minute work segments. Keep a fixed
+# count as a spend bound even when API/order budgets make segments shorter.
+SCHEDULE_MAX_PARTS = 96
 MAX_CYCLE_AGE = timedelta(days=1)
 READ_RETRY_DELAYS = (timedelta(minutes=5), timedelta(minutes=15), timedelta(hours=1))
 
@@ -59,6 +62,23 @@ def read_retry_due(previous, now):
     return True
 
 
+def scheduled_part_resume_candidate(previous, now):
+    """Reconsider the former scheduled cap; creation still checks all blocks."""
+    if (
+        previous is None
+        or getattr(previous, "origin", None) != "schedule"
+        or getattr(previous, "status", None) != "finished"
+        or getattr(previous, "termination_reason", None) != "budget"
+        or (getattr(previous, "progress_json", None) or {}).get("continuation_part") != MAX_PARTS
+    ):
+        return False
+    try:
+        next_metadata(previous, now)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
 async def continuation_result(db, tenant_id, run_id):
     child = await db.scalar(
         select(TransactionRun)
@@ -78,10 +98,10 @@ async def continuation_result(db, tenant_id, run_id):
             AuditEvent.resource_type == TransactionRun.__tablename__,
             AuditEvent.resource_id == str(run_id),
         )
-        # Never let an older retryable no-progress refusal hide a later
-        # permission/feature/operator stop when reconsidering a saved read.
+        # No recoverable historical refusal may hide a hard stop, regardless
+        # of which audit was recorded first.
         .order_by(
-            (AuditEvent.payload["reason"].astext == "no_progress").asc().nullsfirst(),
+            AuditEvent.payload["reason"].astext.in_(("no_progress", "part_limit")).asc().nullsfirst(),
             AuditEvent.timestamp.desc(),
         )
         .limit(1)
@@ -92,7 +112,8 @@ async def continuation_result(db, tenant_id, run_id):
 def next_metadata(previous, now):
     progress = previous.progress_json or {}
     part = progress.get("continuation_part", 1)
-    if type(part) is not int or not 1 <= part < MAX_PARTS:
+    limit = SCHEDULE_MAX_PARTS if getattr(previous, "origin", None) == "schedule" else MAX_PARTS
+    if type(part) is not int or not 1 <= part < limit:
         raise ValueError("part_limit")
     started = (
         datetime.fromisoformat(progress["continuation_started_at"])
@@ -152,9 +173,33 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None):
     if child is not None:
         await state_service._commit(db, tenant_id)
         return child
-    # A pre-release no-progress refusal may have stranded a transient read.
-    # Reconsider only that reason, after backoff and under the same finite caps.
-    if blocked and not (blocked.get("reason") == "no_progress" and read_retry_due(previous, now)):
+    if previous.origin == "schedule":
+        # A new daily cycle resumes the checkpoint without continuation_of.
+        # Once that newer run exists, replaying this parent must never fork
+        # another chain from its older cursor. The config lock serializes both.
+        latest = await db.scalar(
+            select(TransactionRun.id)
+            .where(
+                TransactionRun.tenant_id == tenant_id,
+                TransactionRun.config_id == config.id,
+                TransactionRun.origin == "schedule",
+            )
+            .order_by(
+                TransactionRun.created_at.desc(),
+                TransactionRun.params_json["evaluation_key"].astext.desc(),
+                TransactionRun.id.desc(),
+            )
+            .limit(1)
+        )
+        if latest != previous.id:
+            await state_service._commit(db, tenant_id)
+            return None
+    # Reconsider only the old part cap or a retryable no-progress refusal.
+    # Both paths recheck productivity/backoff and the current finite limits.
+    if blocked and not (
+        (blocked.get("reason") == "no_progress" and read_retry_due(previous, now))
+        or (blocked.get("reason") == "part_limit" and scheduled_part_resume_candidate(previous, now))
+    ):
         await state_service._commit(db, tenant_id)
         return None
     try:
