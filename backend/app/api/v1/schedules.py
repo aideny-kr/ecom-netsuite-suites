@@ -624,6 +624,26 @@ async def resume_schedule(
 # ---------------------------------------------------------------------------
 
 
+@router.post("/{schedule_id}/runs/{job_id}/reconcile")
+async def reconcile_schedule_run(
+    schedule_id: uuid.UUID,
+    job_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("schedules.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Verify recorded effects without sending another delivery or clearing pause."""
+    from app.services.jobs.recovery import reconcile_run
+
+    try:
+        return await reconcile_run(
+            db, tenant_id=user.tenant_id, schedule_id=schedule_id, job_id=job_id, actor_id=user.id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Scheduled run not found") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
 @router.get("/{schedule_id}/runs", response_model=list[ScheduleRunItem])
 async def list_runs(
     schedule_id: uuid.UUID,

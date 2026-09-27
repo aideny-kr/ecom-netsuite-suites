@@ -44,15 +44,58 @@ Existing Drive delivery locates files by identity and updates existing files;
 existing transaction-operation recovery remains the authority for its own writes.
 Do not merge the unrelated open PR218/195 branches to obtain a new write surface.
 
+Operators with current company `schedules.manage` permission can call
+`POST /api/v1/schedules/{schedule_id}/runs/{job_id}/reconcile`. This bounded,
+read-only recovery operation supports **fully delivered scheduled Drive reports**:
+
+1. Before any Drive call, the scheduler durably binds the job/step/report/period,
+   connector identity and credential revision to the SHA-256 hashes, lengths and
+   types of the actual rendered PDF and workbook. A unique attempt marker is
+   written atomically with the bytes on both creates and updates, so even
+   byte-identical older files cannot prove this attempt completed. Successful prior steps also
+   receive durable receipts. Legacy attempts without these bindings stay uncertain.
+2. The reconciler uses that same active company connector to locate unique files
+   within the original folders and compare provider content checksums, size, type
+   and identity. Duplicate files, incomplete searches, absent checksums, partial
+   delivery, changed credentials/destination and unavailable evidence fail closed.
+   A matching name or an old same-period file alone is insufficient.
+3. Every started effect and every plan step must be accounted for. A report match
+   cannot clear an unknown paid-model reservation, another provider's operation,
+   or an unexecuted later step. Missing remote files do not authorize a resend.
+4. Verified settlement records `jobs.run.reconciled` atomically with the original
+   run's completion and recovered output links. It sends no delivery, invokes no
+   model and replays no step. Repeating reconciliation or broker delivery is safe.
+   Cancellation is preserved. Evidence failures and authorization revoked during read-back are audited;
+   database failures may prevent an audit write. All leave the run fenced.
+5. The schedule remains paused. Review its current plan and use the existing
+   `/resume` endpoint explicitly to permit future approved occurrences; other
+   uncertain runs still block resume. Execution identity and consumed budgets are
+   retained, never reset. Reconciliation has its own 20-second read-back deadline.
+
 This scheduler deliberately provides **no generic “clear uncertain and retry”
-endpoint**. Provider-specific reconciliation must prove the exact outcome before
-that operation can be retried or marked verified. Generic automatic reconciliation
-and a user-facing resolution flow are not implemented here. Until a supported
-reconciler records that proof, leave the job uncertain and the schedule stopped;
-do not edit database state to force a replay. Thus this is a safe recovery
-foundation, not complete FW-013 acceptance for every future effect type.
+endpoint**. Partial or unsupported outcomes require provider-specific evidence and
+remain stopped. Do not manually redeliver an uncertain scheduled period: it can
+replace the bound content and prevent reconciliation. A double finalization
+failure may lack step receipts and also remains stopped. Do not edit database
+state to force a replay. Future backfill and
+financial executors must supply their own supported recovery contract before they
+can enter this registry; existing transaction-operation recovery remains separate.
+The verification is an observation of exact content at read-back time, not a
+promise that an external Drive editor will never change it later.
+
+Drive evidence follows the official [file metadata](https://developers.google.com/workspace/drive/api/reference/rest/v3/files)
+and [list completeness](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/list)
+contracts. These checks use synthetic providers in tests; no live Google delivery
+or production rollout is claimed by the integration checks.
+
+At upgrade, legacy pending rows older than one minute with no durable dispatch
+snapshot are retired as blocked without execution and audited. A later broker
+delivery returns that terminal result. Inspect these retired occurrences before
+resuming a schedule whose previous state is unclear.
 
 Tests use real PostgreSQL sessions, synthetic external effects and separate
-process SIGKILL before/after the completion receipt. No live ERP writes or paid
+process SIGKILL before/after the completion receipt, after both synthetic Drive
+uploads, and before reconciliation's settlement commit. Concurrent operators and
+broker delivery share the schedule execution lock. No live ERP writes or paid
 provider calls are needed. This change is integration-only until the separate
 backup/cutover and deployment gates pass.

@@ -1060,7 +1060,9 @@ async def test_tenant_context_set_before_every_step_read_and_write(db: AsyncSess
     # its own at all).
     for label in ("s1", "s2", "s3"):
         exec_idx = events.index(f"exec:{label}")
-        assert events[exec_idx + 1] == "commit", (
+        # Re-establish tenant scope for the durable per-step receipt, then
+        # commit both it and the step's own writes before another executor.
+        assert events[exec_idx + 1 : exec_idx + 3] == ["ctx", "commit"], (
             f"step {label}'s success must be committed immediately, before the next step runs; "
             f"events around it: {events[exec_idx : exec_idx + 3]}"
         )
@@ -1073,7 +1075,7 @@ async def test_tenant_context_set_before_every_step_read_and_write(db: AsyncSess
     # own post-success commit (item 2) to isolate the write step's iteration.
     s1_idx = events.index("exec:s1")
     s2_idx = events.index("exec:s2")
-    between = events[s1_idx + 2 : s2_idx]
+    between = events[s1_idx + 3 : s2_idx]
     assert between == ["ctx", "commit", "ctx"], (
         "expected exactly [ctx, commit, ctx] between s1's post-success commit and s2's own exec "
         f"(top-of-loop ctx, the write step's audit-before-call commit, re-established ctx); got {between}"

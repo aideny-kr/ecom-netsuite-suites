@@ -698,6 +698,14 @@ async def _run_steps(
         # top of this loop re-establishes context after this commit clears
         # it; a step that is the LAST one in the plan needs no further
         # re-establishment -- `_finalize_run` does that itself.
+        # Persist successful steps for crash reconciliation, including the output
+        # needed to bind a later delivery to its producing report. Never use this
+        # as permission to replay an unrecorded step.
+        await set_tenant_context(db, str(tenant_id))
+        receipt_run = await db.get(Job, job_id)
+        summary = dict(receipt_run.result_summary or {})
+        summary["step_receipts"] = {**summary.get("step_receipts", {}), step_id: outputs[step_id]}
+        receipt_run.result_summary = summary
         await db.commit()
 
         usage["bytes_scanned"] += int(artifact.get("bytes_processed") or 0)
@@ -1321,6 +1329,7 @@ async def _run_schedule_now_locked(
     await set_tenant_context(db, str(tenant_id))
     receipt_job = await db.get(Job, job_id_value)
     receipt_job.result_summary = {
+        **(receipt_job.result_summary or {}),
         "execution_complete": True,
         "reason": reason,
         "outputs": outputs,

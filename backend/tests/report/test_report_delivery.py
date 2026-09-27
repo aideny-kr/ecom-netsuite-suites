@@ -130,7 +130,11 @@ class FakeDriveClient:
 
     @staticmethod
     def _key(name: str, parent_id: str | None, app_properties: dict[str, str] | None) -> tuple:
-        identity = tuple(sorted(app_properties.items())) if app_properties else (("name", name),)
+        identity = (
+            tuple(sorted((k, v) for k, v in app_properties.items() if k != "delivery_attempt"))
+            if app_properties
+            else (("name", name),)
+        )
         return (identity, parent_id)
 
     async def find_folder(
@@ -172,7 +176,9 @@ class FakeDriveClient:
         self._files[self._key(name, parent_id, app_properties)] = record
         return record
 
-    async def update_existing(self, *, file_id: str, content: bytes, mime_type: str) -> dict[str, str]:
+    async def update_existing(
+        self, *, file_id: str, content: bytes, mime_type: str, app_properties=None
+    ) -> dict[str, str]:
         self.calls.append("update_existing")
         self._maybe_fail("update_existing")
         for record in self._files.values():
