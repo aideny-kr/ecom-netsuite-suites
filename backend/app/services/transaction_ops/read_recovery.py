@@ -11,6 +11,26 @@ from app.services.transaction_ops.source_reader import SourceReadError
 from app.services.transaction_ops.state_service import StateError
 
 MAX_READ_RETRIES = 3
+_NETSUITE_TRANSIENT_REASONS = frozenset(
+    {
+        "read_timeout",
+        "read_transport_failed",
+        "upstream_http_429",
+        "upstream_http_502",
+        "upstream_http_503",
+        "upstream_http_504",
+    }
+)
+TRANSIENT_READ_CODES = frozenset(
+    {
+        "provider_read_timeout",
+        "provider_transport_failed",
+        "source_transport_failed",
+        "source_rate_limited",
+        "replica_transport_failed",
+    }
+    | {"netsuite_" + code for code in _NETSUITE_TRANSIENT_REASONS}
+)
 
 
 class ReadBudgetExhaustedError(Exception):
@@ -26,14 +46,7 @@ def transient_read_code(exc):
         return exc.code
     if isinstance(exc, ReplicaReadError) and exc.code == "replica_transport_failed":
         return exc.code
-    if isinstance(exc, NetSuiteEvidenceError) and str(exc) in {
-        "read_timeout",
-        "read_transport_failed",
-        "upstream_http_429",
-        "upstream_http_502",
-        "upstream_http_503",
-        "upstream_http_504",
-    }:
+    if isinstance(exc, NetSuiteEvidenceError) and str(exc) in _NETSUITE_TRANSIENT_REASONS:
         return "netsuite_" + str(exc)
     return None
 
