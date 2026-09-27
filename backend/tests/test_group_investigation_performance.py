@@ -656,3 +656,95 @@ async def test_the_agent_streams_preparation_progress_while_it_waits():
             )
         ]
     assert [v for k, v in events if k == "progress"] == [first, second]
+
+
+async def test_closing_the_chat_mid_preparation_waits_for_preparation_to_clean_up():
+    # Gate wf_c9aab898 round 1: the task was cancelled but never awaited, so preparation could
+    # still hold the database while the chat request tore down.
+    agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id=str(uuid4()))
+    agent._tool_defs = [{"name": "transaction_ops_accounting_evidence", "input_schema": {"type": "object"}}]
+    adapter = MagicMock()
+    adapter.stream_message = _stream_replay(
+        [
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="g", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            )
+        ]
+    )
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
+    cleaned = []
+
+    async def prepare(**kwargs):
+        kwargs["progress"]({"checked": 0, "total": 5, "ready": 0, "set_aside": [], "now": ["R1"]})
+        try:
+            await asyncio.sleep(30)
+        finally:
+            await asyncio.sleep(0)  # a real teardown awaits (child sessions close)
+            cleaned.append(True)
+
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.policy_service.evaluate_tool_call", return_value={"allowed": True}),
+        patch("app.services.chat.tools.execute_tool_call", AsyncMock(return_value=json.dumps({"success": True}))),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        stream = BaseSpecialistAgent.run_streaming(
+            agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="m"
+        )
+        async for kind, _ in stream:
+            if kind == "progress":
+                break
+        await stream.aclose()
+    assert cleaned == [True]
+
+
+async def test_orders_cut_off_by_the_time_limit_are_counted_in_the_last_update(monkeypatch):
+    # Gate wf_c9aab898 round 1: members cancelled at the preparation deadline never reported
+    # finishing, so the last update undercounted and still showed them as being checked.
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(2)
+    members = so["accounting_group"]["members"]
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": m["case_id"], "order_reference": m["order_reference"]} for m in members],
+        }
+    }
+
+    @asynccontextmanager
+    async def factory():
+        child = AsyncMock(spec=AsyncSession)
+        child.info = {}
+        yield child
+
+    async def slow(params, **kwargs):
+        await asyncio.sleep(30)
+
+    snapshots = []
+    monkeypatch.setattr(group, "PREPARATION_TIMEOUT", 0.05)
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(group, "log_event", AsyncMock())
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", slow)
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.handoff", lambda *a: {"status": "x"})
+    await group.prepare_group_confirmation(
+        db=db,
+        tenant_id=session.tenant_id,
+        actor_id=session.user_id,
+        session_id=str(session.id),
+        correlation_id="t",
+        tools=[],
+        policy=None,
+        progress=snapshots.append,
+    )
+    last = snapshots[-1]
+    assert last["checked"] == last["total"] == 2 and last["now"] == []
+    assert last["set_aside"] == [{"label": "time limit reached", "count": 2}]

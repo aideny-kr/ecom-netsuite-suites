@@ -2422,21 +2422,29 @@ class BaseSpecialistAgent(abc.ABC):
                                 # A group takes minutes: stream the server's own counts as each
                                 # member finishes instead of a silent wait (2026-09-27).
                                 _progress = asyncio.Queue()
-                                _prep = asyncio.create_task(
-                                    prepare_confirmation(**_prep_args, progress=_progress.put_nowait)
-                                )
+                                _finished = object()  # sentinel: preparation returned or raised
+
+                                async def _prepare_reporting():
+                                    try:
+                                        return await prepare_confirmation(**_prep_args, progress=_progress.put_nowait)
+                                    finally:
+                                        _progress.put_nowait(_finished)
+
+                                _prep = asyncio.create_task(_prepare_reporting())
                                 try:
-                                    while not _prep.done() or not _progress.empty():
-                                        _getter = asyncio.ensure_future(_progress.get())
-                                        await asyncio.wait({_getter, _prep}, return_when=asyncio.FIRST_COMPLETED)
-                                        if _getter.done():
-                                            yield "progress", _getter.result()
-                                        else:
-                                            _getter.cancel()
+                                    while (_update := await _progress.get()) is not _finished:
+                                        yield "progress", _update
                                     prepared = await _prep
                                 finally:
                                     if not _prep.done():
+                                        # The chat went away mid-preparation: stop it and wait for its
+                                        # own cleanup (child sessions, the interruption audit) before
+                                        # this request's session is released.
                                         _prep.cancel()
+                                        try:
+                                            await _prep
+                                        except (asyncio.CancelledError, Exception):
+                                            pass
                             else:
                                 prepared = await prepare_confirmation(**_prep_args)
                         except ValueError as exc:

@@ -245,12 +245,14 @@ def completed_plan(proposal, report, status, next_step):
     return plan
 
 
-async def previous_execution(db, tenant_id, message_id, proposal):
+async def previous_execution(db, tenant_id, message_id, proposal, *, record_release=True):
     """Called while the existing account/invoice lock is held, before a new CAS.
 
     A timed-out or unknown result blocks another send. Only a recorded failure
     of preconditions with zero writes, or an adapter proof of a rejected update
     with a freshly unchanged subledger, can relinquish the same business intent.
+    ``record_release=False`` asks the same question before anyone approves (group
+    preparation, ``message_id`` None): nothing is released, so nothing is recorded.
     """
     from sqlalchemy import select
 
@@ -295,6 +297,9 @@ async def previous_execution(db, tenant_id, message_id, proposal):
             # No card remembers this work; an audit row from the retired dispatcher may.
             return await _legacy_native_reservation(db, tenant_id, key)
         proof = await rejected_credit_unchanged(db, tenant_id, message, proposal) if attempt < 19 else None
+        if proof and not record_release:
+            released.append(message.id)
+            continue
         if proof:
             await log_event(
                 db,

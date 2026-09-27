@@ -209,14 +209,29 @@ class _Progress:
         self._emit()
 
     def finish(self, member, result):
-        if member["order_reference"] in self.now:
-            self.now.remove(member["order_reference"])
+        self.abandon(member)
         self.checked += 1
         if result.get("card"):
             self.ready += 1
         else:
             label = result.get("set_aside") or "no exact fix yet"
             self.aside[label] = self.aside.get(label, 0) + 1
+        self._emit()
+
+    def abandon(self, member):
+        """A member cancelled mid-check (the preparation deadline): no longer being checked."""
+        if member["order_reference"] in self.now:
+            self.now.remove(member["order_reference"])
+
+    def settle(self, results):
+        """The last update, from the final results: members cut off by the deadline count too."""
+        self.checked, self.ready, self.aside, self.now = len(results), 0, {}, []
+        for result in results:
+            if result.get("card"):
+                self.ready += 1
+            else:
+                label = result.get("set_aside") or "no exact fix yet"
+                self.aside[label] = self.aside.get(label, 0) + 1
         self._emit()
 
 
@@ -391,7 +406,11 @@ async def prepare_group_confirmation(
 
     async def tracked(member):
         tracker.start(member)
-        result = await prepare(member)
+        try:
+            result = await prepare(member)
+        except BaseException:
+            tracker.abandon(member)
+            raise
         tracker.finish(member, result)
         return result
 
@@ -405,6 +424,7 @@ async def prepare_group_confirmation(
                 unfinished=lambda member: {
                     **member,
                     "preparation_status": "incomplete",
+                    "set_aside": "time limit reached",
                     "reason": "Preparation time limit reached. No correction was submitted for this order; "
                     "continue preparation from fresh evidence.",
                     "investigation_routes": [
@@ -418,6 +438,7 @@ async def prepare_group_confirmation(
     except (asyncio.CancelledError, TimeoutError):
         await asyncio.shield(record_preparation_interrupted(tenant_id, actor_id, session_id, correlation_id, selection))
         raise
+    tracker.settle(members)
     if not any(member.get("card") for member in members):
         investigation = handoff(selection, members, reads.hits)
         db.info["accounting_group_investigation"] = investigation

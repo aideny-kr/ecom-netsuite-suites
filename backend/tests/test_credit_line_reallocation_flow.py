@@ -372,7 +372,13 @@ class TestGroup:
 
     @pytest.mark.parametrize(
         "status,runs",
-        [(None, True), ("rejected_before_effect", True), ("needs_review", False), ("verified", False), ("unknown", False)],
+        [
+            (None, True),
+            ("rejected_before_effect", True),
+            ("needs_review", False),
+            ("verified", False),
+            ("unknown", False),
+        ],
     )
     async def test_a_fix_can_run_only_if_its_exact_work_was_never_attempted_or_was_refused(
         self, monkeypatch, status, runs
@@ -386,11 +392,36 @@ class TestGroup:
             assert base_work_key == "work"
             return None if status is None else SimpleNamespace(status=status)
 
+        async def no_card(*args, **kwargs):
+            return None
+
         monkeypatch.setattr(state, "latest_operation_for_base", latest)
         monkeypatch.setattr(chat_confirmation, "operation_identity", lambda p: "work")
+        monkeypatch.setattr("app.services.transaction_ops.resolution_plan.previous_execution", no_card)
         blocked = await chat_confirmation.attempt_blocker(None, TENANT, {"case_id": CASE})
         assert (blocked is None) == runs
         assert blocked in (None, status)
+
+    async def test_a_fix_an_earlier_card_or_legacy_reservation_holds_is_set_aside_too(self, monkeypatch):
+        # Gate wf_c9aab898 round 1: the claim also refuses work that only an earlier card (sent
+        # before the ledger existed) or a retired dispatcher's reservation remembers.
+        from app.services.transaction_ops import chat_confirmation
+        from app.services.transaction_ops import state_service as state
+
+        async def clear_ledger(db, tenant_id, base_work_key):
+            return None
+
+        calls = []
+
+        async def prior(db, tenant_id, message_id, proposal, *, record_release=True):
+            calls.append(record_release)
+            return {"confirmation_id": "old", "status": "indeterminate"}
+
+        monkeypatch.setattr(state, "latest_operation_for_base", clear_ledger)
+        monkeypatch.setattr(chat_confirmation, "operation_identity", lambda p: "work")
+        monkeypatch.setattr("app.services.transaction_ops.resolution_plan.previous_execution", prior)
+        assert await chat_confirmation.attempt_blocker(None, TENANT, {"case_id": CASE}) == "indeterminate"
+        assert calls == [False]  # asked before anyone approves: no release is recorded
 
     @pytest.mark.parametrize("outcome", ["prepared", "refused", "crashed", "evidence_crashed", "already_attempted"])
     async def test_group_preparation_uses_the_reallocation_when_no_recipe_fits(self, monkeypatch, outcome):
