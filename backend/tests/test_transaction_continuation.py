@@ -272,7 +272,7 @@ async def test_delayed_retry_never_bypasses_safety_guards(db, admin_user, change
     elif change == "restart":
         progress["restart_scan"] = True
     elif change == "parts":
-        progress["continuation_part"] = continuation.MAX_PARTS
+        progress["continuation_part"] = continuation.SCHEDULE_MAX_PARTS
     elif change == "age":
         progress["continuation_started_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     else:
