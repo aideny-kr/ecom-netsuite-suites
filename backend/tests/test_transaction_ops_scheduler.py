@@ -147,6 +147,46 @@ async def test_locked_recheck_prevents_overlap_and_same_interval_budget_reset(de
     mod.celery_app.send_task.assert_not_called()
 
 
+@pytest.mark.parametrize("active,minutes,expected", [(False, 4, False), (False, 5, True), (True, 5, False)])
+async def test_same_cycle_transient_failure_wakes_after_backoff_only(
+    dependencies, monkeypatch, active, minutes, expected
+):
+    from app.services.transaction_ops import continuation
+
+    conf = config()
+    prior = previous(
+        "budget",
+        created_at=NOW - timedelta(minutes=15),
+        finished_at=NOW - timedelta(minutes=minutes),
+        progress_json={
+            "schedule_cycle_key": mod._bucket(NOW, conf.interval_minutes),
+            "processed": 79,
+            "scan_count": 140,
+            "continuation_baseline": {"processed": 79, "scan_count": 140},
+            "read_stop_reason": "retry_limit",
+            "read_retry_count": 3,
+            "last_read_failure": {"code": "source_transport_failed", "retryable": True, "resolved": False},
+        },
+    )
+    child = SimpleNamespace(id=uuid4(), origin="schedule", status="pending")
+    resume = AsyncMock(return_value=child)
+    monkeypatch.setattr(continuation, "continue_budget_run", resume)
+    dependencies.get_config.return_value = conf
+    mod._candidate_ids.return_value = [conf.id]
+    mod._schedule_history.return_value = (active, prior)
+    stats = await mod.collect_due_runs(AsyncMock(), NOW)
+    dependencies.create_run.assert_not_awaited()  # No fresh cycle or cursor reset.
+    if expected:
+        resume.assert_awaited_once()
+        assert resume.call_args.args[1:] == (TENANT, prior.id)
+        assert resume.call_args.kwargs == {"now": NOW}
+        assert stats["created"] == stats["dispatched"] == 1
+        assert mod.celery_app.send_task.call_args.kwargs["kwargs"]["run_id"] == str(child.id)
+    else:
+        resume.assert_not_awaited()
+        mod.celery_app.send_task.assert_not_called()
+
+
 async def test_long_unobserved_gap_is_explicit_stall(dependencies):
     conf = config()
     prior = previous(params_json=previous().params_json | {"window_end": (NOW - timedelta(days=32)).isoformat()})
