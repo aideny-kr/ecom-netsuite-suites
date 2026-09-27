@@ -19,7 +19,16 @@ from tests.test_transaction_source_snapshot import seed
 
 
 async def setup(
-    db, actor, monkeypatch, *, max_orders=100, size=10, action_mode="detect_only", phase="orders", mapping=None
+    db,
+    actor,
+    monkeypatch,
+    *,
+    max_orders=100,
+    size=10,
+    action_mode="detect_only",
+    phase="orders",
+    mapping=None,
+    origin="manual",
 ):
     if mapping and mapping.get("metabase_replica"):
         from app.services.transaction_ops import metabase_reader
@@ -58,11 +67,15 @@ async def setup(
         actor=actor,
     )
     now = datetime.now(timezone.utc)
+    if origin == "schedule":
+        config.schedule_enabled = True
+        await db.flush()
     run = await state.create_run(
         db,
         actor.tenant_id,
         config.id,
         RunCreate(
+            origin=origin,
             evaluation_key="chunk-runner",
             window_start=now - timedelta(days=1),
             window_end=now,

@@ -32,7 +32,21 @@ def scheduled_read_stop(previous):
         and failure.get("retryable") is True
         and failure.get("resolved") is False
         and failure.get("code") in TRANSIENT_READ_CODES
+        and _read_stopped_this_run(previous, progress, failure)
     )
+
+
+def _read_stopped_this_run(previous, progress, failure):
+    owner = progress.get("read_stop_run_id")
+    if owner is not None:
+        return owner == str(previous.id)
+    # Compatibility for pre-upgrade checkpoints: an inherited diagnostic is
+    # not the stop cause of a later, productive invocation.
+    try:
+        observed = datetime.fromisoformat(failure["observed_at"])
+        return previous.created_at <= observed <= previous.finished_at
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def read_retry_due(previous, now):

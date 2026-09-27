@@ -37,6 +37,20 @@ def _bucket(now, interval_minutes):
     return "schedule:" + start.isoformat()
 
 
+def _read_stop_clause(run):
+    from app.services.transaction_ops.read_recovery import TRANSIENT_READ_CODES
+
+    return and_(
+        run.origin == "schedule",
+        run.status == "finished",
+        run.termination_reason == "budget",
+        run.progress_json["read_stop_reason"].astext.in_(("retry_limit", "retry_deadline")),
+        run.progress_json["last_read_failure"]["retryable"].astext == "true",
+        run.progress_json["last_read_failure"]["resolved"].astext == "false",
+        run.progress_json["last_read_failure"]["code"].astext.in_(TRANSIENT_READ_CODES),
+    )
+
+
 async def _recovery_ids(db, tenant_id, now):
     _, _, config, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
@@ -104,13 +118,16 @@ async def _recovery_ids(db, tenant_id, now):
                     run.status == "finished",
                     run.termination_reason == "budget",
                     run.origin != "recovery",
-                    # Scheduled transient reads wake through the locked
-                    # candidate path below after backoff, not worker polling.
-                    ~and_(
-                        run.origin == "schedule",
-                        func.coalesce(
-                            run.progress_json["read_stop_reason"].astext.in_(("retry_limit", "retry_deadline")), False
+                    # Only a stop owned by this invocation suppresses recovery.
+                    # Legacy diagnostics can be inherited by productive runs.
+                    # Legacy re-deliveries still obey continue_budget_run's
+                    # backoff/caps and never replay a provider read while waiting.
+                    ~func.coalesce(
+                        and_(
+                            _read_stop_clause(run),
+                            run.progress_json["read_stop_run_id"].astext == cast(run.id, String),
                         ),
+                        False,
                     ),
                     run.finished_at > now - timedelta(days=1),
                     or_(
@@ -151,6 +168,14 @@ async def _candidate_ids(db, tenant_id, now):
     )
     interval_seconds = config.interval_minutes * 60
     bucket_epoch = func.floor(literal(int(now.timestamp())) / interval_seconds) * interval_seconds
+    latest_read_stop = exists(
+        select(run.id).where(
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.created_at == latest.c.latest_at,
+            _read_stop_clause(run),
+        )
+    )
     query = (
         select(config.id)
         .outerjoin(latest, latest.c.config_id == config.id)
@@ -164,6 +189,7 @@ async def _candidate_ids(db, tenant_id, now):
                 latest.c.latest_at.is_(None),
                 extract("epoch", latest.c.latest_at) < bucket_epoch,
                 config.mapping_json["reconciliation_policy"].astext.is_not(None),
+                latest_read_stop,
             ),
         )
         .order_by(latest.c.latest_at.asc().nullsfirst(), config.created_at, config.id)
