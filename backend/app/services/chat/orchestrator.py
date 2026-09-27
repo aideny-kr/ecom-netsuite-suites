@@ -477,6 +477,14 @@ def _sanitize_assistant_text(text: str) -> str:
 
 
 _NO_RESULT_FALLBACK = "I wasn't able to find relevant information for that question."
+
+
+def progress_event(snapshot):
+    """Group preparation's own counts as they change: a stream event, never the turn's result
+    (the structured output stays whatever card or answer the turn ends with)."""
+    return {"type": "preparation_progress", "data": snapshot}
+
+
 # Used when the agent called at least one tool but still produced no final
 # text. The original "find relevant information" wording reads like the
 # agent has no knowledge of the topic — even when prior turns answered the
@@ -4524,6 +4532,8 @@ async def run_chat_turn(
                             yield {"type": "tool_start", **payload}
                         elif event_type == "tool_end":
                             yield {"type": "tool_end", **payload}
+                        elif event_type == "progress":
+                            yield progress_event(payload)
                         elif event_type == "tool_intercept":
                             # payload is (event_type_str, event_data_dict)
                             last_structured_output = {"type": payload[0], "data": payload[1]}

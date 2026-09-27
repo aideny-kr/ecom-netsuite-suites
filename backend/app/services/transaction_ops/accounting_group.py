@@ -157,6 +157,69 @@ def reallocation_reason(code):
     return f"Existing-credit reallocation not prepared: {code}."
 
 
+# Short, plain reasons a member was set aside, from the refusal a treatment raised. The
+# member's full reason stays on the card; this is what a progress line can show at a glance.
+_SET_ASIDE = {
+    "source_not_final": "waiting on Solidus to finalize",
+    "period_locked": "period is locked",
+    "credit_not_in_case": "no single credit memo to rework",
+    "no_difference": "already fixed",
+    "no_verified_exemplar": "needs one approved fix of this kind first",
+    "tax_refund_items_not_configured": "tax item not configured",
+    "tax_accounts_not_configured": "tax account not configured",
+    "tax_account_not_configured": "tax account not configured",
+}
+
+
+def set_aside_label(*, crashed=False, blocked=None, code=None, identified=False):
+    if crashed:
+        return "preparation error"
+    if blocked:
+        return "already has an execution record"
+    if code in _SET_ASIDE:
+        return _SET_ASIDE[code]
+    return "fix identified; needs configuration" if identified else "no exact fix yet"
+
+
+class _Progress:
+    """Server counts of a running preparation, reported after every member: nothing a model
+    says, so a progress line can show numbers."""
+
+    def __init__(self, total, report):
+        self.total, self.report = total, report
+        self.checked = self.ready = 0
+        self.aside = {}
+        self.now = []
+
+    def _emit(self):
+        if self.report is None:
+            return
+        self.report(
+            {
+                "checked": self.checked,
+                "total": self.total,
+                "ready": self.ready,
+                "set_aside": [{"label": k, "count": v} for k, v in sorted(self.aside.items(), key=lambda i: -i[1])],
+                "now": list(self.now),
+            }
+        )
+
+    def start(self, member):
+        self.now.append(member["order_reference"])
+        self._emit()
+
+    def finish(self, member, result):
+        if member["order_reference"] in self.now:
+            self.now.remove(member["order_reference"])
+        self.checked += 1
+        if result.get("card"):
+            self.ready += 1
+        else:
+            label = result.get("set_aside") or "no exact fix yet"
+            self.aside[label] = self.aside.get(label, 0) + 1
+        self._emit()
+
+
 def _crash(exc):
     """Where a member's preparation crashed: the innermost frame, never the message (it can carry
     record content). The log line carries the full traceback."""
@@ -166,7 +229,9 @@ def _crash(exc):
     return {"type": type(exc).__name__, "where": where}
 
 
-async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, **_):
+async def prepare_group_confirmation(
+    *, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, progress=None, **_
+):
     from app.mcp.tools.transaction_ops_tools import execute_accounting_evidence
     from app.services.transaction_ops.group_investigation import handoff, summarize
     from app.services.transaction_ops.read_batch import reference_read_batch
@@ -201,6 +266,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
             routes = []
             investigation_evidence = {}
             error = None
+            set_aside = None
             try:
                 async with asyncio.timeout(120):
                     evidence = await execute_accounting_evidence(
@@ -279,11 +345,15 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         reason = "No validated correction is ready. Continue investigation using the recorded evidence."
                     if note := reallocation_reason(reallocation_refusal):
                         reason += " " + note
+                    set_aside = set_aside_label(
+                        blocked=blocked, code=reallocation_refusal, identified=bool(collected.get("resolution_intents"))
+                    )
             except Exception as exc:
                 await child_db.rollback()
                 await set_tenant_context(child_db, str(tenant_id))
                 reason = f"Preparation needs review ({type(exc).__name__})."
                 error = _crash(exc)
+                set_aside = set_aside_label(crashed=True)
                 print(
                     f"accounting_group: preparation crashed case={member['case_id']} at {error['where']}\n"
                     + "".join(traceback.format_exception(exc))[-4000:],
@@ -311,17 +381,26 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
             return {
                 **member,
                 "reason": reason,
+                "set_aside": set_aside or set_aside_label(),
                 "investigation_routes": routes,
                 "investigation_evidence": investigation_evidence,
                 "timing": timing,
             }
+
+    tracker = _Progress(len(selection["members"]), progress)
+
+    async def tracked(member):
+        tracker.start(member)
+        result = await prepare(member)
+        tracker.finish(member, result)
+        return result
 
     preparation_started = time.monotonic()
     try:
         with reference_read_batch() as reads:
             members = await bounded_map(
                 selection["members"],
-                prepare,
+                tracked,
                 timeout=PREPARATION_TIMEOUT,
                 unfinished=lambda member: {
                     **member,

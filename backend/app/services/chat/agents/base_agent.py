@@ -8,6 +8,7 @@ orchestrator, but scoped to a specific task and tool subset.
 from __future__ import annotations
 
 import abc
+import asyncio
 import inspect
 import json
 import logging
@@ -2406,7 +2407,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 else candidate_confirmation
                             )
                             _prep_started = time.monotonic()
-                            prepared = await prepare_confirmation(
+                            _prep_args = dict(
                                 db=db,
                                 tenant_id=self.tenant_id,
                                 actor_id=self.user_id,
@@ -2417,6 +2418,27 @@ class BaseSpecialistAgent(abc.ABC):
                                 policy=active_policy,
                                 case_id=block.input.get("case_id"),
                             )
+                            if block.name == "transaction_ops_accounting_group":
+                                # A group takes minutes: stream the server's own counts as each
+                                # member finishes instead of a silent wait (2026-09-27).
+                                _progress = asyncio.Queue()
+                                _prep = asyncio.create_task(
+                                    prepare_confirmation(**_prep_args, progress=_progress.put_nowait)
+                                )
+                                try:
+                                    while not _prep.done() or not _progress.empty():
+                                        _getter = asyncio.ensure_future(_progress.get())
+                                        await asyncio.wait({_getter, _prep}, return_when=asyncio.FIRST_COMPLETED)
+                                        if _getter.done():
+                                            yield "progress", _getter.result()
+                                        else:
+                                            _getter.cancel()
+                                    prepared = await _prep
+                                finally:
+                                    if not _prep.done():
+                                        _prep.cancel()
+                            else:
+                                prepared = await prepare_confirmation(**_prep_args)
                         except ValueError as exc:
                             prepared = None
                             note = f"The correction needs review before an approval card can be created: {exc}"
