@@ -208,14 +208,17 @@ class _Progress:
         self.now.append(member["order_reference"])
         self._emit()
 
-    def finish(self, member, result):
-        self.abandon(member)
-        self.checked += 1
+    def _tally(self, result):
         if result.get("card"):
             self.ready += 1
         else:
-            label = result.get("set_aside") or "no exact fix yet"
+            label = result.get("set_aside") or set_aside_label()
             self.aside[label] = self.aside.get(label, 0) + 1
+
+    def finish(self, member, result):
+        self.abandon(member)
+        self.checked += 1
+        self._tally(result)
         self._emit()
 
     def abandon(self, member):
@@ -227,11 +230,7 @@ class _Progress:
         """The last update, from the final results: members cut off by the deadline count too."""
         self.checked, self.ready, self.aside, self.now = len(results), 0, {}, []
         for result in results:
-            if result.get("card"):
-                self.ready += 1
-            else:
-                label = result.get("set_aside") or "no exact fix yet"
-                self.aside[label] = self.aside.get(label, 0) + 1
+            self._tally(result)
         self._emit()
 
 
@@ -358,7 +357,7 @@ async def prepare_group_confirmation(
                         )
                     else:
                         reason = "No validated correction is ready. Continue investigation using the recorded evidence."
-                    if note := reallocation_reason(reallocation_refusal):
+                    if not blocked and (note := reallocation_reason(reallocation_refusal)):
                         reason += " " + note
                     set_aside = set_aside_label(
                         blocked=blocked, code=reallocation_refusal, identified=bool(collected.get("resolution_intents"))

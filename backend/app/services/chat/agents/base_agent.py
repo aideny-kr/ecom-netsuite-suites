@@ -2443,8 +2443,13 @@ class BaseSpecialistAgent(abc.ABC):
                                         _prep.cancel()
                                         try:
                                             await _prep
-                                        except (asyncio.CancelledError, Exception):
+                                        except asyncio.CancelledError:
                                             pass
+                                        except Exception:
+                                            logger.error(
+                                                "Group preparation cleanup failed after the chat closed",
+                                                exc_info=True,
+                                            )
                             else:
                                 prepared = await prepare_confirmation(**_prep_args)
                         except ValueError as exc:

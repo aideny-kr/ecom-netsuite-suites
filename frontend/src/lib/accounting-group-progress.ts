@@ -76,8 +76,8 @@ export function groupProgress(members: GroupMember[], dispatch?: Dispatch | null
     counts[state] += 1;
     if (state === "writing") writing.push(member.order_reference);
   }
-  // Done = every order with a known outcome: reconciled, rechecking, refused or needing review.
-  const known = Object.values(counts).reduce((sum, n) => sum + n, 0);
-  const done = known - counts.writing - counts.queued;
+  // Done = every order with an outcome: reconciled, written and rechecking, refused or needing review.
+  const done =
+    counts.reconciled + counts.further_review + counts.rechecking + counts.refused + counts.needs_review;
   return { counts, writing, total, done };
 }

@@ -748,3 +748,49 @@ async def test_orders_cut_off_by_the_time_limit_are_counted_in_the_last_update(m
     last = snapshots[-1]
     assert last["checked"] == last["total"] == 2 and last["now"] == []
     assert last["set_aside"] == [{"label": "time limit reached", "count": 2}]
+
+
+async def test_a_failure_in_preparation_cleanup_after_a_dropped_chat_is_logged(caplog):
+    # Gate wf_13d20e55 round 2: the cancelled preparation's own teardown (the interruption
+    # audit, child sessions) could fail and be swallowed with no trace.
+    agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id=str(uuid4()))
+    agent._tool_defs = [{"name": "transaction_ops_accounting_evidence", "input_schema": {"type": "object"}}]
+    adapter = MagicMock()
+    adapter.stream_message = _stream_replay(
+        [
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="g", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            )
+        ]
+    )
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
+
+    async def prepare(**kwargs):
+        kwargs["progress"]({"checked": 0, "total": 1, "ready": 0, "set_aside": [], "now": ["R1"]})
+        try:
+            await asyncio.sleep(30)
+        finally:
+            raise RuntimeError("interruption audit failed")
+
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.policy_service.evaluate_tool_call", return_value={"allowed": True}),
+        patch("app.services.chat.tools.execute_tool_call", AsyncMock(return_value=json.dumps({"success": True}))),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        stream = BaseSpecialistAgent.run_streaming(
+            agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="m"
+        )
+        async for kind, _ in stream:
+            if kind == "progress":
+                break
+        await stream.aclose()
+    assert any(
+        "interruption audit failed" in (r.exc_text or "") or "preparation cleanup" in r.getMessage()
+        for r in caplog.records
+    )
