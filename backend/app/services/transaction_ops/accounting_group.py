@@ -9,9 +9,11 @@ import asyncio
 import hashlib
 import json
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select, text
 
@@ -155,6 +157,15 @@ def reallocation_reason(code):
     return f"Existing-credit reallocation not prepared: {code}."
 
 
+def _crash(exc):
+    """Where a member's preparation crashed: the innermost frame, never the message (it can carry
+    record content). The log line carries the full traceback."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    frame = frames[-1] if frames else None
+    where = f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" if frame else "unknown"
+    return {"type": type(exc).__name__, "where": where}
+
+
 async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, **_):
     from app.mcp.tools.transaction_ops_tools import execute_accounting_evidence
     from app.services.transaction_ops.group_investigation import handoff, summarize
@@ -189,6 +200,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
             )
             routes = []
             investigation_evidence = {}
+            error = None
             try:
                 async with asyncio.timeout(120):
                     evidence = await execute_accounting_evidence(
@@ -252,6 +264,12 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 await child_db.rollback()
                 await set_tenant_context(child_db, str(tenant_id))
                 reason = f"Preparation needs review ({type(exc).__name__})."
+                error = _crash(exc)
+                print(
+                    f"accounting_group: preparation crashed case={member['case_id']} at {error['where']}\n"
+                    + "".join(traceback.format_exception(exc))[-4000:],
+                    flush=True,
+                )
             timing["total_ms"] = elapsed()
             await log_event(
                 child_db,
@@ -262,7 +280,13 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 resource_type="transaction_case",
                 resource_id=member["case_id"],
                 correlation_id=correlation_id,
-                payload={"reason": reason, "investigation_routes": routes, "timing": timing, "financial_writes": 0},
+                payload={
+                    "reason": reason,
+                    "investigation_routes": routes,
+                    "timing": timing,
+                    **({"error": error} if error else {}),
+                    "financial_writes": 0,
+                },
             )
             await child_db.commit()
             return {

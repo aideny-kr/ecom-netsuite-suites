@@ -370,7 +370,7 @@ class TestGroup:
             await reallocation.prepare_group_member(db, TENANT, CASE)
         assert "accounting_correction_candidate" not in db.info
 
-    @pytest.mark.parametrize("outcome", ["prepared", "refused", "crashed"])
+    @pytest.mark.parametrize("outcome", ["prepared", "refused", "crashed", "evidence_crashed"])
     async def test_group_preparation_uses_the_reallocation_when_no_recipe_fits(self, monkeypatch, outcome):
         import asyncio
         from contextlib import asynccontextmanager
@@ -399,6 +399,8 @@ class TestGroup:
             yield child
 
         async def evidence(*args, **kwargs):
+            if outcome == "evidence_crashed":
+                raise KeyError("sales_credit_profile")
             return {"success": True, "accounting_evidence": {}}
 
         async def derive(child_db, tenant_id, case_id):
@@ -440,6 +442,12 @@ class TestGroup:
         if outcome == "prepared":
             card, _ = result
             assert card.accounting_group["members"][0].get("card") and not skipped
+        elif outcome == "evidence_crashed":
+            # R723913613 (2026-09-27) left only "KeyError": where it failed must be on record.
+            payload = skipped[0]["payload"]
+            assert payload["reason"] == "Preparation needs review (KeyError)."
+            assert payload["error"]["type"] == "KeyError"
+            assert payload["error"]["where"].endswith(":evidence")
         else:
             reason = skipped[0]["payload"]["reason"]
             expected = (
