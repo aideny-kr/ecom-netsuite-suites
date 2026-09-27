@@ -434,3 +434,67 @@ async def test_mixed_cached_chunk_prepays_only_missing_source_reads(committed, m
     assert current.api_calls_used == 14 and current.progress_json["source_staged_hits"] == 7
     assert current.progress_json["source_snapshot_hits"] == 3
     writer.assert_awaited_once()
+
+
+@pytest.mark.parametrize("recovery", ["parallel", "cache"])
+async def test_resumed_source_failure_does_not_delay_productive_budget_stop(committed, monkeypatch, recovery):
+    from datetime import timedelta
+
+    from app.services.transaction_ops import continuation, source_snapshot
+    from app.services.transaction_ops.scheduler import _recovery_ids
+
+    db, actor, _ = committed
+    run, refs, reader, _, _, _ = await parallel_setup(committed, monkeypatch, origin="schedule", max_orders=4)
+    original = reader.side_effect
+    failed_ref = refs[3]  # The error must not be attributed to pending_refs[0].
+    run.progress_json = {**run.progress_json, "read_retry_count": 3}
+    await db.commit()
+
+    async def fail(*args, **kwargs):
+        if args[3] == failed_ref:
+            raise SourceReadError("source_transport_failed")
+        return await original(*args, **kwargs)
+
+    reader.side_effect = fail
+    result = await run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "budget"
+    prior = await state.get_run(db, actor.tenant_id, run.id)
+    assert prior.progress_json["last_read_failure"]["order_reference"] == failed_ref
+    assert prior.progress_json["read_stop_run_id"] == str(prior.id)
+    assert prior.progress_json["processed"] == 0
+    # Boundaries are covered separately; avoid advancing evidence clocks here.
+    monkeypatch.setattr(continuation, "READ_RETRY_DELAYS", (timedelta(0),) * 3)
+    child = await continuation.continue_budget_run(db, actor.tenant_id, prior.id)
+    assert child.progress_json["continuation_read_retry_count"] == 1
+    reader.side_effect = original
+    if recovery == "cache":
+        evidence = await original(db, actor.tenant_id, None, failed_ref)
+        await source_snapshot.save(
+            db,
+            actor.tenant_id,
+            UUID(run.config_snapshot["source_connection_id"]),
+            failed_ref,
+            evidence,
+            now=datetime.now(timezone.utc),
+        )
+        await db.commit()
+    before_reads = reader.await_count
+    result = await run_investigation(db, actor.tenant_id, child.id)
+    assert result["termination_reason"] == "budget" and result["processed"] == 4
+    child = await state.get_run(db, actor.tenant_id, child.id)
+    assert child.progress_json["last_read_failure"]["resolved"] is True
+    assert "read_stop_reason" not in child.progress_json
+    assert "read_stop_run_id" not in child.progress_json
+    assert reader.await_count - before_reads == (1 if recovery == "parallel" else 0)
+    assert child.progress_json["pending_refs"] == refs[4:]
+    assert child.progress_json["read_retry_count"] == 3
+    assert child.progress_json["continuation_read_retry_count"] == 1
+    assert child.api_calls_held == 0
+    # Simulate a worker dying after terminal commit, before creating its child.
+    assert child.id in await _recovery_ids(db, actor.tenant_id, datetime.now(timezone.utc))
+    grandchild = await continuation.continue_budget_run(db, actor.tenant_id, child.id)
+    assert grandchild is not None
+    assert grandchild.progress_json["continuation_read_retry_count"] == 1
+    assert grandchild.progress_json["pending_refs"] == refs[4:]
+    assert grandchild.progress_json["evidence_root_id"] == str(prior.id)
+    assert (await continuation.continue_budget_run(db, actor.tenant_id, child.id)).id == grandchild.id

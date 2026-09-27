@@ -147,6 +147,47 @@ async def test_locked_recheck_prevents_overlap_and_same_interval_budget_reset(de
     mod.celery_app.send_task.assert_not_called()
 
 
+@pytest.mark.parametrize("active,minutes,expected", [(False, 4, False), (False, 5, True), (True, 5, False)])
+async def test_same_cycle_transient_failure_wakes_after_backoff_only(
+    dependencies, monkeypatch, active, minutes, expected
+):
+    from app.services.transaction_ops import continuation
+
+    conf = config()
+    prior = previous(
+        "budget",
+        created_at=NOW - timedelta(minutes=15),
+        finished_at=NOW - timedelta(minutes=minutes),
+        progress_json={
+            "schedule_cycle_key": mod._bucket(NOW, conf.interval_minutes),
+            "processed": 79,
+            "scan_count": 140,
+            "continuation_baseline": {"processed": 79, "scan_count": 140},
+            "read_stop_reason": "retry_limit",
+            "read_retry_count": 3,
+            "last_read_failure": {"code": "source_transport_failed", "retryable": True, "resolved": False},
+        },
+    )
+    prior.progress_json["read_stop_run_id"] = str(prior.id)
+    child = SimpleNamespace(id=uuid4(), origin="schedule", status="pending")
+    resume = AsyncMock(return_value=child)
+    monkeypatch.setattr(continuation, "continue_budget_run", resume)
+    dependencies.get_config.return_value = conf
+    mod._candidate_ids.return_value = [conf.id]
+    mod._schedule_history.return_value = (active, prior)
+    stats = await mod.collect_due_runs(AsyncMock(), NOW)
+    dependencies.create_run.assert_not_awaited()  # No fresh cycle or cursor reset.
+    if expected:
+        resume.assert_awaited_once()
+        assert resume.call_args.args[1:] == (TENANT, prior.id)
+        assert resume.call_args.kwargs == {"now": NOW}
+        assert stats["created"] == stats["dispatched"] == 1
+        assert mod.celery_app.send_task.call_args.kwargs["kwargs"]["run_id"] == str(child.id)
+    else:
+        resume.assert_not_awaited()
+        mod.celery_app.send_task.assert_not_called()
+
+
 async def test_long_unobserved_gap_is_explicit_stall(dependencies):
     conf = config()
     prior = previous(params_json=previous().params_json | {"window_end": (NOW - timedelta(days=32)).isoformat()})
@@ -554,3 +595,56 @@ def test_daily_routing_preserves_manual_bulk_and_one_order_recovery(monkeypatch)
     assert mod.investigation_queue("chat", 1) == "recon"
     assert mod.investigation_queue("recovery", 1) == "recon-actions"
     assert mod.investigation_queue("recovery", 2) == "recon"
+
+
+async def test_real_interval_candidate_recovers_transient_stop_without_daily_policy(db, admin_user, monkeypatch):
+    from app.schemas.transaction_runs import ConfigControl, RunCreate
+    from app.services.transaction_ops import state_service as state
+    from tests.conftest import enable_feature_flag
+    from tests.test_transaction_ops_state_db import seed_config
+
+    actor = admin_user[0]
+    conf = await seed_config(db, actor.tenant_id, actor, interval_minutes=1440)
+    await enable_feature_flag(db, actor.tenant_id, "celigo")
+    await enable_feature_flag(db, actor.tenant_id, "reconciliation")
+    await state.control_config(
+        db, actor.tenant_id, conf.id, ConfigControl(enabled=True, schedule_enabled=True), actor=actor
+    )
+    now = datetime.now(timezone.utc).replace(hour=12, minute=30, second=0, microsecond=0)
+    prior = await state.create_run(
+        db,
+        actor.tenant_id,
+        conf.id,
+        RunCreate(
+            origin="schedule",
+            evaluation_key=mod._bucket(now, conf.interval_minutes),
+            order_references=["R100000001"],
+        ),
+        now=now - timedelta(minutes=10),
+    )
+    prior.status, prior.termination_reason = "finished", "budget"
+    prior.finished_at = now - timedelta(minutes=5)
+    prior.progress_json = {
+        "processed": 7,
+        "scan_count": 7,
+        "continuation_baseline": {"processed": 7, "scan_count": 7},
+        "pending_refs": ["R100000001"],
+        "read_retry_count": 3,
+        "read_stop_reason": "retry_limit",
+        "read_stop_run_id": str(prior.id),
+        "last_read_failure": {"code": "source_transport_failed", "retryable": True, "resolved": False},
+    }
+    await db.flush()
+    assert conf.id in await mod._candidate_ids(db, actor.tenant_id, now)
+    assert prior.id not in await mod._recovery_ids(db, actor.tenant_id, now)
+    monkeypatch.setattr(mod, "_reserve_publication", Mock(return_value=True))
+    monkeypatch.setattr(mod, "_refresh_sources", AsyncMock(return_value=0))
+    monkeypatch.setattr(mod.celery_app, "send_task", Mock())
+    stats = await mod.collect_due_runs(db, now)
+    assert stats["created"] == stats["dispatched"] == 1
+    runs = await state.list_runs(db, actor.tenant_id, config_id=conf.id)
+    child = next(r for r in runs if r.id != prior.id)
+    assert child.progress_json["continuation_of"] == str(prior.id)
+    assert child.progress_json["continuation_read_retry_count"] == 1
+    assert child.progress_json["pending_refs"] == ["R100000001"]
+    assert (await mod.collect_due_runs(db, now + timedelta(seconds=1)))["created"] == 0

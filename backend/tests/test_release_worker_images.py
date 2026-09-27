@@ -28,9 +28,15 @@ import yaml
 def test_release_rejects_stale_or_stopped_background_services(tmp_path, workflow, job, failed_service, failure):
     root = Path(__file__).resolve().parents[2]
     definition = yaml.safe_load((root / f".github/workflows/{workflow}.yml").read_text())
-    script = next(
-        step["with"]["script"] for step in definition["jobs"][job]["steps"] if "script" in step.get("with", {})
-    )
+    # A read-only SSH preflight may precede the rollout. Exercise the script
+    # that actually starts containers, not whichever SSH step appears first.
+    rollouts = [
+        step["with"]["script"]
+        for step in definition["jobs"][job]["steps"]
+        if any("compose" in line and " up " in line for line in step.get("with", {}).get("script", "").splitlines())
+    ]
+    assert len(rollouts) == 1, "Expected one container rollout per deployment job"
+    script = rollouts[0]
     up_commands = [shlex.split(line) for line in script.splitlines() if "compose" in line and " up " in line]
     started = [command[command.index("--no-deps") + 1 :] for command in up_commands if "--no-deps" in command]
     # What the release starts and what it health-checks must be the SAME list, and the list
