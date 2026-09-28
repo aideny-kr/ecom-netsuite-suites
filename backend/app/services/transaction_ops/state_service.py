@@ -660,7 +660,21 @@ async def claim_run(db, tenant_id, run_id, *, now=None, coverage_only=False):
     row = await get_run(db, tenant_id, run_id)
     calendar = calendar_collection(row)
     config = await get_config(db, tenant_id, row.config_id, lock=True) if calendar else None
-    row = await get_run(db, tenant_id, run_id, lock=True)
+    if calendar:
+        # propose() legitimately holds the run before its configuration. Never
+        # wait for that row while holding the config, including redeliveries of
+        # a currently leased run. The owning operation can finish unhindered.
+        row = await db.scalar(
+            select(TransactionRun)
+            .where(TransactionRun.tenant_id == tenant_id, TransactionRun.id == run_id)
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            await _commit(db, tenant_id)
+            return None
+    else:
+        row = await get_run(db, tenant_id, run_id, lock=True)
     now = await run_clock(db, now)
     if row.status == "finished":
         await _commit(db, tenant_id)
@@ -686,9 +700,12 @@ async def claim_run(db, tenant_id, run_id, *, now=None, coverage_only=False):
         await _commit(db, tenant_id)
         return None
     if coverage_only and (not row.params_json.get("review") or row.status != "pending"):
-        raise StateError("invalid_coverage_claim")
+        # A queued review may have been claimed since receipt validation.
+        # Let its owner finish instead of turning an idempotent retry into 409.
+        await _commit(db, tenant_id)
+        return None
     if calendar and not coverage_only:
-        blocker = await collection_blocker(db, tenant_id, row, now)
+        blocker = await collection_blocker(db, tenant_id, row, now, scheduled_enabled=config.schedule_enabled)
         if blocker is not None:
             waiting = {"run_id": str(blocker.id), "reason": "overlapping_collection"}
             if (row.progress_json or {}).get("collection_wait") != waiting:
