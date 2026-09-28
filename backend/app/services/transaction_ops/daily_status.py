@@ -12,9 +12,10 @@ from app.services.transaction_ops.daily_evidence import coverage_receipt, reuses
 from app.services.transaction_ops.periods import ReconciliationPolicy, scheduled_window
 
 
-async def daily_status(db, tenant_id, *, now=None):
+async def daily_status(db, tenant_id, *, now=None, configs=None):
     now = now or datetime.now(timezone.utc)
-    configs = await state_service.list_configs(db, tenant_id)
+    if configs is None:
+        configs = await state_service.list_configs(db, tenant_id)
     result = []
     for config in configs:
         policy = ReconciliationPolicy.model_validate((config.mapping_json or {}).get("reconciliation_policy") or {})

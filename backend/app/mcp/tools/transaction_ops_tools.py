@@ -19,7 +19,7 @@ from app.workers.celery_app import celery_app
 _PARAMS = {
     "configs": frozenset(),
     "run": frozenset({"config_id", "order_references", "window_start", "window_end"}),
-    "status": frozenset({"run_id", "case_id"}),
+    "status": frozenset({"run_id", "case_id", "config_id", "limit", "offset"}),
     "groups": frozenset({"group_id", "limit", "offset", "review_run_ids", "status", "search"}),
 }
 _MAX_FINDINGS = 100
@@ -234,6 +234,20 @@ async def _execute(operation, params, context):
                 "status": run.status,
                 "dispatch_status": dispatch_status,
                 "review_url": f"/transaction-operations/runs/{run.id}",
+            }
+        if operation == "status" and not ({"run_id", "case_id"} & set(params)):
+            from app.services.transaction_ops.operational_status import chat_table, operational_status
+
+            if not await has_permission(db, actor.id, "recon.run"):
+                raise _ToolError("permission_denied")
+            result = await operational_status(db, tenant_id, **params)
+            return {
+                "success": True,
+                **result,
+                **chat_table(result),
+                "interpretation": "Scan coverage is not financial certification. Counts belong to the saved run "
+                "checkpoint, not an entire period. Eligible times are not dispatch receipts. "
+                "State update time is not a last-progress timestamp. No providers were queried.",
             }
         if set(params) not in ({"run_id"}, {"case_id"}):
             raise _ToolError("invalid_parameters")
