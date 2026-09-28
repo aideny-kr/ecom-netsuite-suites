@@ -169,3 +169,11 @@ async def test_sonnet_5_reasoning_stays_out_of_the_chat():
 def test_sonnet_5_5_can_be_chosen_in_settings():
     assert NEW in VALID_MODELS["anthropic"]
     assert TenantConfigUpdate(ai_model=NEW).ai_model == NEW
+
+
+def test_the_progress_updates_beta_joins_any_headers_already_set():
+    # Gate wf_72de7a81 (minor): the beta header replaced extra_headers wholesale.
+    kwargs = {"extra_headers": {"x-request-id": "r1", "anthropic-beta": "other-beta"}}
+    aa._apply_thinking(kwargs, NEW, 100, "high", None)
+    assert kwargs["extra_headers"]["x-request-id"] == "r1"
+    assert kwargs["extra_headers"]["anthropic-beta"].split(",") == ["other-beta", aa._PROGRESS_UPDATES_BETA]

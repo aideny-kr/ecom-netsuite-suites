@@ -59,7 +59,8 @@ def _apply_thinking(
       back as thinking blocks, empty unless requested.
     """
     mode = _thinking.thinking_mode(model)
-    off = {"type": "between_tools"} if _thinking.uses_between_tools(model) else {"type": "disabled"}
+    between_tools = _thinking.uses_between_tools(model)
+    off = {"type": "between_tools"} if between_tools else {"type": "disabled"}
 
     if thinking_level in (None, "none") or _thinking.is_forced_tool_choice(tool_choice):
         # Adaptive-default models (Sonnet 5) think unless explicitly disabled —
@@ -74,9 +75,12 @@ def _apply_thinking(
             kwargs["thinking"] = off
             return
         kwargs["thinking"] = {"type": "adaptive"}
-        if _thinking.uses_between_tools(model):
+        if between_tools:
             kwargs["thinking"]["display"] = "updates"
-            kwargs["extra_headers"] = {"anthropic-beta": _PROGRESS_UPDATES_BETA}
+            headers = dict(kwargs.get("extra_headers") or {})
+            betas = [b for b in (headers.get("anthropic-beta") or "").split(",") if b]
+            headers["anthropic-beta"] = ",".join([*betas, _PROGRESS_UPDATES_BETA])
+            kwargs["extra_headers"] = headers
         output_config = dict(kwargs.get("output_config") or {})
         output_config["effort"] = effort
         kwargs["output_config"] = output_config
@@ -105,7 +109,12 @@ async def _chat_text(stream, progress_in_thinking: bool):
         if event.type == "content_block_start":
             new_block = True
             continue
-        piece = event.text if event.type == "text" else event.thinking if event.type == "thinking" else None
+        if event.type == "text":
+            piece = event.text
+        elif event.type == "thinking":
+            piece = event.thinking
+        else:
+            piece = None
         if not piece:
             continue
         if new_block and shown:
