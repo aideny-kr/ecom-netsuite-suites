@@ -4,7 +4,7 @@ Use the global task/model preferences. Work directly with one lead unless suppor
 
 ## Domain knowledge
 
-`.agents/skills` exposes the maintained `.claude/skills` files by relative symlink; edit the canonical files rather than copying them. Use applicable NetSuite/system-specific skills when implementing or diagnosing those systems. Generic SQL or framework knowledge does not override verified account/connector quirks.
+The maintained domain skills live in `.claude/skills`. Local workspaces may expose them through `.agents/skills` symlinks; edit the canonical files rather than copying them. Use applicable NetSuite/system-specific skills when implementing or diagnosing those systems. Generic SQL or framework knowledge does not override verified account/connector quirks.
 
 For NetSuite queries, read `netsuite-mastery` and its connector contract. Preserve raw status versus display values, transaction/header aggregation grain, fiscal periods, currency context, role visibility, custom fields, governance and connector-specific pagination. Reuse applicable verified evidence; qualify observations by their scope.
 
@@ -26,7 +26,9 @@ Before required review, follow `scripts/review_packet/README.md` to prepare a pa
 
 ## Current handoff
 
-`docs/handoff/2026-09-20-recon-budget-and-tax-proof.md` — read before touching reconcile
+Operator-local `docs/handoff/2026-09-20-recon-budget-and-tax-proof.md` — read before touching reconcile
 budget accounting or the refund tax proof. It carries the shipped state (#277 migration 110,
 #278), the 30 Framework Inc cases still reopening, the exact profile write that activates the
 tax proof (user's explicit go required), and the answered nexus / Solidus-refund-tax questions.
+
+That handoff is not bundled in fresh clones. If unavailable, obtain the current verified handoff before changing those budget/tax controls; do not infer financial activation authority from this file.

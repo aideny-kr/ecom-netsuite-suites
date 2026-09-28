@@ -181,6 +181,21 @@ class PacketTests(unittest.TestCase):
         with self.assertRaises(packet.Invalid):
             packet.prepare(self.repo, "example/repo", "--help", self.head, self.brief)
 
+    def test_renamed_tooling_cannot_escape_tier_guard(self):
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts/gate.py").write_text('print("gate")\n')
+        self.git("add", ".")
+        self.git("commit", "-qm", "tooling base")
+        self.base = self.git("rev-parse", "HEAD")
+        (self.repo / "docs").mkdir()
+        self.git("mv", "scripts/gate.py", "docs/gate.md")
+        self.git("commit", "-qm", "rename")
+        self.head = self.git("rev-parse", "HEAD")
+        for tier in ["T0", "T1"]:
+            self.brief["tier"] = tier
+            with self.subTest(tier=tier), self.assertRaises(packet.Invalid):
+                self.prepare()
+
     def test_code_cannot_claim_docs_only_exemption(self):
         self.brief["tier"] = "T0"
         with self.assertRaises(packet.Invalid):

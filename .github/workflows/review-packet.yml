@@ -20,7 +20,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: review-packet-gate
+  group: review-packet-${{ github.event.pull_request.number || inputs.pr || github.ref }}
   cancel-in-progress: false
 
 jobs:

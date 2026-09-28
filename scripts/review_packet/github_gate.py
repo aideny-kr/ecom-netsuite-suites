@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Trusted-branch CI adapter. Fetches Git objects; never checks out/executes PR code."""
 
+import hashlib
 import json
 import os
 import re
@@ -18,13 +19,16 @@ def api(route, data=None):
     args = ["gh", "api", route]
     if data is not None:
         args += ["--method", "POST", "--input", "-"]
-    result = subprocess.run(
-        args,
-        input=json.dumps(data) if data is not None else None,
-        text=True,
-        capture_output=True,
-        timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            args,
+            input=json.dumps(data) if data is not None else None,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise packet.Invalid("GitHub API timed out") from exc
     if result.returncode:
         raise packet.Invalid(
             "GitHub API failed (response omitted): " + route.split("?")[0]
@@ -72,10 +76,22 @@ def identity(pr):
         pr.get("body") or "",
         pr["state"],
         pr["draft"],
+        pr["base"]["ref"],
     )
 
 
-def status(repository, head, state, description):
+def context_for(base_ref):
+    # Same commit can target distinct bases; its reviews must not share a status.
+    packet.text_value(base_ref, "base ref")
+    suffix = (
+        base_ref
+        if len(base_ref) <= 60
+        else base_ref[:40] + "-" + hashlib.sha256(base_ref.encode()).hexdigest()[:16]
+    )
+    return CONTEXT + "/" + suffix
+
+
+def status(repository, head, state, description, *, base_ref):
     run_url = (
         f"https://github.com/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
     )
@@ -83,7 +99,7 @@ def status(repository, head, state, description):
         f"repos/{repository}/statuses/{head}",
         {
             "state": state,
-            "context": CONTEXT,
+            "context": context_for(base_ref),
             "description": description[:140],
             "target_url": run_url,
         },
@@ -95,11 +111,17 @@ def evaluate(repository, number, out):
     pr = api(f"repos/{repository}/pulls/{number}")
     if pr["state"] != "open":
         return True
-    base, head, body, _, draft = identity(pr)
+    base, head, body, _, draft, base_ref = identity(pr)
     packet.require(
         all(re.fullmatch("[0-9a-f]{40}", sha) for sha in [base, head]), "invalid PR SHA"
     )
-    status(repository, head, "pending", "Preparing exact-revision review packet")
+    status(
+        repository,
+        head,
+        "pending",
+        "Preparing exact-revision review packet",
+        base_ref=base_ref,
+    )
     verdict, description = "failure", "Review packet could not be verified"
     try:
         brief = packet.extract(body, "brief")
@@ -165,9 +187,10 @@ def evaluate(repository, number, out):
             head,
             "pending",
             "PR changed during verification; waiting for fresh packet",
+            base_ref=base_ref,
         )
         return False
-    status(repository, head, verdict, description)
+    status(repository, head, verdict, description, base_ref=base_ref)
     print(f"PR {number}: {verdict}")
     return verdict == "success"
 
@@ -181,11 +204,17 @@ def main():
     event = packet.parse_json(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     out = Path("review-packet-artifacts")
     out.mkdir(exist_ok=True)
-    results = [
-        evaluate(repository, number, out)
-        for number in targets(os.environ["GITHUB_EVENT_NAME"], event, repository)
-    ]
-    return 0 if all(results) else 1
+    results, errors = [], []
+    event_name = os.environ["GITHUB_EVENT_NAME"]
+    for number in targets(event_name, event, repository):
+        try:
+            results.append(evaluate(repository, number, out))
+        except (packet.Invalid, KeyError, TypeError, ValueError, OSError) as exc:
+            errors.append({"pr": number, "error_type": type(exc).__name__})
+            # One unavailable PR must not prevent other PRs from being invalidated.
+    (out / "evaluation-errors.json").write_text(json.dumps(errors, indent=2))
+    # Missing reviews are ordinary PR statuses, not a broken base-branch push job.
+    return 0 if not errors and (event_name == "push" or all(results)) else 1
 
 
 if __name__ == "__main__":
