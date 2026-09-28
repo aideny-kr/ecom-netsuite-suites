@@ -425,6 +425,7 @@ async def create_run(
     now=None,
     resume_from_run_id=None,
     automatic_continuation=False,
+    automatic_auth_recovery=False,
     human_retry=False,
 ):
     now = await run_clock(db, now)
@@ -433,6 +434,8 @@ async def create_run(
     ):
         raise StateError("invalid_run_continuation")
     config = await get_config(db, tenant_id, config_id, lock=True)
+    if automatic_auth_recovery and (not automatic_continuation or request.origin != "schedule" or human_retry):
+        raise StateError("invalid_run_continuation")
     if not config.enabled:
         raise StateError("config_disabled")
     if request.origin == "schedule":
@@ -464,12 +467,18 @@ async def create_run(
     initial_progress = {}
     if resume_from_run_id is not None:
         previous = await get_run(db, tenant_id, resume_from_run_id)
+        if automatic_auth_recovery:
+            from app.services.transaction_ops.auth_recovery import auth_resume_ready
+
+            if not await auth_resume_ready(db, tenant_id, previous, config, now):
+                raise StateError("invalid_run_continuation")
         previous_scope = {k: v for k, v in previous.params_json.items() if k not in {"evaluation_key", "origin"}}
         new_scope = {k: v for k, v in params.items() if k not in {"evaluation_key", "origin"}}
         if (
             previous.config_id != config.id
             or previous.status != "finished"
-            or previous.termination_reason not in ({"budget", "stall", "error"} if human_retry else {"budget", "stall"})
+            or previous.termination_reason
+            not in ({"budget", "stall", "error"} if human_retry or automatic_auth_recovery else {"budget", "stall"})
             or previous_scope != new_scope
         ):
             raise StateError("invalid_run_continuation")
@@ -519,7 +528,7 @@ async def create_run(
 
             metadata = next_metadata(previous, now)
             if (
-                previous.termination_reason != "budget"
+                (previous.termination_reason != "budget" and not automatic_auth_recovery)
                 or request.origin != previous.origin
                 or request.evaluation_key
                 != f"continue:{metadata['continuation_root_id']}:{metadata['continuation_part']}"

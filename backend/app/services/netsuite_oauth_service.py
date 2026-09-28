@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import math
 import os
 import time
 import urllib.parse
@@ -164,70 +165,95 @@ async def refresh_tokens_with_client(account_id: str, refresh_token: str, client
         return resp.json()
 
 
-async def get_valid_token(db: AsyncSession, connection) -> str | None:
-    """Get a valid access token, auto-refreshing if expired.
+def _usable_token(credentials, min_validity_seconds, rejected_token_sha=None):
+    import hashlib
 
-    Updates the connection's encrypted_credentials in-place if a refresh occurs.
-    Caller is responsible for committing the transaction.
-    """
-    credentials = decrypt_credentials(connection.encrypted_credentials)
-
-    # OAuth 2.0 credentials have 'access_token'; OAuth 1.0 have 'consumer_key'
-    access_token = credentials.get("access_token")
-    if not access_token:
+    token = credentials.get("access_token")
+    expires = credentials.get("expires_at", 0)
+    if not isinstance(token, str) or not token or type(expires) not in (int, float) or not math.isfinite(expires):
         return None
+    if time.time() >= expires - min_validity_seconds:
+        return None
+    if rejected_token_sha and hashlib.sha256(token.encode()).hexdigest() == rejected_token_sha:
+        return None
+    return token
 
-    expires_at = credentials.get("expires_at", 0)
-    # Refresh if token expires within 60 seconds (matches reference app)
-    if time.time() < (expires_at - 60):
-        return access_token
 
-    # ── Lock: prevent concurrent refresh of same connection ──
-    from app.core.redis_lock import acquire_lock, release_lock
+async def get_valid_token(
+    db: AsyncSession, connection, *, min_validity_seconds=60, rejected_token_sha=None
+) -> str | None:
+    """Return a sufficiently valid token, serializing and committing any rotation.
 
-    lock_key = f"oauth_refresh:{connection.id}"
+    A rejected token may be replaced once by the read caller, which reserves the
+    extra OAuth/read spend. A different current token wins over another refresh.
+    """
+    import asyncio
 
-    if not acquire_lock(lock_key, timeout=30):
-        # Another process is refreshing — wait briefly, then re-read
-        import asyncio
+    from app.models.connection import RETIRED_CONNECTION_STATUSES
+    from app.services import oauth_refresh_lock
 
-        await asyncio.sleep(2)
-        await db.refresh(connection)
-        credentials = decrypt_credentials(connection.encrypted_credentials)
-        return credentials.get("access_token")
+    if type(min_validity_seconds) is not int or not 60 <= min_validity_seconds <= 600:
+        raise ValueError("invalid_token_validity_margin")
+    credentials = decrypt_credentials(connection.encrypted_credentials)
+    identity = (credentials.get("account_id"), credentials.get("client_id"))
 
-    try:
-        # Re-check after acquiring lock (another process may have finished)
-        await db.refresh(connection)
-        credentials = decrypt_credentials(connection.encrypted_credentials)
-        if time.time() < (credentials.get("expires_at", 0) - 60):
-            return credentials["access_token"]
-
-        # Need to refresh
-        refresh_token = credentials.get("refresh_token")
-        account_id = credentials.get("account_id")
-        if not refresh_token or not account_id:
-            logger.warning("netsuite.oauth2.missing_refresh_info", connection_id=str(connection.id))
+    def usable(current):
+        if getattr(connection, "status", None) in RETIRED_CONNECTION_STATUSES:
             return None
+        if (current.get("account_id"), current.get("client_id")) != identity:
+            return None
+        return _usable_token(current, min_validity_seconds, rejected_token_sha)
 
-        # Always use the stored per-connection client_id — each connection has its
-        # own Integration Record in NetSuite with its own Client ID.
-        client_id = credentials.get("client_id", "")
-        if not client_id:
-            logger.warning("netsuite.oauth2.no_client_id", connection_id=str(connection.id))
+    if token := usable(credentials):
+        return token
+    if not credentials.get("access_token"):
+        return None
+    lock_key = f"oauth_refresh:{connection.id}"
+    owner = oauth_refresh_lock.acquire(lock_key)
+    if owner is None:
+        # Another process may still be rotating. Never return its expired token
+        # and never race it for the same single-use refresh token.
+        for _ in range(5):
+            await asyncio.sleep(1)
+            await db.refresh(connection)
+            credentials = decrypt_credentials(connection.encrypted_credentials)
+            if token := usable(credentials):
+                return token
+        return None
+    try:
+        await db.refresh(connection)
+        credentials = decrypt_credentials(connection.encrypted_credentials)
+        if token := usable(credentials):
+            return token
+        if (
+            getattr(connection, "status", None) in RETIRED_CONNECTION_STATUSES
+            or (credentials.get("account_id"), credentials.get("client_id")) != identity
+        ):
+            return None
+        refresh_token = credentials.get("refresh_token")
+        account_id, client_id = identity
+        if not refresh_token or not account_id or not client_id:
             return None
         token_data = await refresh_tokens_with_client(account_id, refresh_token, client_id)
+        issued = time.time()
         credentials["access_token"] = token_data["access_token"]
         credentials["refresh_token"] = token_data.get("refresh_token", refresh_token)
-        credentials["expires_at"] = time.time() + int(token_data.get("expires_in", 3600))
-
+        credentials["issued_at"] = issued
+        credentials["expires_in"] = int(token_data.get("expires_in", 3600))
+        credentials["expires_at"] = issued + credentials["expires_in"]
         connection.encrypted_credentials = encrypt_credentials(credentials)
-        await db.commit()
-
+        # Once the provider has rotated its single-use token, finish persisting
+        # the replacement before releasing ownership, even on caller cancellation.
+        commit = asyncio.create_task(db.commit())
+        try:
+            await asyncio.shield(commit)
+        except asyncio.CancelledError:
+            await commit
+            raise
         logger.info("netsuite.oauth2.token_refreshed", connection_id=str(connection.id))
-        return credentials["access_token"]
+        return usable(credentials)
     except Exception:
         logger.exception("netsuite.oauth2.refresh_failed", connection_id=str(connection.id))
         return None
     finally:
-        release_lock(lock_key)
+        oauth_refresh_lock.release(lock_key, owner)
