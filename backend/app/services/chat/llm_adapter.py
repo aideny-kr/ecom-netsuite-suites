@@ -29,9 +29,10 @@ class LLMResponse:
     tool_use_blocks: list[ToolUseBlock] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
     thinking_blocks: list[dict] = field(default_factory=list)
-    # (kind, index into the list for that kind) per block, in the order the provider returned
-    # them. Empty = unknown, and an adapter falls back to its fixed layout.
-    content_order: list[tuple[str, int]] = field(default_factory=list)
+    # The assistant content exactly as the provider returned it, for replay on the next step.
+    # What is shown or saved (text_blocks) is separate and may differ. Empty = not captured,
+    # and an adapter builds its own layout.
+    replay_content: list[dict] = field(default_factory=list)
 
 
 class BaseLLMAdapter(abc.ABC):

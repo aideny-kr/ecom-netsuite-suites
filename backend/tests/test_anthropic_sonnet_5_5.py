@@ -257,3 +257,41 @@ def test_thinking_is_shown_only_when_the_request_asked_for_progress_updates():
     assert not aa._progress_updates_requested({"thinking": {"type": "adaptive"}})
     assert not aa._progress_updates_requested({"thinking": {"type": "adaptive", "display": "summarized"}})
     assert not aa._progress_updates_requested({})
+
+
+_SHAPES = {
+    "answer": ([("text", "Done.")], "end_turn"),
+    "note then call": ([("thinking", "Checking."), ("tool_use", None, "review")], "tool_use"),
+    "interleaved": (
+        [("thinking", "A."), ("tool_use", None, "review"), ("thinking", "B."), ("tool_use", None, "review")],
+        "tool_use",
+    ),
+    "note only": ([("thinking", "The credit memo already nets the tax to zero.")], "end_turn"),
+}
+
+
+@pytest.mark.parametrize("shape", list(_SHAPES))
+async def test_a_turn_is_replayed_exactly_as_the_api_returned_it(shape):
+    # Gate wf_f87a590a (majors 1,2,4,5): replay was rebuilt from two representations that
+    # could disagree. It is now the returned content itself; what is shown is separate.
+    blocks, stop = _SHAPES[shape]
+    adapter, events = await _stream_blocks(blocks, stop)
+    content = adapter.build_assistant_message(events[-1][1])["content"]
+    expected = []
+    for i, (kind, text, *tool) in enumerate(blocks):
+        if kind == "thinking":
+            expected.append({"type": "thinking", "thinking": text, "signature": f"s{i}"})
+        elif kind == "text":
+            expected.append({"type": "text", "text": text})
+        else:
+            expected.append({"type": "tool_use", "id": f"toolu_{i}", "name": tool[0], "input": {}})
+    assert content == expected
+
+
+async def test_a_forced_call_the_model_answered_in_prose_is_logged(capsys):
+    # Gate wf_f87a590a (major 3, minor 8): on 5.5 a forced tool call is only asked for. The
+    # callers already treat a missing call as a failed call; this makes the rate visible.
+    await _sent(NEW, tools=[TOOL], tool_choice={"type": "tool", "name": "review"}, thinking_level="none")
+    assert "llm.forced_tool_unanswered" in capsys.readouterr().out
+    await _sent(OLD, tools=[TOOL], tool_choice={"type": "tool", "name": "review"}, thinking_level="none")
+    assert "llm.forced_tool_unanswered" not in capsys.readouterr().out

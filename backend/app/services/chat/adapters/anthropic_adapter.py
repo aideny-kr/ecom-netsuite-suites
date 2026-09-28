@@ -132,27 +132,31 @@ def _progress_updates_requested(kwargs: dict) -> bool:
 
 
 def _response_from(message, *, progress: bool) -> LLMResponse:
-    """One parse for the blocking and streaming paths, keeping the order the blocks arrived
-    in: a Sonnet 5.5 thinking block is signed over everything before it, so a replay that
-    moves it can be rejected."""
+    """One pass for the blocking and streaming paths. Replay is the returned content itself, in
+    its order, signatures included: a Sonnet 5.5 thinking block is signed over everything
+    before it, so a rebuilt or reordered replay can be rejected. What is shown and saved
+    (text_blocks) is derived separately and never feeds the replay."""
     text_blocks: list[str] = []
     tool_use_blocks: list[ToolUseBlock] = []
-    order: list[tuple[str, int]] = []
-    thinking_blocks = _extract_thinking_blocks(message.content)
-    thinking_seen = 0
+    thinking_blocks: list[dict] = []
+    replay: list[dict] = []
     for block in message.content:
         if block.type == "text":
-            order.append(("text", len(text_blocks)))
             text_blocks.append(block.text)
+            replay.append({"type": "text", "text": block.text})
         elif block.type == "tool_use":
-            order.append(("tool_use", len(tool_use_blocks)))
             tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
-        elif block.type in ("thinking", "redacted_thinking"):
-            order.append(("thinking", thinking_seen))
-            thinking_seen += 1
+            # The same input object as the ToolUseBlock, as the fixed layout always sent.
+            replay.append({"type": "tool_use", "id": block.id, "name": block.name, "input": block.input})
+        elif block.type == "thinking":
+            thinking_blocks.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
+            replay.append(thinking_blocks[-1])
+        elif block.type == "redacted_thinking":
+            thinking_blocks.append({"type": "redacted_thinking", "data": block.data})
+            replay.append(thinking_blocks[-1])
     if progress and not text_blocks and not tool_use_blocks:
-        # A note with no call after it is the answer: the chat already showed it, so it is
-        # also what is saved and carried into the next turn.
+        # A note with no call after it is the answer the chat already showed, so it is what is
+        # saved. The replay stays the thinking block, which gives the model its full note.
         notes = [b["thinking"] for b in thinking_blocks if b.get("thinking")]
         if notes:
             text_blocks = ["\n\n".join(notes)]
@@ -161,20 +165,19 @@ def _response_from(message, *, progress: bool) -> LLMResponse:
         tool_use_blocks=tool_use_blocks,
         usage=_usage_from(message.usage),
         thinking_blocks=thinking_blocks,
-        content_order=order,
+        replay_content=replay,
     )
 
 
-def _extract_thinking_blocks(content) -> list[dict]:
-    """Pull thinking / redacted_thinking blocks out of a message's content,
-    preserving signatures — required to echo them back across tool-use turns."""
-    blocks: list[dict] = []
-    for block in content:
-        if block.type == "thinking":
-            blocks.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
-        elif block.type == "redacted_thinking":
-            blocks.append({"type": "redacted_thinking", "data": block.data})
-    return blocks
+def _note_unanswered_forced_call(model: str, tool_choice, response: LLMResponse) -> None:
+    """On Sonnet 5.5 a forced tool call is only asked for in the prompt (it cannot be forced).
+    Callers treat a reply without the call as a failed call; this line makes the rate visible."""
+    if not (_thinking.uses_between_tools(model) and _thinking.is_forced_tool_choice(tool_choice)):
+        return
+    if response.tool_use_blocks:
+        return
+    wanted = tool_choice.get("name", "any") if isinstance(tool_choice, dict) else "any"
+    print(f"llm.forced_tool_unanswered purpose={current_purpose()} model={model} tool={wanted}", flush=True)
 
 
 # Wall-clock deadline for a single stream_message call — PER LLM HOP, not per
@@ -463,7 +466,9 @@ class AnthropicAdapter(BaseLLMAdapter):
         response = await self._client.messages.create(**kwargs)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         _log_usage(model, response.usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
-        return _response_from(response, progress=_progress_updates_requested(kwargs))
+        parsed = _response_from(response, progress=_progress_updates_requested(kwargs))
+        _note_unanswered_forced_call(model, tool_choice, parsed)
+        return parsed
 
     async def stream_message(
         self,
@@ -560,30 +565,19 @@ class AnthropicAdapter(BaseLLMAdapter):
             retries=attempt,
         )
 
-        yield "response", _response_from(final_message, progress=progress_in_thinking)
+        parsed = _response_from(final_message, progress=progress_in_thinking)
+        _note_unanswered_forced_call(model, tool_choice, parsed)
+        yield "response", parsed
 
     def build_tool_result_message(self, tool_results: list[dict]) -> dict:
         return {"role": "user", "content": tool_results}
 
     def build_assistant_message(self, response: LLMResponse) -> dict:
-        def tool_use(tool):
-            return {"type": "tool_use", "id": tool.id, "name": tool.name, "input": tool.input}
-
-        order = response.content_order
-        counts = {"thinking": len(response.thinking_blocks), "tool_use": len(response.tool_use_blocks)}
-        if (
-            order
-            and all(sorted(i for kind, i in order if kind == key) == list(range(n)) for key, n in counts.items())
-            and all(i < len(response.text_blocks) for kind, i in order if kind == "text")
-        ):
-            # Replay exactly as returned: a Sonnet 5.5 thinking block is signed over what
-            # precedes it, so [note, call, note, call] must not become [note, note, call, call].
-            render = {
-                "thinking": lambda i: response.thinking_blocks[i],
-                "text": lambda i: {"type": "text", "text": response.text_blocks[i]},
-                "tool_use": lambda i: tool_use(response.tool_use_blocks[i]),
-            }
-            return {"role": "assistant", "content": [render[kind](i) for kind, i in order]}
+        if response.replay_content:
+            # Exactly as returned (see _response_from): [note, call, note, call] stays in that
+            # order, and a note-only answer replays as its thinking block.
+            return {"role": "assistant", "content": list(response.replay_content)}
+        # A response built by hand (tests, synthetic replies) has no captured content.
         content: list[dict] = []
         # Thinking blocks MUST come first when present (required for tool-use
         # continuation in a thinking-enabled turn).
@@ -591,5 +585,5 @@ class AnthropicAdapter(BaseLLMAdapter):
         for text in response.text_blocks:
             content.append({"type": "text", "text": text})
         for tool in response.tool_use_blocks:
-            content.append(tool_use(tool))
+            content.append({"type": "tool_use", "id": tool.id, "name": tool.name, "input": tool.input})
         return {"role": "assistant", "content": content}
