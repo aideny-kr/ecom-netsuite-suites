@@ -189,6 +189,17 @@ async def _candidate_ids(db, tenant_id, now):
             run.progress_json["continuation_part"].astext == str(MAX_PARTS),
         )
     )
+    auth_stop = exists(
+        select(run.id).where(
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.created_at == latest.c.latest_at,
+            run.origin == "schedule",
+            run.status == "finished",
+            run.termination_reason == "error",
+            run.progress_json["last_read_failure"]["code"].astext == "netsuite_upstream_http_401",
+        )
+    )
     query = (
         select(config.id)
         .outerjoin(latest, latest.c.config_id == config.id)
@@ -204,6 +215,7 @@ async def _candidate_ids(db, tenant_id, now):
                 config.mapping_json["reconciliation_policy"].astext.is_not(None),
                 latest_read_stop,
                 legacy_part_stop,
+                auth_stop,
             ),
         )
         .order_by(latest.c.latest_at.asc().nullsfirst(), config.created_at, config.id)
@@ -431,14 +443,16 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             and latest is not None
                             and latest.termination_reason == "done"
                         )
+                        from app.services.transaction_ops.auth_recovery import auth_stop
                         from app.services.transaction_ops.continuation import (
                             continue_budget_run,
                             read_retry_due,
                             scheduled_part_resume_candidate,
                         )
 
-                        resume_due = already_due and (
-                            read_retry_due(latest, now) or scheduled_part_resume_candidate(latest, now)
+                        resume_due = auth_stop(latest) or (
+                            already_due
+                            and (read_retry_due(latest, now) or scheduled_part_resume_candidate(latest, now))
                         )
                         if (
                             not config.enabled

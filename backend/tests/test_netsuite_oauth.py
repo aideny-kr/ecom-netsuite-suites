@@ -152,6 +152,8 @@ class TestGetValidToken:
             ) as mock_refresh,
             patch("app.services.netsuite_oauth_service.encrypt_credentials", return_value="encrypted"),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
+            patch("app.services.oauth_refresh_lock.acquire", return_value="test-owner"),
+            patch("app.services.oauth_refresh_lock.release"),
             patch("app.core.redis_lock.release_lock"),
         ):
             mock_refresh.return_value = {

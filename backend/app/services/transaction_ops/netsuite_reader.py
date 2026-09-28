@@ -299,7 +299,10 @@ class _Reader:
                 if response.status_code != 200:
                     if response.status_code == 429 and self.max_concurrent_calls > 1:
                         self.throttled = True  # Do not send queued calls after a throttle.
-                    raise NetSuiteEvidenceError(f"upstream_http_{response.status_code}")
+                    error = NetSuiteEvidenceError(f"upstream_http_{response.status_code}")
+                    if response.status_code == 401 and self.read_scope is not None:
+                        error.auth_read_scope = self.read_scope
+                    raise error
                 content = bytearray()
                 async for chunk in response.aiter_bytes():
                     if len(content) + len(chunk) > MAX_RESPONSE_BYTES:
@@ -499,7 +502,13 @@ async def authenticated_reader(
     try:
         # Existing helper commits credential rotation itself. Do not commit the
         # caller's other work on every read; SET LOCAL needs restoring either way.
-        token = await asyncio.wait_for(get_valid_token(db, connection), timeout=45)
+        from app.services.transaction_ops.auth_recovery import rejected_read_scope
+
+        rejected = rejected_read_scope.get()
+        options = {"min_validity_seconds": 300}
+        if rejected is not None and rejected[:3] == (str(tenant), str(connection_uuid), account):
+            options["rejected_token_sha"] = rejected[3]
+        token = await asyncio.wait_for(get_valid_token(db, connection, **options), timeout=45)
     except Exception:
         raise NetSuiteEvidenceError("authentication_failed") from None
     finally:
