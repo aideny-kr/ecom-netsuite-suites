@@ -109,7 +109,7 @@ def resolve_read_failure(progress, *, stage, reference):
 def read_failure(exc, progress, *, stage, reference=None):
     pending = progress.get("pending_refs")
     reference = reference if reference is not None else pending[0] if isinstance(pending, list) and pending else None
-    return {
+    failure = {
         "code": safe_read_code(exc),
         "retryable": transient_read_code(exc) is not None,
         "resolved": False,
@@ -124,6 +124,10 @@ def read_failure(exc, progress, *, stage, reference=None):
         },
         "observed_at": datetime.now(timezone.utc).isoformat(),
     }
+    scope = getattr(exc, "auth_read_scope", None)
+    if isinstance(exc, NetSuiteEvidenceError) and str(exc) == "upstream_http_401" and scope is not None:
+        failure.update(auth_connection_id=scope[1], auth_account_id=scope[2], auth_token_sha256=scope[3])
+    return failure
 
 
 async def read_with_recovery(
@@ -141,16 +145,23 @@ async def read_with_recovery(
 ):
     """The caller reserves the first read; every retry reserves its full cost.
 
-    The persisted count spans continuations. Unknown failures, incomplete
-    evidence, authentication failures and writes are never retried here.
+    Counts span continuations. Native 401 gets one separately metered read
+    attempt with a different credential; other auth failures and writes do not.
     """
+    from app.services.transaction_ops.auth_recovery import rejected_read_scope
+
+    rejected_scope = None
     while True:
         seconds = remaining()
         if seconds <= 0:
             raise TimeoutError
         try:
-            async with asyncio.timeout(min(seconds, 170)):
-                result = await factory()
+            context = rejected_read_scope.set(rejected_scope)
+            try:
+                async with asyncio.timeout(min(seconds, 170)):
+                    result = await factory()
+            finally:
+                rejected_read_scope.reset(context)
             pending = progress.get("pending_refs") or []
             resolve_read_failure(
                 progress, stage=stage, reference=reference if reference is not None else pending[0] if pending else None
@@ -166,6 +177,25 @@ async def read_with_recovery(
             code = transient_read_code(exc)
             retries = progress.get("read_retry_count", 0)
             progress["last_read_failure"] = read_failure(exc, progress, stage=stage, reference=reference)
+            if run_id is not None:
+                progress["last_read_failure"]["run_id"] = str(run_id)
+            scope = getattr(exc, "auth_read_scope", None)
+            auth_count = progress.get("auth_read_retry_count", 0)
+            if (
+                isinstance(exc, NetSuiteEvidenceError)
+                and str(exc) == "upstream_http_401"
+                and scope is not None
+                and type(auth_count) is int
+                and auth_count == 0
+                and retry_calls > 0
+            ):
+                await save()
+                if not await reserve(retry_calls):
+                    raise ReadBudgetExhaustedError from None
+                progress["auth_read_retry_count"] = 1
+                await save()
+                rejected_scope = scope
+                continue
             if not code or retry_calls <= 0 or type(retries) is not int or not 0 <= retries <= MAX_READ_RETRIES:
                 progress["last_read_error_code"] = safe_read_code(exc)
                 progress["last_read_error_type"] = type(exc).__name__[:80]

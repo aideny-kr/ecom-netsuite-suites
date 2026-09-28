@@ -2,12 +2,30 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import event, update
 
 from app.models.feature_flag import TenantFeatureFlag
+from app.models.transaction_ops import TransactionRun
 from app.schemas.transaction_runs import RunCreate
 from app.services.transaction_ops import continuation, framework_defaults, state_service
 from tests.test_transaction_defaults import connections
+
+
+@pytest.fixture(autouse=True)
+def distinct_run_creation_times():
+    # The test DB wraps commits in savepoints, so PostgreSQL now() otherwise
+    # gives every run the same outer-transaction timestamp. Production commits
+    # separate these inserts; preserve that ordering without editing immutable
+    # created_at values after insertion or depending on random evaluation keys.
+    def set_created_at(mapper, connection, target):
+        if target.created_at is None:
+            target.created_at = datetime.now(timezone.utc)
+
+    event.listen(TransactionRun, "before_insert", set_created_at)
+    try:
+        yield
+    finally:
+        event.remove(TransactionRun, "before_insert", set_created_at)
 
 
 async def budget_run(db, user, *, reason="budget", progress=None, origin="manual"):
