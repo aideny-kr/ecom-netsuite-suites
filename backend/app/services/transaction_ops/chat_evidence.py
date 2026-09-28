@@ -4,6 +4,64 @@ import json
 
 
 def condense_status(result):
+    if result.get("source") == "stored_reconciliation_state":
+        return json.dumps(
+            {
+                **{key: result.get(key) for key in ("success", "source", "observed_at", "truncated", "next_offset")},
+                "entities": [
+                    {
+                        "config_id": entity["config_id"],
+                        "name": entity["name"],
+                        "coverage": entity["coverage"],
+                        "next_action": entity["next_action"],
+                        "continuation": entity["continuation"],
+                        "active_runs_truncated": entity["active_runs_truncated"],
+                        "latest_schedule": {
+                            key: entity["latest_schedule"].get(key)
+                            for key in (
+                                "run_id",
+                                "execution_state",
+                                "termination_reason",
+                                "phase",
+                                "window_start",
+                                "window_end",
+                                "last_read_failure",
+                                "budget",
+                                "lineage",
+                                "counters",
+                                "run_state_updated_at",
+                                "last_progress_at",
+                            )
+                        }
+                        if entity.get("latest_schedule")
+                        else None,
+                        "active_runs": [
+                            {
+                                key: row.get(key)
+                                for key in (
+                                    "run_id",
+                                    "origin",
+                                    "execution_state",
+                                    "phase",
+                                    "collection_wait",
+                                    "last_read_failure",
+                                )
+                            }
+                            for row in entity["active_runs"]
+                        ],
+                    }
+                    for entity in result.get("entities", [])
+                ],
+                "note": "The operational table displays exact dates and checkpoint counts. Explain its status without "
+                "recomputing or restating figures. Scan coverage is not financial certification. "
+                "A current cutoff does not prove every historical date was scanned. Financial counts belong only to "
+                "the latest scheduled run checkpoint, not the entire requested period. Next-action times describe "
+                "eligibility, not a guaranteed dispatch. Saved collection waits require scheduler revalidation. "
+                "Worker/container health and last durable progress time are not measured by this tool. "
+                "Use next_offset when truncated. This is a read-only snapshot; do not start or retry work merely "
+                "to answer status, and do not infer that historical read failures are current blockers.",
+            }
+        )
     return json.dumps(
         {
             **{

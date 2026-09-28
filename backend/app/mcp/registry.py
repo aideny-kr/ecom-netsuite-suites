@@ -151,14 +151,20 @@ TOOL_REGISTRY = {
     },
     "transaction_ops.status": {
         "description": (
-            "Read investigation status or a durable case and its recent history. "
-            "Provide exactly one run_id or case_id. The evidence table renders automatically; "
+            "Read daily reconciliation operational status: verified versus expected coverage, active work, "
+            "blockers and next eligible action. Omit IDs for all entities, or supply config_id to narrow. "
+            "Uses saved evidence only; does not run reconciliation or query providers. "
+            "For investigation details instead provide exactly one run_id or case_id, without other parameters. "
+            "The evidence table renders automatically; "
             "do not restate or recompute its amounts. Human decisions are made on the linked review page."
         ),
         "execute": transaction_ops_tools.execute_status,
         "params_schema": {
             "run_id": {"type": "string", "description": "Investigation run UUID; omit when case_id is supplied"},
             "case_id": {"type": "string", "description": "Durable transaction case UUID; omit when run_id is supplied"},
+            "config_id": {"type": "string", "description": "Optional entity configuration UUID for operational status"},
+            "limit": {"type": "integer", "description": "Operational status page size, 1–50; defaults to 20"},
+            "offset": {"type": "integer", "description": "Operational status page offset; defaults to zero"},
         },
     },
     "health": {

@@ -112,6 +112,34 @@ async def test_configs_project_scope_without_mapping_payload(ctx, state):
     assert "tenants.is_active IS true" in sql
 
 
+async def test_operational_status_without_id_uses_read_only_service(ctx, state, monkeypatch):
+    read = AsyncMock(return_value={"source": "stored_reconciliation_state", "entities": [], "truncated": False})
+    monkeypatch.setattr("app.services.transaction_ops.operational_status.operational_status", read)
+    result = await mod.execute_status({}, context=ctx)
+    assert result["success"] and result["source"] == "stored_reconciliation_state"
+    read.assert_awaited_once_with(ctx["db"], TENANT)
+    state.create_run.assert_not_awaited()
+    assert result["rows"] == [] and result["suppress_llm_value"]
+
+
+async def test_operational_status_requires_recon_permission_before_read(ctx, state, monkeypatch):
+    read = AsyncMock()
+    monkeypatch.setattr("app.services.transaction_ops.operational_status.operational_status", read)
+    monkeypatch.setattr(
+        mod, "has_permission", AsyncMock(side_effect=lambda db, actor, permission: permission != "recon.run")
+    )
+    assert (await mod.execute_status({}, context=ctx))["error"] == "permission_denied"
+    read.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "params", [{"run_id": str(RUN), "config_id": str(CONFIG)}, {"limit": True}, {"offset": -1}, {"limit": 51}]
+)
+async def test_operational_scope_cannot_expand_detail_requests_or_bypass_bounds(ctx, state, params):
+    assert (await mod.execute_status(params, context=ctx))["error"] == "invalid_parameters"
+    state.get_run.assert_not_awaited()
+
+
 @pytest.mark.parametrize("permission", ["connections.view", "recon.run"])
 async def test_run_permission_gate_is_inside_tool(ctx, state, monkeypatch, permission):
     monkeypatch.setattr(mod, "has_permission", AsyncMock(side_effect=lambda db, actor, name: name != permission))
