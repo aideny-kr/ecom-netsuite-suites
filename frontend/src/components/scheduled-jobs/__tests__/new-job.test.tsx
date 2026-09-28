@@ -164,7 +164,7 @@ it("answering the clarification re-compiles with the instruction plus the answer
   expect(screen.getByText("Run the reconciliation")).toBeInTheDocument();
 });
 
-it("step 2 has a schedule + delivery form and Save PATCHes then routes to the list", async () => {
+it("step 2 saves bounded cadence then opens the exact plan for approval", async () => {
   mocks.scheduledJob.mockReturnValue({ data: detail(), isPending: false, isError: false });
   createMutate.mockImplementation((_body, { onSuccess }) => onSuccess({ id: "s-9" }));
   updateMutate.mockImplementation((_body, opts) => opts?.onSuccess?.());
@@ -177,18 +177,31 @@ it("step 2 has a schedule + delivery form and Save PATCHes then routes to the li
 
   expect(screen.getByText("Schedule")).toBeInTheDocument();
   expect(screen.getByText("Delivery")).toBeInTheDocument();
-  expect(screen.getByLabelText("Email to")).toBeInTheDocument();
-
-  fireEvent.change(screen.getByLabelText("Email to"), { target: { value: "ops@framework.computer" } });
+  expect(screen.queryByLabelText("Email to")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Maximum seconds"), { target: { value: "120" } });
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
   expect(updateMutate).toHaveBeenCalledWith(
     expect.objectContaining({
       cron_expression: expect.any(String),
       timezone: expect.any(String),
-      delivery: { email: { to: "ops@framework.computer" } },
+      budget: { seconds: 120 },
     }),
     expect.objectContaining({ onSuccess: expect.any(Function) }),
   );
-  expect(routerPush).toHaveBeenCalledWith("/scheduled-jobs");
+  expect(routerPush).toHaveBeenCalledWith("/scheduled-jobs/s-9");
+});
+
+it("does not impose query budgets on report-only plans or a default timeout", async () => {
+  mocks.scheduledJob.mockReturnValue({ data: { ...detail(), plan_json: { steps: [{ id: "r", type: "report.compose", params: {} }] } }, isPending: false, isError: false });
+  createMutate.mockImplementation((_body, { onSuccess }) => onSuccess({ id: "s-9" }));
+  wrap(<NewJob />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Inventory aging report" } });
+  fireEvent.click(screen.getByRole("button", { name: "Compile plan →" }));
+  await screen.findByRole("button", { name: "Save" });
+  expect(screen.queryByLabelText("Maximum query cost (USD)")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Maximum bytes scanned")).not.toBeInTheDocument();
+  expect(screen.getByText(/internal report queries are not metered/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(updateMutate).toHaveBeenCalledWith(expect.objectContaining({ budget: {} }), expect.anything());
 });

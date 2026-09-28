@@ -116,6 +116,8 @@ export interface DiffLine {
  * plus the full `plan_json`/`pending_plan_json`/diff a list row never
  * carries (`GET /api/v1/schedules/{id}` only). */
 export interface ScheduleDetail extends ScheduledJob {
+  plan_hash?: string;
+  pending_plan_hash?: string | null;
   plan_json: { steps: PlanStep[] } | null;
   pending_plan_json: { steps: PlanStep[] } | null;
   pending_plan_reason: string | null;
@@ -147,6 +149,7 @@ export interface ScheduleRun {
   attempt: number | null;
   outputs: Record<string, unknown>;
   detail: string | null;
+  verification?: string;
 }
 
 /** Wire shape of `ScheduleRunResponse` (`POST .../run`). */
@@ -211,8 +214,27 @@ export function useUpdateSchedule(id: string) {
 export function useApproveSchedule(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => apiClient.post<ScheduleDetail>(`/api/v1/schedules/${id}/approve`),
+    mutationFn: (planHash: string | void) => planHash
+      ? apiClient.post<ScheduleDetail>(`/api/v1/schedules/${id}/approve`, { plan_hash: planHash })
+      : apiClient.post<ScheduleDetail>(`/api/v1/schedules/${id}/approve`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["scheduled-jobs"] }),
+  });
+}
+
+export interface PlanReview {
+  plan_hash: string;
+  plan_version: number;
+  use_pending: boolean;
+  structurally_valid: boolean;
+  execution_verified: boolean;
+  blockers: string[];
+  notes: string[];
+  steps: { id: string; type: string; label: string; kind: string; params: Record<string, unknown> }[];
+}
+
+export function useValidateSchedule(id: string) {
+  return useMutation({
+    mutationFn: ({ usePending, expectedPlanHash }: { usePending: boolean; expectedPlanHash: string }) => apiClient.post<PlanReview>(`/api/v1/schedules/${id}/validate`, { use_pending: usePending, expected_plan_hash: expectedPlanHash }),
   });
 }
 

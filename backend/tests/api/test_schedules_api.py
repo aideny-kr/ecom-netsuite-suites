@@ -881,7 +881,11 @@ class TestScheduleApprove:
         user, headers = admin_user
         tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
         schedule = await _seed_job_schedule(
-            db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="pending_approval", plan_version=0
+            db,
+            tenant,
+            plan_json={"steps": _INVENTORY_AGING_PLAN["steps"][1:]},
+            plan_status="pending_approval",
+            plan_version=0,
         )
         await db.commit()
 
@@ -908,7 +912,11 @@ class TestScheduleApprove:
         await db.flush()
         pending_retry_at = datetime.now(timezone.utc) + timedelta(minutes=15)
         schedule = await _seed_job_schedule(
-            db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="pending_approval", plan_version=0
+            db,
+            tenant,
+            plan_json={"steps": _INVENTORY_AGING_PLAN["steps"][1:]},
+            plan_status="pending_approval",
+            plan_version=0,
         )
         schedule.retry_job_id = retry_job.id
         schedule.next_run_at = pending_retry_at
@@ -980,7 +988,11 @@ class TestScheduleApprove:
         ro_user, ro_headers = readonly_user
         tenant = (await db.execute(select(Tenant).where(Tenant.id == admin.tenant_id))).scalar_one()
         schedule = await _seed_job_schedule(
-            db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="pending_approval", plan_version=0
+            db,
+            tenant,
+            plan_json={"steps": _INVENTORY_AGING_PLAN["steps"][1:]},
+            plan_status="pending_approval",
+            plan_version=0,
         )
         await db.commit()
 

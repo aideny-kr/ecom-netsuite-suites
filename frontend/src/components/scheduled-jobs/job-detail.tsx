@@ -37,6 +37,7 @@ import { InstructionPanel } from "./instruction-panel";
 import { PendingChangePanel } from "./pending-change-panel";
 import { PlanPanel } from "./plan-panel";
 import { RunsPanel } from "./runs-panel";
+import { ReviewPanel } from "./review-panel";
 import { SchedulePanel } from "./schedule-panel";
 import { ErrorNotice, Pill } from "./shared";
 import type { PillTone } from "./shared";
@@ -51,7 +52,9 @@ import type { ScheduleDetail } from "@/hooks/use-scheduled-jobs";
 
 function statusPill(schedule: ScheduleDetail): { label: string; tone: PillTone } {
   if (schedule.paused_at) return { label: "paused", tone: "warn" };
-  if (schedule.plan_status === "approved") return { label: "active", tone: "ok" };
+  if (!schedule.is_active) return { label: "inactive", tone: "mute" };
+  if (schedule.plan_status === "approved") return schedule.is_active && schedule.cron_expression
+    ? { label: "active", tone: "ok" } : { label: "approved · manual", tone: "mute" };
   if (schedule.plan_status === "pending_approval") return { label: "awaiting approval", tone: "warn" };
   return { label: schedule.plan_status ?? "draft", tone: "mute" };
 }
@@ -128,7 +131,7 @@ export function JobDetail({ id }: { id: string }): JSX.Element {
 
   const schedule = scheduleQuery.data;
   const pill = statusPill(schedule);
-  const approved = schedule.plan_status === "approved" && !schedule.paused_at;
+  const approved = schedule.plan_status === "approved" && !schedule.paused_at && schedule.is_active;
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -173,11 +176,14 @@ export function JobDetail({ id }: { id: string }): JSX.Element {
       {schedule.paused_at && schedule.pause_reason && (
         <ErrorNotice message={`Paused: ${schedule.pause_reason}`} />
       )}
+      <p className="text-[13px] text-muted-foreground">Run now executes the approved plan against connected sources and can deliver externally. It is a live run.</p>
+      {(run.error || pause.error || resume.error) && <p role="alert" className="text-destructive">{(run.error || pause.error || resume.error)?.message}</p>}
 
       <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[1.35fr_1fr]">
         <div className="flex min-w-0 flex-col gap-3.5">
           <InstructionPanel schedule={schedule} />
           <PlanPanel schedule={schedule} />
+          <ReviewPanel key={JSON.stringify([schedule.id, schedule.plan_version, schedule.plan_json, schedule.pending_plan_json, schedule.budget_json, schedule.delivery_json, schedule.cron_expression, schedule.timezone, schedule.owner_id, schedule.plan_hash, schedule.pending_plan_hash])} schedule={schedule} />
           <PendingChangePanel schedule={schedule} />
         </div>
         <div className="flex min-w-0 flex-col gap-3.5">

@@ -1,23 +1,12 @@
 "use client";
 
-/**
- * Scheduled Jobs platform (Slice 2, spec §B6, mock state two — "Pending
- * change"). Renders only when `schedule.pending_plan_json` is set (an
- * approved schedule whose instruction was edited since, recompiled into a
- * diff awaiting approval — see `update_schedule`'s docstring,
- * `app/api/v1/schedules.py`). Three actions, each its own mutation:
- * Approve (`POST .../approve` — promotes `pending_plan_json` over
- * `plan_json`, `plan_version += 1`), "Run once with this change"
- * (`POST .../run {use_pending: true}` — previews the pending plan WITHOUT
- * approving it), Discard (`PATCH {discard_pending: true}` — drops the
- * pending plan, leaves the live plan untouched; see this task's own
- * backend addition, `ScheduleUpdate.discard_pending`).
- */
+/** Pending plan diff, explicit one-time live execution, and discard.
+ * Version-bound validation and approval live in ReviewPanel. */
 
 import type { JSX } from "react";
 import { Button } from "@/components/ui/button";
 import { Pill } from "./shared";
-import { useApproveSchedule, useRunSchedule, useUpdateSchedule } from "@/hooks/use-scheduled-jobs";
+import { useRunSchedule, useUpdateSchedule } from "@/hooks/use-scheduled-jobs";
 import type { DiffLine, ScheduleDetail } from "@/hooks/use-scheduled-jobs";
 
 function DiffLineRow({ line }: { line: DiffLine }): JSX.Element {
@@ -26,13 +15,12 @@ function DiffLineRow({ line }: { line: DiffLine }): JSX.Element {
 }
 
 export function PendingChangePanel({ schedule }: { schedule: ScheduleDetail }): JSX.Element | null {
-  const approve = useApproveSchedule(schedule.id);
   const run = useRunSchedule(schedule.id);
   const update = useUpdateSchedule(schedule.id);
 
   if (!schedule.pending_plan_json) return null;
 
-  const busy = approve.isPending || run.isPending || update.isPending;
+  const busy = run.isPending || update.isPending;
 
   return (
     <div className="rounded-lg border bg-card">
@@ -51,11 +39,8 @@ export function PendingChangePanel({ schedule }: { schedule: ScheduleDetail }): 
           ))}
         </div>
         <div className="mt-2.5 flex flex-wrap gap-2">
-          <Button size="sm" disabled={busy} onClick={() => approve.mutate()}>
-            Approve · use from next run
-          </Button>
           <Button variant="outline" size="sm" disabled={busy} onClick={() => run.mutate(true)}>
-            Run once with this change
+            Run pending plan (live)
           </Button>
           <Button
             variant="ghost"
@@ -66,6 +51,8 @@ export function PendingChangePanel({ schedule }: { schedule: ScheduleDetail }): 
             Discard
           </Button>
         </div>
+        <p className="mt-3 text-xs text-muted-foreground">This one-time live run can create outputs, spend provider budget and deliver externally. Use Validate and approve above to review the change before enabling recurring execution.</p>
+        {(run.error || update.error) && <p role="alert" className="mt-2 text-destructive">{(run.error || update.error)?.message}</p>}
       </div>
     </div>
   );

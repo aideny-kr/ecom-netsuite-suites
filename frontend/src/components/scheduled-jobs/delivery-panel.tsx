@@ -47,6 +47,7 @@ export function DeliveryPanel({ schedule }: { schedule: ScheduleDetail }): JSX.E
         Delivery
       </h3>
       <div className="p-3">
+        <p className="mb-3 text-[13px] text-muted-foreground">The compiled plan controls delivery. Drive uploads use the connected Drive’s Reports folder and report folder. Saved preferences below do not override that destination or enable email delivery.</p>
         {rows.length === 0 ? (
           <p className="text-[13px] text-muted-foreground">No delivery configured.</p>
         ) : (

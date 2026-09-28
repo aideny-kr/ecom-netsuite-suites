@@ -1,42 +1,7 @@
 "use client";
 
-/**
- * Scheduled Jobs platform (Slice 2, spec §B6, mock state three — "New job").
- * Two-step wizard for creating a NEW schedule from scratch via this page's
- * own "+ New job": a plain-language instruction, then a review of the
- * compiled plan plus a schedule/delivery form. The chat's "schedule this"
- * hand-off does NOT land here, even though it is "the same compile-then-
- * approve step" (spec §B6) — a chat-compiled schedule already exists (a real
- * `schedule_id`, `plan_status: "pending_approval"`) by the time
- * `ScheduleCreatedCard` renders, so that card links straight to the
- * schedule's OWN detail page (`/scheduled-jobs/{id}`, `job-detail.tsx`) for
- * review, never to this wizard. This component reads no `?id=` query param;
- * `createdId` below is purely this wizard's own in-memory state, set once
- * `POST /schedules` succeeds within THIS page's own flow.
- *
- * - Step 1 ("1 of 2 · what should it do?"): a plain-language instruction.
- *   "Compile plan →" calls `useCreateSchedule()` — `POST /api/v1/schedules
- *   {instruction}` (`ScheduleCreate`'s compile path,
- *   `backend/app/api/v1/schedules.py::create_schedule`). A 201 already
- *   PERSISTS the schedule (`plan_status: "pending_approval"`) — there is no
- *   separate "create" step later; step 2's own Save only attaches the
- *   schedule/delivery fields the compile path doesn't ask for. A 409 means
- *   the compiler has a `Clarification` question and created NOTHING.
- * - Step 2 ("2 of 2 · review the plan, then schedule") renders ONE of:
- *   - the clarification question + an answer box, whose "Compile plan →"
- *     re-submits `instruction + "\n\n" + answer` (compile_instruction is
- *     stateless — there is no "pending clarification" to fetch, only this
- *     session's own last failed attempt, same convention as
- *     `instruction-panel.tsx`'s `parseClarification`); or
- *   - the compiled plan (fetched via `useScheduledJob(id)` — the create
- *     response is `ScheduleResponse`, no `plan_json`, so the steps come
- *     from the detail endpoint, the same `describeStep`/`describeStepParams`
- *     registry mirror `plan-panel.tsx` uses) plus a schedule + delivery
- *     form. "Save" PATCHes `{cron_expression, timezone, delivery}`
- *     (`useUpdateSchedule`) and returns to the list, where the row already
- *     reads `pending_approval` (set at create time, spec §B6 — nothing here
- *     approves it; approval is the detail page's own action).
- */
+/** Compile through the real schedule API, set cadence and limits, then review
+ * the persisted plan on its durable detail route before approval. */
 
 import { useState } from "react";
 import type { JSX } from "react";
@@ -150,8 +115,9 @@ export function NewJob(): JSX.Element {
   const [monthDay, setMonthDay] = useState("1");
   const [rawCron, setRawCron] = useState("0 9 * * 1");
   const [timezone, setTimezone] = useState<string>(localTimeZone);
-  const [emailTo, setEmailTo] = useState("");
-  const [driveFolder, setDriveFolder] = useState("");
+  const [seconds, setSeconds] = useState("");
+  const [bytes, setBytes] = useState("");
+  const [usd, setUsd] = useState("");
 
   const detailQuery = useScheduledJob(createdId ?? "");
   const update = useUpdateSchedule(createdId ?? "");
@@ -191,21 +157,22 @@ export function NewJob(): JSX.Element {
 
   function handleSave() {
     if (!createdId) return;
-    const delivery: Record<string, unknown> = {};
-    if (emailTo.trim()) delivery.email = { to: emailTo.trim() };
-    if (driveFolder.trim()) delivery.drive = { folder: driveFolder.trim() };
+    if (!limitsValid) return;
     update.mutate(
       {
         cron_expression: buildCron(cadence, { hour, minute, weekday, monthDay, raw: rawCron }),
         timezone,
-        ...(Object.keys(delivery).length > 0 ? { delivery } : {}),
+        budget: Object.fromEntries([["seconds", seconds], ...(hasStandaloneQuery ? [["bytes_scanned", bytes], ...(!hasAgent ? [["usd", usd]] : [])] : [])].filter(([, v]) => v !== "").map(([k, v]) => [k, Number(v)])),
       },
-      { onSuccess: () => router.push("/scheduled-jobs") },
+      { onSuccess: () => router.push(`/scheduled-jobs/${createdId}`) },
     );
   }
 
   const plainError = create.isError && !clarification ? ((create.error as Error | null)?.message ?? null) : null;
   const steps = detailQuery.data?.plan_json?.steps ?? [];
+  const hasStandaloneQuery = steps.some((step) => step.type === "bigquery_sql");
+  const hasAgent = steps.some((step) => step.type === "agent.review_saved_case");
+  const limitsValid = [seconds, ...(hasStandaloneQuery ? [bytes, ...(!hasAgent ? [usd] : [])] : [])].every((v) => v === "" || (Number.isFinite(Number(v)) && Number(v) > 0));
 
   return (
     <div className="max-w-2xl animate-fade-in space-y-4">
@@ -222,7 +189,9 @@ export function NewJob(): JSX.Element {
               value={instruction}
               onChange={(e) => setInstruction(e.target.value)}
               disabled={create.isPending}
-              placeholder="Every Friday at 6pm, run the Stripe payout reconciliation for the week, hold anything that needs review, and email me the exception summary."
+              aria-label="Workflow instruction"
+              maxLength={4000}
+              placeholder="Every Monday, compose the inventory aging report for the selected stock locations and save PDF and Excel outputs."
             />
             <p className="text-[11.5px] text-muted-foreground">{HINT}</p>
             {plainError && <p className="text-[12px] text-destructive">{plainError}</p>}
@@ -354,32 +323,22 @@ export function NewJob(): JSX.Element {
                   <div className="text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground">
                     Delivery
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <label className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
-                      Email to
-                      <input
-                        aria-label="Email to"
-                        className="h-7 w-56 rounded-md border bg-background px-1.5 text-[12px] text-foreground"
-                        value={emailTo}
-                        onChange={(e) => setEmailTo(e.target.value)}
-                        placeholder="you@company.com"
-                      />
-                    </label>
-                    <label className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
-                      Drive folder
-                      <input
-                        aria-label="Drive folder"
-                        className="h-7 w-56 rounded-md border bg-background px-1.5 text-[12px] text-foreground"
-                        value={driveFolder}
-                        onChange={(e) => setDriveFolder(e.target.value)}
-                        placeholder="Reports/Payout recon"
-                      />
-                    </label>
-                  </div>
+                  <p className="text-[13px] text-muted-foreground">Delivery follows the compiled steps. Reports stay in app; Drive uploads use the connected Drive’s Reports folder and the report’s folder. Email and arbitrary folder overrides are not supported.</p>
+                  <fieldset className="space-y-2">
+                    <legend className="text-[13px] font-semibold">Per-run limits</legend>
+                    {[["Maximum seconds", seconds, setSeconds], ...(hasStandaloneQuery ? [["Maximum bytes scanned", bytes, setBytes], ...(!hasAgent ? [["Maximum query cost (USD)", usd, setUsd]] : [])] : [])].map(([label, value, setter]) => (
+                      <label key={label as string} className="flex flex-wrap items-center gap-2 text-[13px]">
+                        {label as string}<input aria-label={label as string} type="number" min="0.01" step="any" className="h-8 w-40 rounded-md border bg-background px-2" value={value as string} onChange={(e) => (setter as (v: string) => void)(e.target.value)} />
+                      </label>
+                    ))}
+                    <p className="text-xs text-muted-foreground">Blank means no workflow limit. Bytes and estimated query cost cover standalone bigquery_sql steps only; internal report queries are not metered by these limits. Agent steps use their own token and time limits and do not support a USD ceiling. A time limit can interrupt a Drive upload with an unknown outcome that requires reconciliation.</p>
+                  </fieldset>
                 </div>
 
+                {update.error && <p role="alert" className="text-destructive">{update.error.message}</p>}
+                {detailQuery.isError && <p role="alert" className="text-destructive">The compiled plan could not be loaded. Reload this workflow before saving.</p>}
                 <div className="flex items-center gap-2">
-                  <Button size="sm" disabled={update.isPending} onClick={handleSave}>
+                  <Button size="sm" disabled={update.isPending || detailQuery.isPending || detailQuery.isError || !steps.length || !limitsValid} onClick={handleSave}>
                     Save
                   </Button>
                   <Button asChild variant="ghost" size="sm">

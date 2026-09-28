@@ -37,6 +37,12 @@ beforeEach(() => {
 });
 
 describe("Skills page", () => {
+  it("links to the real workflow compiler without claiming expertise is executable", () => {
+    useAgentSkillsMock.mockReturnValue({ data: skills, isLoading: false, error: null });
+    render(<SkillsPage />);
+    expect(screen.getByRole("link", { name: "Build a workflow" })).toHaveAttribute("href", "/scheduled-jobs/new");
+    expect(screen.getByText(/Registered steps determine/)).toBeInTheDocument();
+  });
   it("renders one card per skill", () => {
     useAgentSkillsMock.mockReturnValue({ data: skills, isLoading: false, error: null });
     render(<SkillsPage />);

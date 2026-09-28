@@ -231,7 +231,7 @@ export function SchedulePanel({ schedule }: { schedule: ScheduleDetail }): JSX.E
         <dd>{CATCH_UP_COPY[schedule.catch_up] ?? schedule.catch_up}</dd>
 
         <dt className="pt-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground">Budget</dt>
-        <dd>{describeBudget(schedule.budget_json)}</dd>
+        <dd>{describeBudget(schedule.budget_json)}<p className="mt-1 text-xs text-muted-foreground">Bytes and estimated query cost cover standalone bigquery_sql steps only. Internal report queries are not metered by these limits. A time limit may interrupt a Drive upload with an unknown outcome requiring reconciliation.</p></dd>
       </dl>
     </div>
   );
