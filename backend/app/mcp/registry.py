@@ -195,8 +195,8 @@ TOOL_REGISTRY = {
             "run_id": {"type": "string", "description": "Investigation run UUID; omit when case_id is supplied"},
             "case_id": {"type": "string", "description": "Durable transaction case UUID; omit when run_id is supplied"},
             "config_id": {"type": "string", "description": "Optional entity configuration UUID for operational status"},
-            "limit": {"type": "integer", "default": 20, "description": "Operational status page size, 1–50"},
-            "offset": {"type": "integer", "default": 0, "description": "Operational status page offset"},
+            "limit": {"type": "integer", "description": "Operational status page size, 1–50; defaults to 20"},
+            "offset": {"type": "integer", "description": "Operational status page offset; defaults to zero"},
         },
     },
     "health": {

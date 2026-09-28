@@ -200,6 +200,10 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
             "cycle_expired",
             "no_progress",
             "read_retry_limit",
+            "paused",
+            "feature_unavailable",
+            "permission_denied",
+            "continuation_unavailable",
         }:
             return _action("operator_review", continuation["reason"])
         # A finite continuation stop is not a permanent stop of the next daily cycle.
@@ -230,15 +234,9 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
 
 
 async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=0, now=None):
-    now = now or datetime.now(timezone.utc)
-    if (
-        now.utcoffset() is None
-        or type(limit) is not int
-        or not 1 <= limit <= 50
-        or type(offset) is not int
-        or offset < 0
-    ):
+    if type(limit) is not int or not 1 <= limit <= 50 or type(offset) is not int or offset < 0:
         raise ValueError("invalid_status_scope")
+    now = await state_service.run_clock(db, now)
     await set_tenant_context(db, str(tenant_id))
     c, r = TransactionConfig, TransactionRun
     query = select(c).where(c.tenant_id == tenant_id, state_service.current_config_clause())
