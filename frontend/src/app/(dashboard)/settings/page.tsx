@@ -64,6 +64,7 @@ import { apiClient } from "@/lib/api-client";
 import { useFeature } from "@/hooks/use-features";
 import { TeamSection } from "@/components/settings/team-section";
 import { JobsSection } from "@/components/settings/jobs-section";
+import { OpsStatusLink } from "@/components/transaction-ops/ops-status-link";
 import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-connections-section";
 import { BigQueryConnectionSection } from "@/components/settings/bigquery-connection-section";
 import { DataSourceConnectorsSection } from "@/components/settings/data-source-connectors-section";
@@ -2831,6 +2832,8 @@ export default function SettingsPage() {
           Configure your workspace and integrations
         </p>
       </div>
+
+      <OpsStatusLink />
 
       <SettingsSections initialSection={initialSection}>
         <SettingsSection id="workspace" label="Workspace">
