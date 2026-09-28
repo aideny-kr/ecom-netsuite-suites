@@ -14,7 +14,7 @@ from app.schemas.transaction_runs import RunCreate
 from app.services.transaction_ops import period_review, runner
 from app.services.transaction_ops import state_service as state
 from tests.test_transaction_period_review_api import ready
-from tests.test_transaction_review_slices import finish
+from tests.test_transaction_review_slices import finish, review
 from tests.test_transaction_run_atomic_updates import committed_run
 
 
@@ -224,6 +224,26 @@ async def test_already_covered_review_finishes_while_daily_collector_runs(db, ad
     assert first.status == "running"
 
 
+async def test_waiters_cannot_fill_recovery_scan_ahead_of_their_collector(db, admin_user, monkeypatch):
+    from app.services.transaction_ops import scheduler
+
+    actor = admin_user[0]
+    _, older_waiter, newer_owner = await pair(db, actor, monkeypatch, owner="manual")
+    older_waiter.progress_json = {
+        "collection_wait": {"run_id": str(newer_owner.id), "reason": "overlapping_collection"}
+    }
+    newer_owner.progress_json = {
+        "continuation_started_at": (older_waiter.created_at - timedelta(minutes=15)).isoformat(),
+        "continuation_root_id": str(uuid4()),
+        "continuation_part": 2,
+    }
+    await db.flush()
+    monkeypatch.setattr(scheduler, "_SCAN_LIMIT", 1)
+    recovered = await scheduler._recovery_ids(db, actor.tenant_id, datetime.now(timezone.utc))
+    assert recovered[0] == newer_owner.id
+    assert await state.claim_run(db, actor.tenant_id, newer_owner.id)
+
+
 async def test_simultaneous_committed_claims_have_one_owner():
     # Separate real transactions/connections, not the savepoint test fixture.
     async with committed_run() as (factory, tenant, identifier, _):
@@ -246,3 +266,116 @@ async def test_simultaneous_committed_claims_have_one_owner():
             rows = (await db.scalars(select(TransactionRun).where(TransactionRun.id.in_([first.id, second.id])))).all()
             assert sorted(r.status for r in rows) == ["pending", "running"]
             assert sum(r.api_calls_used for r in rows) == 0
+
+
+async def test_duplicate_claim_cannot_deadlock_run_then_config_proposal_lock(monkeypatch):
+    # Reproduce propose()'s run->config locking while a duplicate claim takes
+    # config->run, using committed fixtures and independent connections.
+    async with committed_run() as (factory, tenant, identifier, _):
+        async with factory() as db:
+            base = await state.get_run(db, tenant, identifier)
+            owner = row(tenant, base.config_id, base.config_snapshot)
+            db.add(owner)
+            await db.commit()
+            assert await state.claim_run(db, tenant, owner.id)
+        async with factory() as proposing, factory() as replay:
+            await state.get_run(proposing, tenant, owner.id, lock=True)
+            config_acquired = asyncio.Event()
+            get_config = state.get_config
+
+            async def observe_config(session, *args, **kwargs):
+                result = await get_config(session, *args, **kwargs)
+                if session is replay and kwargs.get("lock"):
+                    config_acquired.set()
+                return result
+
+            monkeypatch.setattr(state, "get_config", observe_config)
+            duplicate = asyncio.create_task(state.claim_run(replay, tenant, owner.id))
+            try:
+                async with asyncio.timeout(5):
+                    await config_acquired.wait()
+                    await get_config(proposing, tenant, owner.config_id, lock=True)
+                    assert await duplicate is None
+            finally:
+                if not duplicate.done():
+                    duplicate.cancel()
+                await asyncio.gather(duplicate, return_exceptions=True)
+                await proposing.rollback()
+
+
+async def test_more_than_512_waiters_do_not_freeze_owner_or_lease_recovery(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    config, first, second = await pair(db, actor, monkeypatch)
+    db.add_all([row(actor.tenant_id, config.id, first.config_snapshot) for _ in range(513)])
+    await db.flush()
+    assert await state.claim_run(db, actor.tenant_id, first.id)
+    assert await state.claim_run(db, actor.tenant_id, second.id) is None
+    first.lease_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await db.flush()
+    assert await state.claim_run(db, actor.tenant_id, first.id)
+
+
+async def test_covered_retry_defers_if_another_worker_already_claimed_it(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    _, first, _ = await pair(db, actor, monkeypatch, owner="manual")
+    assert await state.claim_run(db, actor.tenant_id, first.id)
+    first.lease_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await db.flush()
+    assert await state.claim_run(db, actor.tenant_id, first.id, coverage_only=True) is None
+    assert first.status == "running"
+
+
+async def test_waiter_reads_missing_evidence_instead_of_forging_completed_coverage(db, admin_user, monkeypatch):
+    from app.services.transaction_ops import metabase_reader
+
+    actor = admin_user[0]
+    _, first, second = await pair(db, actor, monkeypatch)
+    assert await state.claim_run(db, actor.tenant_id, first.id)
+    assert await state.claim_run(db, actor.tenant_id, second.id) is None
+    # A done row without complete refund coverage cannot satisfy the review.
+    first.status, first.termination_reason = "finished", "done"
+    first.finished_at = datetime.now(timezone.utc)
+    first.progress_json = {"scan_complete": True, "refund_scan_complete": False}
+    await db.flush()
+    provider = AsyncMock(side_effect=metabase_reader.ReplicaReadError("invalid_binding"))
+    monkeypatch.setattr(metabase_reader, "read_order_page", provider)
+    await runner.run_investigation(db, actor.tenant_id, second.id, _enabled=AsyncMock(return_value=True))
+    provider.assert_awaited_once()
+    assert "reused_observation_run_ids" not in second.progress_json
+    assert "collection_wait" not in second.progress_json
+
+
+async def test_waiting_review_cannot_prevent_collectors_next_daily_slice(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    config, owner = await review(db, actor, monkeypatch)
+    waiter = row(actor.tenant_id, config.id, owner.config_snapshot)
+    db.add(waiter)
+    await db.flush()
+    await finish(db, owner)
+    child = await period_review.continue_review(db, actor.tenant_id, owner.id)
+    assert child is not None
+    assert child.params_json["window_start"] == owner.params_json["window_end"]
+    assert await state.claim_run(db, actor.tenant_id, child.id)
+
+
+async def test_waiting_does_not_extend_24_hour_queue_cap(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    config, first, _ = await pair(db, actor, monkeypatch)
+    assert await state.claim_run(db, actor.tenant_id, first.id)
+    aged = row(actor.tenant_id, config.id, first.config_snapshot)
+    aged.deadline_at = datetime.now(timezone.utc) - timedelta(days=2) + timedelta(seconds=900)
+    aged.progress_json = {"collection_wait": {"run_id": str(first.id), "reason": "overlapping_collection"}}
+    db.add(aged)
+    await db.flush()
+    assert await state.claim_run(db, actor.tenant_id, aged.id) is None
+    assert aged.status == "finished" and aged.termination_reason == "budget"
+    assert aged.api_calls_used == aged.orders_used == 0
+    assert first.status == "running"
+
+
+async def test_disabled_pending_schedule_does_not_block_manual_review(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    config, _, second = await pair(db, actor, monkeypatch)
+    config.schedule_enabled = False
+    await db.flush()
+    assert await state.claim_run(db, actor.tenant_id, second.id)

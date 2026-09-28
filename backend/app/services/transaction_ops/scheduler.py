@@ -141,7 +141,14 @@ async def _recovery_ids(db, tenant_id, now):
                 ),
             ),
         )
-        .order_by(run.created_at, run.id)
+        # A full page of older waiters must not starve the collector whose
+        # crashed/new continuation they all need. Waiters still get recovered
+        # once runnable owners have been published, within the same scan cap.
+        .order_by(
+            run.progress_json["collection_wait"].astext.is_not(None),
+            run.created_at,
+            run.id,
+        )
         .limit(_SCAN_LIMIT + 1)
     )
     # Expired deadlines deliberately remain eligible: claim_run persists their
