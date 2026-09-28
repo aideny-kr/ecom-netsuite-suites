@@ -102,6 +102,7 @@ VALID_PROVIDERS = {"anthropic", "openai", "gemini", "openrouter"}
 
 VALID_MODELS: dict[str, list[str]] = {
     "anthropic": [
+        "claude-sonnet-5-5",
         "claude-sonnet-5",
         "claude-opus-4-8",
         "claude-opus-4-6",

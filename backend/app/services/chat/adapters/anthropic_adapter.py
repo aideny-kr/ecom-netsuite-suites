@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 # adaptive-thinking turns (mirrors the headroom the legacy budget_tokens path adds).
 _ADAPTIVE_MIN_MAX_TOKENS = 32768
 
+# Beta that returns only Sonnet 5.5's progress updates in thinking blocks (reasoning stays
+# omitted), so the chat keeps showing what the model says between tool calls.
+_PROGRESS_UPDATES_BETA = "thinking-display-updates-2026-08-18"
+
+
+def _forced_tool_instruction(tool_choice) -> str:
+    """The prompt line that replaces a forced tool_choice on a model that cannot be forced."""
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
+        return f"Respond only by calling the {tool_choice['name']} tool."
+    return "Respond only by calling one of the provided tools."
+
 
 def _apply_thinking(
     kwargs: dict,
@@ -43,22 +54,29 @@ def _apply_thinking(
     - LEGACY models (4.5 / 4.0 / 4.1) → thinking={type:enabled,budget_tokens} + temperature=1
       + max_tokens reserved on top of the budget. (effort would error on these.)
     - HAIKU → no thinking (unsupported).
+    - SONNET 5.5 → "off" is thinking={type:between_tools} (disabled is a 400), and "on" asks
+      for display="updates": the notes Sonnet 5 wrote as text between tool calls now come
+      back as thinking blocks, empty unless requested.
     """
     mode = _thinking.thinking_mode(model)
+    off = {"type": "between_tools"} if _thinking.uses_between_tools(model) else {"type": "disabled"}
 
     if thinking_level in (None, "none") or _thinking.is_forced_tool_choice(tool_choice):
         # Adaptive-default models (Sonnet 5) think unless explicitly disabled —
         # omitting leaves thinking ON. Legacy/Haiku are off-by-default when omitted.
         if mode == "adaptive":
-            kwargs["thinking"] = {"type": "disabled"}
+            kwargs["thinking"] = off
         return
 
     if mode == "adaptive":
         effort = _thinking.anthropic_effort(thinking_level, model)
         if effort is None:
-            kwargs["thinking"] = {"type": "disabled"}
+            kwargs["thinking"] = off
             return
         kwargs["thinking"] = {"type": "adaptive"}
+        if _thinking.uses_between_tools(model):
+            kwargs["thinking"]["display"] = "updates"
+            kwargs["extra_headers"] = {"anthropic-beta": _PROGRESS_UPDATES_BETA}
         output_config = dict(kwargs.get("output_config") or {})
         output_config["effort"] = effort
         kwargs["output_config"] = output_config
@@ -71,6 +89,29 @@ def _apply_thinking(
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         kwargs["temperature"] = 1
         kwargs["max_tokens"] = budget + max_tokens
+
+
+async def _chat_text(stream, progress_in_thinking: bool):
+    """What the chat shows while one step streams. Sonnet 5 and earlier: the text deltas.
+    Sonnet 5.5 also writes its notes between tool calls as thinking blocks; with
+    display="updates" (or between_tools) those carry only the progress updates, never the
+    reasoning, so they are shown as Sonnet 5's text between tool calls was."""
+    if not progress_in_thinking:
+        async for text in stream.text_stream:
+            yield text
+        return
+    new_block = shown = False
+    async for event in stream:
+        if event.type == "content_block_start":
+            new_block = True
+            continue
+        piece = event.text if event.type == "text" else event.thinking if event.type == "thinking" else None
+        if not piece:
+            continue
+        if new_block and shown:
+            yield "\n\n"
+        new_block, shown = False, True
+        yield piece
 
 
 def _extract_thinking_blocks(content) -> list[dict]:
@@ -249,6 +290,12 @@ def _build_request_kwargs(
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
     _apply_thinking(kwargs, model, max_tokens, thinking_level, tool_choice)
+    if _thinking.uses_between_tools(model) and _thinking.is_forced_tool_choice(tool_choice):
+        # Sonnet 5.5 rejects type tool/any with a 400. Every caller already treats a reply
+        # without the expected tool call as a failed call, so ask in the prompt instead;
+        # callers that can do without forcing are told so by force_tool_choice.
+        kwargs["tool_choice"] = {"type": "auto"}
+        kwargs["system"] = [*system_blocks, {"type": "text", "text": _forced_tool_instruction(tool_choice)}]
     return kwargs
 
 
@@ -326,10 +373,16 @@ class AnthropicAdapter(BaseLLMAdapter):
 
         Per Anthropic SDK: `tool_choice={"type": "tool", "name": "<tool_name>"}`
         forces the model's first response to be a tool_use block for that tool.
-        Model-agnostic — `model` param accepted only for protocol uniformity.
+        Sonnet 5.5 cannot be forced (type tool/any is a 400): its callers get
+        PlanModeUnsupportedError and take their no-forcing path (JSON routing, no Plan Mode).
         """
         if not tool_name or not isinstance(tool_name, str):
             raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
+        if _thinking.uses_between_tools(model):
+            # Imported here: the plan_mode package imports the orchestrator.
+            from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
+
+            raise PlanModeUnsupportedError("anthropic", f"{model} does not support forced tool use")
         return {"type": "tool", "name": tool_name}
 
     async def create_message(
@@ -410,10 +463,11 @@ class AnthropicAdapter(BaseLLMAdapter):
         deadline = attempt_started + _STREAM_TIMEOUT_SECONDS
         attempt = 0
         first_chunk_received = False
+        progress_in_thinking = _thinking.uses_between_tools(model)
         while True:
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
-                    async for text in stream.text_stream:
+                    async for text in _chat_text(stream, progress_in_thinking):
                         if time.monotonic() > deadline:
                             logger.warning(
                                 "stream_message deadline exceeded (%ds)",
