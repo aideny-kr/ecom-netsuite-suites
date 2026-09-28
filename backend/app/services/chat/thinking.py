@@ -86,6 +86,19 @@ _LEGACY_THINKING_MARKERS = (
 )
 
 
+# Sonnet 5.5 (2026-09-28): thinking={type:disabled} and a forced tool_choice both 400. Its
+# lowest setting is thinking={type:between_tools}, and the notes it writes between tool calls
+# come back as thinking blocks rather than text. Per the Sonnet 5.5 migration guide.
+_BETWEEN_TOOLS_MARKERS = ("sonnet-5-5",)
+
+
+def uses_between_tools(model: str | None) -> bool:
+    """True for models whose lowest thinking setting is between_tools (and that cannot be
+    forced to call a tool): Sonnet 5.5."""
+    m = (model or "").lower()
+    return any(k in m for k in _BETWEEN_TOOLS_MARKERS)
+
+
 def thinking_mode(model: str | None) -> str:
     """'legacy' (4.5 / 4.0 / 4.1 / Haiku — extended thinking via budget_tokens) |
     'adaptive' (Sonnet 5 / 4.6 / Opus 4.6+ / Fable — adaptive thinking + effort).
