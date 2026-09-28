@@ -125,7 +125,9 @@ async def _complete_saved_review(db, tenant_id, run):
     receipt = await coverage_receipt(db, run, span, whole_span=True)
     if receipt is None or not await enabled(db, tenant_id):
         return run
-    token = await state.claim_run(db, tenant_id, run.id)
+    # This path has validated a complete receipt and performs no provider I/O.
+    # A running daily collector must not delay an already-covered report.
+    token = await state.claim_run(db, tenant_id, run.id, coverage_only=True)
     if token is None:
         return await state.get_run(db, tenant_id, run.id)
     progress = {**(run.progress_json or {}), **receipt}
@@ -189,6 +191,9 @@ async def continue_review(db, tenant_id, run_id):
             TransactionRun.config_id == config.id,
             TransactionRun.status.in_(["pending", "running"]),
             TransactionRun.origin != "schedule",
+            # Pending calendar reviews arbitrate collection at claim time.
+            # A waiter must never prevent its owner's next slice from existing.
+            (TransactionRun.status == "running") | TransactionRun.params_json["review"].astext.is_(None),
         )
         .limit(1)
     )

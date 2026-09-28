@@ -240,6 +240,11 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None):
                 or_(TransactionRun.origin == "schedule", TransactionRun.origin == "recovery")
                 if previous.origin == "schedule"
                 else TransactionRun.origin != "schedule",
+                # Pending reviews may be waiting for this very collector. Its
+                # continuation must exist before overlap arbitration can run.
+                (TransactionRun.status == "running") | TransactionRun.params_json["review"].astext.is_(None)
+                if previous.params_json.get("review")
+                else True,
             )
             .limit(1)
         )
