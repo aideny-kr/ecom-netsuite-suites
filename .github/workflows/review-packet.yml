@@ -1,0 +1,48 @@
+name: Review Packet
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review, converted_to_draft]
+  push:
+    branches: ['main', 'release/**']
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to regenerate and validate
+        required: true
+        type: string
+
+# Only this trusted workflow publishes the consistency status. It never executes PR code.
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: review-packet-gate
+  cancel-in-progress: false
+
+jobs:
+  packet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare packet and verify review receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/review_packet/github_gate.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-packets-${{ github.run_id }}
+          path: review-packet-artifacts/
+          retention-days: 14
+          if-no-files-found: warn

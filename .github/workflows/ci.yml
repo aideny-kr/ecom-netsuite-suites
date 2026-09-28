@@ -273,6 +273,13 @@ jobs:
       # Glob, not a hand-listed file: gate-args.test.mjs was added in the same commit
       # that fixed a gate which reviewed the WRONG DIFF and reported OK, and a guard
       # that CI forgets to run is the same class of defect it exists to catch.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Test review packet automation
+        run: python3 -m unittest discover -s scripts/review_packet -p 'test_*.py'
+
       - name: Run workflow guard tests
         run: node --test .claude/workflows/*.test.mjs
 
