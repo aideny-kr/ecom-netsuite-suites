@@ -79,21 +79,23 @@ async def test_thinking_on_asks_sonnet_5_5_for_its_progress_updates(level, effor
 
 
 @pytest.mark.parametrize("choice", [{"type": "tool", "name": "review"}, {"type": "any"}])
-async def test_a_forced_tool_becomes_an_instruction_on_sonnet_5_5(choice):
+async def test_a_forced_call_on_sonnet_5_5_runs_forced_on_sonnet_5(choice):
+    # Round 4 (wf_c02010a0) blocker: asking instead of forcing let a prose answer through plan
+    # mode's clarify gate. 5.5 cannot be forced (type tool/any is a 400), so a forced call runs
+    # on Sonnet 5, where it is forced, and every caller keeps the guarantee it was written for.
     body, _ = await _sent(NEW, tools=[TOOL], tool_choice=choice, thinking_level="none")
-    assert body["tool_choice"] == {"type": "auto"}  # type tool/any is a 400 on 5.5
-    assert body["thinking"] == {"type": "between_tools"}
-    instruction = body["system"][-1]["text"]
-    assert "calling" in instruction and ("review" in instruction if choice["type"] == "tool" else True)
-    old, _ = await _sent(OLD, tools=[TOOL], tool_choice=choice, thinking_level="none")
-    assert old["tool_choice"] == choice
-    assert old["thinking"] == {"type": "disabled"}
+    assert body["model"] == OLD
+    assert body["tool_choice"] == choice
+    assert body["thinking"] == {"type": "disabled"}
+    assert [b["text"] for b in body["system"]] == ["static"]  # no prompt-level request
+    unforced, _ = await _sent(NEW, tools=[TOOL], thinking_level="none")
+    assert unforced["model"] == NEW and "tool_choice" not in unforced
 
 
 def test_plan_mode_keeps_its_clarify_gate_on_sonnet_5_5():
     # Gate wf_e1f01a73 (majors 2, 3): refusing to force turned the financial-ambiguity gate off
-    # entirely on 5.5. Forcing is now asked for at one place, the request builder, so plan mode
-    # stays on: its tools are cut to clarify-only, and the request asks for that call.
+    # entirely on 5.5. force_tool_choice returns the forced choice on every model, so plan mode
+    # stays on, and the request builder runs that forced call on Sonnet 5 (test above).
     from app.services.chat.plan_mode.ambiguity_signal import try_force_tool_choice
 
     adapter = aa.AnthropicAdapter(api_key="test-key")
@@ -291,13 +293,30 @@ async def test_a_turn_is_replayed_exactly_as_the_api_returned_it(shape):
     assert content == expected
 
 
-async def test_a_forced_call_the_model_answered_in_prose_is_logged(capsys):
-    # Gate wf_f87a590a (major 3, minor 8): on 5.5 a forced tool call is only asked for. The
-    # callers already treat a missing call as a failed call; this makes the rate visible.
-    await _sent(NEW, tools=[TOOL], tool_choice={"type": "tool", "name": "review"}, thinking_level="none")
-    assert "llm.forced_tool_unanswered" in capsys.readouterr().out
-    await _sent(OLD, tools=[TOOL], tool_choice={"type": "tool", "name": "review"}, thinking_level="none")
-    assert "llm.forced_tool_unanswered" not in capsys.readouterr().out
+async def test_a_blocking_call_returns_only_the_models_text():
+    # Round 4 (wf_c02010a0) major: progress notes in text_blocks broke tenant_resolver, which parses
+    # text_blocks[0] as JSON. A blocking call shows nothing while it runs, so its text_blocks are
+    # the model's text blocks alone; notes stay in the chat stream.
+    message = {
+        **_MESSAGE,
+        "content": [
+            {"type": "thinking", "thinking": "Extracting entities.", "signature": "s0"},
+            {"type": "text", "text": '["Acme"]'},
+        ],
+    }
+    response = await _adapter(lambda request: httpx.Response(200, json=message)).create_message(
+        model=NEW, max_tokens=100, system="static", messages=[{"role": "user", "content": "hi"}]
+    )
+    assert response.text_blocks == ['["Acme"]']
+
+
+async def test_replay_keeps_the_input_the_model_sent_even_if_the_call_is_later_edited():
+    # Round 4 (wf_c02010a0) minor: replay shared the input object with the ToolUseBlock, so an
+    # in-place fix before execution (e.g. a workspace id) rewrote history the model signed over.
+    adapter, events = await _stream_blocks([("tool_use", None, "review")], "tool_use")
+    response = events[-1][1]
+    response.tool_use_blocks[0].input["workspace_id"] = "corrected"
+    assert adapter.build_assistant_message(response)["content"][0]["input"] == {}
 
 
 async def test_what_is_saved_is_what_the_chat_showed():

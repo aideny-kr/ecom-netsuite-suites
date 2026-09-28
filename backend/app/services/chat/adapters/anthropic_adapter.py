@@ -1,6 +1,7 @@
 """Anthropic (Claude) adapter — identity mapping since tools are already in Anthropic format."""
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -27,11 +28,11 @@ _ADAPTIVE_MIN_MAX_TOKENS = 32768
 _PROGRESS_UPDATES_BETA = "thinking-display-updates-2026-08-18"
 
 
-def _forced_tool_instruction(tool_choice) -> str:
-    """The prompt line that replaces a forced tool_choice on a model that cannot be forced."""
-    if isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
-        return f"Respond only by calling the {tool_choice['name']} tool."
-    return "Respond only by calling one of the provided tools."
+# Sonnet 5.5 cannot be forced to call a tool (tool_choice type tool/any is a 400). A forced
+# call on it runs on Sonnet 5, where forcing still works, so plan mode's clarify gate and every
+# structured caller keep the guarantee they were written for. Same price; 5.5 reads Sonnet 5's
+# thinking blocks, and a forced call runs with thinking off anyway.
+_FORCEABLE_MODEL = "claude-sonnet-5"
 
 
 def _apply_thinking(
@@ -147,8 +148,8 @@ def _response_from(message, *, progress: bool) -> LLMResponse:
             replay.append({"type": "text", "text": block.text})
         elif block.type == "tool_use":
             tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
-            # The same input object as the ToolUseBlock, as the fixed layout always sent.
-            replay.append({"type": "tool_use", "id": block.id, "name": block.name, "input": block.input})
+            # A copy: an in-place fix before execution must not rewrite what the model signed over.
+            replay.append({"type": "tool_use", "id": block.id, "name": block.name, "input": copy.deepcopy(block.input)})
         elif block.type == "thinking":
             thinking_blocks.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
             replay.append(thinking_blocks[-1])
@@ -166,21 +167,12 @@ def _response_from(message, *, progress: bool) -> LLMResponse:
     )
 
 
-def _asks_instead_of_forcing(model: str, tool_choice) -> bool:
-    """A forced tool_choice on a model that rejects forcing (Sonnet 5.5): the request builder
-    sends it as tool_choice=auto plus an instruction. The one place this is decided."""
-    return _thinking.uses_between_tools(model) and _thinking.is_forced_tool_choice(tool_choice)
-
-
-def _note_unanswered_forced_call(model: str, tool_choice, response: LLMResponse) -> None:
-    """On Sonnet 5.5 a forced tool call is only asked for in the prompt (it cannot be forced).
-    Callers treat a reply without the call as a failed call; this line makes the rate visible."""
-    if not _asks_instead_of_forcing(model, tool_choice):
-        return
-    if response.tool_use_blocks:
-        return
-    wanted = tool_choice.get("name", "any") if isinstance(tool_choice, dict) else "any"
-    print(f"llm.forced_tool_unanswered purpose={current_purpose()} model={model} tool={wanted}", flush=True)
+def _request_model(model: str, tool_choice) -> str:
+    """The model a request actually runs on: a forced call on a model that cannot be forced
+    runs on _FORCEABLE_MODEL. The one place this is decided."""
+    if _thinking.uses_between_tools(model) and _thinking.is_forced_tool_choice(tool_choice):
+        return _FORCEABLE_MODEL
+    return model
 
 
 # Wall-clock deadline for a single stream_message call — PER LLM HOP, not per
@@ -322,6 +314,7 @@ def _build_request_kwargs(
     thinking_level: str | None = None,
 ) -> dict:
     """The one place the request is assembled, for both the blocking and streaming paths."""
+    model = _request_model(model, tool_choice)
     stable = _stable_cache_control()
     system_blocks = [{"type": "text", "text": system, "cache_control": stable}]
     if system_dynamic:
@@ -347,12 +340,6 @@ def _build_request_kwargs(
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
     _apply_thinking(kwargs, model, max_tokens, thinking_level, tool_choice)
-    if _asks_instead_of_forcing(model, tool_choice):
-        # Sonnet 5.5 rejects type tool/any with a 400, so ask in the prompt instead. Every caller
-        # already treats a reply without the expected tool call as a failed call, and plan mode
-        # keeps its clarify-only tool list, so the only call available is the one asked for.
-        kwargs["tool_choice"] = {"type": "auto"}
-        kwargs["system"] = [*system_blocks, {"type": "text", "text": _forced_tool_instruction(tool_choice)}]
     return kwargs
 
 
@@ -430,9 +417,9 @@ class AnthropicAdapter(BaseLLMAdapter):
 
         Per Anthropic SDK: `tool_choice={"type": "tool", "name": "<tool_name>"}`
         forces the model's first response to be a tool_use block for that tool.
-        Sonnet 5.5 cannot be forced (type tool/any is a 400); the request builder turns this
-        into tool_choice=auto plus an instruction, so callers (plan mode's clarify gate
-        included) keep one code path on every model.
+        Sonnet 5.5 cannot be forced (type tool/any is a 400); the request builder runs a
+        forced call on Sonnet 5 instead (_request_model), so callers (plan mode's clarify
+        gate included) keep one code path and a real forced call on every model.
         """
         if not tool_name or not isinstance(tool_name, str):
             raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
@@ -464,10 +451,10 @@ class AnthropicAdapter(BaseLLMAdapter):
         started = time.monotonic()
         response = await self._client.messages.create(**kwargs)
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        _log_usage(model, response.usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
-        parsed = _response_from(response, progress=_progress_updates_requested(kwargs))
-        _note_unanswered_forced_call(model, tool_choice, parsed)
-        return parsed
+        _log_usage(kwargs["model"], response.usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
+        # Nothing is shown while a blocking call runs, so its text is the model's text blocks
+        # alone: callers such as tenant_resolver parse text_blocks[0] as JSON.
+        return _response_from(response, progress=False)
 
     async def stream_message(
         self,
@@ -556,7 +543,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                 attempt_started = time.monotonic()
 
         _log_usage(
-            model,
+            kwargs["model"],
             final_message.usage,
             stream=True,
             elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
@@ -564,9 +551,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             retries=attempt,
         )
 
-        parsed = _response_from(final_message, progress=progress_in_thinking)
-        _note_unanswered_forced_call(model, tool_choice, parsed)
-        yield "response", parsed
+        yield "response", _response_from(final_message, progress=progress_in_thinking)
 
     def build_tool_result_message(self, tool_results: list[dict]) -> dict:
         return {"role": "user", "content": tool_results}
