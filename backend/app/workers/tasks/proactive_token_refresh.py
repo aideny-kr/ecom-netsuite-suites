@@ -103,11 +103,30 @@ def _refresh_single(db, record, lock_prefix, stats, now, settings):
             return
 
         lock_key = f"{lock_prefix}:{record.id}"
-        if not acquire_lock(lock_key, timeout=30):
+        from app.services import oauth_refresh_lock
+
+        rest = lock_prefix == "oauth_refresh"
+        owner = oauth_refresh_lock.acquire(lock_key) if rest else acquire_lock(lock_key, timeout=30)
+        if not owner:
             stats["skipped_locked"] += 1
             return
 
         try:
+            # The reactive reader may have rotated while this task waited.
+            # Re-read inside the shared owned REST lock before consuming a token.
+            if rest:
+                db.refresh(record)
+                if record.status not in ("active", "error"):
+                    return
+                current = decrypt_credentials(record.encrypted_credentials)
+                if (current.get("account_id"), current.get("client_id")) != (account_id, client_id):
+                    return
+                if time.time() < current.get("expires_at", 0) - REFRESH_BUFFER_SECONDS:
+                    return
+                creds = current
+                refresh_token = creds.get("refresh_token")
+                if not refresh_token:
+                    return
             token_data = _run_async_refresh(account_id, refresh_token, client_id)
             print(
                 f"[proactive_token_refresh] token_data keys: {list(token_data.keys()) if isinstance(token_data, dict) else type(token_data)}",
@@ -115,7 +134,9 @@ def _refresh_single(db, record, lock_prefix, stats, now, settings):
             )
             creds["access_token"] = token_data["access_token"]
             creds["refresh_token"] = token_data.get("refresh_token", refresh_token)
-            creds["expires_at"] = time.time() + int(token_data.get("expires_in", 3600))
+            creds["issued_at"] = time.time()
+            creds["expires_in"] = int(token_data.get("expires_in", 3600))
+            creds["expires_at"] = creds["issued_at"] + creds["expires_in"]
             record.encrypted_credentials = encrypt_credentials(creds)
             record.status = "active"
             record.error_reason = None
@@ -137,7 +158,10 @@ def _refresh_single(db, record, lock_prefix, stats, now, settings):
             )
             print(f"[proactive_token_refresh] REFRESH ERROR: {type(exc).__name__}: {exc}", flush=True)
         finally:
-            release_lock(lock_key)
+            if rest:
+                oauth_refresh_lock.release(lock_key, owner)
+            else:
+                release_lock(lock_key)
 
     except Exception:
         stats["errors"] += 1

@@ -23,7 +23,8 @@ async def test_cancelled_database_read_can_finalize_without_losing_its_cursor(mo
     async with database.worker_async_session(pin_connection=pin) as db:
         old_pid = await db.scalar(text("SELECT pg_backend_pid()"))
         await db.commit()
-        state.run.deadline_at = datetime.now(timezone.utc) + timedelta(seconds=0.15 if failure == "deadline" else 10)
+        current = datetime.now(timezone.utc)
+        state.run.deadline_at = current + timedelta(seconds=0.15 if failure == "deadline" else 10)
         original_finish, original_settle = state.finish_run, state.settle_budget
 
         async def finish(*args, **kwargs):
@@ -43,8 +44,16 @@ async def test_cancelled_database_read_can_finalize_without_losing_its_cursor(mo
             return await original_settle(*args, **kwargs)
 
         async def cancelled_query(*args, **kwargs):
+            nonlocal current
             if failure == "deadline":
-                await db.execute(text("SELECT pg_sleep(5)"))
+                try:
+                    await db.execute(text("SELECT pg_sleep(5)"))
+                except asyncio.CancelledError:
+                    # Start the simulated deadline at the actual read, not at
+                    # cold runner setup. The real asyncio timeout still cancels
+                    # a real PostgreSQL query and must invalidate its connection.
+                    current = state.run.deadline_at
+                    raise
             else:
                 try:
                     async with asyncio.timeout(0.03):
@@ -52,6 +61,16 @@ async def test_cancelled_database_read_can_finalize_without_losing_its_cursor(mo
                 except TimeoutError:
                     raise ValueError("private provider payload") from None
             pytest.fail("query should have been cancelled")
+
+        first_enable = True
+
+        async def enabled(*args, **kwargs):
+            nonlocal first_enable
+            if first_enable:
+                first_enable = False
+                # Reproduce setup taking longer than the read's 150ms budget.
+                await asyncio.sleep(0.2)
+            return True
 
         state.finish_run, state.settle_budget = finish, settle
         result = await run_investigation(
@@ -62,7 +81,8 @@ async def test_cancelled_database_read_can_finalize_without_losing_its_cursor(mo
             _source_reader=cancelled_query if stage == "source" else AsyncMock(return_value=source_order()),
             _target_reader=cancelled_query if stage == "target" else AsyncMock(return_value=missing_target()),
             _order_mirror=AsyncMock(),
-            _enabled=AsyncMock(return_value=True),
+            _enabled=enabled,
+            _clock=lambda: current,
         )
         assert result["termination_reason"] == ("budget" if failure == "deadline" else "error")
         assert state.run.status == "finished"

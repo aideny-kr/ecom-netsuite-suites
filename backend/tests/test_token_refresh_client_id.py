@@ -61,6 +61,8 @@ class TestGetValidTokenClientId:
             ) as mock_refresh,
             patch("app.services.netsuite_oauth_service.settings") as mock_settings,
             patch("app.core.redis_lock.acquire_lock", return_value=True),
+            patch("app.services.oauth_refresh_lock.acquire", return_value="test-owner"),
+            patch("app.services.oauth_refresh_lock.release"),
             patch("app.core.redis_lock.release_lock"),
         ):
             mock_settings.NETSUITE_OAUTH_CLIENT_ID = global_client_id
@@ -118,6 +120,8 @@ class TestGetValidTokenClientId:
             ) as mock_refresh,
             patch("app.services.netsuite_oauth_service.settings") as mock_settings,
             patch("app.core.redis_lock.acquire_lock", return_value=True),
+            patch("app.services.oauth_refresh_lock.acquire", return_value="test-owner"),
+            patch("app.services.oauth_refresh_lock.release"),
             patch("app.core.redis_lock.release_lock"),
         ):
             mock_settings.NETSUITE_OAUTH_CLIENT_ID = ""  # Empty global
@@ -154,6 +158,8 @@ class TestGetValidTokenClientId:
             patch("app.services.netsuite_oauth_service.decrypt_credentials", return_value=credentials),
             patch("app.services.netsuite_oauth_service.settings") as mock_settings,
             patch("app.core.redis_lock.acquire_lock", return_value=True),
+            patch("app.services.oauth_refresh_lock.acquire", return_value="test-owner"),
+            patch("app.services.oauth_refresh_lock.release"),
             patch("app.core.redis_lock.release_lock"),
         ):
             mock_settings.NETSUITE_OAUTH_CLIENT_ID = ""
@@ -204,6 +210,8 @@ class TestProactiveRefreshClientId:
             patch("app.core.encryption.decrypt_credentials", return_value=creds),
             patch("app.core.encryption.encrypt_credentials", return_value="enc"),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
+            patch("app.services.oauth_refresh_lock.acquire", return_value="test-owner"),
+            patch("app.services.oauth_refresh_lock.release"),
             patch("app.core.redis_lock.release_lock"),
             patch(
                 "app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data
@@ -254,6 +262,8 @@ class TestProactiveRefreshClientId:
             patch("app.core.encryption.decrypt_credentials", return_value=creds),
             patch("app.core.encryption.encrypt_credentials", return_value="enc"),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
+            patch("app.services.oauth_refresh_lock.acquire", return_value="test-owner"),
+            patch("app.services.oauth_refresh_lock.release"),
             patch("app.core.redis_lock.release_lock"),
             patch(
                 "app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data
@@ -301,6 +311,8 @@ class TestProactiveRefreshErrorLogging:
         with (
             patch("app.core.encryption.decrypt_credentials", return_value=creds),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
+            patch("app.services.oauth_refresh_lock.acquire", return_value="test-owner"),
+            patch("app.services.oauth_refresh_lock.release"),
             patch("app.core.redis_lock.release_lock"),
             patch(
                 "app.workers.tasks.proactive_token_refresh._run_async_refresh",
