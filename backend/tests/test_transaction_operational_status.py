@@ -221,6 +221,53 @@ def test_operational_table_survives_streamed_and_nonstreamed_condensation():
     assert "not financial certification" in json.loads(condensed)["note"]
 
 
+def test_finished_failure_diagnostic_is_preserved_for_agent():
+    import json
+
+    from app.services.transaction_ops.chat_evidence import condense_status
+
+    latest = status.run_snapshot(
+        run(progress_json={"last_read_failure": {"code": "replica_transport_failed", "resolved": False}}), NOW
+    )
+    result = {
+        "source": "stored_reconciliation_state",
+        "entities": [
+            {
+                "config_id": str(uuid4()),
+                "name": "Inc",
+                "coverage": {},
+                "next_action": {},
+                "continuation": {},
+                "active_runs": [],
+                "active_runs_truncated": False,
+                "latest_schedule": latest,
+            }
+        ],
+    }
+    condensed = json.loads(condense_status(result))["entities"][0]["latest_schedule"]
+    assert condensed["last_read_failure"]["code"] == "replica_transport_failed"
+    assert condensed["run_id"] == latest["run_id"]
+
+
+@pytest.mark.parametrize("reason", ["paused", "feature_unavailable", "permission_denied", "continuation_unavailable"])
+def test_historical_audit_block_does_not_hide_next_daily_attempt(reason):
+    c = config()
+    r = run(created_at=NOW - timedelta(days=1))
+    result = status._next_action(c, r, [], {}, status.schedule(c, NOW), {"state": "blocked", "reason": reason}, NOW)
+    assert result["kind"] == "new_schedule_cycle"
+
+
+async def test_live_snapshot_uses_the_same_database_clock_as_the_engine(monkeypatch):
+    read_clock = AsyncMock(return_value=NOW)
+    monkeypatch.setattr(state_service, "run_clock", read_clock)
+    db = AsyncMock()
+    db.scalars.return_value = []
+    tenant = uuid4()
+    result = await status.operational_status(db, tenant)
+    read_clock.assert_awaited_once_with(db, None)
+    assert result["observed_at"] == NOW.isoformat()
+
+
 async def seed(db, actor):
     c = await seed_config(
         db,

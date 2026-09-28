@@ -16,6 +16,25 @@ def condense_status(result):
                         "next_action": entity["next_action"],
                         "continuation": entity["continuation"],
                         "active_runs_truncated": entity["active_runs_truncated"],
+                        "latest_schedule": {
+                            key: entity["latest_schedule"].get(key)
+                            for key in (
+                                "run_id",
+                                "execution_state",
+                                "termination_reason",
+                                "phase",
+                                "window_start",
+                                "window_end",
+                                "last_read_failure",
+                                "budget",
+                                "lineage",
+                                "counters",
+                                "run_state_updated_at",
+                                "last_progress_at",
+                            )
+                        }
+                        if entity.get("latest_schedule")
+                        else None,
                         "active_runs": [
                             {
                                 key: row.get(key)
