@@ -37,7 +37,7 @@ beforeEach(() => {
 
 it("opens through Settings and displays coverage without promising accounting completion or dispatch", async () => {
   setup();
-  expect(screen.getByRole("link", { name: /Ops status/ })).toHaveAttribute("href", "/transaction-operations/status");
+  expect(screen.getByRole("link", { name: /Ops status/ })).toHaveAttribute("href", "/settings/ops-status");
   expect(await screen.findByText("Caught up")).toBeVisible();
   expect(screen.getByText("Expected through 2026-09-27")).toBeVisible();
   expect(screen.getByText(/eligibility is not a dispatch confirmation/)).toBeVisible();
