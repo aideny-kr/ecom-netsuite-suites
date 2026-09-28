@@ -177,3 +177,83 @@ def test_the_progress_updates_beta_joins_any_headers_already_set():
     aa._apply_thinking(kwargs, NEW, 100, "high", None)
     assert kwargs["extra_headers"]["x-request-id"] == "r1"
     assert kwargs["extra_headers"]["anthropic-beta"].split(",") == ["other-beta", aa._PROGRESS_UPDATES_BETA]
+
+
+def _block(index, kind, text=None, tool=None):
+    """Stream events for one content block: a progress note (thinking), answer text, or a tool call."""
+    if kind == "thinking":
+        start = {"type": "thinking", "thinking": "", "signature": ""}
+        deltas = [{"type": "thinking_delta", "thinking": text}, {"type": "signature_delta", "signature": f"s{index}"}]
+    elif kind == "text":
+        start, deltas = {"type": "text", "text": ""}, [{"type": "text_delta", "text": text}]
+    else:
+        start = {"type": "tool_use", "id": f"toolu_{index}", "name": tool, "input": {}}
+        deltas = [{"type": "input_json_delta", "partial_json": "{}"}]
+    return [
+        {"type": "content_block_start", "index": index, "content_block": start},
+        *({"type": "content_block_delta", "index": index, "delta": d} for d in deltas),
+        {"type": "content_block_stop", "index": index},
+    ]
+
+
+async def _stream_blocks(blocks, stop_reason):
+    events = [
+        _TURN[0],
+        *(e for i, b in enumerate(blocks) for e in _block(i, *b)),
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "usage": {"output_tokens": 9},
+        },
+        {"type": "message_stop"},
+    ]
+
+    def handler(request):
+        return httpx.Response(200, content=_sse(events), headers={"content-type": "text/event-stream"})
+
+    adapter = _adapter(handler)
+    out = [
+        e
+        async for e in adapter.stream_message(
+            model=NEW,
+            max_tokens=100,
+            system="s",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[TOOL],
+            thinking_level="high",
+        )
+    ]
+    return adapter, out
+
+
+async def test_interleaved_notes_and_tool_calls_are_replayed_in_the_order_they_were_signed():
+    # Gate wf_2c57b401 (major): replay moved every thinking block to the front. Sonnet 5.5 signs a
+    # block over everything before it, so [note, call, note, call] must come back in that order.
+    adapter, events = await _stream_blocks(
+        [
+            ("thinking", "Reading the invoice."),
+            ("tool_use", None, "review"),
+            ("thinking", "Now the credit."),
+            ("tool_use", None, "review"),
+        ],
+        "tool_use",
+    )
+    assert "".join(e[1] for e in events if e[0] == "text") == "Reading the invoice.\n\nNow the credit."
+    content = adapter.build_assistant_message(events[-1][1])["content"]
+    assert [b["type"] for b in content] == ["thinking", "tool_use", "thinking", "tool_use"]
+    assert [b.get("signature") for b in content if b["type"] == "thinking"] == ["s0", "s2"]
+
+
+async def test_an_answer_that_arrives_only_as_a_note_is_still_the_answer():
+    # Gate wf_2c57b401 (major): the chat showed it live, but the saved message was empty.
+    _, events = await _stream_blocks([("thinking", "The credit memo already nets the tax to zero.")], "end_turn")
+    assert events[-1][1].text_blocks == ["The credit memo already nets the tax to zero."]
+
+
+def test_thinking_is_shown_only_when_the_request_asked_for_progress_updates():
+    # Gate wf_2c57b401 (minor): decide from the request sent, not from the model name.
+    assert aa._progress_updates_requested({"thinking": {"type": "between_tools"}})
+    assert aa._progress_updates_requested({"thinking": {"type": "adaptive", "display": "updates"}})
+    assert not aa._progress_updates_requested({"thinking": {"type": "adaptive"}})
+    assert not aa._progress_updates_requested({"thinking": {"type": "adaptive", "display": "summarized"}})
+    assert not aa._progress_updates_requested({})

@@ -123,6 +123,48 @@ async def _chat_text(stream, progress_in_thinking: bool):
         yield piece
 
 
+def _progress_updates_requested(kwargs: dict) -> bool:
+    """Whether this request's thinking blocks carry only progress updates, never reasoning:
+    between_tools, or adaptive with display="updates" (both Sonnet 5.5 only). Anything else
+    keeps thinking out of the chat."""
+    thinking = kwargs.get("thinking") or {}
+    return thinking.get("type") == "between_tools" or thinking.get("display") == "updates"
+
+
+def _response_from(message, *, progress: bool) -> LLMResponse:
+    """One parse for the blocking and streaming paths, keeping the order the blocks arrived
+    in: a Sonnet 5.5 thinking block is signed over everything before it, so a replay that
+    moves it can be rejected."""
+    text_blocks: list[str] = []
+    tool_use_blocks: list[ToolUseBlock] = []
+    order: list[tuple[str, int]] = []
+    thinking_blocks = _extract_thinking_blocks(message.content)
+    thinking_seen = 0
+    for block in message.content:
+        if block.type == "text":
+            order.append(("text", len(text_blocks)))
+            text_blocks.append(block.text)
+        elif block.type == "tool_use":
+            order.append(("tool_use", len(tool_use_blocks)))
+            tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
+        elif block.type in ("thinking", "redacted_thinking"):
+            order.append(("thinking", thinking_seen))
+            thinking_seen += 1
+    if progress and not text_blocks and not tool_use_blocks:
+        # A note with no call after it is the answer: the chat already showed it, so it is
+        # also what is saved and carried into the next turn.
+        notes = [b["thinking"] for b in thinking_blocks if b.get("thinking")]
+        if notes:
+            text_blocks = ["\n\n".join(notes)]
+    return LLMResponse(
+        text_blocks=text_blocks,
+        tool_use_blocks=tool_use_blocks,
+        usage=_usage_from(message.usage),
+        thinking_blocks=thinking_blocks,
+        content_order=order,
+    )
+
+
 def _extract_thinking_blocks(content) -> list[dict]:
     """Pull thinking / redacted_thinking blocks out of a message's content,
     preserving signatures — required to echo them back across tool-use turns."""
@@ -420,25 +462,8 @@ class AnthropicAdapter(BaseLLMAdapter):
         started = time.monotonic()
         response = await self._client.messages.create(**kwargs)
         elapsed_ms = int((time.monotonic() - started) * 1000)
-
-        text_blocks: list[str] = []
-        tool_use_blocks: list[ToolUseBlock] = []
-
-        for block in response.content:
-            if block.type == "text":
-                text_blocks.append(block.text)
-            elif block.type == "tool_use":
-                tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
-
-        usage = _usage_from(response.usage)
         _log_usage(model, response.usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
-
-        return LLMResponse(
-            text_blocks=text_blocks,
-            tool_use_blocks=tool_use_blocks,
-            usage=usage,
-            thinking_blocks=_extract_thinking_blocks(response.content),
-        )
+        return _response_from(response, progress=_progress_updates_requested(kwargs))
 
     async def stream_message(
         self,
@@ -472,7 +497,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         deadline = attempt_started + _STREAM_TIMEOUT_SECONDS
         attempt = 0
         first_chunk_received = False
-        progress_in_thinking = _thinking.uses_between_tools(model)
+        progress_in_thinking = _progress_updates_requested(kwargs)
         while True:
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
@@ -526,16 +551,6 @@ class AnthropicAdapter(BaseLLMAdapter):
                 await asyncio.sleep(delay)
                 attempt_started = time.monotonic()
 
-        text_blocks: list[str] = []
-        tool_use_blocks: list[ToolUseBlock] = []
-
-        for block in final_message.content:
-            if block.type == "text":
-                text_blocks.append(block.text)
-            elif block.type == "tool_use":
-                tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
-
-        usage = _usage_from(final_message.usage)
         _log_usage(
             model,
             final_message.usage,
@@ -545,18 +560,30 @@ class AnthropicAdapter(BaseLLMAdapter):
             retries=attempt,
         )
 
-        response = LLMResponse(
-            text_blocks=text_blocks,
-            tool_use_blocks=tool_use_blocks,
-            usage=usage,
-            thinking_blocks=_extract_thinking_blocks(final_message.content),
-        )
-        yield "response", response
+        yield "response", _response_from(final_message, progress=progress_in_thinking)
 
     def build_tool_result_message(self, tool_results: list[dict]) -> dict:
         return {"role": "user", "content": tool_results}
 
     def build_assistant_message(self, response: LLMResponse) -> dict:
+        def tool_use(tool):
+            return {"type": "tool_use", "id": tool.id, "name": tool.name, "input": tool.input}
+
+        order = response.content_order
+        counts = {"thinking": len(response.thinking_blocks), "tool_use": len(response.tool_use_blocks)}
+        if (
+            order
+            and all(sorted(i for kind, i in order if kind == key) == list(range(n)) for key, n in counts.items())
+            and all(i < len(response.text_blocks) for kind, i in order if kind == "text")
+        ):
+            # Replay exactly as returned: a Sonnet 5.5 thinking block is signed over what
+            # precedes it, so [note, call, note, call] must not become [note, note, call, call].
+            render = {
+                "thinking": lambda i: response.thinking_blocks[i],
+                "text": lambda i: {"type": "text", "text": response.text_blocks[i]},
+                "tool_use": lambda i: tool_use(response.tool_use_blocks[i]),
+            }
+            return {"role": "assistant", "content": [render[kind](i) for kind, i in order]}
         content: list[dict] = []
         # Thinking blocks MUST come first when present (required for tool-use
         # continuation in a thinking-enabled turn).
@@ -564,12 +591,5 @@ class AnthropicAdapter(BaseLLMAdapter):
         for text in response.text_blocks:
             content.append({"type": "text", "text": text})
         for tool in response.tool_use_blocks:
-            content.append(
-                {
-                    "type": "tool_use",
-                    "id": tool.id,
-                    "name": tool.name,
-                    "input": tool.input,
-                }
-            )
+            content.append(tool_use(tool))
         return {"role": "assistant", "content": content}
