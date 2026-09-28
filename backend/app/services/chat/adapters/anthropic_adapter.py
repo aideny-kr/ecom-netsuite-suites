@@ -95,11 +95,15 @@ def _apply_thinking(
         kwargs["max_tokens"] = budget + max_tokens
 
 
+def _shown(block_type: str, progress: bool) -> bool:
+    """The one rule for what the chat shows, and therefore what is saved: answer text, plus,
+    on a request that asked for progress updates (Sonnet 5.5), the notes in thinking blocks.
+    Those carry only updates, never reasoning, just as Sonnet 5's text between tool calls."""
+    return block_type == "text" or (progress and block_type == "thinking")
+
+
 async def _chat_text(stream, progress_in_thinking: bool):
-    """What the chat shows while one step streams. Sonnet 5 and earlier: the text deltas.
-    Sonnet 5.5 also writes its notes between tool calls as thinking blocks; with
-    display="updates" (or between_tools) those carry only the progress updates, never the
-    reasoning, so they are shown as Sonnet 5's text between tool calls was."""
+    """What the chat shows while one step streams, by _shown."""
     if not progress_in_thinking:
         async for text in stream.text_stream:
             yield text
@@ -109,12 +113,9 @@ async def _chat_text(stream, progress_in_thinking: bool):
         if event.type == "content_block_start":
             new_block = True
             continue
-        if event.type == "text":
-            piece = event.text
-        elif event.type == "thinking":
-            piece = event.thinking
-        else:
-            piece = None
+        if event.type not in ("text", "thinking") or not _shown(event.type, progress_in_thinking):
+            continue
+        piece = event.text if event.type == "text" else event.thinking
         if not piece:
             continue
         if new_block and shown:
@@ -134,8 +135,8 @@ def _progress_updates_requested(kwargs: dict) -> bool:
 def _response_from(message, *, progress: bool) -> LLMResponse:
     """One pass for the blocking and streaming paths. Replay is the returned content itself, in
     its order, signatures included: a Sonnet 5.5 thinking block is signed over everything
-    before it, so a rebuilt or reordered replay can be rejected. What is shown and saved
-    (text_blocks) is derived separately and never feeds the replay."""
+    before it, so a rebuilt or reordered replay can be rejected. What is saved (text_blocks)
+    is what the chat showed, by the same rule (_shown), and never feeds the replay."""
     text_blocks: list[str] = []
     tool_use_blocks: list[ToolUseBlock] = []
     thinking_blocks: list[dict] = []
@@ -151,15 +152,11 @@ def _response_from(message, *, progress: bool) -> LLMResponse:
         elif block.type == "thinking":
             thinking_blocks.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
             replay.append(thinking_blocks[-1])
+            if _shown(block.type, progress) and block.thinking:
+                text_blocks.append(block.thinking)
         elif block.type == "redacted_thinking":
             thinking_blocks.append({"type": "redacted_thinking", "data": block.data})
             replay.append(thinking_blocks[-1])
-    if progress and not text_blocks and not tool_use_blocks:
-        # A note with no call after it is the answer the chat already showed, so it is what is
-        # saved. The replay stays the thinking block, which gives the model its full note.
-        notes = [b["thinking"] for b in thinking_blocks if b.get("thinking")]
-        if notes:
-            text_blocks = ["\n\n".join(notes)]
     return LLMResponse(
         text_blocks=text_blocks,
         tool_use_blocks=tool_use_blocks,
@@ -169,10 +166,16 @@ def _response_from(message, *, progress: bool) -> LLMResponse:
     )
 
 
+def _asks_instead_of_forcing(model: str, tool_choice) -> bool:
+    """A forced tool_choice on a model that rejects forcing (Sonnet 5.5): the request builder
+    sends it as tool_choice=auto plus an instruction. The one place this is decided."""
+    return _thinking.uses_between_tools(model) and _thinking.is_forced_tool_choice(tool_choice)
+
+
 def _note_unanswered_forced_call(model: str, tool_choice, response: LLMResponse) -> None:
     """On Sonnet 5.5 a forced tool call is only asked for in the prompt (it cannot be forced).
     Callers treat a reply without the call as a failed call; this line makes the rate visible."""
-    if not (_thinking.uses_between_tools(model) and _thinking.is_forced_tool_choice(tool_choice)):
+    if not _asks_instead_of_forcing(model, tool_choice):
         return
     if response.tool_use_blocks:
         return
@@ -344,10 +347,10 @@ def _build_request_kwargs(
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
     _apply_thinking(kwargs, model, max_tokens, thinking_level, tool_choice)
-    if _thinking.uses_between_tools(model) and _thinking.is_forced_tool_choice(tool_choice):
-        # Sonnet 5.5 rejects type tool/any with a 400. Every caller already treats a reply
-        # without the expected tool call as a failed call, so ask in the prompt instead;
-        # callers that can do without forcing are told so by force_tool_choice.
+    if _asks_instead_of_forcing(model, tool_choice):
+        # Sonnet 5.5 rejects type tool/any with a 400, so ask in the prompt instead. Every caller
+        # already treats a reply without the expected tool call as a failed call, and plan mode
+        # keeps its clarify-only tool list, so the only call available is the one asked for.
         kwargs["tool_choice"] = {"type": "auto"}
         kwargs["system"] = [*system_blocks, {"type": "text", "text": _forced_tool_instruction(tool_choice)}]
     return kwargs
@@ -427,16 +430,12 @@ class AnthropicAdapter(BaseLLMAdapter):
 
         Per Anthropic SDK: `tool_choice={"type": "tool", "name": "<tool_name>"}`
         forces the model's first response to be a tool_use block for that tool.
-        Sonnet 5.5 cannot be forced (type tool/any is a 400): its callers get
-        PlanModeUnsupportedError and take their no-forcing path (JSON routing, no Plan Mode).
+        Sonnet 5.5 cannot be forced (type tool/any is a 400); the request builder turns this
+        into tool_choice=auto plus an instruction, so callers (plan mode's clarify gate
+        included) keep one code path on every model.
         """
         if not tool_name or not isinstance(tool_name, str):
             raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
-        if _thinking.uses_between_tools(model):
-            # Imported here: the plan_mode package imports the orchestrator.
-            from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
-
-            raise PlanModeUnsupportedError("anthropic", f"{model} does not support forced tool use")
         return {"type": "tool", "name": tool_name}
 
     async def create_message(

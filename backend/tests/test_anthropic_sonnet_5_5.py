@@ -16,7 +16,6 @@ import pytest
 from app.schemas.tenant import TenantConfigUpdate
 from app.services.chat.adapters import anthropic_adapter as aa
 from app.services.chat.llm_adapter import VALID_MODELS
-from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
 
 NEW, OLD = "claude-sonnet-5-5", "claude-sonnet-5"
 TOOL = {"name": "review", "description": "Record the review.", "input_schema": {"type": "object"}}
@@ -91,10 +90,14 @@ async def test_a_forced_tool_becomes_an_instruction_on_sonnet_5_5(choice):
     assert old["thinking"] == {"type": "disabled"}
 
 
-def test_callers_that_can_do_without_forcing_are_told_sonnet_5_5_cannot_force():
+def test_plan_mode_keeps_its_clarify_gate_on_sonnet_5_5():
+    # Gate wf_e1f01a73 (majors 2, 3): refusing to force turned the financial-ambiguity gate off
+    # entirely on 5.5. Forcing is now asked for at one place, the request builder, so plan mode
+    # stays on: its tools are cut to clarify-only, and the request asks for that call.
+    from app.services.chat.plan_mode.ambiguity_signal import try_force_tool_choice
+
     adapter = aa.AnthropicAdapter(api_key="test-key")
-    with pytest.raises(PlanModeUnsupportedError):
-        adapter.force_tool_choice("route_request", model=NEW)
+    assert try_force_tool_choice(adapter, "clarify", model=NEW) == {"type": "tool", "name": "clarify"}
     assert adapter.force_tool_choice("route_request", model=OLD) == {"type": "tool", "name": "route_request"}
 
 
@@ -295,3 +298,12 @@ async def test_a_forced_call_the_model_answered_in_prose_is_logged(capsys):
     assert "llm.forced_tool_unanswered" in capsys.readouterr().out
     await _sent(OLD, tools=[TOOL], tool_choice={"type": "tool", "name": "review"}, thinking_level="none")
     assert "llm.forced_tool_unanswered" not in capsys.readouterr().out
+
+
+async def test_what_is_saved_is_what_the_chat_showed():
+    # Gate wf_e1f01a73 (major 1): a note followed by the answer streamed both, but only the
+    # answer was saved. One rule now decides what is shown, for the stream and for the save.
+    _, events = await _stream_blocks([("thinking", "Checking the totals."), ("text", "Net is zero.")], "end_turn")
+    shown = "".join(e[1] for e in events if e[0] == "text")
+    assert shown == "Checking the totals.\n\nNet is zero."
+    assert "\n\n".join(events[-1][1].text_blocks) == shown
