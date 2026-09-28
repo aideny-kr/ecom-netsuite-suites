@@ -267,6 +267,13 @@ jobs:
         with:
           node-version: "20"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Test review packet automation
+        run: python3 -m unittest discover -s scripts/review_packet -p 'test_*.py'
+
       # Guards the T2 review gate's model-tiering (.claude/workflows/*.js): every fan-out
       # goes through tagent() (no un-tiered agent() burst) and the pasted TIER copies match
       # the canonical policy. Node builtins only — no install step. See tiering.test.mjs.

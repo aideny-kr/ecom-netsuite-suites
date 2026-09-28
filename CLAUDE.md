@@ -30,6 +30,8 @@
 - **Unattended execution is a different discipline**: anything a *schedule* can start — not a human — is bound by `.claude/rules/agent-graph.md`. The one-line test: *if this runs at 03:00 and nobody is watching, what happens?* Non-negotiables: guardrails are code at the choke point (never prompt prose, never one caller); allow-list derived from a registry, never a deny-list; termination returns a reason enum with cost budgets, not just a step cap; irreversible steps go last, with a work-derived idempotency key and a side-effect log written *before* the call. Program plan: `docs/superpowers/plans/2026-08-02-autonomous-accounting-ops-program.md`.
 - **Workflow model-tiering**: when authoring a `Workflow` or spawning an `Agent`, tier by role (Fable for plan/architect/synthesize/judge · Sonnet for reason/verify/implement · Haiku for search/mechanical) and cap bursty stages with `makeGate(n)`. This is what keeps the T2 gate from rate-limiting (it fanned out ~16 concurrent Opus verifiers). Canonical policy + harness block to paste: `~/.claude/workflows/model-tiering.md`.
 
+Prepare a revision-bound review packet before the required review; follow `scripts/review_packet/README.md`. Keep the brief and receipt in the PR description, regenerate after scope/base/head changes, and preserve original reviewer evidence. Packet consistency never substitutes for required CI, independent review or live acceptance.
+
 ## UAT + Review — tier EVERY PR
 
 Review + UAT depth is decided by a risk **tier** (not by vibes). Pick the tier; the tier decides the gates.
