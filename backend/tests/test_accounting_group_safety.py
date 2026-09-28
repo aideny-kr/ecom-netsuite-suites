@@ -196,6 +196,8 @@ async def test_preparation_publishes_children_only_with_complete_parent(monkeypa
     monkeypatch.setattr(group, "record_preparation_interrupted", interrupted)
     monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
     monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
+    # The children's databases are doubles: no attempt exists on this work in the ledger.
+    monkeypatch.setattr("app.services.transaction_ops.chat_confirmation.attempt_blocker", AsyncMock(return_value=None))
     task = asyncio.create_task(
         group.prepare_group_confirmation(
             db=db,

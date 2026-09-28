@@ -370,7 +370,60 @@ class TestGroup:
             await reallocation.prepare_group_member(db, TENANT, CASE)
         assert "accounting_correction_candidate" not in db.info
 
-    @pytest.mark.parametrize("outcome", ["prepared", "refused", "crashed"])
+    @pytest.mark.parametrize(
+        "status,runs",
+        [
+            (None, True),
+            ("rejected_before_effect", True),
+            ("needs_review", False),
+            ("verified", False),
+            ("unknown", False),
+        ],
+    )
+    async def test_a_fix_can_run_only_if_its_exact_work_was_never_attempted_or_was_refused(
+        self, monkeypatch, status, runs
+    ):
+        # The claim refuses any card whose exact work already has a ledger row, unless the
+        # latest attempt was refused before effect (a lineage retry). Preparation asks the same.
+        from app.services.transaction_ops import chat_confirmation
+        from app.services.transaction_ops import state_service as state
+
+        async def latest(db, tenant_id, base_work_key):
+            assert base_work_key == "work"
+            return None if status is None else SimpleNamespace(status=status)
+
+        async def no_card(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(state, "latest_operation_for_base", latest)
+        monkeypatch.setattr(chat_confirmation, "operation_identity", lambda p: "work")
+        monkeypatch.setattr("app.services.transaction_ops.resolution_plan.previous_execution", no_card)
+        blocked = await chat_confirmation.attempt_blocker(None, TENANT, {"case_id": CASE})
+        assert (blocked is None) == runs
+        assert blocked in (None, status)
+
+    async def test_a_fix_an_earlier_card_or_legacy_reservation_holds_is_set_aside_too(self, monkeypatch):
+        # Gate wf_c9aab898 round 1: the claim also refuses work that only an earlier card (sent
+        # before the ledger existed) or a retired dispatcher's reservation remembers.
+        from app.services.transaction_ops import chat_confirmation
+        from app.services.transaction_ops import state_service as state
+
+        async def clear_ledger(db, tenant_id, base_work_key):
+            return None
+
+        calls = []
+
+        async def prior(db, tenant_id, message_id, proposal, *, record_release=True):
+            calls.append(record_release)
+            return {"confirmation_id": "old", "status": "indeterminate"}
+
+        monkeypatch.setattr(state, "latest_operation_for_base", clear_ledger)
+        monkeypatch.setattr(chat_confirmation, "operation_identity", lambda p: "work")
+        monkeypatch.setattr("app.services.transaction_ops.resolution_plan.previous_execution", prior)
+        assert await chat_confirmation.attempt_blocker(None, TENANT, {"case_id": CASE}) == "indeterminate"
+        assert calls == [False]  # asked before anyone approves: no release is recorded
+
+    @pytest.mark.parametrize("outcome", ["prepared", "refused", "crashed", "evidence_crashed", "already_attempted"])
     async def test_group_preparation_uses_the_reallocation_when_no_recipe_fits(self, monkeypatch, outcome):
         import asyncio
         from contextlib import asynccontextmanager
@@ -399,6 +452,8 @@ class TestGroup:
             yield child
 
         async def evidence(*args, **kwargs):
+            if outcome == "evidence_crashed":
+                raise KeyError("sales_credit_profile")
             return {"success": True, "accounting_evidence": {}}
 
         async def derive(child_db, tenant_id, case_id):
@@ -420,6 +475,11 @@ class TestGroup:
         monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
         monkeypatch.setattr(reallocation, "prepare_group_member", derive)
         monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+
+        async def blocker(db, tenant_id, p):
+            return "needs_review" if outcome == "already_attempted" else None
+
+        monkeypatch.setattr("app.services.transaction_ops.chat_confirmation.attempt_blocker", blocker)
         result = await asyncio.wait_for(
             group.prepare_group_confirmation(
                 db=db,
@@ -440,6 +500,18 @@ class TestGroup:
         if outcome == "prepared":
             card, _ = result
             assert card.accounting_group["members"][0].get("card") and not skipped
+        elif outcome == "already_attempted":
+            # R619946522 (2026-09-27): a card for work the ledger already closed was approved,
+            # refused as a duplicate at the claim, and stopped the whole group.
+            assert result is None  # no card: nothing in the group could run
+            reason = skipped[0]["payload"]["reason"]
+            assert "already has an execution record (needs_review)" in reason
+        elif outcome == "evidence_crashed":
+            # R723913613 (2026-09-27) left only "KeyError": where it failed must be on record.
+            payload = skipped[0]["payload"]
+            assert payload["reason"] == "Preparation needs review (KeyError)."
+            assert payload["error"]["type"] == "KeyError"
+            assert payload["error"]["where"].endswith(":evidence")
         else:
             reason = skipped[0]["payload"]["reason"]
             expected = (

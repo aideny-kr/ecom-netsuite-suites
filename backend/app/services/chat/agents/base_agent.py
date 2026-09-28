@@ -8,6 +8,7 @@ orchestrator, but scoped to a specific task and tool subset.
 from __future__ import annotations
 
 import abc
+import asyncio
 import inspect
 import json
 import logging
@@ -2406,7 +2407,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 else candidate_confirmation
                             )
                             _prep_started = time.monotonic()
-                            prepared = await prepare_confirmation(
+                            _prep_args = dict(
                                 db=db,
                                 tenant_id=self.tenant_id,
                                 actor_id=self.user_id,
@@ -2417,6 +2418,47 @@ class BaseSpecialistAgent(abc.ABC):
                                 policy=active_policy,
                                 case_id=block.input.get("case_id"),
                             )
+                            if block.name == "transaction_ops_accounting_group":
+                                # A group takes minutes: stream the server's own counts as each
+                                # member finishes instead of a silent wait (2026-09-27).
+                                _progress = asyncio.Queue()
+                                _finished = object()  # sentinel: preparation returned or raised
+
+                                async def _prepare_reporting():
+                                    try:
+                                        return await prepare_confirmation(**_prep_args, progress=_progress.put_nowait)
+                                    finally:
+                                        _progress.put_nowait(_finished)
+
+                                _prep = asyncio.create_task(_prepare_reporting())
+                                _collected = False
+                                try:
+                                    while (_update := await _progress.get()) is not _finished:
+                                        yield "progress", _update
+                                    _collected = True
+                                    prepared = await _prep
+                                finally:
+                                    if _prep.done() and not _collected and not _prep.cancelled() and _prep.exception():
+                                        # It failed just as the chat closed: nothing else will read it.
+                                        logger.error(
+                                            "Group preparation failed as the chat closed", exc_info=_prep.exception()
+                                        )
+                                    if not _prep.done():
+                                        # The chat went away mid-preparation: stop it and wait for its
+                                        # own cleanup (child sessions, the interruption audit) before
+                                        # this request's session is released.
+                                        _prep.cancel()
+                                        try:
+                                            await _prep
+                                        except asyncio.CancelledError:
+                                            pass
+                                        except Exception:
+                                            logger.error(
+                                                "Group preparation cleanup failed after the chat closed",
+                                                exc_info=True,
+                                            )
+                            else:
+                                prepared = await prepare_confirmation(**_prep_args)
                         except ValueError as exc:
                             prepared = None
                             note = f"The correction needs review before an approval card can be created: {exc}"

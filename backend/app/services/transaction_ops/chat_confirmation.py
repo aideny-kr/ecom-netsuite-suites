@@ -222,14 +222,35 @@ async def _config_for_scope(db, tenant_id, scope):
     return matching[0].id if len(matching) == 1 else None
 
 
+async def _latest_attempt(db, tenant_id, p):
+    """The latest ledger attempt on this proposal's business identity, or None."""
+    return await state.latest_operation_for_base(db, tenant_id, operation_identity(p)) if p else None
+
+
+async def attempt_blocker(db, tenant_id, p):
+    """Why sending a card for this work will be refused, asked before anyone approves it.
+
+    The same two questions the send asks: the ledger's (the latest attempt on the same work,
+    unless it was refused before effect, the one state a lineage retry may follow) and the
+    earlier cards' and legacy reservations' (resolution_plan.previous_execution, which
+    releases a rejected attempt only on a fresh unchanged readback). None when it can run.
+    """
+    if not p:
+        return None
+    latest = await _latest_attempt(db, tenant_id, p)
+    if latest is not None and latest.status != "rejected_before_effect":
+        return latest.status
+    from app.services.transaction_ops.resolution_plan import previous_execution
+
+    prior = await previous_execution(db, tenant_id, None, p, record_release=False)
+    return (prior.get("status") or "recorded") if prior else None
+
+
 async def _retryable_attempt(db, tenant_id, so):
     """The latest ledger attempt on this business identity when, and only when, it was
     refused before any effect: that is the one state a lineage retry is allowed from
     (write-kernel design, section 4). Anything else leaves the ledger's refusal to speak."""
-    p = so.get("accounting_review") or {}
-    if not p:
-        return None
-    latest = await state.latest_operation_for_base(db, tenant_id, operation_identity(p))
+    latest = await _latest_attempt(db, tenant_id, so.get("accounting_review") or {})
     return latest if latest is not None and latest.status == "rejected_before_effect" else None
 
 
