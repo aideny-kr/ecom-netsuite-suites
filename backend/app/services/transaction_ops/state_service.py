@@ -651,10 +651,30 @@ def _first_claim_deadline(row, now):
     return min(now + duration, hard_deadline)
 
 
-async def claim_run(db, tenant_id, run_id, *, now=None):
+async def claim_run(db, tenant_id, run_id, *, now=None, coverage_only=False):
+    from app.services.transaction_ops.collection_coordination import calendar_collection, collection_blocker
     from app.services.transaction_ops.settlement import is_settlement
 
-    row = await get_run(db, tenant_id, run_id, lock=True)
+    # All calendar claims serialize with create/continuation. Always take the
+    # configuration lock before the run lock to avoid inversion with those paths.
+    row = await get_run(db, tenant_id, run_id)
+    calendar = calendar_collection(row)
+    config = await get_config(db, tenant_id, row.config_id, lock=True) if calendar else None
+    if calendar:
+        # propose() legitimately holds the run before its configuration. Never
+        # wait for that row while holding the config, including redeliveries of
+        # a currently leased run. The owning operation can finish unhindered.
+        row = await db.scalar(
+            select(TransactionRun)
+            .where(TransactionRun.tenant_id == tenant_id, TransactionRun.id == run_id)
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            await _commit(db, tenant_id)
+            return None
+    else:
+        row = await get_run(db, tenant_id, run_id, lock=True)
     now = await run_clock(db, now)
     if row.status == "finished":
         await _commit(db, tenant_id)
@@ -674,11 +694,27 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
     if row.status == "running" and row.lease_until and now < row.lease_until:
         await _commit(db, tenant_id)
         return None
-    config = await get_config(db, tenant_id, row.config_id)
+    config = config or await get_config(db, tenant_id, row.config_id)
     if not config.enabled or (row.origin == "schedule" and not config.schedule_enabled):
         await _finish_audited(db, tenant_id, row, "stall", now)
         await _commit(db, tenant_id)
         return None
+    if coverage_only and (not row.params_json.get("review") or row.status != "pending"):
+        # A queued review may have been claimed since receipt validation.
+        # Let its owner finish instead of turning an idempotent retry into 409.
+        await _commit(db, tenant_id)
+        return None
+    if calendar and not coverage_only:
+        blocker = await collection_blocker(db, tenant_id, row, now, scheduled_enabled=config.schedule_enabled)
+        if blocker is not None:
+            waiting = {"run_id": str(blocker.id), "reason": "overlapping_collection"}
+            if (row.progress_json or {}).get("collection_wait") != waiting:
+                row.progress_json = {**(row.progress_json or {}), "collection_wait": waiting}
+                await _audit(db, tenant_id, "run.collection_wait", row, payload=waiting)
+            await _commit(db, tenant_id)
+            return None
+    if "collection_wait" in (row.progress_json or {}):
+        row.progress_json = {k: v for k, v in row.progress_json.items() if k != "collection_wait"}
     row.deadline_at = deadline
     row.status, row.lease_token = "running", uuid.uuid4()
     row.lease_until = min(row.deadline_at, now + _LEASE)
