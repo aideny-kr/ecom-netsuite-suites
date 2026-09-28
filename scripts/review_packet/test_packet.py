@@ -62,6 +62,14 @@ class PacketTests(unittest.TestCase):
         receipt = packet.receipt(p, self.review(p))
         packet.validate_receipt(p, receipt)
 
+    def test_packet_does_not_depend_on_local_diff_display_configuration(self):
+        before = self.prepare()
+        self.git("config", "color.ui", "always")
+        self.git("config", "diff.mnemonicPrefix", "true")
+        self.git("config", "diff.context", "20")
+        self.git("config", "diff.algorithm", "histogram")
+        self.assertEqual(before, self.prepare())
+
     def test_new_head_invalidates_review_even_same_tree(self):
         p, _ = self.prepare()
         r = packet.receipt(p, self.review(p))

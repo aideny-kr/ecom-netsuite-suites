@@ -117,6 +117,25 @@ def brief_check(brief):
 
 
 def git(repo, *args):
+    if args and args[0] == "diff":
+        # A local color/prefix/context/algorithm preference must not invalidate CI's packet.
+        args = (
+            "diff",
+            "--no-color",
+            "--no-renames",
+            "--diff-algorithm=myers",
+            "--no-indent-heuristic",
+            "--unified=3",
+            "--inter-hunk-context=0",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--submodule=short",
+            "--full-index",
+            "--output-indicator-new=+",
+            "--output-indicator-old=-",
+            "--output-indicator-context= ",
+            *args[1:],
+        )
     try:
         return subprocess.check_output(
             ["git", "-C", str(repo), "-c", "core.quotePath=true", *args],
