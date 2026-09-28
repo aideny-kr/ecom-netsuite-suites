@@ -96,6 +96,19 @@ async def list_configs(user: Reader, db: Database):
     return await service.list_configs(db, user.tenant_id)
 
 
+@router.get("/operational-status")
+async def operational_status(
+    user: Reader,
+    db: Database,
+    config_id: UUID | None = None,
+    limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+):
+    from app.services.transaction_ops.operational_status import operational_status as read_status
+
+    return await read_status(db, user.tenant_id, config_id=config_id, limit=limit, offset=offset)
+
+
 @router.post("/configs", response_model=ConfigOut, status_code=201)
 async def create_config(request: ConfigCreate, user: Manager, db: Database):
     try:
