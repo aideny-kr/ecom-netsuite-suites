@@ -64,7 +64,11 @@ def _predicates(model, tenant_id: UUID, filters, search, date_from=None, date_to
         if key == "reconciliation_status":
             if model is not Order:
                 raise ValueError("Reconciliation filter is available for orders")
-            predicates.append(reconciliation_predicate(tenant_id, value))
+            predicates.append(
+                reconciliation_predicate(
+                    tenant_id, value, source_connection_id=(filters or {}).get("source_connection_id")
+                )
+            )
         if key in model.__table__.columns and value is not None:
             predicates.append(getattr(model, key) == value)
     if search and search.strip():
