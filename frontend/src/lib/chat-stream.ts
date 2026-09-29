@@ -113,9 +113,12 @@ export interface GroupBreakdownCause {
   next_label: string;
   orders: number;
   order_references: string[];
-  amounts: Record<string, string>;
-  /** The amount this cause shows, chosen by the server. */
-  primary?: { metric: string; amount: string };
+  /** The exact case of each order, paired with order_references by position. */
+  case_ids?: string[];
+  /** null when an amount is missing for some order: unknown, never zero. */
+  amounts: Record<string, string | null>;
+  /** The amount this cause shows, chosen by the server; null when none is known and non-zero. */
+  primary?: { metric: string; amount: string } | null;
   facts: Array<{ fact: string; orders: number; kind?: string }>;
 }
 
@@ -127,7 +130,7 @@ export interface GroupBreakdownData {
   pattern: string | null;
   currency: string | null;
   orders: number;
-  totals: Record<string, string>;
+  totals: Record<string, string | null>;
   causes: GroupBreakdownCause[];
   checked: {
     saved_evidence: number;

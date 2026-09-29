@@ -129,6 +129,12 @@ def _money(total):
     return str(total.quantize(Decimal("0.01")))
 
 
+def _sum(values):
+    """The sum as money, or None when any value is missing: an incomplete sum is not a total."""
+    values = list(values)
+    return None if any(value is None for value in values) else _money(sum(values, Decimal(0)))
+
+
 def _source_order(evidence, reference):
     """The saved Solidus order for this reference, or None. Never another order's detail."""
     try:
@@ -168,6 +174,12 @@ def _explaining_adjustments(order, delta):
     if rows and sum((_decimal(entry["amount"]) for entry in rows), Decimal(0)) == delta:
         return rows
     return []
+
+
+def _customer_type(order):
+    """Solidus customer_type is free text: only its known values reach a fact or a rule."""
+    value = (order or {}).get("customer_type")
+    return value if value in ("business", "consumer") else ("unknown" if value is None else "other")
 
 
 def _label(entry):
@@ -265,8 +277,11 @@ async def _invoices(db, tenant_id, config, order_ids):
                     rows = await query(
                         reader,
                         # taxtotal is in the transaction's currency, like foreigntotal (checked on a CHF invoice).
+                        # parents: every sales order the invoice came from, not only the requested ones.
                         "SELECT t.id, t.foreigntotal, t.taxtotal, t.foreignamountunpaid, "
-                        "BUILTIN.DF(t.entity) AS customer "
+                        "BUILTIN.DF(t.entity) AS customer, "
+                        "(SELECT COUNT(DISTINCT x.createdfrom) FROM transactionline x "
+                        "WHERE x.transaction = t.id AND x.createdfrom IS NOT NULL) AS parents "
                         f"FROM transaction t WHERE t.type = 'CustInvc' AND t.id IN ({','.join(invoice_ids)})",
                     )
                     totals = {str(row.get("id")): row for row in rows}
@@ -277,6 +292,8 @@ async def _invoices(db, tenant_id, config, order_ids):
     # An invoice created from several of these orders cannot be split between them from its header,
     # so none of those orders gets the invoice rule.
     shared = {invoice for invoice, n in Counter(str(row.get("invoice_id")) for row in links).items() if n > 1}
+    # Also shared with an order outside this request: only NetSuite's own parent count shows that.
+    shared |= {invoice for invoice, row in totals.items() if str(row.get("parents")) != "1"}
     by_order = {}
     for row in links:
         if str(row.get("invoice_id")) in shared:
@@ -330,7 +347,8 @@ def _classify(member, invoices, tax_reasons):
         )
         return "corrected_in_app", {
             "refund_reasons": reasons,
-            "counted_as_tax_refund": [r for r in reasons if r in tax_reasons],
+            # None when the subsidiary's refund settings could not be read: unknown, never "not counted".
+            "counted_as_tax_refund": None if tax_reasons is None else [r for r in reasons if r in tax_reasons],
         }
     target = (report.get("refund_evidence") or {}).get("target") or {}
     if (
@@ -360,7 +378,7 @@ def _classify(member, invoices, tax_reasons):
     explaining = _explaining_adjustments(member["order"], delta)
     if explaining and _known_zero(member, "tax", "refunds"):
         return "source_adjustment_not_in_netsuite", {"labels": [_label(entry) for entry in explaining]}
-    if delta and _known_zero(member, "tax", "refunds") and (member["order"] or {}).get("customer_type") == "business":
+    if delta and _known_zero(member, "tax", "refunds") and _customer_type(member["order"]) == "business":
         return "business_priced_in_netsuite", {}
     # A pointer for review, not an explanation of the amounts: it proposes nothing.
     if member["links"] and not any(link.get("credit_memo_id") for link in member["links"]):
@@ -375,7 +393,15 @@ def _facts(key, members, detail, invoices, saved_source="complete"):
         counts.append(
             {"kind": "refund_reason", "fact": "refund reason " + (", ".join(reasons) or "none"), "orders": len(members)}
         )
-        if reasons and not detail["counted_as_tax_refund"]:
+        if detail["counted_as_tax_refund"] is None:
+            counts.append(
+                {
+                    "kind": "setting",
+                    "fact": "the subsidiary's refund settings could not be read",
+                    "orders": len(members),
+                }
+            )
+        elif reasons and not detail["counted_as_tax_refund"]:
             counts.append(
                 {
                     "kind": "setting",
@@ -397,7 +423,7 @@ def _facts(key, members, detail, invoices, saved_source="complete"):
                 }
             )
     if key in ("invoice_matches_source", "source_adjustment_not_in_netsuite", "business_priced_in_netsuite"):
-        types = Counter((m["order"] or {}).get("customer_type") or "unknown" for m in members)
+        types = Counter(_customer_type(m["order"]) for m in members)
         counts.extend(
             {"kind": "customer_type", "fact": f"{kind} customer", "orders": n} for kind, n in types.most_common()
         )
@@ -446,7 +472,12 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
     scope_json = cases[0].scope_json or {}
     config = await _scope_config(db, tenant_id, scope_json)
     profile = ((config.mapping_json or {}).get("refund_adjustments") or {}) if config else {}
-    tax_reasons = {str(r) for r in profile.get("tax_reversal_reason_ids") or []}
+    # None: no single config or no refund profile, so which reasons count as tax refunds is unknown.
+    tax_reasons = (
+        {str(r) for r in profile["tax_reversal_reason_ids"]}
+        if isinstance(profile.get("tax_reversal_reason_ids"), list)
+        else None
+    )
 
     snapshots, saved_source = await _saved_source_orders(db, tenant_id, scope_json.get("source_connection_id"), cases)
     corrected = await _verified_corrections(db, tenant_id, case_ids)
@@ -516,29 +547,29 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
         vocabulary = dict(CAUSES[key])
         if key == "corrected_in_app":
             reasons, counted = row["detail"]["refund_reasons"], row["detail"]["counted_as_tax_refund"]
-            if reasons and not counted and len(row["members"]) >= MIN_SETTING_EVIDENCE:
+            if reasons and counted is not None and not counted and len(row["members"]) >= MIN_SETTING_EVIDENCE:
                 vocabulary["next_step"] = "settings_change"
                 vocabulary["next_pill"] = "Settings change"
                 vocabulary["next_label"] = (
                     f"Count refund reason {', '.join(reasons)} as a tax refund for this subsidiary. "
                     "A person approves it."
                 )
-        amounts = {
-            metric: _money(sum((m["amounts"][metric] or Decimal(0) for m in row["members"]), Decimal(0)))
-            for metric in METRICS
-        }
+        amounts = {metric: _sum(m["amounts"][metric] for m in row["members"]) for metric in METRICS}
         if invoices is not None:
             opened = [invoices[m["order_id"]]["open"] for m in row["members"] if m["order_id"] in invoices]
             if len(opened) == len(row["members"]):
                 amounts["open_on_invoices"] = _money(sum(opened, Decimal(0)))
-        primary = next((m for m in METRICS if Decimal(amounts[m])), "order_total")
+        primary = next((m for m in METRICS if amounts[m] is not None and Decimal(amounts[m])), None)
         causes.append(
             {
                 "cause": key,
-                "primary": {"metric": primary, "amount": amounts[primary]},
+                "primary": {"metric": primary, "amount": amounts[primary]} if primary else None,
+                # The exact cases, paired with order_references by position: a reference alone does not
+                # identify a case across configurations.
+                "case_ids": [m["case_id"] for m in sorted(row["members"], key=lambda m: m["reference"])],
                 **vocabulary,
                 "orders": len(row["members"]),
-                "order_references": sorted(m["reference"] for m in row["members"]),
+                "order_references": [m["reference"] for m in sorted(row["members"], key=lambda m: m["reference"])],
                 "amounts": amounts,
                 "facts": _facts(key, row["members"], row["detail"], invoices, saved_source),
             }
@@ -571,9 +602,7 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
         "pattern": _pattern(pattern_row) if group_id is not None else None,
         "currency": balance.get("currency"),
         "orders": len(members),
-        "totals": {
-            metric: _money(sum((m["amounts"][metric] or Decimal(0) for m in members), Decimal(0))) for metric in METRICS
-        },
+        "totals": {metric: _sum(m["amounts"][metric] for m in members) for metric in METRICS},
         "causes": causes,
         "checked": {
             "saved_evidence": len(members),

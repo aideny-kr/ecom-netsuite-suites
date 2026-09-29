@@ -36,6 +36,7 @@ const breakdown: GroupBreakdownData = {
       primary: { metric: "tax", amount: "-7.63" },
       orders: 1,
       order_references: ["R619946522"],
+      case_ids: ["c-619"],
       amounts: { order_total: "-7.63", tax: "-7.63", refunds: "0.00" },
       facts: [],
     },
@@ -62,6 +63,7 @@ const breakdown: GroupBreakdownData = {
       primary: { metric: "order_total", amount: "-1345.37" },
       orders: 4,
       order_references: ["R274027840", "R622812723", "R293712421", "R547556184"],
+      case_ids: ["c-274", "c-622", "c-293", "c-547"],
       amounts: { order_total: "-1345.37", tax: "0.00", refunds: "0.00", open_on_invoices: "0.00" },
       facts: [{ fact: "no saved Solidus detail yet", orders: 2 }],
     },
@@ -92,11 +94,13 @@ it("shows each cause with the server's counts and amounts", () => {
 
 it("routes each next step to the right action", () => {
   render(<GroupBreakdownCard data={breakdown} />);
+  // Packet review F3: each order goes with its exact case, which the case tools need.
   const review = compose(screen.getByRole("link", { name: "Review one by one →" }));
-  expect(review).toContain("R274027840, R622812723, R293712421, R547556184");
+  expect(review).toContain("R274027840 (case c-274)");
+  expect(review).toContain("R547556184 (case c-547)");
   // One order of 46: prepare that order, never the whole mixed group (review round 1 of #356).
   const fix = compose(screen.getByRole("link", { name: "Prepare these fixes →" }));
-  expect(fix).toContain("R619946522");
+  expect(fix).toContain("R619946522 (case c-619)");
   expect(fix).toContain("transaction_ops_accounting_evidence");
   expect(fix).not.toContain("transaction_ops.accounting_group");
   expect(screen.getByRole("button", { name: "Propose settings change" })).toBeDisabled();
@@ -158,4 +162,25 @@ it("shows every non-zero amount of a cause, not just the one it leads with", () 
 it("says when the saved Solidus orders could not be read", () => {
   render(<GroupBreakdownCard data={{ ...breakdown, checked: { ...breakdown.checked, saved_source: "unavailable" } }} />);
   expect(screen.getByText(/saved Solidus orders could not be read/)).toBeVisible();
+});
+
+it("shows an unknown amount as unknown, never as zero", () => {
+  // Packet review F2: the card used to show a sum with a missing amount as a complete $0.00.
+  const unknown: GroupBreakdownData = {
+    ...breakdown,
+    totals: { order_total: null as unknown as string, tax: null as unknown as string, refunds: "0.00" },
+    causes: [
+      {
+        ...breakdown.causes[3],
+        amounts: { order_total: null as unknown as string, tax: null as unknown as string, refunds: "0.00" },
+        primary: null as unknown as { metric: string; amount: string },
+      },
+    ],
+  };
+  render(<GroupBreakdownCard data={unknown} />);
+  const row = screen.getByText("No shared cause").closest("li")!;
+  expect(within(row).getByText("—")).toBeVisible();
+  expect(within(row).getByText("tax unknown")).toBeVisible();
+  expect(screen.queryByText(/\$0\.00/)).toBeNull();
+  expect(screen.getByText(/difference not fully known/)).toBeVisible();
 });

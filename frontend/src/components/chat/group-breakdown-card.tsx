@@ -29,7 +29,7 @@ const NETSUITE: Record<string, string> = {
 };
 
 /** The shared formatter, on the size of the difference; the direction is stated in words. */
-function money(value: string | undefined, currency: string | null) {
+function money(value: string | null | undefined, currency: string | null) {
   const amount = value === undefined || value === null ? NaN : Math.abs(Number(value));
   if (!Number.isFinite(amount)) return formatMoney(null);
   try {
@@ -54,12 +54,14 @@ function compose(prompt: string) {
 }
 
 function Action({ cause, data }: { cause: GroupBreakdownCause; data: GroupBreakdownData }) {
-  const refs = cause.order_references;
+  // Each order with its exact case: the case tools need the case id, and a reference alone does not
+  // identify a case across configurations.
+  const refs = cause.order_references.map((ref, i) => (cause.case_ids?.[i] ? `${ref} (case ${cause.case_ids[i]})` : ref));
   if (cause.next_step === "review_individually") {
     return (
       <ActionLink
         href={compose(
-          `Investigate these orders one at a time: ${refs.join(", ")}. Start with transaction_ops_status for each and tell me what differs.`,
+          `Investigate these cases one at a time: ${refs.join(", ")}. Start with transaction_ops_status for each case_id and tell me what differs.`,
         )}
       >
         Review one by one →
@@ -72,7 +74,7 @@ function Action({ cause, data }: { cause: GroupBreakdownCause; data: GroupBreakd
     return (
       <ActionLink
         href={compose(
-          `Prepare corrections for these orders one at a time: ${refs.join(", ")}. For each, use transaction_ops_accounting_evidence, then prepare the supported exact correction for my approval; show any order without a supported correction separately. Do not treat this request as financial approval.`,
+          `Prepare corrections for these cases one at a time: ${refs.join(", ")}. For each, use transaction_ops_accounting_evidence with its case_id, then prepare the supported exact correction for my approval; show any order without a supported correction separately. Do not treat this request as financial approval.`,
         )}
       >
         Prepare these fixes →
@@ -110,7 +112,8 @@ function Action({ cause, data }: { cause: GroupBreakdownCause; data: GroupBreakd
 
 export function GroupBreakdownCard({ data }: { data: GroupBreakdownData }) {
   const total = Math.max(data.orders, 1);
-  const difference = Number(data.totals.order_total ?? 0) || Number(data.totals.tax ?? 0);
+  const unknownTotal = data.totals.order_total === null || data.totals.tax === null;
+  const difference = unknownTotal ? 0 : Number(data.totals.order_total ?? 0) || Number(data.totals.tax ?? 0);
   return (
     <section
       aria-label={`Breakdown of ${data.pattern || "the order"}`}
@@ -123,6 +126,7 @@ export function GroupBreakdownCard({ data }: { data: GroupBreakdownData }) {
             <p className="text-xs text-muted-foreground">
               <span className="tabular-nums">{data.orders}</span> {data.orders === 1 ? "order" : "orders"}
               {data.currency ? ` · ${data.currency}` : ""}
+              {unknownTotal ? " · difference not fully known: some amounts are missing" : null}
               {difference ? (
                 <>
                   {" "}
@@ -180,11 +184,12 @@ export function GroupBreakdownCard({ data }: { data: GroupBreakdownData }) {
                     (metric) =>
                       metric !== (cause.primary?.metric ?? "order_total") &&
                       cause.amounts[metric] !== undefined &&
-                      Number(cause.amounts[metric]) !== 0,
+                      (cause.amounts[metric] === null || Number(cause.amounts[metric]) !== 0),
                   )
                   .map((metric) => (
                     <div key={metric} className="whitespace-nowrap text-[11.5px] tabular-nums text-muted-foreground">
-                      {METRIC_LABEL[metric]} {money(cause.amounts[metric], data.currency)}
+                      {METRIC_LABEL[metric]}{" "}
+                      {cause.amounts[metric] === null ? "unknown" : money(cause.amounts[metric], data.currency)}
                     </div>
                   ))}
                 {cause.amounts.open_on_invoices !== undefined && (

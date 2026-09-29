@@ -611,8 +611,8 @@ async def test_an_invoice_shared_by_several_orders_is_never_split_between_them(w
         [
             [{"invoice_id": 1, "order_id": 11}, {"invoice_id": 1, "order_id": 12}, {"invoice_id": 2, "order_id": 13}],
             [
-                {"id": 1, "foreigntotal": 500, "taxtotal": 50, "foreignamountunpaid": 0, "customer": "A"},
-                {"id": 2, "foreigntotal": 80, "taxtotal": 0, "foreignamountunpaid": 80, "customer": "B"},
+                {"id": 1, "foreigntotal": 500, "taxtotal": 50, "foreignamountunpaid": 0, "customer": "A", "parents": 2},
+                {"id": 2, "foreigntotal": 80, "taxtotal": 0, "foreignamountunpaid": 80, "customer": "B", "parents": 1},
             ],
         ]
     )
@@ -641,3 +641,78 @@ async def test_says_so_when_saved_solidus_orders_cannot_be_read(world, monkeypat
     result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
     assert result["checked"]["saved_source"] == "unavailable"
     assert not any("no saved Solidus detail" in f["fact"] for c in result["causes"] for f in c["facts"])
+
+
+async def test_an_invoice_with_another_order_outside_the_request_is_not_this_orders(world, monkeypatch):
+    # Packet review F1: shared invoices were detected only among the requested orders.
+    from contextlib import asynccontextmanager
+
+    from app.services.transaction_ops import netsuite_bulk, netsuite_reader
+
+    @asynccontextmanager
+    async def reader(*args, **kwargs):
+        yield object()
+
+    answers = iter(
+        [
+            [{"invoice_id": 1, "order_id": 11}],
+            [{"id": 1, "foreigntotal": 500, "taxtotal": 50, "foreignamountunpaid": 0, "customer": "A", "parents": 2}],
+        ]
+    )
+
+    async def query(reader, sql, limit=1000):
+        return next(answers)
+
+    monkeypatch.setattr(netsuite_reader, "authenticated_reader", reader)
+    monkeypatch.setattr(netsuite_bulk, "query", query)
+    await world.config()
+    config = (await world.db.execute(gb.select(TransactionConfig))).scalars().one()
+    by_order, status = await gb._invoices(world.db, world.tenant.id, config, ["11"])
+    assert status == "complete" and by_order == {}
+
+
+async def test_a_missing_amount_is_shown_as_unknown_not_zero(world, monkeypatch):
+    # Packet review F2: the card summed missing amounts as zero and showed the sum as complete.
+    await world.config()
+    await world.case("R000002701", delta=None, tax=None, refunds=None)
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    cause = result["causes"][0]
+    assert cause["amounts"]["order_total"] is None and result["totals"]["order_total"] is None
+    assert cause["primary"] is None
+
+
+async def test_each_cause_names_its_exact_cases(world, monkeypatch):
+    # Packet review F3: follow-up prompts carried only order references, which do not identify a case
+    # across configurations; the evidence tool needs the case id.
+    await world.config()
+    case = await world.case("R000002801", delta="-12.00")
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert result["causes"][0]["case_ids"] == [str(case.id)]
+    assert "case_ids" not in json.dumps(gb.condensed_for_model(result))
+
+
+async def test_without_the_subsidiarys_settings_no_setting_change_is_suggested(world, monkeypatch):
+    # Packet review F4: an unresolved configuration was read as "the settings do not count this reason".
+    orders = [await world.case(f"R00000290{i}", delta="-2.80", tax="-2.80", links=[link("4")]) for i in range(3)]
+    for case in orders:
+        await world.corrected(case)
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())  # no config seeded
+    corrected = by_cause(result)["corrected_in_app"]
+    assert corrected["next_step"] == "recheck"
+    facts = [f["fact"] for f in corrected["facts"]]
+    assert "not counted as a tax refund in this subsidiary's settings" not in facts
+    assert "the subsidiary's refund settings could not be read" in facts
+
+
+async def test_an_unexpected_customer_type_never_reaches_the_model_as_text(world, monkeypatch):
+    # Packet review F5: customer_type is free text from Solidus.
+    await world.config()
+    await world.case("R000003001", delta="-59.00")
+    await world.solidus("R000003001", customer_type="Jane Doe 123.45", adjustments=[("SKU Adjustment", "-59.0")])
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert "Jane" not in json.dumps(gb.condensed_for_model(result))
+    assert {"kind": "customer_type", "fact": "other customer", "orders": 1} in result["causes"][0]["facts"]
