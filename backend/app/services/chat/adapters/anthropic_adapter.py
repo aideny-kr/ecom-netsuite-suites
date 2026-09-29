@@ -1,6 +1,7 @@
 """Anthropic (Claude) adapter — identity mapping since tools are already in Anthropic format."""
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -21,6 +22,17 @@ logger = logging.getLogger(__name__)
 # Adaptive thinking tokens count toward max_tokens, so give the answer room on
 # adaptive-thinking turns (mirrors the headroom the legacy budget_tokens path adds).
 _ADAPTIVE_MIN_MAX_TOKENS = 32768
+
+# Beta that returns only Sonnet 5.5's progress updates in thinking blocks (reasoning stays
+# omitted), so the chat keeps showing what the model says between tool calls.
+_PROGRESS_UPDATES_BETA = "thinking-display-updates-2026-08-18"
+
+
+# Sonnet 5.5 cannot be forced to call a tool (tool_choice type tool/any is a 400). A forced
+# call on it runs on Sonnet 5, where forcing still works, so plan mode's clarify gate and every
+# structured caller keep the guarantee they were written for. Same price; 5.5 reads Sonnet 5's
+# thinking blocks, and a forced call runs with thinking off anyway.
+_FORCEABLE_MODEL = "claude-sonnet-5"
 
 
 def _apply_thinking(
@@ -43,22 +55,33 @@ def _apply_thinking(
     - LEGACY models (4.5 / 4.0 / 4.1) → thinking={type:enabled,budget_tokens} + temperature=1
       + max_tokens reserved on top of the budget. (effort would error on these.)
     - HAIKU → no thinking (unsupported).
+    - SONNET 5.5 → "off" is thinking={type:between_tools} (disabled is a 400), and "on" asks
+      for display="updates": the notes Sonnet 5 wrote as text between tool calls now come
+      back as thinking blocks, empty unless requested.
     """
     mode = _thinking.thinking_mode(model)
+    between_tools = _thinking.uses_between_tools(model)
+    off = {"type": "between_tools"} if between_tools else {"type": "disabled"}
 
     if thinking_level in (None, "none") or _thinking.is_forced_tool_choice(tool_choice):
         # Adaptive-default models (Sonnet 5) think unless explicitly disabled —
         # omitting leaves thinking ON. Legacy/Haiku are off-by-default when omitted.
         if mode == "adaptive":
-            kwargs["thinking"] = {"type": "disabled"}
+            kwargs["thinking"] = off
         return
 
     if mode == "adaptive":
         effort = _thinking.anthropic_effort(thinking_level, model)
         if effort is None:
-            kwargs["thinking"] = {"type": "disabled"}
+            kwargs["thinking"] = off
             return
         kwargs["thinking"] = {"type": "adaptive"}
+        if between_tools:
+            kwargs["thinking"]["display"] = "updates"
+            headers = dict(kwargs.get("extra_headers") or {})
+            betas = [b for b in (headers.get("anthropic-beta") or "").split(",") if b]
+            headers["anthropic-beta"] = ",".join([*betas, _PROGRESS_UPDATES_BETA])
+            kwargs["extra_headers"] = headers
         output_config = dict(kwargs.get("output_config") or {})
         output_config["effort"] = effort
         kwargs["output_config"] = output_config
@@ -73,16 +96,85 @@ def _apply_thinking(
         kwargs["max_tokens"] = budget + max_tokens
 
 
-def _extract_thinking_blocks(content) -> list[dict]:
-    """Pull thinking / redacted_thinking blocks out of a message's content,
-    preserving signatures — required to echo them back across tool-use turns."""
-    blocks: list[dict] = []
-    for block in content:
-        if block.type == "thinking":
-            blocks.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
+def _shown(block_type: str, progress: bool) -> bool:
+    """The one rule for what the chat shows, and therefore what is saved: answer text, plus,
+    on a request that asked for progress updates (Sonnet 5.5), the notes in thinking blocks.
+    Those carry only updates, never reasoning, just as Sonnet 5's text between tool calls."""
+    return block_type == "text" or (progress and block_type == "thinking")
+
+
+async def _chat_text(stream, progress_in_thinking: bool):
+    """What the chat shows while one step streams, by _shown."""
+    if not progress_in_thinking:
+        async for text in stream.text_stream:
+            yield text
+        return
+    new_block = shown = False
+    async for event in stream:
+        if event.type == "content_block_start":
+            new_block = True
+            continue
+        if event.type not in ("text", "thinking") or not _shown(event.type, progress_in_thinking):
+            continue
+        piece = event.text if event.type == "text" else event.thinking
+        if not piece:
+            continue
+        if new_block and shown:
+            # The separator the callers save with ("\n".join(text_blocks)), so the saved reply
+            # reads exactly as it streamed.
+            yield "\n"
+        new_block, shown = False, True
+        yield piece
+
+
+def _progress_updates_requested(kwargs: dict) -> bool:
+    """Whether this request's thinking blocks carry only progress updates, never reasoning:
+    between_tools, or adaptive with display="updates" (both Sonnet 5.5 only). Anything else
+    keeps thinking out of the chat."""
+    thinking = kwargs.get("thinking") or {}
+    return thinking.get("type") == "between_tools" or thinking.get("display") == "updates"
+
+
+def _response_from(message, *, progress: bool) -> LLMResponse:
+    """One pass for the blocking and streaming paths. Replay is the returned content itself, in
+    its order, signatures included: a Sonnet 5.5 thinking block is signed over everything
+    before it, so a rebuilt or reordered replay can be rejected. What is saved (text_blocks)
+    is what the chat showed, by the same rule (_shown), and never feeds the replay."""
+    text_blocks: list[str] = []
+    tool_use_blocks: list[ToolUseBlock] = []
+    thinking_blocks: list[dict] = []
+    replay: list[dict] = []
+    for block in message.content:
+        if block.type == "text":
+            text_blocks.append(block.text)
+            replay.append({"type": "text", "text": block.text})
+        elif block.type == "tool_use":
+            tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
+            # A copy: an in-place fix before execution must not rewrite what the model signed over.
+            replay.append({"type": "tool_use", "id": block.id, "name": block.name, "input": copy.deepcopy(block.input)})
+        elif block.type == "thinking":
+            thinking_blocks.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
+            replay.append(thinking_blocks[-1])
+            if _shown(block.type, progress) and block.thinking:
+                text_blocks.append(block.thinking)
         elif block.type == "redacted_thinking":
-            blocks.append({"type": "redacted_thinking", "data": block.data})
-    return blocks
+            thinking_blocks.append({"type": "redacted_thinking", "data": block.data})
+            replay.append(thinking_blocks[-1])
+    return LLMResponse(
+        text_blocks=text_blocks,
+        tool_use_blocks=tool_use_blocks,
+        usage=_usage_from(message.usage),
+        thinking_blocks=thinking_blocks,
+        replay_content=replay,
+    )
+
+
+def _request_model(model: str, tool_choice) -> str:
+    """The model a request actually runs on: a forced call on a model that cannot be forced
+    runs on _FORCEABLE_MODEL. The one place this is decided."""
+    if _thinking.uses_between_tools(model) and _thinking.is_forced_tool_choice(tool_choice):
+        return _FORCEABLE_MODEL
+    return model
 
 
 # Wall-clock deadline for a single stream_message call — PER LLM HOP, not per
@@ -224,6 +316,7 @@ def _build_request_kwargs(
     thinking_level: str | None = None,
 ) -> dict:
     """The one place the request is assembled, for both the blocking and streaming paths."""
+    model = _request_model(model, tool_choice)
     stable = _stable_cache_control()
     system_blocks = [{"type": "text", "text": system, "cache_control": stable}]
     if system_dynamic:
@@ -326,7 +419,9 @@ class AnthropicAdapter(BaseLLMAdapter):
 
         Per Anthropic SDK: `tool_choice={"type": "tool", "name": "<tool_name>"}`
         forces the model's first response to be a tool_use block for that tool.
-        Model-agnostic — `model` param accepted only for protocol uniformity.
+        Sonnet 5.5 cannot be forced (type tool/any is a 400); the request builder runs a
+        forced call on Sonnet 5 instead (_request_model), so callers (plan mode's clarify
+        gate included) keep one code path and a real forced call on every model.
         """
         if not tool_name or not isinstance(tool_name, str):
             raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
@@ -358,25 +453,10 @@ class AnthropicAdapter(BaseLLMAdapter):
         started = time.monotonic()
         response = await self._client.messages.create(**kwargs)
         elapsed_ms = int((time.monotonic() - started) * 1000)
-
-        text_blocks: list[str] = []
-        tool_use_blocks: list[ToolUseBlock] = []
-
-        for block in response.content:
-            if block.type == "text":
-                text_blocks.append(block.text)
-            elif block.type == "tool_use":
-                tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
-
-        usage = _usage_from(response.usage)
-        _log_usage(model, response.usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
-
-        return LLMResponse(
-            text_blocks=text_blocks,
-            tool_use_blocks=tool_use_blocks,
-            usage=usage,
-            thinking_blocks=_extract_thinking_blocks(response.content),
-        )
+        _log_usage(kwargs["model"], response.usage, stream=False, elapsed_ms=elapsed_ms, kwargs=kwargs)
+        # Nothing is shown while a blocking call runs, so its text is the model's text blocks
+        # alone: callers such as tenant_resolver parse text_blocks[0] as JSON.
+        return _response_from(response, progress=False)
 
     async def stream_message(
         self,
@@ -410,10 +490,11 @@ class AnthropicAdapter(BaseLLMAdapter):
         deadline = attempt_started + _STREAM_TIMEOUT_SECONDS
         attempt = 0
         first_chunk_received = False
+        progress_in_thinking = _progress_updates_requested(kwargs)
         while True:
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
-                    async for text in stream.text_stream:
+                    async for text in _chat_text(stream, progress_in_thinking):
                         if time.monotonic() > deadline:
                             logger.warning(
                                 "stream_message deadline exceeded (%ds)",
@@ -463,18 +544,8 @@ class AnthropicAdapter(BaseLLMAdapter):
                 await asyncio.sleep(delay)
                 attempt_started = time.monotonic()
 
-        text_blocks: list[str] = []
-        tool_use_blocks: list[ToolUseBlock] = []
-
-        for block in final_message.content:
-            if block.type == "text":
-                text_blocks.append(block.text)
-            elif block.type == "tool_use":
-                tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
-
-        usage = _usage_from(final_message.usage)
         _log_usage(
-            model,
+            kwargs["model"],
             final_message.usage,
             stream=True,
             elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
@@ -482,18 +553,17 @@ class AnthropicAdapter(BaseLLMAdapter):
             retries=attempt,
         )
 
-        response = LLMResponse(
-            text_blocks=text_blocks,
-            tool_use_blocks=tool_use_blocks,
-            usage=usage,
-            thinking_blocks=_extract_thinking_blocks(final_message.content),
-        )
-        yield "response", response
+        yield "response", _response_from(final_message, progress=progress_in_thinking)
 
     def build_tool_result_message(self, tool_results: list[dict]) -> dict:
         return {"role": "user", "content": tool_results}
 
     def build_assistant_message(self, response: LLMResponse) -> dict:
+        if response.replay_content:
+            # Exactly as returned (see _response_from): [note, call, note, call] stays in that
+            # order, and a note-only answer replays as its thinking block.
+            return {"role": "assistant", "content": list(response.replay_content)}
+        # A response built by hand (tests, synthetic replies) has no captured content.
         content: list[dict] = []
         # Thinking blocks MUST come first when present (required for tool-use
         # continuation in a thinking-enabled turn).
@@ -501,12 +571,5 @@ class AnthropicAdapter(BaseLLMAdapter):
         for text in response.text_blocks:
             content.append({"type": "text", "text": text})
         for tool in response.tool_use_blocks:
-            content.append(
-                {
-                    "type": "tool_use",
-                    "id": tool.id,
-                    "name": tool.name,
-                    "input": tool.input,
-                }
-            )
+            content.append({"type": "tool_use", "id": tool.id, "name": tool.name, "input": tool.input})
         return {"role": "assistant", "content": content}

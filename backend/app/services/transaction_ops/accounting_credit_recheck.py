@@ -12,6 +12,7 @@ import httpx
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.database import set_tenant_context
+from app.services.chat.external_tool_audit import WORKER_SESSION_FACTORY as READ_SESSION_FACTORY
 from app.services.transaction_ops import credit_api_correction
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.native_accounting_service import _stable
@@ -19,7 +20,6 @@ from app.services.transaction_ops.posting_balance import repriced_credit_balance
 from app.services.transaction_ops.source_reader import SourceReadError
 
 READ_CALLS = 56  # Accounting (20), support (24), source and OAuth maintenance allowance.
-READ_SESSION_FACTORY = "accounting_authorization_session_factory"  # the dispatcher's worker-safe factory key
 
 
 def _read_session(db):
@@ -42,6 +42,10 @@ def _read_session(db):
 
 
 def project(p, report, current, *, verified_at, now):
+    from app.services.transaction_ops import credit_line_reallocation
+
+    if p.get("kind") == credit_line_reallocation.KIND:
+        return credit_line_reallocation.project(p, report, current, verified_at=verified_at, now=now)
     source, review, evidence, support = current
     if (
         str(support["credit"]["id"]) != p["record_id"]

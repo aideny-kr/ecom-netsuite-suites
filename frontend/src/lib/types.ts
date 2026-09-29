@@ -965,6 +965,7 @@ interface NativeAccountingReviewBase extends AccountingReviewBase {
 
 export type NativeAccountingReview =
   | (NativeAccountingReviewBase & { kind: "credit_tax_reallocation" })
+  | (NativeAccountingReviewBase & { kind: "credit_line_reallocation" })
   | (NativeAccountingReviewBase & { kind: "sales_order_line_alignment" });
 
 export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview | NativeAccountingReview;
@@ -973,7 +974,7 @@ export interface AccountingGroup {
   group_id: string;
   treatment_batches?: Array<{ treatment_id: string; label: string; case_ids: string[]; treatment: { currency?: string; accounting_book: string; ar_account: string; offset_account?: string } }>;
   investigation_batches?: Array<{ code: string; next_step: string; case_ids: string[]; executable: false }>;
-  members: Array<{ case_id: string; order_reference: string; confirmation_id?: string; reason?: string; card?: WriteConfirmationData; resolution_receipt?: WriteConfirmationData["accounting_receipt"] }>;
+  members: Array<{ case_id: string; order_reference: string; confirmation_id?: string; reason?: string; set_aside?: string; card?: WriteConfirmationData; resolution_receipt?: WriteConfirmationData["accounting_receipt"] }>;
   concurrency: number;
 }
 

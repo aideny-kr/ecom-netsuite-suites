@@ -45,7 +45,12 @@ export function AccountingConfirmationCard({
   groupState?: WriteConfirmationData["status"];
 }) {
   const p = data.accounting_review!;
-  if (p.kind === "credit_tax_reallocation" || p.kind === "sales_order_line_alignment") {
+  // An agent-proposed existing-credit reallocation is the same kind of amendment: reuse its card.
+  if (
+    p.kind === "credit_tax_reallocation" ||
+    p.kind === "credit_line_reallocation" ||
+    p.kind === "sales_order_line_alignment"
+  ) {
     return <NativeAccountingConfirmationCard key={data.confirmation_token} data={data} proposal={p} onConfirm={onConfirm} onReject={onReject} disabled={disabled} readOnly={readOnly} groupState={groupState} />;
   }
   if (p.kind === "sales_adjustment_credit") {

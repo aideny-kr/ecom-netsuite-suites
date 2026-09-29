@@ -21,6 +21,7 @@ from functools import cached_property
 from typing import Any, Callable
 
 from app.models.transaction_ops import TransactionOperation
+from app.services.chat.external_tool_audit import ExternalCallNotSentError
 from app.services.chat.tool_call_results import _extract_error_message
 from app.services.chat.write_outcome import classify_write_outcome
 from app.services.transaction_ops import chat_confirmation
@@ -101,6 +102,8 @@ REFUSALS = {
     "approver_not_session_owner": "Only the session owner can send this correction. No update was sent.",
     "dispatch_disabled": "Sending is switched off by the operator. No update was sent.",
     "operation_budget_exhausted": "The correction ran out of its read budget before sending. No update was sent.",
+    state.REQUEST_NOT_SENT: "Nothing was sent to NetSuite: the request could not be recorded first. "
+    "Prepare the correction again.",
 }
 
 
@@ -213,17 +216,23 @@ class AccountingCardAdapter:
     async def deliver(self, db, tenant_id, claimed) -> dict:
         if self.dispatch is None:
             raise RuntimeError("dispatcher_required")
-        raw = await self.dispatch(
-            human_approved=True,
-            approval_context=self.approval_context,
-            tool_name=self.tool_name,
-            tool_input=self.tool_input,
-            tenant_id=tenant_id,
-            actor_id=self.actor_id,
-            correlation_id=self.correlation_id,
-            db=db,
-            session_id=self.session_id,
-        )
+        try:
+            raw = await self.dispatch(
+                human_approved=True,
+                approval_context=self.approval_context,
+                tool_name=self.tool_name,
+                tool_input=self.tool_input,
+                tenant_id=tenant_id,
+                actor_id=self.actor_id,
+                correlation_id=self.correlation_id,
+                db=db,
+                session_id=self.session_id,
+            )
+        except ExternalCallNotSentError:
+            # The request row could not be written, so the provider was never called. Refused
+            # before effect (a fresh approval may retry), not an unknown no readback can settle.
+            self.refusal = REFUSALS[state.REQUEST_NOT_SENT]
+            return self._sent({"status": "failed", "code": state.REQUEST_NOT_SENT, "verified": False})
         try:
             result = json.loads(raw)
         except (TypeError, ValueError):

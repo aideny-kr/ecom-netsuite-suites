@@ -29,6 +29,10 @@ class LLMResponse:
     tool_use_blocks: list[ToolUseBlock] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
     thinking_blocks: list[dict] = field(default_factory=list)
+    # The assistant content exactly as the provider returned it, for replay on the next step.
+    # What is shown or saved (text_blocks) is separate and may differ. Empty = not captured,
+    # and an adapter builds its own layout.
+    replay_content: list[dict] = field(default_factory=list)
 
 
 class BaseLLMAdapter(abc.ABC):
@@ -102,6 +106,7 @@ VALID_PROVIDERS = {"anthropic", "openai", "gemini", "openrouter"}
 
 VALID_MODELS: dict[str, list[str]] = {
     "anthropic": [
+        "claude-sonnet-5-5",
         "claude-sonnet-5",
         "claude-opus-4-8",
         "claude-opus-4-6",

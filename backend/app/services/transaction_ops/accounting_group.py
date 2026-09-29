@@ -9,15 +9,18 @@ import asyncio
 import hashlib
 import json
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select, text
 
 from app.core.database import async_session_factory, engine, set_tenant_context
 from app.models.chat import ChatMessage
 from app.services.audit_service import log_event
+from app.services.chat.external_tool_audit import session_factory_for
 from app.services.chat.write_confirmation_service import (
     WriteConfirmationPayload,
     mint_confirmation_token,
@@ -33,6 +36,10 @@ class AccountingCapacityBusyError(ValueError):
 
 
 PREPARATION_TIMEOUT = 450  # Leave time to publish an explicit result within the chat budget.
+# The earlier-attempt check can re-read NetSuite for a rejected prior card; bound it inside the
+# member's own budget and set the member aside when it cannot answer (fail closed, never a crash).
+ATTEMPT_CHECK_TIMEOUT = 20
+UNCONFIRMED_ATTEMPT = "unconfirmed"
 MAX_GROUP_BYTES = 4 * 1024 * 1024
 
 
@@ -142,7 +149,109 @@ def build_group_card(members, selection, session_id):
     return card
 
 
-async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, **_):
+def reallocation_reason(code):
+    """What a member's skipped reason says about the existing-credit reallocation, if anything."""
+    if not code or code in {"no_difference", "gross_not_reconciled"}:
+        return None
+    if code == "no_verified_exemplar":
+        return (
+            "Existing-credit reallocation needs one approved and verified correction of this kind for this "
+            "configuration first; group preparation then applies the same treatment."
+        )
+    return f"Existing-credit reallocation not prepared: {code}."
+
+
+# Short, plain reasons a member was set aside, from the refusal a treatment raised. The
+# member's full reason stays on the card; this is what a progress line can show at a glance.
+_SET_ASIDE = {
+    "source_not_final": "waiting on Solidus to finalize",
+    "period_locked": "period is locked",
+    "credit_not_in_case": "no single credit memo to rework",
+    "no_difference": "already fixed",
+    "no_verified_exemplar": "needs one approved fix of this kind first",
+    "tax_refund_items_not_configured": "tax item not configured",
+    "tax_accounts_not_configured": "tax account not configured",
+    "tax_account_not_configured": "tax account not configured",
+}
+
+
+def set_aside_label(*, crashed=False, blocked=None, code=None, identified=False):
+    if crashed:
+        return "preparation error"
+    if blocked == UNCONFIRMED_ATTEMPT:
+        return "could not confirm no earlier attempt"
+    if blocked:
+        return "already has an execution record"
+    if code in _SET_ASIDE:
+        return _SET_ASIDE[code]
+    return "fix identified; needs configuration" if identified else "no exact fix yet"
+
+
+class _Progress:
+    """Server counts of a running preparation, reported after every member: nothing a model
+    says, so a progress line can show numbers."""
+
+    def __init__(self, total, report):
+        self.total, self.report = total, report
+        self.checked = self.ready = 0
+        self.aside = {}
+        self.now = []
+
+    def _emit(self):
+        if self.report is None:
+            return
+        self.report(
+            {
+                "checked": self.checked,
+                "total": self.total,
+                "ready": self.ready,
+                "set_aside": [{"label": k, "count": v} for k, v in sorted(self.aside.items(), key=lambda i: -i[1])],
+                "now": list(self.now),
+            }
+        )
+
+    def start(self, member):
+        self.now.append(member["order_reference"])
+        self._emit()
+
+    def _tally(self, result):
+        if result.get("card"):
+            self.ready += 1
+        else:
+            label = result.get("set_aside") or set_aside_label()
+            self.aside[label] = self.aside.get(label, 0) + 1
+
+    def finish(self, member, result):
+        self.abandon(member)
+        self.checked += 1
+        self._tally(result)
+        self._emit()
+
+    def abandon(self, member):
+        """A member cancelled mid-check (the preparation deadline): no longer being checked."""
+        if member["order_reference"] in self.now:
+            self.now.remove(member["order_reference"])
+
+    def settle(self, results):
+        """The last update, from the final results: members cut off by the deadline count too."""
+        self.checked, self.ready, self.aside, self.now = len(results), 0, {}, []
+        for result in results:
+            self._tally(result)
+        self._emit()
+
+
+def _crash(exc):
+    """Where a member's preparation crashed: the innermost frame, never the message (it can carry
+    record content). The log line carries the full traceback."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    frame = frames[-1] if frames else None
+    where = f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" if frame else "unknown"
+    return {"type": type(exc).__name__, "where": where}
+
+
+async def prepare_group_confirmation(
+    *, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, progress=None, **_
+):
     from app.mcp.tools.transaction_ops_tools import execute_accounting_evidence
     from app.services.transaction_ops.group_investigation import handoff, summarize
     from app.services.transaction_ops.read_batch import reference_read_batch
@@ -176,6 +285,8 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
             )
             routes = []
             investigation_evidence = {}
+            error = None
+            set_aside = None
             try:
                 async with asyncio.timeout(120):
                     evidence = await execute_accounting_evidence(
@@ -185,6 +296,25 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                     collected = evidence.get("accounting_evidence") or {}
                     routes = collected.get("investigation_routes", [])
                     investigation_evidence = summarize(collected)
+                    reallocation_refusal = None
+                    if evidence.get("success") and not child_db.info.get("accounting_correction_candidate"):
+                        # No preset recipe fits: an existing credit reallocation, derived by the
+                        # server from this member's own figures, once one has been verified.
+                        from app.services.transaction_ops import credit_line_reallocation
+
+                        try:
+                            await credit_line_reallocation.prepare_group_member(child_db, tenant_id, member["case_id"])
+                            timing["reallocation_ms"] = elapsed()
+                        except credit_line_reallocation.RefusalError as exc:
+                            reallocation_refusal = exc.code
+                        except Exception as exc:  # a failed attempt must not discard the member's evidence
+                            child_db.info.pop("accounting_correction_candidate", None)
+                            reallocation_refusal = f"error:{type(exc).__name__}"
+                            print(
+                                f"accounting_group: reallocation attempt failed case={member['case_id']} "
+                                f"{type(exc).__name__}: {str(exc)[:200]}",
+                                flush=True,
+                            )
                     prepared = (
                         await candidate_confirmation(
                             db=child_db,
@@ -200,55 +330,133 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         if evidence.get("success")
                         else None
                     )
+                    blocked = None
+                    value = None
                     if prepared:
-                        card, _note = prepared
-                        value = {**card.model_dump(mode="json"), "accounting_group_child": True}
+                        from app.services.transaction_ops import chat_confirmation
+
+                        # A card for work the ledger already closed is refused at its claim and,
+                        # as an unconfirmed outcome, stops the whole group (R619946522,
+                        # 2026-09-27). Ask the claim's own question before anyone approves.
+                        value = prepared[0].model_dump(mode="json")
+                        try:
+                            async with asyncio.timeout(ATTEMPT_CHECK_TIMEOUT):
+                                blocked = await chat_confirmation.attempt_blocker(
+                                    child_db, tenant_id, value.get("accounting_review")
+                                )
+                        except TimeoutError:
+                            blocked = UNCONFIRMED_ATTEMPT
+                        if blocked:
+                            prepared = None
+                    if prepared:
+                        value = {**value, "accounting_group_child": True}
                         # Publish children only in the parent's transaction. A cancelled
                         # preparation must never leave independently actionable orphans.
                         # Keep the per-case evidence/candidate audit, without a ChatMessage.
                         await child_db.commit()
                         timing["total_ms"] = elapsed()
                         return {**member, "confirmation_id": str(uuid.uuid4()), "card": value, "timing": timing}
-                    reason = (
-                        "Solution identified. Account configuration, native preview and approval are still required."
-                        if collected.get("resolution_intents")
-                        else "No validated correction is ready. Continue investigation using the recorded evidence."
+                    if blocked == UNCONFIRMED_ATTEMPT:
+                        reason = (
+                            "Could not confirm in time that this exact correction has no earlier execution "
+                            "record, so it was not prepared. Prepare it again."
+                        )
+                    elif blocked:
+                        reason = (
+                            f"This exact correction already has an execution record ({blocked}). "
+                            "A person decides what happens next; a new approval cannot send it."
+                        )
+                    elif collected.get("resolution_intents"):
+                        reason = (
+                            "Solution identified. Account configuration, native preview and approval "
+                            "are still required."
+                        )
+                    else:
+                        reason = "No validated correction is ready. Continue investigation using the recorded evidence."
+                    if not blocked and (note := reallocation_reason(reallocation_refusal)):
+                        reason += " " + note
+                    set_aside = set_aside_label(
+                        blocked=blocked, code=reallocation_refusal, identified=bool(collected.get("resolution_intents"))
                     )
             except Exception as exc:
                 await child_db.rollback()
                 await set_tenant_context(child_db, str(tenant_id))
                 reason = f"Preparation needs review ({type(exc).__name__})."
+                error = _crash(exc)
+                set_aside = set_aside_label(crashed=True)
+                print(
+                    f"accounting_group: preparation crashed case={member['case_id']} at {error['where']}\n"
+                    + "".join(traceback.format_exception(exc))[-4000:],
+                    flush=True,
+                )
             timing["total_ms"] = elapsed()
-            await log_event(
-                child_db,
-                tenant_id,
-                category="transaction_ops",
-                action="accounting_group.case.skipped",
-                actor_id=actor_id,
-                resource_type="transaction_case",
-                resource_id=member["case_id"],
-                correlation_id=correlation_id,
-                payload={"reason": reason, "investigation_routes": routes, "timing": timing, "financial_writes": 0},
-            )
-            await child_db.commit()
+
+            async def record_skip():
+                await log_event(
+                    child_db,
+                    tenant_id,
+                    category="transaction_ops",
+                    action="accounting_group.case.skipped",
+                    actor_id=actor_id,
+                    resource_type="transaction_case",
+                    resource_id=member["case_id"],
+                    correlation_id=correlation_id,
+                    payload={
+                        "reason": reason,
+                        "investigation_routes": routes,
+                        "timing": timing,
+                        **({"error": error} if error else {}),
+                        "financial_writes": 0,
+                    },
+                )
+                await child_db.commit()
+
+            try:
+                await record_skip()
+            except Exception as exc:
+                # A handler above can leave this session unusable: a deadline that cancelled one
+                # of its queries, or a database error kept as the member's reason. Set the order
+                # aside anyway (its earlier evidence rows go with the transaction) rather than
+                # fail every other order in the group.
+                print(
+                    f"accounting_group: skip record retried case={member['case_id']} {type(exc).__name__}",
+                    flush=True,
+                )
+                await child_db.rollback()
+                await set_tenant_context(child_db, str(tenant_id))
+                await record_skip()
             return {
                 **member,
                 "reason": reason,
+                "set_aside": set_aside or set_aside_label(),
                 "investigation_routes": routes,
                 "investigation_evidence": investigation_evidence,
                 "timing": timing,
             }
+
+    tracker = _Progress(len(selection["members"]), progress)
+
+    async def tracked(member):
+        tracker.start(member)
+        try:
+            result = await prepare(member)
+        except BaseException:
+            tracker.abandon(member)
+            raise
+        tracker.finish(member, result)
+        return result
 
     preparation_started = time.monotonic()
     try:
         with reference_read_batch() as reads:
             members = await bounded_map(
                 selection["members"],
-                prepare,
+                tracked,
                 timeout=PREPARATION_TIMEOUT,
                 unfinished=lambda member: {
                     **member,
                     "preparation_status": "incomplete",
+                    "set_aside": "time limit reached",
                     "reason": "Preparation time limit reached. No correction was submitted for this order; "
                     "continue preparation from fresh evidence.",
                     "investigation_routes": [
@@ -262,6 +470,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
     except (asyncio.CancelledError, TimeoutError):
         await asyncio.shield(record_preparation_interrupted(tenant_id, actor_id, session_id, correlation_id, selection))
         raise
+    tracker.settle(members)
     if not any(member.get("card") for member in members):
         investigation = handoff(selection, members, reads.hits)
         db.info["accounting_group_investigation"] = investigation
@@ -388,7 +597,7 @@ async def authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_in
     # An independent session plus uncached flags reads the current persisted grants.
     # Celery owns disposable event-loop-local engines. Never borrow the app's
     # global pool from a worker loop.
-    factory = getattr(db, "info", {}).get("accounting_authorization_session_factory", _authorization_session_factory)
+    factory = session_factory_for(db) or _authorization_session_factory
     async with factory() as auth_db:
         await set_tenant_context(auth_db, str(tenant_id))
         await _authorize({"db": auth_db, "tenant_id": tenant_id, "actor_id": actor_id}, create=True, fresh=True)

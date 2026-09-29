@@ -11,7 +11,7 @@ from app.models.transaction_ops import TransactionCase, TransactionFinding, Tran
 from app.models.user import User
 from app.services.transaction_ops.accounting_recheck import effective_config_id, report_in_scope, supports
 from app.services.transaction_ops.accounting_recovery import evidence_digest
-from app.services.transaction_ops.case_service import _cleared
+from app.services.transaction_ops.case_service import _cleared, latest_observation
 from app.services.transaction_ops.planner import source_fingerprint
 from app.services.transaction_ops.settlement import SCOPE
 from app.services.transaction_ops.state_service import business_digest
@@ -48,9 +48,7 @@ def verified_resolution(message, run, finding, case):
         checked = datetime.fromisoformat(result["checked_at"])
         report = finding.report_json
         current = case.latest_report_json
-        current_observed = max(
-            datetime.fromisoformat(s["observed_at"]) for s in [current["source"], *current["targets"]]
-        )
+        current_observed = latest_observation(current)
         return bool(
             claim
             and checked.utcoffset() is not None

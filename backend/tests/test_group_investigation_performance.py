@@ -35,6 +35,19 @@ async def test_reference_reads_coalesce_concurrent_cases_and_return_independent_
     assert fetch.await_count == 2
 
 
+async def test_the_credit_memo_field_catalog_is_read_once_per_preparation():
+    # Identical for every order of a group, and the largest reference read: fetched per
+    # order until 2026-09-26. Final approval preflight stays outside the batch.
+    fetch = AsyncMock(return_value={"properties": {"item": {}}})
+    scope = ("tenant", "connection", "account", "credential")
+    path = "/record/v1/metadata-catalog/creditMemo"
+    with reference_read_batch() as batch:
+        await asyncio.gather(*[reference_read(scope, "GET", path, None, None, fetch) for _ in range(10)])
+        assert fetch.await_count == 1 and batch.hits == 9
+    await reference_read(scope, "GET", path, None, None, fetch)
+    assert fetch.await_count == 2
+
+
 @pytest.mark.parametrize("field", range(4))
 async def test_reference_cache_partitions_tenant_connection_account_and_credentials(field):
     fetch = AsyncMock(return_value={"id": "1"})
@@ -305,6 +318,54 @@ async def test_actual_evidence_tool_uses_full_reads_for_supported_shapes_and_ref
     assert result["accounting_evidence"]["source_refresh"] == source
 
 
+@pytest.mark.parametrize("group_preparation", [True, False])
+async def test_group_preparation_keeps_its_own_reads_for_the_reallocation_step(group_preparation, monkeypatch):
+    # Measured 2026-09-26: the reallocation step re-read the same source and NetSuite evidence
+    # seconds after this tool read them (12.8 s + 10.9 s per order at 3 in flight).
+    from copy import deepcopy
+
+    from app.mcp.tools import transaction_ops_tools as tool
+    from app.services.transaction_ops.credit_line_reallocation import GROUP_PREPARATION_READS
+    from tests.test_accounting_approval_flow import kind_proposal
+    from tests.test_tax_correction import fixture
+
+    e, report, review, _ = fixture()
+    source = deepcopy(kind_proposal("credit")["source"])
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    db.scalar.return_value = None
+    case = SimpleNamespace(id=uuid4(), scope_json={}, latest_report_json=report, order_reference=source["number"])
+    monkeypatch.setattr(tool, "_authorize", AsyncMock(return_value=(db, uuid4(), SimpleNamespace(id=uuid4()))))
+    monkeypatch.setattr("app.services.transaction_ops.case_service.get_case", AsyncMock(return_value=case))
+    monkeypatch.setattr(
+        "app.services.transaction_ops.accounting_review.accounting_context", AsyncMock(return_value=review)
+    )
+    collected = {**deepcopy(e), "blockers": [], "assessment": {}}
+    monkeypatch.setattr(
+        "app.services.transaction_ops.accounting_evidence.collect_accounting_evidence",
+        AsyncMock(return_value=deepcopy(collected)),
+    )
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.refresh_source", AsyncMock(return_value=source))
+    monkeypatch.setattr("app.services.transaction_ops.commercial_credits.collect_commercial_credits", AsyncMock())
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate", lambda *args: None)
+    monkeypatch.setattr(
+        "app.services.transaction_ops.resolution_assessment.reference_provenance", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr("app.services.audit_service.log_event", AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    result = await tool.execute_accounting_evidence(
+        {"case_id": str(case.id)}, context={"group_preparation": group_preparation}
+    )
+    assert result["success"], result
+    kept = db.info.get(GROUP_PREPARATION_READS)
+    if not group_preparation:
+        assert kept is None  # a chat read is never handed to a later step
+        return
+    assert kept["case_id"] == str(case.id) and kept["field_map"] is None
+    assert kept["review"] == review and kept["report"] == report
+    # The reads exactly as collected, before this tool annotated its own copy of them.
+    assert kept["source"] == source and kept["evidence"] == collected
+
+
 def test_representative_reads_bound_work_and_preserve_exact_case_observation_pairs():
     from app.services.transaction_ops.group_investigation import representative_reads
 
@@ -476,3 +537,496 @@ def test_model_group_view_retains_all_members_without_repeating_full_evidence():
     assert view["batches"][0]["representative_evidence"] == orders[0]
     assert len(json.dumps(view)) < len(json.dumps(investigation)) / 3
     assert "not proof" in view["context_projection"]
+
+
+async def test_preparation_reports_what_it_has_checked_as_it_goes(monkeypatch):
+    # 2026-09-27: preparing 36 orders showed nothing for three minutes. Each finished member
+    # now reports server counts: checked, ready, set aside by reason, and who is being checked.
+    from app.services.chat.write_confirmation_service import WriteConfirmationPayload
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(3)
+    members = so["accounting_group"]["members"]
+    tenant, actor = session.tenant_id, session.user_id
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": m["case_id"], "order_reference": m["order_reference"]} for m in members],
+        }
+    }
+
+    @asynccontextmanager
+    async def factory():
+        child = AsyncMock(spec=AsyncSession)
+        child.info = {}
+        yield child
+
+    outcomes = {members[0]["case_id"]: "ready", members[1]["case_id"]: "source_not_final"}
+
+    async def evidence(params, **kwargs):
+        return {"success": True, "accounting_evidence": {}}
+
+    async def reallocate(child_db, tenant_id, case_id):
+        from app.services.transaction_ops import credit_line_reallocation as reallocation
+
+        if outcomes.get(case_id) == "ready":
+            child_db.info["accounting_correction_candidate"] = {"case_id": case_id}
+            return
+        if outcomes.get(case_id) == "source_not_final":
+            raise reallocation.RefusalError("source_not_final")
+        raise reallocation.RefusalError("period_locked")
+
+    async def candidate(**kwargs):
+        if not kwargs["db"].info.get("accounting_correction_candidate"):
+            return None
+        member = next(m for m in members if m["case_id"] == kwargs["case_id"])
+        return WriteConfirmationPayload(**member["card"]), "test"
+
+    snapshots = []
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(group, "log_event", AsyncMock())
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
+    monkeypatch.setattr("app.services.transaction_ops.credit_line_reallocation.prepare_group_member", reallocate)
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
+    monkeypatch.setattr("app.services.transaction_ops.chat_confirmation.attempt_blocker", AsyncMock(return_value=None))
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+    card, _ = await group.prepare_group_confirmation(
+        db=db,
+        tenant_id=tenant,
+        actor_id=actor,
+        session_id=str(session.id),
+        correlation_id="t",
+        tools=[],
+        policy=None,
+        progress=snapshots.append,
+    )
+    last = snapshots[-1]
+    assert last["checked"] == last["total"] == 3 and last["ready"] == 1 and last["now"] == []
+    assert sorted((a["label"], a["count"]) for a in last["set_aside"]) == [
+        ("period is locked", 1),
+        ("waiting on Solidus to finalize", 1),
+    ]
+    assert any(s["now"] for s in snapshots)  # who is being checked shows while it runs
+    assert [s["checked"] for s in snapshots] == sorted(s["checked"] for s in snapshots)
+    labels = {m["order_reference"]: m.get("set_aside") for m in card.accounting_group["members"]}
+    assert labels[members[1]["order_reference"]] == "waiting on Solidus to finalize"
+    assert labels[members[0]["order_reference"]] is None
+
+
+async def test_the_agent_streams_preparation_progress_while_it_waits():
+    agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id=str(uuid4()))
+    agent._tool_defs = [{"name": "transaction_ops_accounting_evidence", "input_schema": {"type": "object"}}]
+    adapter = MagicMock()
+    adapter.stream_message = _stream_replay(
+        [
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="g", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            ),
+            _llm_response(text="Done."),
+        ]
+    )
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
+    first = {"checked": 1, "total": 2, "ready": 1, "set_aside": [], "now": ["R2"]}
+    second = {"checked": 2, "total": 2, "ready": 1, "set_aside": [{"label": "period is locked", "count": 1}], "now": []}
+
+    async def prepare(**kwargs):
+        kwargs["progress"](first)
+        await asyncio.sleep(0)
+        kwargs["progress"](second)
+        return None
+
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.policy_service.evaluate_tool_call", return_value={"allowed": True}),
+        patch("app.services.chat.tools.execute_tool_call", AsyncMock(return_value=json.dumps({"success": True}))),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        events = [
+            e
+            async for e in BaseSpecialistAgent.run_streaming(
+                agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="m"
+            )
+        ]
+    assert [v for k, v in events if k == "progress"] == [first, second]
+
+
+async def test_closing_the_chat_mid_preparation_waits_for_preparation_to_clean_up():
+    # Gate wf_c9aab898 round 1: the task was cancelled but never awaited, so preparation could
+    # still hold the database while the chat request tore down.
+    agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id=str(uuid4()))
+    agent._tool_defs = [{"name": "transaction_ops_accounting_evidence", "input_schema": {"type": "object"}}]
+    adapter = MagicMock()
+    adapter.stream_message = _stream_replay(
+        [
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="g", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            )
+        ]
+    )
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
+    cleaned = []
+
+    async def prepare(**kwargs):
+        kwargs["progress"]({"checked": 0, "total": 5, "ready": 0, "set_aside": [], "now": ["R1"]})
+        try:
+            await asyncio.sleep(30)
+        finally:
+            await asyncio.sleep(0)  # a real teardown awaits (child sessions close)
+            cleaned.append(True)
+
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.policy_service.evaluate_tool_call", return_value={"allowed": True}),
+        patch("app.services.chat.tools.execute_tool_call", AsyncMock(return_value=json.dumps({"success": True}))),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        stream = BaseSpecialistAgent.run_streaming(
+            agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="m"
+        )
+        async for kind, _ in stream:
+            if kind == "progress":
+                break
+        await stream.aclose()
+    assert cleaned == [True]
+
+
+async def test_orders_cut_off_by_the_time_limit_are_counted_in_the_last_update(monkeypatch):
+    # Gate wf_c9aab898 round 1: members cancelled at the preparation deadline never reported
+    # finishing, so the last update undercounted and still showed them as being checked.
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(2)
+    members = so["accounting_group"]["members"]
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": m["case_id"], "order_reference": m["order_reference"]} for m in members],
+        }
+    }
+
+    @asynccontextmanager
+    async def factory():
+        child = AsyncMock(spec=AsyncSession)
+        child.info = {}
+        yield child
+
+    async def slow(params, **kwargs):
+        await asyncio.sleep(30)
+
+    snapshots = []
+    monkeypatch.setattr(group, "PREPARATION_TIMEOUT", 0.05)
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(group, "log_event", AsyncMock())
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", slow)
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.handoff", lambda *a: {"status": "x"})
+    await group.prepare_group_confirmation(
+        db=db,
+        tenant_id=session.tenant_id,
+        actor_id=session.user_id,
+        session_id=str(session.id),
+        correlation_id="t",
+        tools=[],
+        policy=None,
+        progress=snapshots.append,
+    )
+    last = snapshots[-1]
+    assert last["checked"] == last["total"] == 2 and last["now"] == []
+    assert last["set_aside"] == [{"label": "time limit reached", "count": 2}]
+
+
+async def test_a_failure_in_preparation_cleanup_after_a_dropped_chat_is_logged(caplog):
+    # Gate wf_13d20e55 round 2: the cancelled preparation's own teardown (the interruption
+    # audit, child sessions) could fail and be swallowed with no trace.
+    agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id=str(uuid4()))
+    agent._tool_defs = [{"name": "transaction_ops_accounting_evidence", "input_schema": {"type": "object"}}]
+    adapter = MagicMock()
+    adapter.stream_message = _stream_replay(
+        [
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="g", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            )
+        ]
+    )
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
+
+    async def prepare(**kwargs):
+        kwargs["progress"]({"checked": 0, "total": 1, "ready": 0, "set_aside": [], "now": ["R1"]})
+        try:
+            await asyncio.sleep(30)
+        finally:
+            raise RuntimeError("interruption audit failed")
+
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.policy_service.evaluate_tool_call", return_value={"allowed": True}),
+        patch("app.services.chat.tools.execute_tool_call", AsyncMock(return_value=json.dumps({"success": True}))),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        stream = BaseSpecialistAgent.run_streaming(
+            agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="m"
+        )
+        async for kind, _ in stream:
+            if kind == "progress":
+                break
+        await stream.aclose()
+    assert any(
+        "interruption audit failed" in (r.exc_text or "") or "preparation cleanup" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+async def test_a_slow_earlier_attempt_check_sets_the_order_aside_instead_of_crashing_it(monkeypatch):
+    # Gate wf_f4fc4c7c round 3: the earlier-attempt check can re-read NetSuite for a rejected
+    # prior card; inside the member's 120 s budget it could time the whole member out as a crash.
+    from app.services.chat.write_confirmation_service import WriteConfirmationPayload
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(1)
+    member = so["accounting_group"]["members"][0]
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": member["case_id"], "order_reference": member["order_reference"]}],
+        }
+    }
+
+    @asynccontextmanager
+    async def factory():
+        child = AsyncMock(spec=AsyncSession)
+        child.info = {"accounting_correction_candidate": {"case_id": member["case_id"]}}
+        yield child
+
+    async def evidence(params, **kwargs):
+        return {"success": True, "accounting_evidence": {}}
+
+    async def candidate(**kwargs):
+        return WriteConfirmationPayload(**member["card"]), "test"
+
+    async def slow_check(db, tenant_id, p):
+        await asyncio.sleep(5)
+
+    snapshots = []
+    monkeypatch.setattr(group, "ATTEMPT_CHECK_TIMEOUT", 0.05)
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(group, "log_event", AsyncMock())
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
+    monkeypatch.setattr("app.services.transaction_ops.chat_confirmation.attempt_blocker", slow_check)
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.handoff", lambda *a: {"status": "x"})
+    await group.prepare_group_confirmation(
+        db=db,
+        tenant_id=session.tenant_id,
+        actor_id=session.user_id,
+        session_id=str(session.id),
+        correlation_id="t",
+        tools=[],
+        policy=None,
+        progress=snapshots.append,
+    )
+    assert snapshots[-1]["set_aside"] == [{"label": "could not confirm no earlier attempt", "count": 1}]
+
+
+async def test_an_earlier_attempt_check_cut_off_mid_query_still_records_the_order_as_set_aside(monkeypatch):
+    # The check reads the database between NetSuite reads. A deadline that cancels one of those
+    # queries invalidates the order's own session: its audit row and commit then failed outside
+    # the order's error handling and took the whole group preparation down with them.
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.services.chat.write_confirmation_service import WriteConfirmationPayload
+    from tests.conftest import _test_connect_args, _test_db_url
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(1)
+    member = so["accounting_group"]["members"][0]
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": member["case_id"], "order_reference": member["order_reference"]}],
+        }
+    }
+    engine = create_async_engine(_test_db_url, connect_args=_test_connect_args)
+
+    @asynccontextmanager
+    async def factory():
+        async with AsyncSession(engine) as child:
+            child.info["accounting_correction_candidate"] = {"case_id": member["case_id"]}
+            yield child
+
+    async def evidence(params, **kwargs):
+        return {"success": True, "accounting_evidence": {}}
+
+    async def candidate(**kwargs):
+        return WriteConfirmationPayload(**member["card"]), "test"
+
+    async def check_cut_off_mid_query(child_db, tenant_id, p):
+        await child_db.execute(text("SELECT pg_sleep(5)"))
+
+    recorded = []
+
+    async def audit(child_db, *args, payload, **kwargs):
+        # The real audit row is an INSERT on the same session.
+        await child_db.execute(text("SELECT 1"))
+        if "reason" in payload:
+            recorded.append(payload["reason"])
+
+    snapshots = []
+    monkeypatch.setattr(group, "ATTEMPT_CHECK_TIMEOUT", 0.2)
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "log_event", audit)
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
+    monkeypatch.setattr("app.services.transaction_ops.chat_confirmation.attempt_blocker", check_cut_off_mid_query)
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.handoff", lambda *a: {"status": "x"})
+    try:
+        await group.prepare_group_confirmation(
+            db=db,
+            tenant_id=session.tenant_id,
+            actor_id=session.user_id,
+            session_id=str(session.id),
+            correlation_id="t",
+            tools=[],
+            policy=None,
+            progress=snapshots.append,
+        )
+    finally:
+        await engine.dispose()
+    assert snapshots[-1]["set_aside"] == [{"label": "could not confirm no earlier attempt", "count": 1}]
+    assert recorded and recorded[0].startswith("Could not confirm in time")
+
+
+async def test_a_database_error_in_the_reallocation_attempt_still_records_the_order_as_set_aside(monkeypatch):
+    # Same shape, older handler: the reallocation attempt's database error is kept as the
+    # member's reason, but Postgres has aborted the member's transaction by then.
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from tests.conftest import _test_connect_args, _test_db_url
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture(1)
+    member = so["accounting_group"]["members"][0]
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {
+        "accounting_group_selection": {
+            "group_id": "g",
+            "scope": {},
+            "members": [{"case_id": member["case_id"], "order_reference": member["order_reference"]}],
+        }
+    }
+    engine = create_async_engine(_test_db_url, connect_args=_test_connect_args)
+
+    @asynccontextmanager
+    async def factory():
+        async with AsyncSession(engine) as child:
+            yield child
+
+    async def evidence(params, **kwargs):
+        return {"success": True, "accounting_evidence": {}}
+
+    async def reallocate(child_db, tenant_id, case_id):
+        await child_db.execute(text("SELECT * FROM no_such_reallocation_table"))
+
+    recorded = []
+
+    async def audit(child_db, *args, payload, **kwargs):
+        await child_db.execute(text("SELECT 1"))
+        if "reason" in payload:
+            recorded.append(payload["reason"])
+
+    snapshots = []
+    monkeypatch.setattr(group, "async_session_factory", factory)
+    monkeypatch.setattr(group, "log_event", audit)
+    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
+    monkeypatch.setattr("app.services.transaction_ops.credit_line_reallocation.prepare_group_member", reallocate)
+    monkeypatch.setattr(
+        "app.services.transaction_ops.tax_correction.candidate_confirmation", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
+    monkeypatch.setattr("app.services.transaction_ops.group_investigation.handoff", lambda *a: {"status": "x"})
+    try:
+        await group.prepare_group_confirmation(
+            db=db,
+            tenant_id=session.tenant_id,
+            actor_id=session.user_id,
+            session_id=str(session.id),
+            correlation_id="t",
+            tools=[],
+            policy=None,
+            progress=snapshots.append,
+        )
+    finally:
+        await engine.dispose()
+    assert snapshots[-1]["checked"] == 1 and snapshots[-1]["ready"] == 0
+    assert recorded and "ProgrammingError" in recorded[0]
+
+
+async def test_a_preparation_failure_that_races_a_dropped_chat_is_logged(caplog):
+    # Gate wf_f4fc4c7c round 3: preparation finished with an error just as the chat closed, so
+    # the cleanup saw a done task and never retrieved (or logged) its exception.
+    agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id=str(uuid4()))
+    agent._tool_defs = [{"name": "transaction_ops_accounting_evidence", "input_schema": {"type": "object"}}]
+    adapter = MagicMock()
+    adapter.stream_message = _stream_replay(
+        [
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="g", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            )
+        ]
+    )
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
+
+    async def prepare(**kwargs):
+        kwargs["progress"]({"checked": 1, "total": 1, "ready": 0, "set_aside": [], "now": []})
+        raise RuntimeError("preparation blew up")
+
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.policy_service.evaluate_tool_call", return_value={"allowed": True}),
+        patch("app.services.chat.tools.execute_tool_call", AsyncMock(return_value=json.dumps({"success": True}))),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        stream = BaseSpecialistAgent.run_streaming(
+            agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="m"
+        )
+        async for kind, _ in stream:
+            if kind == "progress":
+                break
+        await stream.aclose()
+    assert any(
+        r.name == "app.services.chat.agents.base_agent" and "preparation blew up" in (r.exc_text or "")
+        for r in caplog.records
+    )

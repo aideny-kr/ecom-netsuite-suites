@@ -47,6 +47,9 @@ class Treatment:
     verification: str  # invoice | discount | credit | order | amendment
     dependent_step: bool = False  # the plan's sales-order step awaits approval for this kind
     prefetch_metadata: bool = False  # scoped invoice metadata is prefetched before the card
+    # the post-verification recheck re-reads the subledger (invoice less credits) instead of
+    # comparing the unchanged sales order: an existing-credit correction never edits the order
+    subledger_recheck: bool = False
 
 
 _ROWS = (
@@ -102,6 +105,19 @@ _ROWS = (
         lock="invoice",
         reconciliation_target="sales_order",
         verification="amendment",
+        subledger_recheck=True,
+    ),
+    Treatment(
+        # Agent-proposed, accepted by outcome: credit_line_reallocation.assess.
+        kind="credit_line_reallocation",
+        label="Reallocate existing credit lines",
+        batch_label="Existing credit line reallocation",
+        record_type="creditmemo",
+        family="amendment",
+        lock="invoice",
+        reconciliation_target="sales_order",
+        verification="amendment",
+        subledger_recheck=True,
     ),
     Treatment(
         kind="sales_order_line_alignment",

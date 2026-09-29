@@ -76,6 +76,15 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["group_id", "review_run_ids", "status", "search"],
     },
+    "transaction_ops.propose_credit_reallocation": {
+        # Same fresh reads as the evidence tool plus the refund graph; no writes.
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 120,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["case_id", "credit_memo_id", "lines", "reason"],
+    },
     "transaction_ops.accounting_evidence": {
         "default_limit": None,
         "max_limit": None,

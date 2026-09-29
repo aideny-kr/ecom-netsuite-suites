@@ -115,15 +115,16 @@ def proposal_plan(proposal, report):
     if kind not in KINDS:
         raise ValueError("unsupported_accounting_plan")
     order_step = kind in DEPENDENT_KINDS
+    # An amendment of an existing credit: the invoice it reconciles stays the plan's anchor.
+    treatment = treatment_of(proposal)
+    existing_credit = treatment.family == "amendment" and treatment.record_type == "creditmemo"
     before = proposal["before"]
     order_id = (
         proposal["record_id"]
         if order_step
         else proposal.get("sales_order_id") or (before.get("createdFrom") or {}).get("id")
     )
-    invoice_id = (
-        proposal.get("invoice_id") if order_step or kind == "credit_tax_reallocation" else proposal.get("record_id")
-    )
+    invoice_id = proposal.get("invoice_id") if order_step or existing_credit else proposal.get("record_id")
     amounts = (report.get("balance") or {}).get("amounts") or {}
     total = amounts.get("order_total") or {}
     source = proposal.get("source") or {}
@@ -163,7 +164,7 @@ def proposal_plan(proposal, report):
         if order_step
         else "After posting verification, read the sales order again and prepare an exact amendment if needed.",
     }
-    if kind == "credit_tax_reallocation":
+    if existing_credit:
         posting.update(
             record_id=proposal["record_id"],
             current_total=before.get("total"),
@@ -244,12 +245,14 @@ def completed_plan(proposal, report, status, next_step):
     return plan
 
 
-async def previous_execution(db, tenant_id, message_id, proposal):
+async def previous_execution(db, tenant_id, message_id, proposal, *, record_release=True):
     """Called while the existing account/invoice lock is held, before a new CAS.
 
     A timed-out or unknown result blocks another send. Only a recorded failure
     of preconditions with zero writes, or an adapter proof of a rejected update
     with a freshly unchanged subledger, can relinquish the same business intent.
+    ``record_release=False`` asks the same question before anyone approves (group
+    preparation, ``message_id`` None): nothing is released, so nothing is recorded.
     """
     from sqlalchemy import select
 
@@ -295,6 +298,9 @@ async def previous_execution(db, tenant_id, message_id, proposal):
             return await _legacy_native_reservation(db, tenant_id, key)
         proof = await rejected_credit_unchanged(db, tenant_id, message, proposal) if attempt < 19 else None
         if proof:
+            released.append(message.id)
+            if not record_release:
+                continue
             await log_event(
                 db,
                 tenant_id,
@@ -305,7 +311,6 @@ async def previous_execution(db, tenant_id, message_id, proposal):
                 resource_id=str(message.id),
                 payload={**proof, "replacement_confirmation_id": str(message_id), "operation_key": key},
             )
-            released.append(message.id)
             continue
         so = message.structured_output
         return {

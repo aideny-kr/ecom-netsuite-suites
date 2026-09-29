@@ -209,3 +209,63 @@ def transaction_ops_complete_accounting(tenant_id: str, message_id: str):
         return asyncio.run(execute())
     except Exception:
         raise RuntimeError("accounting_completion_failed") from None
+
+
+class PolicyReplayTask(InstrumentedTask):
+    """Close each failed attempt before Celery creates the retry's Job record."""
+
+    abstract = True
+
+    def on_retry(self, exc, task_id, args, kwargs, einfo):
+        self.on_failure(RuntimeError("policy_replay_retry_scheduled"), task_id, args, kwargs, einfo)
+
+
+@celery_app.task(
+    base=PolicyReplayTask,
+    name="tasks.transaction_policy_replay",
+    queue=RECON_COLLECTOR_QUEUE,
+    priority=6,
+    bind=True,
+    max_retries=3,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    soft_time_limit=50,
+    time_limit=55,
+)
+def transaction_policy_replay(self, tenant_id: str, replay_id: str):
+    async def execute():
+        import time
+
+        from app.services.transaction_ops.policy_replay import process_batch, publish
+
+        tenant, replay = uuid.UUID(tenant_id), uuid.UUID(replay_id)
+        started = time.monotonic()
+        async with worker_async_session() as db:
+            while time.monotonic() - started < 25:
+                result = await asyncio.wait_for(process_batch(db, tenant, replay), timeout=20)
+                if result != "pending":
+                    return {"status": result}
+        if not await publish(tenant, replay):
+            raise RuntimeError("policy_replay_publication_failed")
+        return {"status": "pending"}
+
+    try:
+        return asyncio.run(execute())
+    except Exception as error:
+        error_code = getattr(error, "code", "policy_replay_failed")
+
+        async def failed():
+            from app.services.transaction_ops.policy_replay import record_failure
+
+            async with worker_async_session() as db:
+                await record_failure(db, uuid.UUID(tenant_id), uuid.UUID(replay_id), error_code)
+
+        try:
+            asyncio.run(failed())
+        except Exception:
+            pass  # Never expose database/provider details through task logs.
+        from app.services.transaction_ops.state_service import StateError
+
+        if isinstance(error, StateError) and error.http_status in {403, 404, 409}:
+            raise RuntimeError(error_code) from None
+        raise self.retry(exc=RuntimeError("policy_replay_failed"), countdown=30) from None

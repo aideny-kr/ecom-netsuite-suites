@@ -257,6 +257,17 @@ export default function ChatPage() {
             flushTimerRef.current = setTimeout(forceFlush, 100);
           },
           onToolStatus: () => {},
+          onPreparationProgress: (data) => {
+            // One live block per turn, replaced as each order finishes.
+            setStreamBlocks(prev => {
+              const block = { type: "preparation_progress" as const, data, id: "preparation-progress" };
+              const index = prev.findIndex(b => b.type === "preparation_progress");
+              if (index === -1) return [...prev, block];
+              const next = [...prev];
+              next[index] = block;
+              return next;
+            });
+          },
           onFinancialReport: (data) => {
             setFinancialReport(data);
             setStreamBlocks(prev => [...prev, { type: "financial_report" as const, data, id: `fr-${Date.now()}` }]);
