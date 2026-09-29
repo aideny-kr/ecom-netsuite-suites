@@ -243,7 +243,7 @@ async def test_interleaved_notes_and_tool_calls_are_replayed_in_the_order_they_w
         ],
         "tool_use",
     )
-    assert "".join(e[1] for e in events if e[0] == "text") == "Reading the invoice.\n\nNow the credit."
+    assert "".join(e[1] for e in events if e[0] == "text") == "Reading the invoice.\nNow the credit."
     content = adapter.build_assistant_message(events[-1][1])["content"]
     assert [b["type"] for b in content] == ["thinking", "tool_use", "thinking", "tool_use"]
     assert [b.get("signature") for b in content if b["type"] == "thinking"] == ["s0", "s2"]
@@ -324,5 +324,6 @@ async def test_what_is_saved_is_what_the_chat_showed():
     # answer was saved. One rule now decides what is shown, for the stream and for the save.
     _, events = await _stream_blocks([("thinking", "Checking the totals."), ("text", "Net is zero.")], "end_turn")
     shown = "".join(e[1] for e in events if e[0] == "text")
-    assert shown == "Checking the totals.\n\nNet is zero."
-    assert "\n\n".join(events[-1][1].text_blocks) == shown
+    assert shown == "Checking the totals.\nNet is zero."
+    # The join the callers save with (base_agent.py, orchestrator.py), not one of the test's own.
+    assert "\n".join(events[-1][1].text_blocks) == shown

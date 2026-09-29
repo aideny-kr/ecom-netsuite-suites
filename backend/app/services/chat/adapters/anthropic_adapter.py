@@ -120,7 +120,9 @@ async def _chat_text(stream, progress_in_thinking: bool):
         if not piece:
             continue
         if new_block and shown:
-            yield "\n\n"
+            # The separator the callers save with ("\n".join(text_blocks)), so the saved reply
+            # reads exactly as it streamed.
+            yield "\n"
         new_block, shown = False, True
         yield piece
 
