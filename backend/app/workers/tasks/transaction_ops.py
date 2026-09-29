@@ -263,4 +263,8 @@ def transaction_policy_replay(self, tenant_id: str, replay_id: str):
             asyncio.run(failed())
         except Exception:
             pass  # Never expose database/provider details through task logs.
+        from app.services.transaction_ops.state_service import StateError
+
+        if isinstance(error, StateError) and error.http_status in {403, 404, 409}:
+            raise RuntimeError(error_code) from None
         raise self.retry(exc=RuntimeError("policy_replay_failed"), countdown=30) from None

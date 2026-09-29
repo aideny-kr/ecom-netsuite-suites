@@ -50,13 +50,13 @@ def test_worker_yields_and_republishes_at_time_bound(setup, monkeypatch):
 
 def test_worker_records_sanitized_error_and_closes_attempt_on_retry(setup, monkeypatch):
     db, process, publish, failure = setup
-    process.side_effect = service.state.StateError("policy_replay_contract_changed", 409)
+    process.side_effect = RuntimeError("secret connection URL")
     tenant, replay = uuid4(), uuid4()
     retry = Mock(side_effect=RuntimeError("retried"))
     monkeypatch.setattr(tasks.transaction_policy_replay, "retry", retry)
     with pytest.raises(RuntimeError, match="retried"):
         tasks.transaction_policy_replay.run(str(tenant), str(replay))
-    failure.assert_awaited_once_with(db, tenant, replay, "policy_replay_contract_changed")
+    failure.assert_awaited_once_with(db, tenant, replay, "policy_replay_failed")
     assert str(retry.call_args.kwargs["exc"]) == "policy_replay_failed"
     close = Mock()
     task = tasks.PolicyReplayTask()
@@ -71,3 +71,16 @@ async def test_publisher_passes_named_tenant_for_job_audit(monkeypatch):
     tenant, replay = uuid4(), uuid4()
     assert await service.publish(tenant, replay)
     apply.assert_called_once_with(kwargs={"tenant_id": str(tenant), "replay_id": str(replay)})
+
+
+@pytest.mark.parametrize("code,status", [("human_actor_required", 403), ("policy_replay_contract_changed", 409)])
+def test_permanent_worker_failure_does_not_retry(setup, monkeypatch, code, status):
+    db, process, publish, failure = setup
+    process.side_effect = service.state.StateError(code, status)
+    retry = Mock()
+    monkeypatch.setattr(tasks.transaction_policy_replay, "retry", retry)
+    tenant, replay = uuid4(), uuid4()
+    with pytest.raises(RuntimeError, match=code):
+        tasks.transaction_policy_replay.run(str(tenant), str(replay))
+    failure.assert_awaited_once_with(db, tenant, replay, code)
+    retry.assert_not_called()

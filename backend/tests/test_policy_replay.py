@@ -369,3 +369,35 @@ async def test_unknown_window_basis_is_not_assumed_to_be_updated_at(db, admin_us
     await db.flush()
     replay = await service.create_replay(db, actor.tenant_id, target.id, request(), actor=actor)
     assert replay.manifest_json["candidate_count"] == 3
+
+
+async def test_ambiguous_basis_scan_cannot_fill_a_coverage_gap(db, admin_user):
+    actor, _ = admin_user
+    source, target, run = await seed(db, actor)
+    ambiguous = TransactionRun(
+        tenant_id=actor.tenant_id,
+        config_id=source.id,
+        work_key=uuid4().hex,
+        origin="schedule",
+        params_json={
+            "window_start": "2026-09-02T07:00:00+00:00",
+            "window_end": "2026-09-03T07:00:00+00:00",
+            "order_references": [],
+        },
+        config_snapshot=run.config_snapshot,
+        status="finished",
+        termination_reason="done",
+        max_api_calls=100,
+        max_orders=100,
+        api_calls_used=0,
+        orders_used=0,
+        deadline_at=NOW,
+        finished_at=NOW,
+        progress_json=run.progress_json,
+    )
+    db.add(ambiguous)
+    await db.flush()
+    body = request().model_copy(update={"end_date": date(2026, 9, 2)})
+    replay = await service.create_replay(db, actor.tenant_id, target.id, body, actor=actor)
+    assert replay.manifest_json["original_scan_coverage_complete"] is False
+    assert str(ambiguous.id) not in replay.manifest_json["original_scan_run_ids"]

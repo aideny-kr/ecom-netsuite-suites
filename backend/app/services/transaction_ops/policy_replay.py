@@ -110,6 +110,20 @@ async def create_replay(db, tenant_id, config_id, request, *, actor):
     # scans under the OLD policy, never a new scan or complete population proof.
     await db.execute(text("SET LOCAL statement_timeout = '15s'"))
     windows = await daily_evidence.completed_observation_windows(db, root, span)
+    # Coverage and candidate membership must use the same explicit date basis.
+    # Keep legacy interpretation in ordinary daily/review code unchanged.
+    if windows:
+        explicit_ids = set(
+            await db.scalars(
+                select(Run.id).where(
+                    Run.tenant_id == tenant_id,
+                    Run.id.in_([UUID(value[2]) for value in windows]),
+                    Run.params_json["window_basis"].astext == window["window_basis"],
+                )
+            )
+        )
+        windows = [value for value in windows if UUID(value[2]) in explicit_ids]
+
     picked = (
         select(Finding.id.label("finding_id"), Finding.run_id, Finding.order_reference)
         .join(Run, (Run.tenant_id == Finding.tenant_id) & (Run.id == Finding.run_id))
@@ -347,7 +361,15 @@ async def record_failure(db, tenant_id, replay_id, code="policy_replay_failed"):
     if replay.status == "pending":
         replay.last_error_code = (
             code
-            if code in {"policy_replay_contract_changed", "policy_replay_rule_changed", "policy_replay_database_busy"}
+            if code
+            in {
+                "policy_replay_contract_changed",
+                "policy_replay_rule_changed",
+                "policy_replay_database_busy",
+                "human_actor_required",
+                "permission_denied",
+                "policy_replay_source_missing",
+            }
             else "policy_replay_failed"
         )
         await state._commit(db, tenant_id)
