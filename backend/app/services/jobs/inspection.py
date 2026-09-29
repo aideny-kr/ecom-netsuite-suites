@@ -52,6 +52,10 @@ def inspect_plan(schedule, *, use_pending=False):
                 key = step.params["playbook_key"]
                 if key not in PLAYBOOKS:
                     blockers.append(f"Step {step.id}: unknown report playbook")
+                elif set(step.params["params"]) - {p["key"] for p in PLAYBOOKS[key]["params"]}:
+                    blockers.append(
+                        f"Step {step.id}: unsupported report input; use only the playbook's declared inputs"
+                    )
                 elif step.params.get("mode", "period") == "period":
                     try:
                         build_playbook_recipe(key, step.params["params"])

@@ -106,6 +106,10 @@ async def run_test(db, schedule, job):
             "detail": error,
             "verification": "not_verified",
             "retained_report_ids": [str(rid) for rid in retained],
+            "outputs": {
+                **((job.result_summary or {}).get("outputs") or {}),
+                **{f"retained_{i}": {"report_id": str(rid)} for i, rid in enumerate(retained)},
+            },
         }
         await audit_service.log_event(
             db,
@@ -119,7 +123,7 @@ async def run_test(db, schedule, job):
             status="error",
         )
         await db.commit()
-        return RunOutcome("blocked", job_id, {})
+        return RunOutcome("blocked", job_id, job.result_summary["outputs"])
     actor_id = uuid.UUID(params["actor_id"])
     job.status = "running"
     job.started_at = datetime.now(timezone.utc)

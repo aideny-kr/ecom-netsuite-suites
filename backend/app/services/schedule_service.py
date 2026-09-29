@@ -263,6 +263,7 @@ async def enqueue_run(
             "use_pending": use_pending,
             "plan": plan_to_run,
             "budget": dict(schedule.budget_json or {}),
+            "workflow_review": (schedule.parameters or {}).get("workflow_review"),
             "control_version": schedule.plan_version,
             "actor_type": "user",
             "actor_id": str(actor_id) if actor_id else None,

@@ -294,6 +294,12 @@ async def _execute_sources(
                 type(exc).__name__,
             )
             continue
+        finally:
+            from app.services.jobs.source_scope import raise_if_source_changed
+
+            # Optional comparison outages may degrade; lost authorization or a
+            # changed reviewed source must abort before any report is persisted.
+            raise_if_source_changed()
     return payloads
 
 

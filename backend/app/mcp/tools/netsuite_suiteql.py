@@ -386,15 +386,15 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
             statement = statement.where(Connection.id == connection_id)
         result = await db.execute(statement)
         connection = result.scalars().first()
-        if not connection:
-            return {
-                "error": True,
-                "message": "No active NetSuite connection found for this tenant.",
-            }
     except Exception as exc:
         return {"error": True, "message": f"DB lookup failed: {exc}"}
 
     # --- Decrypt credentials ---
+    from app.services.jobs.source_scope import check_selected_source
+
+    await check_selected_source(db, tenant_id, "netsuite", connection)
+    if not connection:
+        return {"error": True, "message": "No active NetSuite connection found for this tenant."}
     try:
         credentials = decrypt_credentials(connection.encrypted_credentials)
     except Exception as exc:
@@ -429,6 +429,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         from app.services.netsuite_oauth_service import get_valid_token
 
         access_token = await get_valid_token(db, connection)
+        await check_selected_source(db, tenant_id, "netsuite", connection)
         if not access_token:
             return {
                 "error": True,

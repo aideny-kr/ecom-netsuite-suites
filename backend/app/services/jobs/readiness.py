@@ -22,6 +22,36 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()
 
 
+def source_binding(row):
+    from app.core.encryption import decrypt_credentials
+
+    try:
+        credentials = decrypt_credentials(row.encrypted_credentials)
+        # OAuth token renewal preserves the account/client identity. Credential
+        # health is intentionally not claimed by this saved-state check.
+        credentials = {
+            k: v
+            for k, v in credentials.items()
+            if k not in {"access_token", "refresh_token", "expires_at", "expires_in"}
+        }
+    except Exception:
+        credentials = row.encrypted_credentials
+    return {
+        "kind": row.__tablename__,
+        "id": str(row.id),
+        "provider": row.provider,
+        "status": row.status,
+        "enabled": getattr(row, "is_enabled", True),
+        "scope": {
+            k: v
+            for k, v in (row.metadata_json or {}).items()
+            if k in {"account_id", "restlet_url", "project_id", "location", "shared_drive_id"}
+        },
+        "endpoint": getattr(row, "server_url", None),
+        "credential_scope_hash": digest(credentials),
+    }
+
+
 def test_blockers(plan):
     """Only explicitly registered test contracts; read-kind alone proves nothing."""
     blockers = []
@@ -38,7 +68,7 @@ def test_blockers(plan):
                     "Tests support new period financial statements only; "
                     "refresh, tracking and scan-priced reports require live execution."
                 )
-        elif contract != "local_report_artifact":
+        else:
             blockers.append(f"Step {step.get('id')}: {step.get('type')} has no supported test contract.")
     return blockers
 
@@ -88,6 +118,9 @@ async def inspect_readiness(db, schedule, *, use_pending=False):
         elif kind == "recon.run":
             permissions.add("recon.run")
             tools.append(("recon.run", params))
+            blockers.append(
+                "Reconciliation sources require their own run review; this workflow readiness contract is unavailable."
+            )
         elif kind == "agent.review_saved_case":
             permissions.update({"connections.view", "recon.run"})
             tools.append(("transaction_ops_status", {"case_id": params.get("case_id")}))
@@ -147,17 +180,7 @@ async def inspect_readiness(db, schedule, *, use_pending=False):
             ):
                 continue
             if provider in sources:
-                bindings.append(
-                    {
-                        "kind": model.__tablename__,
-                        "id": str(row.id),
-                        "provider": provider,
-                        "status": row.status,
-                        "enabled": getattr(row, "is_enabled", True),
-                        "scope": row.metadata_json,
-                        "endpoint": getattr(row, "server_url", None),
-                    }
-                )
+                bindings.append(source_binding(row))
     for source in sorted(sources):
         active = [b for b in bindings if b["provider"] == source and b["status"] == "active" and b["enabled"]]
         if not active:
@@ -184,12 +207,13 @@ async def inspect_readiness(db, schedule, *, use_pending=False):
         except (AgentStoppedError, ValueError) as exc:
             blockers.append(f"Saved-evidence context is unavailable: {exc}")
     test_errors = test_blockers(plan) if review["structurally_valid"] else review["blockers"]
+    bound = [b for b in bindings if b["status"] == "active" and b["enabled"]]
     signature = digest(
         {
             "owner": str(schedule.owner_id),
             "grants": grants,
             "policy": policy_state,
-            "sources": sorted(bindings, key=lambda b: b["id"]),
+            "sources": sorted(bound, key=lambda b: b["id"]),
             "blockers": blockers,
         }
     )
@@ -201,6 +225,7 @@ async def inspect_readiness(db, schedule, *, use_pending=False):
         "required_permissions": sorted(permissions),
         "sources": sorted(sources),
         "source_bindings": [{k: b[k] for k in ("id", "provider", "status")} for b in bindings],
+        "source_binding_hashes": {b["id"]: digest(b) for b in bound},
         "test_supported": not test_errors,
         "test_blockers": test_errors,
         "test_seconds": TEST_SECONDS,
@@ -244,3 +269,24 @@ async def approval_blocker(db, schedule):
     if not review["ready"] or saved.get("readiness_hash") != review["readiness_hash"]:
         return "Source, permission or policy changed. Validate and refresh approval."
     return None
+
+
+async def pause_for_review(db, schedule, reason):
+    from datetime import datetime, timezone
+
+    from app.services import audit_service
+
+    schedule.paused_at = datetime.now(timezone.utc)
+    schedule.pause_reason = reason
+    schedule.last_run_status = "paused"
+    await audit_service.log_event(
+        db,
+        tenant_id=schedule.tenant_id,
+        category="jobs",
+        action="jobs.paused",
+        actor_type="system",
+        resource_type="schedule",
+        resource_id=str(schedule.id),
+        payload={"reason": reason, "owner_id": str(schedule.owner_id) if schedule.owner_id else None},
+        status="error",
+    )

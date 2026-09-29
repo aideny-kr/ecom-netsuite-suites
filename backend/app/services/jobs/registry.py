@@ -616,7 +616,6 @@ STEP_REGISTRY: dict[str, StepSpec] = {
         kind="read",
         params_schema=_REPORT_RENDER_PDF_SCHEMA,
         executor=_report_render_pdf_executor,
-        test_contract="local_report_artifact",
     ),
     "report.build_xlsx": StepSpec(
         type="report.build_xlsx",
@@ -624,7 +623,6 @@ STEP_REGISTRY: dict[str, StepSpec] = {
         kind="read",
         params_schema=_REPORT_BUILD_XLSX_SCHEMA,
         executor=_report_build_xlsx_executor,
-        test_contract="local_report_artifact",
     ),
     "drive.upload": StepSpec(
         type="drive.upload",

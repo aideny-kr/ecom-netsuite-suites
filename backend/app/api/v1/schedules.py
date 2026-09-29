@@ -398,6 +398,7 @@ async def update_schedule(
         else:
             schedule.plan_json = compiled.plan_json
             schedule.plan_status = "pending_approval"
+            schedule.parameters = {**(schedule.parameters or {}), "workflow_review_required": True}
         changed_fields["instruction"] = True
 
     # Item 2 (gate fix): `approve_schedule`/`resume_schedule` both recompute
@@ -703,7 +704,7 @@ async def resume_schedule(
         raise HTTPException(status_code=409, detail=f"Reconcile uncertain operation {unresolved} before resuming")
     from app.services.jobs.readiness import approval_blocker
 
-    blocker = await approval_blocker(db, schedule)
+    blocker = await approval_blocker(db, schedule) if schedule.plan_status == "approved" else None
     if blocker:
         raise HTTPException(status_code=409, detail=blocker)
     schedule.paused_at = None

@@ -240,6 +240,7 @@ async def test_approved_readiness_is_rechecked_before_live_execution(client, db,
     assert result.reason == "blocked"
     await db.refresh(row)
     assert row.paused_at is not None
+    assert row.last_run_status == "paused"
     resume = await client.post(f"/api/v1/schedules/{row.id}/resume", headers=headers)
     assert resume.status_code == 409
 
@@ -304,3 +305,254 @@ async def test_readiness_requires_executor_source_not_unrelated_mcp(client, db, 
     await ready(db, user)
     third = (await client.post(f"/api/v1/schedules/{row.id}/validate", json={}, headers=headers)).json()
     assert not third["ready"] and any("unambiguously" in b for b in third["readiness_blockers"])
+
+
+async def test_queued_modern_run_cannot_borrow_replacement_approval(client, db, admin_user, monkeypatch):
+    from dataclasses import replace
+
+    from app.services.jobs.readiness import execution_fingerprint, inspect_readiness
+    from app.services.jobs.registry import STEP_REGISTRY
+    from app.services.schedule_service import enqueue_run
+    from app.workers.tasks.scheduled_jobs import run_schedule_now
+
+    user, headers = admin_user
+    row = await seed(db, user, PLAN)
+    await ready(db, user)
+
+    async def approve():
+        review = await inspect_readiness(db, row)
+        row.plan_status = "approved"
+        row.plan_version += 1
+        row.parameters = {
+            "workflow_review_required": True,
+            "workflow_review": {
+                "execution_hash": execution_fingerprint(row),
+                "readiness_hash": review["readiness_hash"],
+            },
+        }
+        await db.flush()
+
+    await approve()
+    job = await enqueue_run(db, schedule=row, tenant_id=user.tenant_id, actor_id=user.id, use_pending=False)
+    await approve()
+
+    async def forbidden(*a, **kw):
+        raise AssertionError("executed superseded queued plan")
+
+    monkeypatch.setitem(STEP_REGISTRY, "report.compose", replace(STEP_REGISTRY["report.compose"], executor=forbidden))
+    outcome = await run_schedule_now(db, row.id, tenant_id=user.tenant_id, existing_job_id=job.id)
+    assert outcome.reason == "blocked"
+    assert row.paused_at is None
+
+
+async def test_routine_verification_metadata_preserves_approval_but_account_change_does_not(db, admin_user):
+    from app.core.encryption import encrypt_credentials
+    from app.services.jobs.readiness import inspect_readiness
+
+    user, _ = admin_user
+    row = await seed(db, user, PLAN)
+    await ready(db, user)
+    source = await db.scalar(select(Connection).where(Connection.tenant_id == user.tenant_id))
+    source.encrypted_credentials = encrypt_credentials(
+        {"account_id": "original", "access_token": "old", "expires_at": 1}
+    )
+    await db.flush()
+    before = await inspect_readiness(db, row)
+    source.metadata_json = {"verification_at": "now", "accounting_profiles": {"unrelated": "change"}}
+    source.encrypted_credentials = encrypt_credentials(
+        {"account_id": "original", "access_token": "renewed", "expires_at": 2}
+    )
+    await db.flush()
+    after = await inspect_readiness(db, row)
+    assert before["readiness_hash"] == after["readiness_hash"]
+    db.add(
+        Connection(
+            tenant_id=user.tenant_id,
+            provider="netsuite",
+            label="Inactive",
+            status="disconnected",
+            encrypted_credentials="unused",
+        )
+    )
+    await db.flush()
+    assert before["readiness_hash"] == (await inspect_readiness(db, row))["readiness_hash"]
+    source.encrypted_credentials = encrypt_credentials(
+        {"account_id": "different", "access_token": "renewed", "expires_at": 2}
+    )
+    await db.flush()
+    assert before["readiness_hash"] != (await inspect_readiness(db, row))["readiness_hash"]
+
+
+async def test_unapproved_paused_draft_can_resume_for_test(client, db, admin_user):
+    user, headers = admin_user
+    row = await seed(db, user, PLAN)
+    row.parameters = {"workflow_review_required": True}
+    await db.flush()
+    assert (await client.post(f"/api/v1/schedules/{row.id}/pause", headers=headers)).status_code == 200
+    assert (await client.post(f"/api/v1/schedules/{row.id}/resume", headers=headers)).status_code == 200
+    assert row.plan_status == "pending_approval" and row.next_run_at is None
+
+
+@pytest.mark.parametrize("key", ["subsidiary_id", "currency", "unsupported"])
+async def test_statement_filters_cannot_be_silently_ignored(client, db, admin_user, key):
+    import copy
+
+    user, headers = admin_user
+    plan = copy.deepcopy(PLAN)
+    plan["steps"][0]["params"]["params"][key] = "123"
+    row = await seed(db, user, plan)
+    await ready(db, user)
+    review = (await client.post(f"/api/v1/schedules/{row.id}/validate", json={}, headers=headers)).json()
+    assert not review["ready"] and any("unsupported report input" in b for b in review["blockers"])
+
+
+@pytest.mark.parametrize("kind", ["report.render_pdf", "report.build_xlsx"])
+async def test_synchronous_artifact_renderers_are_not_advertised_as_bounded_tests(db, admin_user, kind):
+    from app.services.jobs.readiness import inspect_readiness
+
+    user, _ = admin_user
+    row = await seed(
+        db, user, {"steps": [*PLAN["steps"], {"id": "artifact", "type": kind, "params": {"report_step": "report"}}]}
+    )
+    await ready(db, user)
+    review = await inspect_readiness(db, row)
+    assert review["ready"] and not review["test_supported"]
+
+
+async def test_instruction_compilation_cannot_upgrade_legacy_draft_without_review(client, db, admin_user, monkeypatch):
+    from app.services.jobs.compiler import CompiledPlan
+
+    user, headers = admin_user
+    row = await seed(db, user, PLAN)
+
+    async def compile_plan(*a, **kw):
+        return CompiledPlan(plan_json=PLAN, summary_line="Synthetic", kinds={"read"}, model="synthetic")
+
+    monkeypatch.setattr("app.api.v1.schedules.compile_instruction", compile_plan)
+    response = await client.patch(
+        f"/api/v1/schedules/{row.id}", json={"instruction": "Compile new draft"}, headers=headers
+    )
+    assert response.status_code == 200, response.text
+    assert (await client.post(f"/api/v1/schedules/{row.id}/approve", headers=headers)).status_code == 409
+
+
+@pytest.mark.parametrize("change", ["replacement", "account", "policy"])
+async def test_report_subreads_revalidate_actual_source_before_each_dispatch(
+    client, db, admin_user, monkeypatch, change
+):
+    from types import SimpleNamespace
+
+    from app.core.encryption import encrypt_credentials
+    from app.mcp.tools import netsuite_suiteql
+    from app.models.policy_profile import PolicyProfile
+    from app.models.report import Report
+    from app.services.chat import tools
+    from app.workers.tasks.scheduled_jobs import run_schedule_now
+    from tests.test_report_playbooks import _patch_executor, _trial_balance_by_params
+
+    user, headers = admin_user
+    tenant_id = user.tenant_id
+    row = await seed(db, user, PLAN)
+    await ready(db, user)
+    source = await db.scalar(select(Connection).where(Connection.tenant_id == user.tenant_id))
+    source.encrypted_credentials = encrypt_credentials({"account_id": "synthetic-first"})
+    await db.flush()
+    monkeypatch.setattr("app.api.v1.schedules.celery_app.send_task", lambda *a, **k: None)
+    review = (await client.post(f"/api/v1/schedules/{row.id}/validate", json={}, headers=headers)).json()
+    queued = await client.post(
+        f"/api/v1/schedules/{row.id}/test",
+        json={"expected_plan_hash": review["plan_hash"], "readiness_hash": review["readiness_hash"]},
+        headers=headers,
+    )
+    assert queued.status_code == 202, queued.text
+    jid = uuid.UUID(queued.json()["jobs_id"])
+    _patch_executor(monkeypatch, by_params=_trial_balance_by_params())
+    fake = tools.execute_tool_call
+
+    async def financial_transport(tool_name, tool_input, **kw):
+        # Exercise the actual selector/credential guard. Only the outbound HTTP
+        # response and statement rows are synthetic; no provider is contacted.
+        result = await netsuite_suiteql.execute(
+            {"query": "SELECT id FROM transaction", "limit": 1}, context={"db": kw["db"], "tenant_id": kw["tenant_id"]}
+        )
+        assert not result.get("error"), result
+        return await fake(tool_name, tool_input, **kw)
+
+    monkeypatch.setattr(tools, "execute_tool_call", financial_transport)
+    monkeypatch.setattr(netsuite_suiteql, "build_oauth1_header", lambda *a: {})
+    calls = []
+
+    class HTTP:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def post(self, url, **kw):
+            calls.append(url)
+            assert len(calls) == 1, "second provider call escaped its reviewed source"
+            if change == "replacement":
+                source.status = "disconnected"
+                db.add(
+                    Connection(
+                        tenant_id=user.tenant_id,
+                        provider="netsuite",
+                        label="Replacement",
+                        status="active",
+                        encrypted_credentials=encrypt_credentials({"account_id": "different"}),
+                    )
+                )
+            elif change == "account":
+                source.encrypted_credentials = encrypt_credentials({"account_id": "different"})
+            else:
+                db.add(
+                    PolicyProfile(
+                        tenant_id=user.tenant_id,
+                        name="Revoked",
+                        version=1,
+                        is_active=True,
+                        tool_allowlist=["unrelated"],
+                    )
+                )
+            await db.commit()
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"items": []})
+
+    monkeypatch.setattr(netsuite_suiteql.httpx, "AsyncClient", HTTP)
+    outcome = await run_schedule_now(db, row.id, tenant_id=user.tenant_id, existing_job_id=jid)
+    assert outcome.reason == "blocked", outcome
+    assert len(calls) == 1
+    assert not (await db.scalars(select(Report).where(Report.tenant_id == tenant_id))).all()
+
+
+async def test_bigquery_selector_excludes_disabled_connectors(db, admin_user):
+    from app.mcp.tools.bigquery_tools import _get_bigquery_connector
+    from app.models.mcp_connector import McpConnector
+
+    user, _ = admin_user
+    db.add(
+        McpConnector(
+            tenant_id=user.tenant_id,
+            provider="bigquery",
+            label="Disabled",
+            server_url="https://example.test",
+            status="active",
+            is_enabled=False,
+        )
+    )
+    await db.flush()
+    assert await _get_bigquery_connector({"db": db, "tenant_id": user.tenant_id}) is None
+
+
+async def test_legacy_mcp_create_cannot_mint_unreviewed_job(db, admin_user):
+    from app.mcp.tools.schedule_ops import execute_create
+
+    user, _ = admin_user
+    result = await execute_create(
+        {"name": "Legacy job", "schedule_type": "job"},
+        context={"db": db, "tenant_id": user.tenant_id, "actor_id": user.id},
+    )
+    assert result.get("error"), result
