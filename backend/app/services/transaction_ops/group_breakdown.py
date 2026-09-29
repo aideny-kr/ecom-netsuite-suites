@@ -278,7 +278,7 @@ async def _invoices(db, tenant_id, config, order_ids):
                         reader,
                         # taxtotal is in the transaction's currency, like foreigntotal (checked on a CHF invoice).
                         # parents: every sales order the invoice came from, not only the requested ones.
-                        "SELECT t.id, t.foreigntotal, t.taxtotal, t.foreignamountunpaid, "
+                        "SELECT t.id, t.foreigntotal, t.taxtotal, t.foreignamountunpaid, t.posting, t.voided, "
                         "BUILTIN.DF(t.entity) AS customer, "
                         "(SELECT COUNT(DISTINCT x.createdfrom) FROM transactionline x "
                         "WHERE x.transaction = t.id AND x.createdfrom IS NOT NULL) AS parents "
@@ -294,6 +294,8 @@ async def _invoices(db, tenant_id, config, order_ids):
     shared = {invoice for invoice, n in Counter(str(row.get("invoice_id")) for row in links).items() if n > 1}
     # Also shared with an order outside this request: only NetSuite's own parent count shows that.
     shared |= {invoice for invoice, row in totals.items() if str(row.get("parents")) != "1"}
+    # Only a posted, not voided invoice is the books. An order with any other invoice gets no invoice rule.
+    shared |= {invoice for invoice, row in totals.items() if (row.get("posting"), row.get("voided")) != ("T", "F")}
     by_order = {}
     for row in links:
         if str(row.get("invoice_id")) in shared:
@@ -335,7 +337,21 @@ def _classify(member, invoices, tax_reasons):
         return "matched_now", {}
     # NetSuite carries more tax than the source and the whole difference is that tax.
     tax_only_gap = tax is not None and tax < 0 and delta == tax and _known_zero(member, "refunds")
-    if member["corrected_credits"] and tax_only_gap:
+    credit_links = [link for link in member["links"] if link.get("credit_memo_id")]
+    corrected_amounts = [
+        _decimal(link.get("amount"))
+        for link in credit_links
+        if str(link.get("credit_memo_id")) in member["corrected_credits"]
+    ]
+    if (
+        member["corrected_credits"]
+        and tax_only_gap
+        # Every credit on the order was corrected, and together they are exactly the tax NetSuite still
+        # carries: one corrected credit must not vouch for another that is still unresolved.
+        and all(str(link.get("credit_memo_id")) in member["corrected_credits"] for link in credit_links)
+        and None not in corrected_amounts
+        and sum(corrected_amounts, Decimal(0)) == -tax
+    ):
         # Only the reasons on the corrected credit's own refund link: another refund on the same
         # order says nothing about which reasons are tax refunds.
         reasons = sorted(

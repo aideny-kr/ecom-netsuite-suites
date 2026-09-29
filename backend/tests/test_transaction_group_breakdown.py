@@ -192,8 +192,8 @@ async def world(db, tenant_a):
     return World(db, tenant_a, user, source, netsuite)
 
 
-def link(reason, credit_memo="15788939"):
-    return {"reason_id": reason, "credit_memo_id": credit_memo, "stage": "refund_verified"}
+def link(reason, credit_memo="15788939", amount="2.80"):
+    return {"reason_id": reason, "credit_memo_id": credit_memo, "stage": "refund_verified", "amount": amount}
 
 
 def by_cause(result):
@@ -316,7 +316,7 @@ async def test_orders_already_corrected_here_point_to_the_refund_setting(world, 
     fixed = [await world.case(f"R00000060{i}", delta="-2.80", tax="-2.80", links=[link("4")]) for i in range(3)]
     for case in fixed:
         await world.corrected(case)
-    odd = await world.case("R000000701", delta="-3.00", tax="-3.00", links=[link("3")])
+    odd = await world.case("R000000701", delta="-3.00", tax="-3.00", links=[link("3", amount="3.00")])
     await world.corrected(odd)
     await world.case("R000000801", delta="-100.45", tax="-100.46", links=[link("2", credit_memo=None)])
     monkeypatch.setattr(gb, "_invoices", _no_invoices)
@@ -521,9 +521,9 @@ async def test_the_setting_names_only_the_reason_on_the_corrected_credit(world, 
         await world.corrected(case)
     monkeypatch.setattr(gb, "_invoices", _no_invoices)
     result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
-    corrected = by_cause(result)["corrected_in_app"]
-    assert corrected["next_step"] == "settings_change"
-    assert "reason 4" in corrected["next_label"] and "7" not in corrected["next_label"]
+    # Packet review F7 made this stricter: an order with another, uncorrected credit is not
+    # "already corrected" at all, so reason 7 can never be proposed as a tax refund reason.
+    assert "corrected_in_app" not in by_cause(result)
 
 
 async def test_a_missing_tax_amount_is_never_read_as_zero(world, monkeypatch):
@@ -611,8 +611,8 @@ async def test_an_invoice_shared_by_several_orders_is_never_split_between_them(w
         [
             [{"invoice_id": 1, "order_id": 11}, {"invoice_id": 1, "order_id": 12}, {"invoice_id": 2, "order_id": 13}],
             [
-                {"id": 1, "foreigntotal": 500, "taxtotal": 50, "foreignamountunpaid": 0, "customer": "A", "parents": 2},
-                {"id": 2, "foreigntotal": 80, "taxtotal": 0, "foreignamountunpaid": 80, "customer": "B", "parents": 1},
+                {"id": 1, "foreigntotal": 500, "taxtotal": 50, "foreignamountunpaid": 0, "customer": "A", "parents": 2, "posting": "T", "voided": "F"},
+                {"id": 2, "foreigntotal": 80, "taxtotal": 0, "foreignamountunpaid": 80, "customer": "B", "parents": 1, "posting": "T", "voided": "F"},
             ],
         ]
     )
@@ -716,3 +716,53 @@ async def test_an_unexpected_customer_type_never_reaches_the_model_as_text(world
     result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
     assert "Jane" not in json.dumps(gb.condensed_for_model(result))
     assert {"kind": "customer_type", "fact": "other customer", "orders": 1} in result["causes"][0]["facts"]
+
+
+async def test_an_unposted_or_voided_invoice_never_makes_the_books_right(world, monkeypatch):
+    # Packet review F6: an invoice awaiting posting was accepted as "books right".
+    from contextlib import asynccontextmanager
+
+    from app.services.transaction_ops import netsuite_bulk, netsuite_reader
+
+    @asynccontextmanager
+    async def reader(*args, **kwargs):
+        yield object()
+
+    row = {"foreigntotal": 100, "taxtotal": 0, "foreignamountunpaid": 0, "customer": "A", "parents": 1}
+    answers = iter(
+        [
+            [{"invoice_id": 1, "order_id": 11}, {"invoice_id": 2, "order_id": 12}, {"invoice_id": 3, "order_id": 13}],
+            [
+                {**row, "id": 1, "posting": "F", "voided": "F"},
+                {**row, "id": 2, "posting": "T", "voided": "T"},
+                {**row, "id": 3, "posting": "T", "voided": "F"},
+            ],
+        ]
+    )
+
+    async def query(reader, sql, limit=1000):
+        return next(answers)
+
+    monkeypatch.setattr(netsuite_reader, "authenticated_reader", reader)
+    monkeypatch.setattr(netsuite_bulk, "query", query)
+    await world.config()
+    config = (await world.db.execute(gb.select(TransactionConfig))).scalars().one()
+    by_order, status = await gb._invoices(world.db, world.tenant.id, config, ["11", "12", "13"])
+    assert status == "complete" and set(by_order) == {"13"}
+
+
+async def test_corrections_must_account_for_the_whole_tax_difference(world, monkeypatch):
+    # Packet review F7: one verified credit of 5 marked a 100 tax gap "already corrected".
+    await world.config()
+    part = await world.case(
+        "R000003101",
+        delta="-100.00",
+        tax="-100.00",
+        links=[link("4", amount="5.00"), link("4", credit_memo="17000002", amount="95.00")],
+    )
+    await world.corrected(part)  # corrects only 15788939, the 5.00 credit
+    whole = await world.case("R000003102", delta="-5.00", tax="-5.00", links=[link("4", amount="5.00")])
+    await world.corrected(whole)
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert by_cause(result)["corrected_in_app"]["order_references"] == ["R000003102"]
