@@ -50,6 +50,7 @@ class World:
         record_id=None,
         refunds="0.00",
         proofs=(),
+        tax_source="0.00",
     ):
         report = {
             "balance": {
@@ -59,7 +60,7 @@ class World:
                 "missing_metrics": [],
                 "amounts": {
                     "order_total": {"delta": delta, "source": source_total},
-                    "tax": {"delta": tax},
+                    "tax": {"delta": tax, "source": tax_source} if tax is not None else None,
                     "refunds": {"delta": refunds},
                 },
                 "adjustments": [],
@@ -231,8 +232,18 @@ async def test_an_invoice_that_already_matches_solidus_outranks_the_adjustment(w
     async def invoices(db, tenant_id, config, order_ids):
         seen.append(sorted(order_ids))
         return {
-            "14388301": {"total": gb.Decimal("0.00"), "open": gb.Decimal("0"), "customers": {"FW Marketing Orders"}},
-            "15941837": {"total": gb.Decimal("2743.00"), "open": gb.Decimal("59"), "customers": {"Doug Finch"}},
+            "14388301": {
+                "total": gb.Decimal("0.00"),
+                "tax": gb.Decimal("0"),
+                "open": gb.Decimal("0"),
+                "customers": {"FW Marketing Orders"},
+            },
+            "15941837": {
+                "total": gb.Decimal("2743.00"),
+                "tax": gb.Decimal("0"),
+                "open": gb.Decimal("59"),
+                "customers": {"Doug Finch"},
+            },
         }, "complete"
 
     monkeypatch.setattr(gb, "_invoices", invoices)
@@ -440,7 +451,7 @@ async def test_the_model_never_reads_customer_names_or_numbers_inside_labels(wor
     await world.case("R000001903", delta="-6.00", source_total="30.00", record_id="15000003")
 
     async def invoices(db, tenant_id, config, order_ids):
-        row = {"total": gb.Decimal("20.00"), "open": gb.Decimal("0"), "customers": {"Jane Doe"}}
+        row = {"total": gb.Decimal("20.00"), "tax": gb.Decimal("0"), "open": gb.Decimal("0"), "customers": {"Jane Doe"}}
         return {"15000002": row, "15000003": {**row, "total": gb.Decimal("30.00")}}, "complete"
 
     monkeypatch.setattr(gb, "_invoices", invoices)
@@ -449,3 +460,72 @@ async def test_the_model_never_reads_customer_names_or_numbers_inside_labels(wor
     condensed = json.dumps(gb.condensed_for_model(result))
     assert "Jane Doe" not in condensed and "50" not in condensed and "5%" not in condensed
     assert "Refund $# per call #%" in condensed
+
+
+async def test_an_invoice_with_the_right_total_but_the_wrong_tax_is_not_called_right(world, monkeypatch):
+    # Review round 2 of #356: the gross total alone let a wrong tax split pass as "books right".
+    await world.config()
+    await world.case("R000002001", delta="-10.00", source_total="100.00", tax_source="10.00", record_id="15000011")
+
+    async def invoices(db, tenant_id, config, order_ids):
+        return {
+            "15000011": {
+                "total": gb.Decimal("100.00"),
+                "tax": gb.Decimal("20.00"),
+                "open": gb.Decimal("0"),
+                "customers": set(),
+            }
+        }, "complete"
+
+    monkeypatch.setattr(gb, "_invoices", invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert "invoice_matches_source" not in by_cause(result)
+
+
+async def test_only_a_credit_memo_correction_still_on_the_order_counts(world, monkeypatch):
+    # Review round 2 of #356: an invoice or sales order correction counted as "corrected" forever.
+    await world.config()
+    case = await world.case("R000002101", delta="-2.80", tax="-2.80", links=[link("4")])
+    await world.corrected(case, record_type="invoice", record_id="15733697")
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert "corrected_in_app" not in by_cause(result)
+
+
+async def test_the_setting_names_only_the_reason_on_the_corrected_credit(world, monkeypatch):
+    # Review round 2 of #356: reasons came from every refund link, so an unrelated merchandise
+    # refund's reason would have been proposed as a tax refund reason.
+    await world.config()
+    orders = [
+        await world.case(
+            f"R00000220{i}", delta="-2.80", tax="-2.80", links=[link("4"), link("7", credit_memo="17000001")]
+        )
+        for i in range(3)
+    ]
+    for case in orders:
+        await world.corrected(case)
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    corrected = by_cause(result)["corrected_in_app"]
+    assert corrected["next_step"] == "settings_change"
+    assert "reason 4" in corrected["next_label"] and "7" not in corrected["next_label"]
+
+
+async def test_a_missing_tax_amount_is_never_read_as_zero(world, monkeypatch):
+    # Review round 2 of #356: a missing metric became 0, so a business order with no tax evidence
+    # was called "priced in NetSuite".
+    await world.config()
+    await world.case("R000002301", delta="-10.00", tax=None)
+    await world.solidus("R000002301", customer_type="business")
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(
+        world.db,
+        world.tenant.id,
+        case_id=str(
+            (await world.db.execute(gb.select(TransactionCase).where(TransactionCase.order_reference == "R000002301")))
+            .scalars()
+            .one()
+            .id
+        ),
+    )
+    assert [c["cause"] for c in result["causes"]] == ["no_shared_cause"]

@@ -135,3 +135,22 @@ it("offers the fix for a single order too", () => {
   render(<GroupBreakdownCard data={single} />);
   expect(compose(screen.getByRole("link", { name: "Prepare these fixes →" }))).toContain("R619946522");
 });
+
+it("shows every non-zero amount of a cause, not just the one it leads with", () => {
+  // Review round 2 of #356: the model is told every amount is on the card, so it must be.
+  const mixed: GroupBreakdownData = {
+    ...breakdown,
+    causes: [
+      {
+        ...breakdown.causes[0],
+        amounts: { order_total: "-100.00", tax: "-10.00", refunds: "25.00" },
+        primary: { metric: "order_total", amount: "-100.00" },
+      },
+    ],
+  };
+  render(<GroupBreakdownCard data={mixed} />);
+  const row = screen.getByText("Solidus adjustment never reached NetSuite").closest("li")!;
+  expect(within(row).getByText("$100.00")).toBeVisible();
+  expect(within(row).getByText("tax $10.00")).toBeVisible();
+  expect(within(row).getByText("refunds $25.00")).toBeVisible();
+});

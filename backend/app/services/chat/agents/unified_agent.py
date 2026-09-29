@@ -780,7 +780,7 @@ class UnifiedAgent(BaseSpecialistAgent):
                 "\nThis request selects a transaction case/group workflow, not a standalone database query. "
                 "Start with transaction_ops_status for the exact case, or with "
                 "transaction_ops_group_breakdown for the exact group and supplied scope. "
-                "Run transaction_ops_accounting_group for that group only when a cause's next step is "
+                "Run transaction_ops_accounting_group for that group, with the same scope, only when a cause's next step is "
                 "prepare_corrections. Use transaction_ops_accounting_evidence for case evidence. "
                 "Resolve connections from that authorized evidence; "
                 "do not ask which data source to use. Continue targeted read-only investigation when evidence "

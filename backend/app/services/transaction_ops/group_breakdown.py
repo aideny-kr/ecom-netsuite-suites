@@ -31,13 +31,13 @@ from app.models.transaction_ops import TransactionCase, TransactionConfig
 from app.models.transaction_source_snapshot import TransactionSourceSnapshot
 from app.schemas.transaction_ops import _decimal as _exact
 from app.services.transaction_ops.case_groups import _pattern, preparation_members
-from app.services.transaction_ops.state_service import StateError, current_config_clause
+from app.services.transaction_ops.netsuite_reader import _id
+from app.services.transaction_ops.state_service import StateError
 
 METRICS = ("order_total", "tax", "refunds")
 NETSUITE_SECONDS = 40  # the tool's own limit is 60 s; the database part takes seconds
 NETSUITE_CALLS = 2
 MIN_SETTING_EVIDENCE = 3  # a settings change affects every future refund with that reason
-_ID = re.compile(r"[0-9]{1,20}\Z")
 
 # One fixed vocabulary, so the model never writes a cause or a next step itself.
 CAUSES = {
@@ -177,21 +177,20 @@ def _label(entry):
 
 
 async def _scope_config(db, tenant_id, scope):
-    """The current investigation config for this scope: the refund settings and the connection."""
+    """The single enabled config for this scope, matched exactly as the accounting review matches it."""
+    from app.services.transaction_ops.accounting_review import SCOPE_FIELDS, scope_projection
+
     if not isinstance(scope, dict):
         return None
-    query = select(TransactionConfig).where(
-        TransactionConfig.tenant_id == tenant_id,
-        current_config_clause(),
-        TransactionConfig.subsidiary_id == str(scope.get("subsidiary_id")),
-        TransactionConfig.netsuite_account_id == str(scope.get("netsuite_account_id")),
-        TransactionConfig.record_type == str(scope.get("record_type") or "salesorder"),
-    )
+    wanted = scope_projection(scope)
     configs = [
         config
-        for config in (await db.execute(query)).scalars()
-        if str(config.source_connection_id or "") == str(scope.get("source_connection_id") or "")
-        and str(config.source_step_id or "") == str(scope.get("source_step_id") or "")
+        for config in await db.scalars(
+            select(TransactionConfig).where(
+                TransactionConfig.tenant_id == tenant_id, TransactionConfig.enabled.is_(True)
+            )
+        )
+        if scope_projection({key: getattr(config, key) for key in SCOPE_FIELDS}) == wanted
     ]
     return configs[0] if len(configs) == 1 else None
 
@@ -219,7 +218,7 @@ async def _invoices(db, tenant_id, config, order_ids):
     from app.services.transaction_ops.netsuite_bulk import query
     from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError, authenticated_reader
 
-    ids = sorted({value for value in order_ids if _ID.fullmatch(value)})
+    ids = sorted({value for value in order_ids if _id(value)})
     if not ids or len(ids) > 500 or not config.netsuite_connection_id:
         return None, "not_needed" if not ids else "unavailable"
     try:
@@ -238,14 +237,14 @@ async def _invoices(db, tenant_id, config, order_ids):
                     "FROM transactionline tl JOIN transaction t ON t.id = tl.transaction "
                     f"WHERE t.type = 'CustInvc' AND tl.createdfrom IN ({','.join(ids)})",
                 )
-                invoice_ids = sorted(
-                    {str(row.get("invoice_id")) for row in links if _ID.fullmatch(str(row.get("invoice_id")))}
-                )
+                invoice_ids = sorted({str(row.get("invoice_id")) for row in links if _id(row.get("invoice_id"))})
                 totals = {}
                 if invoice_ids:
                     rows = await query(
                         reader,
-                        "SELECT t.id, t.foreigntotal, t.foreignamountunpaid, BUILTIN.DF(t.entity) AS customer "
+                        # taxtotal is in the transaction's currency, like foreigntotal (checked on a CHF invoice).
+                        "SELECT t.id, t.foreigntotal, t.taxtotal, t.foreignamountunpaid, "
+                        "BUILTIN.DF(t.entity) AS customer "
                         f"FROM transaction t WHERE t.type = 'CustInvc' AND t.id IN ({','.join(invoice_ids)})",
                     )
                     totals = {str(row.get("id")): row for row in rows}
@@ -257,14 +256,16 @@ async def _invoices(db, tenant_id, config, order_ids):
     for row in links:
         order_id, invoice_id = str(row.get("order_id")), str(row.get("invoice_id"))
         invoice = totals.get(invoice_id)
-        total, unpaid = (
-            _decimal((invoice or {}).get("foreigntotal")),
-            _decimal((invoice or {}).get("foreignamountunpaid")),
+        total, tax, unpaid = (
+            _decimal((invoice or {}).get(field)) for field in ("foreigntotal", "taxtotal", "foreignamountunpaid")
         )
-        if invoice is None or total is None or unpaid is None:
+        if invoice is None or total is None or tax is None or unpaid is None:
             return None, "unavailable"  # never classify on a partial invoice set
-        entry = by_order.setdefault(order_id, {"total": Decimal(0), "open": Decimal(0), "customers": set()})
+        entry = by_order.setdefault(
+            order_id, {"total": Decimal(0), "tax": Decimal(0), "open": Decimal(0), "customers": set()}
+        )
         entry["total"] += total
+        entry["tax"] += tax
         entry["open"] += unpaid
         if invoice.get("customer"):
             entry["customers"].add(str(invoice["customer"])[:80])
@@ -272,19 +273,29 @@ async def _invoices(db, tenant_id, config, order_ids):
 
 
 def _classify(member, invoices, tax_reasons):
-    report, delta = member["report"], member["amounts"]["order_total"]
+    """The first rule whose evidence is present and holds. Each rule reads only the evidence it names;
+    a missing amount is missing, never zero, so the rule that needs it does not apply."""
+    report, delta, tax = member["report"], member["amounts"]["order_total"], member["amounts"]["tax"]
     if member["status"] != "open" or (report.get("balance") or {}).get("status") == "matched":
         return "matched_now", {}
-    if member["corrected"]:
-        reasons = sorted({link.get("reason_id") for link in member["links"] if link.get("reason_id")})
+    if member["corrected_credits"]:
+        # Only the reasons on the corrected credit's own refund link: another refund on the same
+        # order says nothing about which reasons are tax refunds.
+        reasons = sorted(
+            {
+                str(link.get("reason_id"))
+                for link in member["links"]
+                if link.get("reason_id") and str(link.get("credit_memo_id")) in member["corrected_credits"]
+            }
+        )
         return "corrected_in_app", {
             "refund_reasons": reasons,
             "counted_as_tax_refund": [r for r in reasons if r in tax_reasons],
         }
-    tax = member["amounts"]["tax"]
     target = (report.get("refund_evidence") or {}).get("target") or {}
     if (
         tax
+        and delta is not None
         and delta == tax
         and any(link.get("credit_memo_id") for link in member["links"])
         # An ordinary credit proof without tax recognises none of it; one that carries tax does.
@@ -296,13 +307,22 @@ def _classify(member, invoices, tax_reasons):
     ):
         return "tax_left_after_credit", {}
     invoice = (invoices or {}).get(member["order_id"])
-    source_total = _decimal(((report.get("balance") or {}).get("amounts") or {}).get("order_total", {}).get("source"))
-    if delta and invoice is not None and source_total is not None and invoice["total"] == source_total:
+    metrics = (report.get("balance") or {}).get("amounts") or {}
+    source_total = _decimal((metrics.get("order_total") or {}).get("source"))
+    source_tax = _decimal((metrics.get("tax") or {}).get("source"))
+    if (
+        delta
+        and invoice is not None
+        and source_total is not None
+        and source_tax is not None
+        # The tax split too: a right total with the wrong tax is not "books right".
+        and (invoice["total"], invoice["tax"]) == (source_total, source_tax)
+    ):
         return "invoice_matches_source", {}
     explaining = _explaining_adjustments(member["order"], delta)
     if explaining:
         return "source_adjustment_not_in_netsuite", {"labels": [_label(entry) for entry in explaining]}
-    if delta and not tax and (member["order"] or {}).get("customer_type") == "business":
+    if delta and tax is not None and not tax and (member["order"] or {}).get("customer_type") == "business":
         return "business_priced_in_netsuite", {}
     if member["links"] and not any(link.get("credit_memo_id") for link in member["links"]):
         return "refund_without_credit_memo", {}
@@ -405,9 +425,9 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
     members = []
     for case in cases:
         report = case.latest_report_json or {}
+        # None when the report lacks the metric: missing evidence, never a zero.
         amounts = {
             metric: _decimal((((report.get("balance") or {}).get("amounts") or {}).get(metric) or {}).get("delta"))
-            or Decimal(0)
             for metric in METRICS
         }
         targets = report.get("targets") or []
@@ -429,23 +449,21 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
                 "order": _source_order(snapshots.get(case.order_reference), case.order_reference),
             }
         )
-        # A credit memo correction counts only while that credit memo is still on the order: a card
-        # stays in the chat forever, the order can move on. Invoice and sales order corrections
-        # cannot be tied to the saved report, so they count as recorded.
+        # A correction counts only while the credit memo it corrected is still on the order: a card
+        # stays in the chat forever, the order can move on. Invoice and sales order corrections cannot
+        # be tied to the saved report, so their orders are classified on current evidence instead.
         member = members[-1]
         credits = {str(link.get("credit_memo_id")) for link in member["links"] if link.get("credit_memo_id")}
-        records = corrected.get(str(case.id), set())
-        member["corrected_on_credit"] = any(kind == "creditmemo" and rid in credits for kind, rid in records)
-        member["corrected"] = member["corrected_on_credit"] or any(kind != "creditmemo" for kind, _ in records)
+        member["corrected_credits"] = {
+            record_id for kind, record_id in corrected.get(str(case.id), set()) if kind == "creditmemo"
+        } & credits
 
     # NetSuite only for members the saved evidence leaves open, and only when it can decide something.
     open_ids = sorted(
         {
             m["order_id"]
             for m in members
-            if m["amounts"]["order_total"]
-            and _ID.fullmatch(m["order_id"])
-            and _classify(m, {}, tax_reasons)[0] in _NEEDS_INVOICE
+            if m["amounts"]["order_total"] and _id(m["order_id"]) and _classify(m, {}, tax_reasons)[0] in _NEEDS_INVOICE
         }
     )
     if not open_ids:
@@ -469,12 +487,7 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
         vocabulary = dict(CAUSES[key])
         if key == "corrected_in_app":
             reasons, counted = row["detail"]["refund_reasons"], row["detail"]["counted_as_tax_refund"]
-            if (
-                reasons
-                and not counted
-                and len(row["members"]) >= MIN_SETTING_EVIDENCE
-                and all(m["corrected_on_credit"] for m in row["members"])
-            ):
+            if reasons and not counted and len(row["members"]) >= MIN_SETTING_EVIDENCE:
                 vocabulary["next_step"] = "settings_change"
                 vocabulary["next_pill"] = "Settings change"
                 vocabulary["next_label"] = (
@@ -482,7 +495,8 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
                     "A person approves it."
                 )
         amounts = {
-            metric: _money(sum((m["amounts"][metric] for m in row["members"]), Decimal(0))) for metric in METRICS
+            metric: _money(sum((m["amounts"][metric] or Decimal(0) for m in row["members"]), Decimal(0)))
+            for metric in METRICS
         }
         if invoices is not None:
             opened = [invoices[m["order_id"]]["open"] for m in row["members"] if m["order_id"] in invoices]
@@ -511,7 +525,11 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
             for kind in ("tax_reversal", "credit_memo")
         },
         **{
-            m: "zero" if not members[0]["amounts"][m] else ("negative" if members[0]["amounts"][m] < 0 else "positive")
+            m: "unknown"
+            if members[0]["amounts"][m] is None
+            else (
+                "zero" if not members[0]["amounts"][m] else ("negative" if members[0]["amounts"][m] < 0 else "positive")
+            )
             for m in METRICS
         },
     }
@@ -524,7 +542,9 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
         "pattern": _pattern(pattern_row) if group_id is not None else None,
         "currency": balance.get("currency"),
         "orders": len(members),
-        "totals": {metric: _money(sum((m["amounts"][metric] for m in members), Decimal(0))) for metric in METRICS},
+        "totals": {
+            metric: _money(sum((m["amounts"][metric] or Decimal(0) for m in members), Decimal(0))) for metric in METRICS
+        },
         "causes": causes,
         "checked": {
             "saved_evidence": len(members),

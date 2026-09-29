@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { money as formatMoney } from "@/components/reconciliation/format";
 import type { GroupBreakdownCause, GroupBreakdownData } from "@/lib/chat-stream";
 
@@ -29,12 +30,23 @@ const NETSUITE: Record<string, string> = {
 
 /** The shared formatter, on the size of the difference; the direction is stated in words. */
 function money(value: string | undefined, currency: string | null) {
-  if (value === undefined || value === null || !Number.isFinite(Number(value))) return formatMoney(null);
+  const amount = value === undefined || value === null ? NaN : Math.abs(Number(value));
+  if (!Number.isFinite(amount)) return formatMoney(null);
   try {
-    return formatMoney(String(Math.abs(Number(value))), currency || "USD");
+    return formatMoney(String(amount), currency || "USD");
   } catch {
-    return Math.abs(Number(value)).toFixed(2);
+    return amount.toFixed(2);
   }
+}
+
+const METRIC_LABEL: Record<string, string> = { order_total: "order", tax: "tax", refunds: "refunds" };
+
+function ActionLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <Link className="whitespace-nowrap text-[12.5px] font-medium text-primary underline" href={href}>
+      {children}
+    </Link>
+  );
 }
 
 function compose(prompt: string) {
@@ -45,35 +57,32 @@ function Action({ cause, data }: { cause: GroupBreakdownCause; data: GroupBreakd
   const refs = cause.order_references;
   if (cause.next_step === "review_individually") {
     return (
-      <Link
-        className="whitespace-nowrap text-[12.5px] font-medium text-primary underline"
+      <ActionLink
         href={compose(
           `Investigate these orders one at a time: ${refs.join(", ")}. Start with transaction_ops_status for each and tell me what differs.`,
         )}
       >
         Review one by one →
-      </Link>
+      </ActionLink>
     );
   }
   if (cause.next_step === "prepare_corrections" && !(data.group_id && cause.orders === data.orders)) {
     // Part of a group, or one order: prepare exactly these orders. The group fix would prepare
     // every member of a mixed group, one by one, to find the few it can correct.
     return (
-      <Link
-        className="whitespace-nowrap text-[12.5px] font-medium text-primary underline"
+      <ActionLink
         href={compose(
           `Prepare corrections for these orders one at a time: ${refs.join(", ")}. For each, use transaction_ops_accounting_evidence, then prepare the supported exact correction for my approval; show any order without a supported correction separately. Do not treat this request as financial approval.`,
         )}
       >
         Prepare these fixes →
-      </Link>
+      </ActionLink>
     );
   }
   if (cause.next_step === "prepare_corrections" && data.group_id) {
     const scope = Object.fromEntries(Object.entries(data.scope || {}).filter(([, value]) => value));
     return (
-      <Link
-        className="whitespace-nowrap text-[12.5px] font-medium text-primary underline"
+      <ActionLink
         href={compose(
           `Prepare fixes for issue group ${data.group_id}. Call transaction_ops.accounting_group with group_id "${data.group_id}"${
             Object.keys(scope).length ? ` and these exact scope parameters: ${JSON.stringify(scope)}` : ""
@@ -81,7 +90,7 @@ function Action({ cause, data }: { cause: GroupBreakdownCause; data: GroupBreakd
         )}
       >
         Prepare these fixes →
-      </Link>
+      </ActionLink>
     );
   }
   if (cause.next_step === "settings_change") {
@@ -166,6 +175,18 @@ export function GroupBreakdownCard({ data }: { data: GroupBreakdownData }) {
                 <div className="whitespace-nowrap text-[12.5px] tabular-nums text-muted-foreground">
                   {money(cause.primary?.amount ?? cause.amounts.order_total, data.currency)}
                 </div>
+                {Object.keys(METRIC_LABEL)
+                  .filter(
+                    (metric) =>
+                      metric !== (cause.primary?.metric ?? "order_total") &&
+                      cause.amounts[metric] !== undefined &&
+                      Number(cause.amounts[metric]) !== 0,
+                  )
+                  .map((metric) => (
+                    <div key={metric} className="whitespace-nowrap text-[11.5px] tabular-nums text-muted-foreground">
+                      {METRIC_LABEL[metric]} {money(cause.amounts[metric], data.currency)}
+                    </div>
+                  ))}
                 {cause.amounts.open_on_invoices !== undefined && (
                   <div className="whitespace-nowrap text-[11.5px] tabular-nums text-muted-foreground">
                     open {money(cause.amounts.open_on_invoices, data.currency)}
