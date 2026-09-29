@@ -1,0 +1,14 @@
+"""Tool-choice guidance shared by every chat prompt, so the prompts cannot drift apart.
+
+The SuiteQL order was hand-copied into eight prompts, each worded differently. They told the
+agent to prefer the external MCP tool, which sees only standard tables. Sonnet 5.5 obeys that
+literally and stopped finding Framework's custom fields (benchmark 2026-09-29). Every prompt
+that states the order embeds this constant; tests/test_suiteql_tool_order.py enforces it.
+"""
+
+SUITEQL_TOOL_ORDER = (
+    "For NetSuite queries, use the local netsuite_suiteql tool first: it sees custom records and custom "
+    "fields. Use the external MCP SuiteQL tool (ns_runCustomSuiteQL) for standard tables or when the local "
+    "tool is unavailable. If a query returns zero rows or an error, try the other tool before concluding "
+    "the data does not exist."
+)

@@ -98,12 +98,13 @@ class Settings(BaseSettings):
     # Native extended reasoning. CHAT_THINKING_ENABLED is the global kill-switch.
     # Levels: none|low|med|high|xhigh (see chat/thinking.py); the agent can
     # escalate_reasoning per-turn for hard turns (Layer 2).
-    # Default is "low": on Sonnet 5, adaptive "medium" is "comparable to Sonnet 4.6
-    # at high effort" — that produced ~2-minute thinking turns that, across a
-    # multi-turn report, blew the 300s cap (see /cashflow timeout, 2026-07-01).
-    # Anthropic's effort docs recommend "low" for chat / latency-sensitive workloads;
-    # escalate_reasoning still lifts hard turns. (Legacy budget_tokens' hard cap used
-    # to bound this implicitly; adaptive effort has no token ceiling.)
+    # Default is "med", the floor: never "low" (user rule, 2026-09-29).
+    # History: "low" was chosen on 2026-07-01 because Sonnet 5 at "medium" produced ~2-minute
+    # thinking turns that, across a multi-turn report, blew the then-300s cap (/cashflow). The cap
+    # is now 600s. On 2026-09-29 the vs-MCP sales suite showed Sonnet 5 at med averaging 34.5s per
+    # case, and Sonnet 5.5 (effort levels recalibrated; its API default is "high") at 30.8s.
+    # Report latency at med is re-checked after each deploy that changes this; a slow model is
+    # moved forward, not dropped to "low". Adaptive effort has no token ceiling.
     CHAT_THINKING_ENABLED: bool = True
     CHAT_THINKING_DEFAULT_LEVEL: str = "med"  # never "low": med is the floor (user rule, 2026-09-29)
     # NOTE: the Layer-2 GLM-tier config (CHAT_THINKING_MODEL/PROVIDER +

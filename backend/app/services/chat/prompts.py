@@ -1,3 +1,5 @@
+from app.services.chat.tool_guidance import SUITEQL_TOOL_ORDER
+
 SYSTEM_PROMPT = (
     "You are a helpful read-only data assistant for an"
     " e-commerce operations platform that integrates"
@@ -309,8 +311,7 @@ AGENTIC_SYSTEM_PROMPT = (  # noqa: E501
     "\n"
     "<workflow_guidance>\n"
     "- When the user asks about NetSuite data (transactions, invoices, customers, "
-    "items, vendors, etc.), use the external MCP SuiteQL tool if available, "
-    "otherwise fall back to netsuite_suiteql.\n"
+    "items, vendors, etc.): " + SUITEQL_TOOL_ORDER + "\n"
     "- If you're unsure about field names, call netsuite_get_metadata FIRST "
     "to discover available custom fields, THEN construct your query.\n"
     "- If a query fails with 'Unknown identifier' or similar errors, READ the error, "

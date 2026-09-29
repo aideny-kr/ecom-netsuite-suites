@@ -7,19 +7,25 @@ Benchmark on staging, 2026-09-29, 18 vs-MCP sales cases:
 - Sonnet 5 had ignored that preference and used the local tool (0.89; 16/18).
 Both tools run on tenant-level credentials, so the order changes which tool is tried first, not
 what a user can see.
+
+The rule is one constant (tool_guidance.SUITEQL_TOOL_ORDER), embedded in every live prompt. Review
+round 1 of #355 found why: hand-copied variants drifted, one live copy was missed
+(AGENTIC_SYSTEM_PROMPT), and phrase-matching tests passed a negated sentence.
 """
 
 import re
+from functools import cache
 from uuid import uuid4
 
 import pytest
 
+from app.services.chat.tool_guidance import SUITEQL_TOOL_ORDER
+
 MCP_FIRST = re.compile(
-    r"MCP, preferred|\(preferred\)|prefer external MCP|local,? fallback|prefer over local|prefer these for execution",
+    r"MCP, preferred|\(preferred\)|prefer external MCP|local,? fallback|prefer over local|"
+    r"prefer these for execution|MCP SuiteQL tool if available|otherwise fall back to netsuite_suiteql",
     re.IGNORECASE,
 )
-LOCAL_FIRST = re.compile(r"netsuite_suiteql[^.\n]{0,70}\bfirst\b", re.IGNORECASE)
-TRY_THE_OTHER = re.compile(r"zero rows.{0,80}(other|netsuite_suiteql|ns_runCustomSuiteQL)", re.IGNORECASE | re.DOTALL)
 
 
 def _unified_prompt(context_need):
@@ -29,7 +35,9 @@ def _unified_prompt(context_need):
     return agent.system_prompt
 
 
-def _prompts():
+@cache
+def _live_prompts():
+    """Every prompt a chat turn can actually receive that states the SuiteQL tool order."""
     from app.services import prompt_template_service
     from app.services.chat import prompts, tool_inventory
 
@@ -41,28 +49,39 @@ def _prompts():
     return {
         "unified agent (FULL)": _unified_prompt("FULL"),
         "unified agent (full, slimmed tool guidance)": _unified_prompt("full"),
-        "tool inventory execution priority": tool_inventory.build_mcp_execution_guidance(tools),
+        "tool inventory (MCP entry + execution priority)": tool_inventory.build_mcp_execution_guidance(tools),
         "prompt template tool rules": prompt_template_service._build_tool_rules_section(),
-        "router prompt": prompts.ROUTER_PROMPT,
+        # get_active_template() returns this verbatim for any tenant without a custom template.
+        "agentic system prompt (template fallback)": prompts.AGENTIC_SYSTEM_PROMPT,
     }
 
 
-@pytest.mark.parametrize("name", list(_prompts()))
-def test_no_prompt_tells_the_agent_to_prefer_the_mcp_query_tool(name):
-    text = _prompts()[name]
-    assert not MCP_FIRST.search(text), f"{name}: {MCP_FIRST.search(text).group(0)!r}"
+LIVE = [
+    "unified agent (FULL)",
+    "unified agent (full, slimmed tool guidance)",
+    "tool inventory (MCP entry + execution priority)",
+    "prompt template tool rules",
+    "agentic system prompt (template fallback)",
+]
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "unified agent (FULL)",
-        "unified agent (full, slimmed tool guidance)",
-        "tool inventory execution priority",
-        "prompt template tool rules",
-    ],
-)
-def test_the_agent_is_told_to_try_the_other_tool_before_concluding_there_is_no_data(name):
-    text = _prompts()[name]
-    assert TRY_THE_OTHER.search(text), name
-    assert LOCAL_FIRST.search(text), name
+def test_the_rule_says_local_first_and_try_the_other_tool():
+    assert "local netsuite_suiteql tool first" in SUITEQL_TOOL_ORDER
+    assert "try the other tool before concluding the data does not exist" in SUITEQL_TOOL_ORDER
+
+
+@pytest.mark.parametrize("name", LIVE)
+def test_every_live_prompt_carries_the_one_tool_order_rule(name):
+    assert SUITEQL_TOOL_ORDER in _live_prompts()[name], name
+
+
+@pytest.mark.parametrize("name", LIVE)
+def test_no_live_prompt_keeps_an_mcp_first_wording(name):
+    found = MCP_FIRST.search(_live_prompts()[name])
+    assert not found, f"{name}: {found.group(0)!r}"
+
+
+def test_the_legacy_router_prompt_keeps_no_mcp_first_wording():
+    from app.services.chat.prompts import ROUTER_PROMPT
+
+    assert not MCP_FIRST.search(ROUTER_PROMPT)

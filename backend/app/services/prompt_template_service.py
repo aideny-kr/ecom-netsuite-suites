@@ -15,6 +15,7 @@ from app.models.policy_profile import PolicyProfile
 from app.models.prompt_template import SystemPromptTemplate
 from app.models.tenant_profile import TenantProfile
 from app.services.chat.prompts import AGENTIC_SYSTEM_PROMPT
+from app.services.chat.tool_guidance import SUITEQL_TOOL_ORDER
 
 logger = structlog.get_logger()
 
@@ -259,11 +260,7 @@ def _build_suiteql_rules_section(profile: TenantProfile) -> str:
 def _build_tool_rules_section() -> str:
     return (
         "WORKFLOW GUIDANCE:\n"
-        "- To query NetSuite data, use the local netsuite_suiteql tool first: it sees custom records "
-        "and custom fields. Use external MCP tools (prefixed with 'ext__') for standard tables or when "
-        "the local tool is unavailable.\n"
-        "- If a query returns zero rows or an error, try the other tool before concluding the data "
-        "does not exist.\n"
+        "- " + SUITEQL_TOOL_ORDER + " External MCP tools are prefixed with 'ext__'.\n"
         "- To discover custom field names before writing a query, call netsuite_get_metadata first.\n"
         "- If a query fails with 'Unknown identifier', call netsuite_get_metadata to look up "
         "correct field names, fix the query, and retry automatically.\n"
