@@ -195,7 +195,13 @@ class ScheduleValidateRequest(ScheduleRunRequest):
     expected_plan_hash: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
+class ScheduleTestRequest(ScheduleValidateRequest):
+    expected_plan_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    readiness_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class ScheduleApproveRequest(BaseModel):
+    readiness_hash: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     plan_hash: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
@@ -278,6 +284,7 @@ class ScheduleRunResponse(BaseModel):
 
 
 class ScheduleRunItem(BaseModel):
+    execution_mode: str = "live"
     id: str
     status: str
     reason: Optional[str] = None

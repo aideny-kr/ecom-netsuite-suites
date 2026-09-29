@@ -183,7 +183,7 @@ export function JobDetail({ id }: { id: string }): JSX.Element {
         <div className="flex min-w-0 flex-col gap-3.5">
           <InstructionPanel schedule={schedule} />
           <PlanPanel schedule={schedule} />
-          <ReviewPanel key={JSON.stringify([schedule.id, schedule.plan_version, schedule.plan_json, schedule.pending_plan_json, schedule.budget_json, schedule.delivery_json, schedule.cron_expression, schedule.timezone, schedule.owner_id, schedule.plan_hash, schedule.pending_plan_hash])} schedule={schedule} />
+          <ReviewPanel key={JSON.stringify([schedule.id, schedule.plan_version, schedule.plan_json, schedule.pending_plan_json, schedule.budget_json, schedule.delivery_json, schedule.cron_expression, schedule.timezone, schedule.owner_id, schedule.plan_hash, schedule.pending_plan_hash])} schedule={schedule} onReload={() => { void scheduleQuery.refetch(); }} />
           <PendingChangePanel schedule={schedule} />
         </div>
         <div className="flex min-w-0 flex-col gap-3.5">

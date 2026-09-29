@@ -38,6 +38,7 @@ from app.schemas.schedule import (
     ScheduleRunItem,
     ScheduleRunRequest,
     ScheduleRunResponse,
+    ScheduleTestRequest,
     ScheduleUpdate,
     ScheduleValidateRequest,
 )
@@ -358,6 +359,9 @@ async def update_schedule(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="not a scheduled job")
 
     correlation_id = _correlation_id(request)
+    from app.services.jobs.readiness import execution_fingerprint
+
+    before_execution = execution_fingerprint(schedule)
     changed_fields: dict = {}
     cron_or_tz_changed = False
 
@@ -405,6 +409,10 @@ async def update_schedule(
     # shared `recompute_next_run_at` also refuses to touch `next_run_at`
     # while a retry is pending (`retry_job_id` set) — `cron_or_tz_changed`
     # stays the trigger for whether to call it at all.
+    if (schedule.parameters or {}).get("workflow_review") and before_execution != execution_fingerprint(schedule):
+        schedule.paused_at = datetime.now(timezone.utc)
+        schedule.pause_reason = "Settings changed. Validate, refresh approval and resume."
+
     if cron_or_tz_changed:
         schedule_service.recompute_next_run_at(schedule, now=datetime.now(timezone.utc))
 
@@ -441,7 +449,40 @@ async def validate_schedule(
         raise HTTPException(status_code=409, detail="not a scheduled job")
     if body.expected_plan_hash and body.expected_plan_hash != plan_fingerprint(schedule, use_pending=body.use_pending):
         raise HTTPException(status_code=409, detail="Displayed plan or settings changed. Reload before validating.")
-    return inspect_plan(schedule, use_pending=body.use_pending)
+    from app.services.jobs.readiness import inspect_readiness
+
+    return await inspect_readiness(db, schedule, use_pending=body.use_pending)
+
+
+@router.post("/{schedule_id}/test", response_model=ScheduleRunResponse, status_code=202)
+async def test_schedule(
+    schedule_id: uuid.UUID,
+    body: ScheduleTestRequest,
+    user: Annotated[User, Depends(require_permission("schedules.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    from app.services.jobs.testing import enqueue_test
+
+    schedule = await _get_or_404(db, schedule_id, user.tenant_id, lock=True)
+    try:
+        job = await enqueue_test(db, schedule, user.id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    job_id = job.id
+    await db.commit()
+    celery_app.send_task(
+        "tasks.scheduled_jobs_run_now",
+        kwargs={
+            "schedule_id": str(schedule_id),
+            "tenant_id": str(user.tenant_id),
+            "use_pending": body.use_pending,
+            "actor_id": str(user.id),
+            "job_id": str(job_id),
+        },
+        queue="sync",
+        priority=SCHEDULED_JOBS_RUN_NOW_PRIORITY,
+    )
+    return ScheduleRunResponse(jobs_id=str(job_id))
 
 
 @router.post("/{schedule_id}/approve", response_model=ScheduleDetailResponse)
@@ -466,7 +507,17 @@ async def approve_schedule(
     if schedule.schedule_type != "job":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="not a scheduled job")
 
-    if not schedule.pending_plan_json and (schedule.plan_status != "pending_approval" or not schedule.plan_json):
+    modern = bool(body and body.readiness_hash)
+    if modern and not body.plan_hash:
+        raise HTTPException(status_code=409, detail="Approval requires the validated plan fingerprint.")
+    if (schedule.parameters or {}).get("workflow_review_required") and not modern:
+        raise HTTPException(status_code=409, detail="Validate current readiness before approval.")
+    refresh_approval = modern and schedule.plan_status == "approved" and not schedule.pending_plan_json
+    if (
+        not refresh_approval
+        and not schedule.pending_plan_json
+        and (schedule.plan_status != "pending_approval" or not schedule.plan_json)
+    ):
         raise HTTPException(status_code=400, detail="No pending plan to approve")
     review = inspect_plan(schedule, use_pending=bool(schedule.pending_plan_json))
     if body is not None and body.plan_hash is not None and body.plan_hash != review["plan_hash"]:
@@ -474,15 +525,35 @@ async def approve_schedule(
     if not review["structurally_valid"]:
         raise HTTPException(status_code=409, detail={"blockers": review["blockers"]})
 
+    if modern:
+        from app.services.jobs.readiness import inspect_readiness
+
+        readiness = await inspect_readiness(db, schedule, use_pending=bool(schedule.pending_plan_json))
+        if not readiness["ready"] or body.readiness_hash != readiness["readiness_hash"]:
+            raise HTTPException(
+                status_code=409, detail="Source, permission or policy changed or unavailable. Validate again."
+            )
+
     if schedule.pending_plan_json:
         schedule.plan_json = schedule.pending_plan_json
         schedule.pending_plan_json = None
         schedule.pending_plan_reason = None
-    elif schedule.plan_status != "pending_approval" or not schedule.plan_json:
+    elif not refresh_approval and (schedule.plan_status != "pending_approval" or not schedule.plan_json):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No pending plan to approve")
 
     schedule.plan_status = "approved"
     schedule.plan_version += 1
+    if modern:
+        from app.services.jobs.readiness import execution_fingerprint
+
+        schedule.parameters = {
+            **(schedule.parameters or {}),
+            "workflow_review_required": True,
+            "workflow_review": {
+                "execution_hash": execution_fingerprint(schedule),
+                "readiness_hash": readiness["readiness_hash"],
+            },
+        }
 
     # Item 4 (delta gate fix): the shared helper refuses to touch
     # `next_run_at` while a retry is pending (`retry_job_id` set) — approving
@@ -630,6 +701,11 @@ async def resume_schedule(
     )
     if unresolved:
         raise HTTPException(status_code=409, detail=f"Reconcile uncertain operation {unresolved} before resuming")
+    from app.services.jobs.readiness import approval_blocker
+
+    blocker = await approval_blocker(db, schedule)
+    if blocker:
+        raise HTTPException(status_code=409, detail=blocker)
     schedule.paused_at = None
     schedule.pause_reason = None
     if schedule.last_run_status == "paused":
@@ -734,6 +810,7 @@ async def list_runs(
                 outputs=summary.get("outputs") or {},
                 detail=summary.get("detail"),
                 verification=summary.get("verification") or "not_verified",
+                execution_mode=params.get("execution_mode", "live"),
             )
         )
     return items

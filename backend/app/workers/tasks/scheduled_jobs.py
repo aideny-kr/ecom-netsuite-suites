@@ -602,6 +602,21 @@ async def _run_steps(
             or (control_version is not None and current.plan_version != control_version)
         ):
             return REASON_BLOCKED, outputs, "run cancelled, schedule stopped, or plan changed"
+        if (run.parameters or {}).get("execution_mode") == "test":
+            from app.services.jobs.testing import test_guard
+
+            test_error = await test_guard(db, current, run)
+            if test_error:
+                return REASON_BLOCKED, outputs, test_error
+        elif (current.parameters or {}).get("workflow_review_required"):
+            from app.services.jobs.readiness import approval_blocker
+
+            readiness_error = await approval_blocker(db, current)
+            if readiness_error:
+                current.paused_at = datetime.now(timezone.utc)
+                current.pause_reason = readiness_error
+                await db.commit()
+                return REASON_BLOCKED, outputs, readiness_error
         usage["seconds"] = time.monotonic() - started_at
         if any(budget.get(k) is not None and usage[k] >= budget[k] for k in usage):
             return REASON_BUDGET, outputs, "budget exhausted before next step"
@@ -1065,6 +1080,10 @@ async def _run_schedule_now_locked(
         ).scalar_one_or_none()
         if existing_job is None:
             return RunOutcome(REASON_BLOCKED, None, {})
+        if (existing_job.parameters or {}).get("execution_mode") == "test":
+            from app.services.jobs.testing import run_test
+
+            return await run_test(db, row, existing_job)
         saved = existing_job.parameters or {}
         if recovering and existing_job.status == "pending" and saved.get("recovery_version") != 1:
             _stamp_blocked_existing_job(existing_job, "legacy dispatch has no saved recovery identity; not replayed")
@@ -1116,6 +1135,12 @@ async def _run_schedule_now_locked(
         .all()
     )
     for interrupted_job in interrupted:
+        if (interrupted_job.parameters or {}).get("execution_mode") == "test":
+            from app.services.jobs.testing import run_test
+
+            await run_test(db, row, interrupted_job)
+            await set_tenant_context(db, str(tenant_id))
+            continue
         if await _settle_completed_receipt(db, row, interrupted_job):
             await set_tenant_context(db, str(tenant_id))
             continue
@@ -1137,6 +1162,20 @@ async def _run_schedule_now_locked(
         jid = _stamp_blocked_existing_job(
             existing_job, "schedule stopped or unresolved operation requires reconciliation"
         )
+        await db.commit()
+        return RunOutcome(REASON_BLOCKED, jid, {})
+
+    from app.services.jobs.readiness import approval_blocker
+
+    readiness_error = (
+        "Pending plan requires approval before live execution."
+        if use_pending and (row.parameters or {}).get("workflow_review_required")
+        else await approval_blocker(db, row)
+    )
+    if readiness_error:
+        row.paused_at = now
+        row.pause_reason = readiness_error
+        jid = _stamp_blocked_existing_job(existing_job, readiness_error)
         await db.commit()
         return RunOutcome(REASON_BLOCKED, jid, {})
 

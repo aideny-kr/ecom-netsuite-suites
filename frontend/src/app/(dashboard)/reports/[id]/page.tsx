@@ -122,7 +122,7 @@ export default function ReportViewPage() {
             (delivery_json is written atomically, never partially — see
             report_delivery.py) — no delivery ever happened, or the last attempt
             failed, both render nothing rather than a stale/misleading link. */}
-        {report?.delivery_json && (
+        {report?.delivery_json?.pdf?.url && report.delivery_json.xlsx?.url && (
           <span className="text-[13px] text-muted-foreground whitespace-nowrap">
             Delivered to Drive ·{" "}
             <a

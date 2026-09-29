@@ -67,6 +67,7 @@ export function RunsPanel({ scheduleId }: { scheduleId: string }): JSX.Element {
             <table className="w-full border-collapse text-[12px]">
               <thead>
                 <tr className="text-left text-[10.5px] uppercase tracking-wide text-muted-foreground">
+                  <th className="py-1 pr-2 font-medium">Mode</th>
                   <th className="py-1 pr-2 font-medium">When</th>
                   <th className="py-1 pr-2 font-medium">Took</th>
                   <th className="py-1 pr-2 font-medium">Ended</th>
@@ -79,6 +80,7 @@ export function RunsPanel({ scheduleId }: { scheduleId: string }): JSX.Element {
                   const duration = formatDuration(run.started_at, run.completed_at);
                   return (
                     <tr key={run.id} className="border-t">
+                      <td className="py-1.5 pr-2">{run.execution_mode === "test" ? "Report test" : "Live run"}</td>
                       <td className="py-1.5 pr-2 tabular-nums">{formatWhen(run.started_at)}</td>
                       <td className="py-1.5 pr-2 tabular-nums">{duration ?? "—"}</td>
                       <td className="py-1.5 pr-2">

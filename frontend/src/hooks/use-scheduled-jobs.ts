@@ -150,6 +150,7 @@ export interface ScheduleRun {
   outputs: Record<string, unknown>;
   detail: string | null;
   verification?: string;
+  execution_mode?: "test" | "live";
 }
 
 /** Wire shape of `ScheduleRunResponse` (`POST .../run`). */
@@ -192,6 +193,7 @@ export function useScheduleRuns(id: string) {
     queryKey: ["scheduled-jobs", id, "runs"],
     queryFn: () => apiClient.get<ScheduleRun[]>(`/api/v1/schedules/${id}/runs`),
     enabled: Boolean(id),
+    refetchInterval: (query) => query.state.data?.some((run) => ["pending", "running"].includes(run.status)) ? 2000 : false,
   });
 }
 
@@ -214,8 +216,8 @@ export function useUpdateSchedule(id: string) {
 export function useApproveSchedule(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (planHash: string | void) => planHash
-      ? apiClient.post<ScheduleDetail>(`/api/v1/schedules/${id}/approve`, { plan_hash: planHash })
+    mutationFn: (review: string | { plan_hash: string; readiness_hash: string } | void) => review
+      ? apiClient.post<ScheduleDetail>(`/api/v1/schedules/${id}/approve`, typeof review === "string" ? { plan_hash: review } : review)
       : apiClient.post<ScheduleDetail>(`/api/v1/schedules/${id}/approve`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["scheduled-jobs"] }),
   });
@@ -227,6 +229,15 @@ export interface PlanReview {
   use_pending: boolean;
   structurally_valid: boolean;
   execution_verified: boolean;
+  ready: boolean;
+  readiness_hash: string;
+  readiness_blockers: string[];
+  required_permissions: string[];
+  sources: string[];
+  source_bindings: { id: string; provider: string; status: string }[];
+  test_supported: boolean;
+  test_blockers: string[];
+  test_seconds: number;
   blockers: string[];
   notes: string[];
   steps: { id: string; type: string; label: string; kind: string; params: Record<string, unknown> }[];
@@ -320,5 +331,14 @@ export function useResumeScheduledJob() {
   return useMutation({
     mutationFn: (id: string) => apiClient.post(`/api/v1/schedules/${id}/resume`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["scheduled-jobs"] }),
+  });
+}
+
+export function useTestSchedule(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { use_pending: boolean; expected_plan_hash: string; readiness_hash: string }) =>
+      apiClient.post<ScheduleRunResult>(`/api/v1/schedules/${id}/test`, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["scheduled-jobs", id, "runs"] }),
   });
 }

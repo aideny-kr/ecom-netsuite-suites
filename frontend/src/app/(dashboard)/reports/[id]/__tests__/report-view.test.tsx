@@ -332,3 +332,11 @@ it("clicking Unpublish from dashboard DELETEs /pin", async () => {
   fireEvent.click(btn);
   await waitFor(() => expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/abc/pin"));
 });
+
+it("opens a workflow preview with recovery identity but no delivery files", async () => {
+  api.get.mockImplementation((path: string) => path.endsWith("/versions") ? Promise.resolve(_versions) : Promise.resolve(_report({ auto_refresh: "off", delivery_json: { identity: { kind: "schedule" } } })));
+  const { findByText, queryByText } = renderPage();
+  await findByText(/data as of/i);
+  await waitFor(() => expect(document.querySelector("iframe")).toBeTruthy());
+  expect(queryByText(/delivered to drive/i)).toBeNull();
+});

@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/hooks/use-scheduled-jobs", () => ({
   useScheduledJob: () => mocks.scheduledJob(),
+  useTestSchedule: () => ({ mutate: vi.fn(), isPending: false }),
   useValidateSchedule: () => mocks.validate(),
   useUpdateSchedule: () => mocks.update(),
   useApproveSchedule: () => mocks.approve(),
