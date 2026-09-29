@@ -108,11 +108,15 @@ export interface GroupBreakdownCause {
   label: string;
   why: string;
   next_step: string;
+  /** The server's short name for the next step; the card only colours it. */
+  next_pill?: string;
   next_label: string;
   orders: number;
   order_references: string[];
   amounts: Record<string, string>;
-  facts: Array<{ fact: string; orders: number }>;
+  /** The amount this cause shows, chosen by the server. */
+  primary?: { metric: string; amount: string };
+  facts: Array<{ fact: string; orders: number; kind?: string }>;
 }
 
 /** A group (or one order) split into causes, from saved evidence and at most two NetSuite reads. */

@@ -20,7 +20,7 @@ import asyncio
 import re
 import time
 from collections import Counter
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -29,6 +29,7 @@ from app.core.database import set_tenant_context
 from app.models.chat import ChatMessage
 from app.models.transaction_ops import TransactionCase, TransactionConfig
 from app.models.transaction_source_snapshot import TransactionSourceSnapshot
+from app.schemas.transaction_ops import _decimal as _exact
 from app.services.transaction_ops.case_groups import _pattern, preparation_members
 from app.services.transaction_ops.state_service import StateError, current_config_clause
 
@@ -41,12 +42,14 @@ _ID = re.compile(r"[0-9]{1,20}\Z")
 # One fixed vocabulary, so the model never writes a cause or a next step itself.
 CAUSES = {
     "matched_now": {
+        "next_pill": "Nothing to do",
         "label": "Matched on the latest check",
         "why": "The latest reconciliation of these orders matched; the group listing predates it.",
         "next_step": "none",
         "next_label": "Nothing to do. They leave the group when it refreshes.",
     },
     "corrected_in_app": {
+        "next_pill": "Recheck",
         "label": "Already corrected here, still shown as open",
         "why": "Each order has an approved correction that the app verified in NetSuite, "
         "but the reconciliation does not recognise it yet.",
@@ -54,6 +57,7 @@ CAUSES = {
         "next_label": "Recheck these orders.",
     },
     "tax_left_after_credit": {
+        "next_pill": "Group fix",
         "label": "Refund credit left the tax in place",
         "why": "A credit memo refunded the order, but NetSuite still carries the tax: the difference is all tax "
         "and no tax reversal was recognised. This is the shape the credit reallocation corrects.",
@@ -61,6 +65,7 @@ CAUSES = {
         "next_label": "Run the group fix. It prepares only the orders it can prove and sets the rest aside.",
     },
     "invoice_matches_source": {
+        "next_pill": "Books right",
         "label": "Invoice already matches Solidus",
         "why": "The invoice NetSuite posted equals the Solidus total. Only the sales order differs, "
         "so the books are right and nothing needs correcting.",
@@ -68,6 +73,7 @@ CAUSES = {
         "next_label": "Compare these orders to the invoice instead of the sales order.",
     },
     "source_adjustment_not_in_netsuite": {
+        "next_pill": "Fix at the source",
         "label": "Solidus adjustment never reached NetSuite",
         "why": "Each order has a manual Solidus adjustment equal to the difference to the cent. "
         "The order sync did not carry it to NetSuite.",
@@ -75,6 +81,7 @@ CAUSES = {
         "next_label": "The order sync must carry Solidus order adjustments; new orders are probably affected too.",
     },
     "business_priced_in_netsuite": {
+        "next_pill": "Needs a policy",
         "label": "Business orders priced in NetSuite",
         "why": "Business customers with no Solidus adjustment that explains the difference. "
         "NetSuite carries its own price.",
@@ -82,12 +89,14 @@ CAUSES = {
         "next_label": "Finance decides which system sets the price for business orders.",
     },
     "refund_without_credit_memo": {
+        "next_pill": "Review",
         "label": "Refund request without a credit memo",
         "why": "A refund request exists but no credit memo is linked to it, so there is nothing to recognise yet.",
         "next_step": "review_individually",
         "next_label": "Review one by one.",
     },
     "no_shared_cause": {
+        "next_pill": "Review",
         "label": "No shared cause",
         "why": "No rule explains these orders.",
         "next_step": "review_individually",
@@ -107,13 +116,14 @@ _NEEDS_INVOICE = frozenset(
 
 
 def _decimal(value):
-    if isinstance(value, bool) or value is None:
+    """The shared bounded parser; None when missing or invalid. SuiteQL returns numbers as JSON
+    floats, which reach it as their decimal text."""
+    if value is None or isinstance(value, bool):
         return None
     try:
-        amount = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+        return _exact(str(value) if isinstance(value, float) else value)
+    except ValueError:
         return None
-    return amount if amount.is_finite() else None
 
 
 def _money(total):
@@ -187,10 +197,10 @@ async def _scope_config(db, tenant_id, scope):
 
 
 async def _verified_corrections(db, tenant_id, case_ids):
-    """Cases with an approved correction that the app itself verified in NetSuite."""
+    """The records each case had corrected: approved cards the app itself verified in NetSuite."""
     review = ChatMessage.structured_output["accounting_review"]
     rows = await db.execute(
-        select(review["case_id"].as_string()).where(
+        select(review["case_id"].as_string(), review["record_type"].as_string(), review["record_id"].as_string()).where(
             ChatMessage.tenant_id == tenant_id,
             ChatMessage.role == "assistant",
             review["case_id"].as_string().in_([str(case_id) for case_id in case_ids]),
@@ -198,7 +208,10 @@ async def _verified_corrections(db, tenant_id, case_ids):
             ChatMessage.structured_output["accounting_verification"]["status"].as_string() == "verified",
         )
     )
-    return {value for (value,) in rows}
+    corrected = {}
+    for case_id, record_type, record_id in rows:
+        corrected.setdefault(case_id, set()).add((record_type, record_id))
+    return corrected
 
 
 async def _invoices(db, tenant_id, config, order_ids):
@@ -274,7 +287,12 @@ def _classify(member, invoices, tax_reasons):
         tax
         and delta == tax
         and any(link.get("credit_memo_id") for link in member["links"])
-        and not target.get("tax_adjustments")
+        # An ordinary credit proof without tax recognises none of it; one that carries tax does.
+        and not any(
+            _decimal(proof.get("tax_amount"))
+            for proof in target.get("tax_adjustments") or []
+            if isinstance(proof, dict)
+        )
     ):
         return "tax_left_after_credit", {}
     invoice = (invoices or {}).get(member["order_id"])
@@ -295,29 +313,42 @@ def _facts(key, members, detail, invoices):
     counts = []
     if key == "corrected_in_app":
         reasons = detail["refund_reasons"]
-        counts.append({"fact": "refund reason " + (", ".join(reasons) or "none"), "orders": len(members)})
+        counts.append(
+            {"kind": "refund_reason", "fact": "refund reason " + (", ".join(reasons) or "none"), "orders": len(members)}
+        )
         if reasons and not detail["counted_as_tax_refund"]:
-            counts.append({"fact": "not counted as a tax refund in this subsidiary's settings", "orders": len(members)})
+            counts.append(
+                {
+                    "kind": "setting",
+                    "fact": "not counted as a tax refund in this subsidiary's settings",
+                    "orders": len(members),
+                }
+            )
     if key == "source_adjustment_not_in_netsuite":
         labels = Counter(label for m in members for label in m["detail"]["labels"])
-        counts.extend({"fact": f'"{label}"', "orders": n} for label, n in labels.most_common(5))
+        counts.extend(
+            {"kind": "adjustment_label", "fact": f'"{label}"', "orders": n} for label, n in labels.most_common(5)
+        )
         if len(labels) > 5:
             counts.append(
                 {
+                    "kind": "adjustment_label",
                     "fact": f"{len(labels) - 5} other adjustment labels",
                     "orders": sum(n for _, n in labels.most_common()[5:]),
                 }
             )
     if key in ("invoice_matches_source", "source_adjustment_not_in_netsuite", "business_priced_in_netsuite"):
         types = Counter((m["order"] or {}).get("customer_type") or "unknown" for m in members)
-        counts.extend({"fact": f"{kind} customer", "orders": n} for kind, n in types.most_common())
+        counts.extend(
+            {"kind": "customer_type", "fact": f"{kind} customer", "orders": n} for kind, n in types.most_common()
+        )
     if invoices is not None and key in ("invoice_matches_source", "business_priced_in_netsuite"):
         customers = Counter(c for m in members for c in (invoices.get(m["order_id"]) or {}).get("customers", ()))
-        counts.extend({"fact": name, "orders": n} for name, n in customers.most_common(3) if n > 1)
+        counts.extend({"kind": "customer", "fact": name, "orders": n} for name, n in customers.most_common(3) if n > 1)
     if key == "no_shared_cause":
         missing = sum(1 for m in members if m["order"] is None)
         if missing:
-            counts.append({"fact": "no saved Solidus detail yet", "orders": missing})
+            counts.append({"kind": "missing_source", "fact": "no saved Solidus detail yet", "orders": missing})
     return counts
 
 
@@ -396,16 +427,27 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
                     if isinstance(link, dict)
                 ],
                 "order": _source_order(snapshots.get(case.order_reference), case.order_reference),
-                "corrected": str(case.id) in corrected,
             }
         )
+        # A credit memo correction counts only while that credit memo is still on the order: a card
+        # stays in the chat forever, the order can move on. Invoice and sales order corrections
+        # cannot be tied to the saved report, so they count as recorded.
+        member = members[-1]
+        credits = {str(link.get("credit_memo_id")) for link in member["links"] if link.get("credit_memo_id")}
+        records = corrected.get(str(case.id), set())
+        member["corrected_on_credit"] = any(kind == "creditmemo" and rid in credits for kind, rid in records)
+        member["corrected"] = member["corrected_on_credit"] or any(kind != "creditmemo" for kind, _ in records)
 
     # NetSuite only for members the saved evidence leaves open, and only when it can decide something.
-    open_ids = [
-        m["order_id"]
-        for m in members
-        if m["amounts"]["order_total"] and _classify(m, {}, tax_reasons)[0] in _NEEDS_INVOICE
-    ]
+    open_ids = sorted(
+        {
+            m["order_id"]
+            for m in members
+            if m["amounts"]["order_total"]
+            and _ID.fullmatch(m["order_id"])
+            and _classify(m, {}, tax_reasons)[0] in _NEEDS_INVOICE
+        }
+    )
     if not open_ids:
         invoices, netsuite = None, "not_needed"
     elif config is None:
@@ -427,8 +469,14 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
         vocabulary = dict(CAUSES[key])
         if key == "corrected_in_app":
             reasons, counted = row["detail"]["refund_reasons"], row["detail"]["counted_as_tax_refund"]
-            if reasons and not counted and len(row["members"]) >= MIN_SETTING_EVIDENCE:
+            if (
+                reasons
+                and not counted
+                and len(row["members"]) >= MIN_SETTING_EVIDENCE
+                and all(m["corrected_on_credit"] for m in row["members"])
+            ):
                 vocabulary["next_step"] = "settings_change"
+                vocabulary["next_pill"] = "Settings change"
                 vocabulary["next_label"] = (
                     f"Count refund reason {', '.join(reasons)} as a tax refund for this subsidiary. "
                     "A person approves it."
@@ -440,9 +488,11 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
             opened = [invoices[m["order_id"]]["open"] for m in row["members"] if m["order_id"] in invoices]
             if len(opened) == len(row["members"]):
                 amounts["open_on_invoices"] = _money(sum(opened, Decimal(0)))
+        primary = next((m for m in METRICS if Decimal(amounts[m])), "order_total")
         causes.append(
             {
                 "cause": key,
+                "primary": {"metric": primary, "amount": amounts[primary]},
                 **vocabulary,
                 "orders": len(row["members"]),
                 "order_references": sorted(m["reference"] for m in row["members"]),
@@ -487,8 +537,20 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
     }
 
 
+_DIGITS = re.compile(r"[0-9][0-9,.]*")
+
+
+def _model_fact(fact):
+    """Customer names stay on the card; numbers inside free-text labels become '#'."""
+    if fact.get("kind") == "customer":
+        return None
+    if fact.get("kind") == "adjustment_label":
+        return _DIGITS.sub("#", fact["fact"])
+    return fact["fact"]
+
+
 def condensed_for_model(result):
-    """What the model reads: causes, counts, facts and next steps. No amounts."""
+    """What the model reads: causes, counts, facts and next steps. No amounts, no customer names."""
     return {
         "success": True,
         "shown_to_user": "The breakdown card is on screen with every amount. Do not restate amounts or totals.",
@@ -500,7 +562,7 @@ def condensed_for_model(result):
                 "label": cause["label"],
                 "orders": cause["orders"],
                 "next_step": cause["next_step"],
-                "facts": [f["fact"] for f in cause["facts"]],
+                "facts": [text for text in (_model_fact(f) for f in cause["facts"]) if text],
             }
             for cause in result["causes"]
         ],

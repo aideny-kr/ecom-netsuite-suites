@@ -1330,7 +1330,9 @@ def _intercept_tool_result(
     return None, None, result_str
 
 
-_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready"})
+# group_breakdown is a card, not a query result: caching it would replace the conversation's
+# last real result with an empty one.
+_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready", "group_breakdown"})
 
 # The SSE event types for which _intercept_tool_result STAMPS the result_id into
 # the LLM-facing condensed string (so the model actually SEES the id). The unified

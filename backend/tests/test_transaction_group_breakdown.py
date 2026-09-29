@@ -48,6 +48,8 @@ class World:
         status="open",
         balance="difference",
         record_id=None,
+        refunds="0.00",
+        proofs=(),
     ):
         report = {
             "balance": {
@@ -58,14 +60,17 @@ class World:
                 "amounts": {
                     "order_total": {"delta": delta, "source": source_total},
                     "tax": {"delta": tax},
-                    "refunds": {"delta": "0.00"},
+                    "refunds": {"delta": refunds},
                 },
                 "adjustments": [],
             },
             "targets": [
-                {"status": "fulfilled", "record_id": record_id or str(15_000_000 + len(ref) * 7 + int(ref[-3:]))}
+                {
+                    "status": "fulfilled",
+                    "record_id": str(15_000_000 + len(ref) * 7 + int(ref[-3:])) if record_id is None else record_id,
+                }
             ],
-            "refund_evidence": {"target": {"request_links": list(links)}},
+            "refund_evidence": {"target": {"request_links": list(links), "tax_adjustments": list(proofs)}},
         }
         row = TransactionCase(
             id=uuid4(),
@@ -110,7 +115,7 @@ class World:
         )
         await self.db.flush()
 
-    async def corrected(self, case):
+    async def corrected(self, case, record_type="creditmemo", record_id="15788939"):
         if self.session is None:
             self.session = ChatSession(tenant_id=self.tenant.id, user_id=self.user.id, title="fixes")
             self.db.add(self.session)
@@ -123,7 +128,7 @@ class World:
                 content="card",
                 structured_output={
                     "status": "approved",
-                    "accounting_review": {"case_id": str(case.id)},
+                    "accounting_review": {"case_id": str(case.id), "record_type": record_type, "record_id": record_id},
                     "accounting_verification": {"status": "verified"},
                 },
             )
@@ -196,12 +201,16 @@ async def test_every_order_lands_in_exactly_one_cause(world, monkeypatch):
     assert sorted(assigned) == sorted(c.order_reference for c in [*touchpad, business, unexplained])
     # The cents are not leftovers: each adjustment equals its own difference exactly.
     assert causes["source_adjustment_not_in_netsuite"]["orders"] == 3
-    assert {"fact": '"SKU Adjustment"', "orders": 3} in causes["source_adjustment_not_in_netsuite"]["facts"]
+    assert {"kind": "adjustment_label", "fact": '"SKU Adjustment"', "orders": 3} in causes[
+        "source_adjustment_not_in_netsuite"
+    ]["facts"]
     assert causes["source_adjustment_not_in_netsuite"]["amounts"]["order_total"] == "-177.00"
     # An adjustment that does not equal the difference explains nothing.
     assert causes["business_priced_in_netsuite"]["order_references"] == ["R000000201"]
     assert causes["no_shared_cause"]["order_references"] == ["R000000301"]
-    assert {"fact": "no saved Solidus detail yet", "orders": 1} in causes["no_shared_cause"]["facts"]
+    assert {"kind": "missing_source", "fact": "no saved Solidus detail yet", "orders": 1} in causes["no_shared_cause"][
+        "facts"
+    ]
     assert result["causes"][-1]["cause"] == "no_shared_cause"
     assert result["totals"]["order_total"] == "-6638.00"
     assert result["scope"] == {"review_run_ids": None, "status": None, "search": ""}
@@ -290,7 +299,11 @@ async def test_orders_already_corrected_here_point_to_the_refund_setting(world, 
 
     reason_4 = next(c for c in corrected if c["orders"] == 3)
     assert reason_4["next_step"] == "settings_change" and "reason 4" in reason_4["next_label"]
-    assert {"fact": "not counted as a tax refund in this subsidiary's settings", "orders": 3} in reason_4["facts"]
+    assert {
+        "kind": "setting",
+        "fact": "not counted as a tax refund in this subsidiary's settings",
+        "orders": 3,
+    } in reason_4["facts"]
     # One order is too little evidence to change a setting that affects every future refund.
     reason_3 = next(c for c in corrected if c["orders"] == 1)
     assert reason_3["next_step"] == "recheck"
@@ -352,3 +365,87 @@ async def test_a_tax_difference_is_never_called_a_business_price(world, monkeypa
     monkeypatch.setattr(gb, "_invoices", _no_invoices)
     result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
     assert [c["cause"] for c in result["causes"]] == ["no_shared_cause"]
+
+
+async def test_a_correction_counts_only_while_its_credit_memo_is_still_on_the_order(world, monkeypatch):
+    # Review round 1 of #356: any past verified card used to mark a case corrected forever, even
+    # after the order moved on to a different credit memo.
+    await world.config()
+    kept = [await world.case(f"R00000140{i}", delta="-2.80", tax="-2.80", links=[link("4")]) for i in range(3)]
+    for case in kept:
+        await world.corrected(case)
+    moved = await world.case("R000001501", delta="-2.80", tax="-2.80", links=[link("4", credit_memo="16000001")])
+    await world.corrected(moved)  # the card corrected 15788939, which this order no longer carries
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    corrected = by_cause(result)["corrected_in_app"]
+    assert sorted(corrected["order_references"]) == sorted(c.order_reference for c in kept)
+    assert corrected["next_step"] == "settings_change"
+    assert "R000001501" not in corrected["order_references"]
+
+
+async def test_an_ordinary_credit_proof_without_tax_does_not_hide_the_tax_left_behind(world, monkeypatch):
+    # Review round 1 of #356: any recognised proof used to exclude the case, even one carrying no tax.
+    await world.config()
+    await world.case(
+        "R000001601",
+        delta="-2.80",
+        tax="-2.80",
+        links=[link("4")],
+        proofs=[{"kind": "credit_memo", "tax_amount": "0", "amount": "10.00"}],
+    )
+    await world.case(
+        "R000001602",
+        delta="-2.80",
+        tax="-2.80",
+        links=[link("4")],
+        proofs=[{"kind": "credit_memo", "tax_amount": "1.40", "amount": "10.00"}],
+    )
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert by_cause(result)["tax_left_after_credit"]["order_references"] == ["R000001601"]
+
+
+async def test_the_server_names_the_amount_each_cause_shows(world, monkeypatch):
+    # Review round 1 of #356: the card guessed between order total and tax, and missed refunds.
+    await world.config()
+    await world.case("R000001701", delta="0.00", tax="0.00", refunds="-5.00")
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert result["causes"][0]["primary"] == {"metric": "refunds", "amount": "-5.00"}
+    assert result["causes"][0]["next_pill"] == "Review"
+
+
+async def test_the_netsuite_count_is_only_orders_actually_checked(world, monkeypatch):
+    await world.config()
+    await world.case("R000001801", delta="-12.00")
+    await world.case("R000001802", delta="-13.00", record_id="")  # no single sales order to look up
+    seen = []
+
+    async def invoices(db, tenant_id, config, order_ids):
+        seen.append(list(order_ids))
+        return {}, "complete"
+
+    monkeypatch.setattr(gb, "_invoices", invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert result["checked"]["netsuite_orders"] == 1 and len(seen[0]) == 1
+
+
+async def test_the_model_never_reads_customer_names_or_numbers_inside_labels(world, monkeypatch):
+    # Review round 1 of #356: free text from Solidus and NetSuite reached the model verbatim.
+    await world.config()
+    await world.case("R000001901", delta="-50.00", source_total="10.00", record_id="15000001")
+    await world.solidus("R000001901", adjustments=[("Refund $50 per call 5%", "-50.0")])
+    await world.case("R000001902", delta="-5.00", source_total="20.00", record_id="15000002")
+    await world.case("R000001903", delta="-6.00", source_total="30.00", record_id="15000003")
+
+    async def invoices(db, tenant_id, config, order_ids):
+        row = {"total": gb.Decimal("20.00"), "open": gb.Decimal("0"), "customers": {"Jane Doe"}}
+        return {"15000002": row, "15000003": {**row, "total": gb.Decimal("30.00")}}, "complete"
+
+    monkeypatch.setattr(gb, "_invoices", invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert any(f["fact"] == "Jane Doe" for f in by_cause(result)["invoice_matches_source"]["facts"])
+    condensed = json.dumps(gb.condensed_for_model(result))
+    assert "Jane Doe" not in condensed and "50" not in condensed and "5%" not in condensed
+    assert "Refund $# per call #%" in condensed

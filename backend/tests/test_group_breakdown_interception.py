@@ -63,3 +63,37 @@ def test_the_agent_breaks_a_group_down_before_fixing_it():
     assert "transaction_ops_group_breakdown for the exact group" in agent
     skill = Path("app/services/chat/skills/accounting_operations/SKILL.md").read_text()
     assert "transaction_ops_group_breakdown" in skill
+
+
+def test_the_breakdown_never_replaces_the_cached_query_result():
+    # Review round 1 of #356: the card payload was cached as an empty SuiteQL result under the
+    # conversation's alias, so a later pivot or reference read nothing.
+    from app.services.chat.orchestrator import _build_intercept_cache_entry
+
+    entry = _build_intercept_cache_entry(
+        tool_name="transaction_ops_group_breakdown",
+        event_type_str="group_breakdown",
+        event_data=RESULT,
+        conversation_id="00000000-0000-0000-0000-000000000001",
+    )
+    assert entry is None
+
+
+async def test_the_tool_answers_within_its_own_limit(monkeypatch):
+    # Review round 1 of #356: the tool had no deadline of its own, unlike every other tool in its family.
+    import asyncio
+
+    from app.mcp.tools import transaction_ops_tools as tools
+    from app.services.transaction_ops import group_breakdown
+
+    async def authorize(context, *, create, fresh=False):
+        return object(), "tenant", object()
+
+    async def hang(*args, **kwargs):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(tools, "_authorize", authorize)
+    monkeypatch.setattr(group_breakdown, "breakdown", hang)
+    monkeypatch.setattr(tools, "_BREAKDOWN_TIMEOUT", 0.05)
+    result = await tools.execute_group_breakdown({"group_id": "a" * 32}, context={})
+    assert result == {"success": False, "error": "transaction_investigation_timeout"}

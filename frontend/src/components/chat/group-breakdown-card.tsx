@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { money as formatMoney } from "@/components/reconciliation/format";
 import type { GroupBreakdownCause, GroupBreakdownData } from "@/lib/chat-stream";
 
 /** The server's split of an issue group into causes. Every amount and count here is the
@@ -26,18 +27,13 @@ const NETSUITE: Record<string, string> = {
   unavailable: "NetSuite was unavailable, so the invoice rule was skipped",
 };
 
+/** The shared formatter, on the size of the difference; the direction is stated in words. */
 function money(value: string | undefined, currency: string | null) {
-  const amount = Math.abs(Number(value ?? 0));
-  if (!Number.isFinite(amount)) return value ?? "";
+  if (value === undefined || value === null || !Number.isFinite(Number(value))) return formatMoney(null);
   try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: currency || "USD",
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(amount);
+    return formatMoney(String(Math.abs(Number(value))), currency || "USD");
   } catch {
-    return amount.toFixed(2);
+    return Math.abs(Number(value)).toFixed(2);
   }
 }
 
@@ -56,6 +52,20 @@ function Action({ cause, data }: { cause: GroupBreakdownCause; data: GroupBreakd
         )}
       >
         Review one by one →
+      </Link>
+    );
+  }
+  if (cause.next_step === "prepare_corrections" && !(data.group_id && cause.orders === data.orders)) {
+    // Part of a group, or one order: prepare exactly these orders. The group fix would prepare
+    // every member of a mixed group, one by one, to find the few it can correct.
+    return (
+      <Link
+        className="whitespace-nowrap text-[12.5px] font-medium text-primary underline"
+        href={compose(
+          `Prepare corrections for these orders one at a time: ${refs.join(", ")}. For each, use transaction_ops_accounting_evidence, then prepare the supported exact correction for my approval; show any order without a supported correction separately. Do not treat this request as financial approval.`,
+        )}
+      >
+        Prepare these fixes →
       </Link>
     );
   }
@@ -154,7 +164,7 @@ export function GroupBreakdownCard({ data }: { data: GroupBreakdownData }) {
               <div className="text-right">
                 <div className="text-[17px] font-semibold tabular-nums">{cause.orders}</div>
                 <div className="whitespace-nowrap text-[12.5px] tabular-nums text-muted-foreground">
-                  {money(cause.amounts.order_total !== "0.00" ? cause.amounts.order_total : cause.amounts.tax, data.currency)}
+                  {money(cause.primary?.amount ?? cause.amounts.order_total, data.currency)}
                 </div>
                 {cause.amounts.open_on_invoices !== undefined && (
                   <div className="whitespace-nowrap text-[11.5px] tabular-nums text-muted-foreground">
@@ -163,7 +173,9 @@ export function GroupBreakdownCard({ data }: { data: GroupBreakdownData }) {
                 )}
               </div>
               <div className="col-start-2 col-end-4 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span className={`rounded-full px-2 py-0.5 text-[11.5px] font-semibold ${step.tone}`}>{step.pill}</span>
+                <span className={`rounded-full px-2 py-0.5 text-[11.5px] font-semibold ${step.tone}`}>
+                  {cause.next_pill || step.pill}
+                </span>
                 <span className="text-[12.5px] text-muted-foreground">{cause.next_label}</span>
                 <span className="font-mono text-[12px] text-muted-foreground">
                   {shown.join(" · ")}

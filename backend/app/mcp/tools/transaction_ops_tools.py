@@ -25,6 +25,7 @@ _PARAMS = {
 _MAX_FINDINGS = 100
 _MAX_ROWS = 500
 _TOOL_TIMEOUT = 20
+_BREAKDOWN_TIMEOUT = 55  # inside governance's 60 s; the NetSuite invoice check has its own 40 s
 _PUBLISH_TIMEOUT = 5
 
 
@@ -392,7 +393,10 @@ async def execute_group_breakdown(params: dict, **kwargs) -> dict:
         if not isinstance(params, dict) or set(params) - {"group_id", "case_id", "review_run_ids", "status", "search"}:
             raise _ToolError("invalid_parameters")
         db, tenant_id, _ = await _authorize(context, create=False)
-        return await breakdown(db, tenant_id, **params)
+        async with asyncio.timeout(_BREAKDOWN_TIMEOUT):
+            return await breakdown(db, tenant_id, **params)
+    except TimeoutError:
+        return {"success": False, "error": "transaction_investigation_timeout"}
     except (ValueError, _ToolError, StateError) as exc:
         return {"success": False, "error": str(exc)}
 
