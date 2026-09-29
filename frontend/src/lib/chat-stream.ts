@@ -93,6 +93,15 @@ export interface ReportReadyData {
   section_count?: number;
 }
 
+/** Group preparation's own counts, streamed as each order finishes (server numbers, never the model's). */
+export interface PreparationProgressData {
+  checked: number;
+  total: number;
+  ready: number;
+  set_aside: Array<{ label: string; count: number }>;
+  now: string[];
+}
+
 export type StreamBlock =
   | { type: "text"; content: string; id: string }
   | { type: "tool"; tool: StreamingToolCall; id: string }
@@ -104,7 +113,8 @@ export type StreamBlock =
   | { type: "docs_link"; data: DocsLinkData; id: string }
   | { type: "report_ready"; data: ReportReadyData; id: string }
   | { type: "thinking"; content: string; isActive: boolean; id: string }
-  | { type: "write_confirmation"; data: WriteConfirmationData; id: string };
+  | { type: "write_confirmation"; data: WriteConfirmationData; id: string }
+  | { type: "preparation_progress"; data: PreparationProgressData; id: string };
 
 export type ChatStreamEvent =
   | { type: "text"; content: string }
@@ -120,6 +130,7 @@ export type ChatStreamEvent =
   | { type: "drive_sources"; sources: Record<string, string> }
   | { type: "chart"; data: ChartData }
   | { type: "clarification_required"; data: ClarificationData }
+  | { type: "preparation_progress"; data: PreparationProgressData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage }
   | { type: "tool_start"; tool_name: string; tool_input: Record<string, unknown>; step: number }
@@ -147,6 +158,7 @@ type StreamHandlers = {
   // Without this, the card only appears via the terminal `message` event's
   // structured_output — defeating the point of the mid-stream gate.
   onClarificationRequired?: (data: ClarificationData) => void;
+  onPreparationProgress?: (data: PreparationProgressData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
   onToolStart?: (tool_name: string, tool_input: Record<string, unknown>, step: number) => void;
@@ -270,6 +282,8 @@ export async function consumeChatStream(
           handlers.onDriveSources?.(event.sources);
         } else if (event.type === "clarification_required") {
           handlers.onClarificationRequired?.(event.data);
+        } else if (event.type === "preparation_progress") {
+          handlers.onPreparationProgress?.(event.data);
         } else if (event.type === "error") {
           handlers.onError?.(event.error);
           terminalSeen = true;
@@ -418,6 +432,18 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
   // terminal `message` event + session refetch.
   if (type === "clarification_required" && data.data && typeof data.data === "object") {
     return { type, data: data.data as ClarificationData };
+  }
+  if (type === "preparation_progress" && data.data && typeof data.data === "object") {
+    const progress = data.data as PreparationProgressData;
+    if (
+      typeof progress.checked === "number" &&
+      typeof progress.total === "number" &&
+      Array.isArray(progress.set_aside) &&
+      Array.isArray(progress.now)
+    ) {
+      return { type, data: progress };
+    }
+    return null;
   }
   if (type === "error" && typeof data.error === "string") {
     return { type, error: data.error };

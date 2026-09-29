@@ -45,6 +45,7 @@ export const AI_PROVIDERS = [
 
 export const AI_MODELS: Record<string, { value: string; label: string }[]> = {
   anthropic: [
+    { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
     { value: "claude-sonnet-5", label: "Claude Sonnet 5 (recommended)" },
     { value: "claude-opus-4-8", label: "Claude Opus 4.8" },
     { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },

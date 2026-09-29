@@ -11,6 +11,7 @@ import { tokenUsageSummary } from "@/lib/token-usage";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage, ClarificationData, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
+import { PreparationProgress } from "./preparation-progress";
 import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
 import { WriteConfirmationCard } from "@/components/chat/write-confirmation-card";
@@ -1115,6 +1116,8 @@ export function MessageList({
                         <ReportReadyCard data={block.data} />
                       </div>
                     );
+                  case "preparation_progress":
+                    return <PreparationProgress key={block.id} data={block.data} />;
                   default:
                     return null;
                 }
