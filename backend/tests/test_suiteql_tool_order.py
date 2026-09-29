@@ -61,7 +61,12 @@ LIVE = list(_live_prompts())  # derived, so a prompt added above cannot be skipp
 
 def test_the_rule_says_local_first_and_try_the_other_tool():
     assert "local netsuite_suiteql tool first" in SUITEQL_TOOL_ORDER
-    assert "try the other tool before concluding the data does not exist" in SUITEQL_TOOL_ORDER
+    assert "try the other tool once before concluding the data does not exist" in SUITEQL_TOOL_ORDER
+
+
+def test_a_custom_record_query_is_never_retried_on_the_mcp_tool():
+    # #355 round 3: the MCP tool cannot see custom records, so its empty result is not a second finding.
+    assert "Never retry a custom record or custom field query on the MCP tool" in SUITEQL_TOOL_ORDER
 
 
 @pytest.mark.parametrize("name", LIVE)
@@ -80,12 +85,14 @@ def test_the_rule_is_stated_once_in_the_tool_inventory():
     assert _live_prompts()["tool inventory (MCP entry + execution priority)"].count(SUITEQL_TOOL_ORDER) == 1
 
 
-def test_the_error_recovery_rules_do_not_stop_at_zero_rows_before_trying_the_other_tool():
+def test_the_error_recovery_rules_defer_to_the_tool_order_at_zero_rows():
     # #355 round 2: "0 rows on other tables -> report '0 rows found'" contradicted the rule in the
-    # same prompt, the give-up behaviour this change exists to remove.
+    # same prompt. Round 3: restating the retry there dropped the rule's own limits. It points to
+    # the one rule instead of carrying a second copy.
     prompt = _live_prompts()["unified agent (FULL)"]
     zero_row_lines = [line for line in prompt.splitlines() if line.startswith("- 0 rows on other tables")]
-    assert zero_row_lines and all("other SuiteQL tool" in line for line in zero_row_lines)
+    assert zero_row_lines and all("SuiteQL tool order" in line for line in zero_row_lines)
+    assert prompt.index(SUITEQL_TOOL_ORDER) < prompt.index(zero_row_lines[0])
 
 
 async def test_a_saved_template_serves_the_current_tool_rules():
@@ -111,3 +118,18 @@ async def test_a_saved_template_serves_the_current_tool_rules():
     served = await pts.get_active_template(db, "tenant")
     assert SUITEQL_TOOL_ORDER in served and not MCP_FIRST.search(served)
     assert served.startswith("IDENTITY\n\n") and served.endswith("\n\nRESPONSE RULES")
+
+
+async def test_a_saved_template_without_its_stored_rules_is_served_as_saved():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+
+    from app.services import prompt_template_service as pts
+
+    saved = SimpleNamespace(id=uuid4(), tenant_id=uuid4(), template_text="IDENTITY\n\nRULES", sections=None)
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = saved
+    db = AsyncMock()
+    db.execute.return_value = result
+    assert await pts.get_active_template(db, saved.tenant_id) == "IDENTITY\n\nRULES"

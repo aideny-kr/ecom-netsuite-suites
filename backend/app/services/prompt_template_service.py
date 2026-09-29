@@ -433,6 +433,9 @@ def _with_current_tool_rules(template: SystemPromptTemplate) -> str:
     stored = (template.sections or {}).get("tool_rules")
     if stored and stored in template.template_text:
         return template.template_text.replace(stored, _build_tool_rules_section(), 1)
+    logger.warning(
+        "prompt_template.tool_rules_not_refreshed", tenant_id=str(template.tenant_id), template_id=str(template.id)
+    )
     return template.template_text
 
 
