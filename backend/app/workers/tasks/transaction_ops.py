@@ -209,3 +209,48 @@ def transaction_ops_complete_accounting(tenant_id: str, message_id: str):
         return asyncio.run(execute())
     except Exception:
         raise RuntimeError("accounting_completion_failed") from None
+
+
+@celery_app.task(
+    base=InstrumentedTask,
+    name="tasks.transaction_policy_replay",
+    queue="recon",
+    bind=True,
+    max_retries=3,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    soft_time_limit=110,
+    time_limit=120,
+)
+def transaction_policy_replay(self, tenant_id: str, replay_id: str):
+    async def execute():
+        import time
+
+        from app.services.transaction_ops.policy_replay import process_batch, publish
+
+        tenant, replay = uuid.UUID(tenant_id), uuid.UUID(replay_id)
+        started = time.monotonic()
+        async with worker_async_session() as db:
+            while time.monotonic() - started < 75:
+                result = await process_batch(db, tenant, replay)
+                if result != "pending":
+                    return {"status": result}
+        if not await publish(tenant, replay):
+            raise RuntimeError("policy_replay_publication_failed")
+        return {"status": "pending"}
+
+    try:
+        return asyncio.run(execute())
+    except Exception:
+
+        async def failed():
+            from app.services.transaction_ops.policy_replay import record_failure
+
+            async with worker_async_session() as db:
+                await record_failure(db, uuid.UUID(tenant_id), uuid.UUID(replay_id))
+
+        try:
+            asyncio.run(failed())
+        except Exception:
+            pass  # Never expose database/provider details through task logs.
+        raise self.retry(exc=RuntimeError("policy_replay_failed"), countdown=30) from None
