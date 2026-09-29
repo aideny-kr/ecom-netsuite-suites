@@ -56,13 +56,7 @@ def _live_prompts():
     }
 
 
-LIVE = [
-    "unified agent (FULL)",
-    "unified agent (full, slimmed tool guidance)",
-    "tool inventory (MCP entry + execution priority)",
-    "prompt template tool rules",
-    "agentic system prompt (template fallback)",
-]
+LIVE = list(_live_prompts())  # derived, so a prompt added above cannot be skipped (#355 round 2)
 
 
 def test_the_rule_says_local_first_and_try_the_other_tool():
@@ -81,7 +75,39 @@ def test_no_live_prompt_keeps_an_mcp_first_wording(name):
     assert not found, f"{name}: {found.group(0)!r}"
 
 
-def test_the_legacy_router_prompt_keeps_no_mcp_first_wording():
-    from app.services.chat.prompts import ROUTER_PROMPT
+def test_the_rule_is_stated_once_in_the_tool_inventory():
+    # #355 round 2: it was emitted twice in one guidance block, once per section.
+    assert _live_prompts()["tool inventory (MCP entry + execution priority)"].count(SUITEQL_TOOL_ORDER) == 1
 
-    assert not MCP_FIRST.search(ROUTER_PROMPT)
+
+def test_the_error_recovery_rules_do_not_stop_at_zero_rows_before_trying_the_other_tool():
+    # #355 round 2: "0 rows on other tables -> report '0 rows found'" contradicted the rule in the
+    # same prompt, the give-up behaviour this change exists to remove.
+    prompt = _live_prompts()["unified agent (FULL)"]
+    zero_row_lines = [line for line in prompt.splitlines() if line.startswith("- 0 rows on other tables")]
+    assert zero_row_lines and all("other SuiteQL tool" in line for line in zero_row_lines)
+
+
+async def test_a_saved_template_serves_the_current_tool_rules():
+    # #355 round 2: get_active_template() returned a tenant's stored text verbatim, so templates
+    # saved before this change (Framework's, 2026-03-16) kept "prefer external MCP tools".
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.services import prompt_template_service as pts
+
+    old_rules = (
+        "WORKFLOW GUIDANCE:\n- To query NetSuite data, prefer external MCP tools (prefixed with 'ext__') if "
+        "available. These connect directly to NetSuite and are the most reliable option.\n- If no external "
+        "MCP tools are available, use the netsuite_suiteql tool as fallback."
+    )
+    saved = SimpleNamespace(
+        template_text=f"IDENTITY\n\n{old_rules}\n\nRESPONSE RULES", sections={"tool_rules": old_rules}
+    )
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = saved
+    db = AsyncMock()
+    db.execute.return_value = result
+    served = await pts.get_active_template(db, "tenant")
+    assert SUITEQL_TOOL_ORDER in served and not MCP_FIRST.search(served)
+    assert served.startswith("IDENTITY\n\n") and served.endswith("\n\nRESPONSE RULES")

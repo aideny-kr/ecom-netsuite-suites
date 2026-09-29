@@ -419,8 +419,21 @@ async def get_active_template(
     )
     template = result.scalar_one_or_none()
     if template:
-        return template.template_text
+        return _with_current_tool_rules(template)
     return AGENTIC_SYSTEM_PROMPT
+
+
+def _with_current_tool_rules(template: SystemPromptTemplate) -> str:
+    """The saved text, with its tool-rules section replaced by the current one.
+
+    Tool rules describe the running code's tools, and generate_template() is the only writer, so a
+    stored copy only goes stale. Framework's template (saved 2026-03-16) still said "prefer external
+    MCP tools" after #355 changed the rule. Text without the stored section verbatim is served as saved.
+    """
+    stored = (template.sections or {}).get("tool_rules")
+    if stored and stored in template.template_text:
+        return template.template_text.replace(stored, _build_tool_rules_section(), 1)
+    return template.template_text
 
 
 async def get_active_template_obj(

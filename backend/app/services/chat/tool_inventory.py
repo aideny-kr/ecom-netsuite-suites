@@ -214,9 +214,8 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
         if "SUITEQL" in matched:
             sections.append(
                 f"\n• SUITEQL (MCP): `{matched['SUITEQL']}`"
-                "\n  Ad-hoc SuiteQL over standard tables. "
-                + SUITEQL_TOOL_ORDER
-                + '\n  Parameters: {"sqlQuery": "SELECT ...", "description": "..."}'
+                "\n  Ad-hoc SuiteQL over standard tables only. Tool order: see the execution priority below."
+                '\n  Parameters: {"sqlQuery": "SELECT ...", "description": "..."}'
                 "\n  STILL FOLLOW all <suiteql_dialect_rules> — they apply to MCP SuiteQL too."
             )
 

@@ -273,7 +273,7 @@ If a query fails, diagnose WHY before trying a different approach — read the e
 - "Record not found" or "Invalid or unsupported search" → switch to netsuite_suiteql (local REST API).
 - "Unknown identifier" → `SELECT * FROM <table> WHERE ROWNUM <= 1` to discover columns, then retry.
 - 0 rows on ITEM table → call netsuite_get_metadata. Do NOT retry with different column combos.
-- 0 rows on other tables → report "0 rows found". Only retry if query logic was wrong.
+- 0 rows on other tables → run the same query once with the other SuiteQL tool (local sees custom records and fields; MCP sees standard tables). If both return 0 rows, report "0 rows found". Only rewrite the query if its logic was wrong.
 After 2 failures → report clearly and suggest what info would help.
 
 STOP WHEN YOU HAVE DATA:

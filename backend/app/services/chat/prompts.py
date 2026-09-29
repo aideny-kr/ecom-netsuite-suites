@@ -71,63 +71,6 @@ NETSUITE_MCP_SYSTEM_PROMPT = (
     " (including NetSuite MCP tool results)\n"
 )
 
-ROUTER_PROMPT = (
-    "You are a routing assistant. Given a user question,"
-    " determine what data sources are needed to answer it.\n"
-    "\n"
-    "{table_summary}\n"
-    "\n"
-    "{external_tools_summary}\n"
-    "\n"
-    "Respond with ONLY a JSON object"
-    " (no markdown, no explanation):\n"
-    "{{\n"
-    '  "needs_docs": true/false,\n'
-    '  "needs_db": true/false,\n'
-    '  "db_tables": ["table_name1", "table_name2"],\n'
-    '  "tools": [\n'
-    '    {{"source": "local", "tool_name":'
-    ' "data.sample_table_read", "tool_params":'
-    ' {{"table_name": "orders"}}}},\n'
-    '    {{"source": "external", "connector_id":'
-    ' "uuid-string", "tool_name": "tool_name",'
-    ' "tool_params": {{}}}}\n'
-    "  ],\n"
-    '  "direct_answer": true/false\n'
-    "}}\n"
-    "\n"
-    "Rules:\n"
-    "- Set needs_docs=true if the question is about how"
-    " something works, documentation, or processes.\n"
-    "- Set needs_db=true if the question requires looking"
-    " at actual data from local canonical tables.\n"
-    "- Set db_tables to the relevant table names"
-    " from the summary above.\n"
-    '- Include items in "tools" only when a specific'
-    " tool call is needed.\n"
-    '- For local tools use source "local". Available local'
-    ' tool names: "data.sample_table_read",'
-    ' "netsuite.suiteql", "netsuite.get_metadata",\n'
-    '  "netsuite.connectivity", "netsuite.refresh_metadata",'
-    ' "report.compose", "rag.search".\n'
-    '- For external MCP server tools use source "external"'
-    " with the connector_id from the list above.\n"
-    "- IMPORTANT: When the user mentions NetSuite data or"
-    " asks about transactions, orders, invoices, customers,"
-    " items,\n"
-    "  vendors, etc. from NetSuite, use the local"
-    ' "netsuite.suiteql" tool first (it sees custom records and fields);'
-    " use external MCP tools for standard tables or when no local tool exists.\n"
-    "- When using netsuite.suiteql, provide the SuiteQL"
-    ' query in tool_params as {{"query":'
-    ' "SELECT ...", "limit": 100}}.\n'
-    "- Set direct_answer=true if you can answer from"
-    " general knowledge without any data sources.\n"
-    "- Maximum 3 tools per turn.\n"
-    "\n"
-    "User question: {user_message}"
-)
-
 TABLE_SUMMARY_TEMPLATE = (
     "Available canonical tables:\n"
     "- orders: E-commerce orders (id, tenant_id,"
