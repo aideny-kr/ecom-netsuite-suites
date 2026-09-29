@@ -611,8 +611,26 @@ async def test_an_invoice_shared_by_several_orders_is_never_split_between_them(w
         [
             [{"invoice_id": 1, "order_id": 11}, {"invoice_id": 1, "order_id": 12}, {"invoice_id": 2, "order_id": 13}],
             [
-                {"id": 1, "foreigntotal": 500, "taxtotal": 50, "foreignamountunpaid": 0, "customer": "A", "parents": 2, "posting": "T", "voided": "F"},
-                {"id": 2, "foreigntotal": 80, "taxtotal": 0, "foreignamountunpaid": 80, "customer": "B", "parents": 1, "posting": "T", "voided": "F"},
+                {
+                    "id": 1,
+                    "foreigntotal": 500,
+                    "taxtotal": 50,
+                    "foreignamountunpaid": 0,
+                    "customer": "A",
+                    "parents": 2,
+                    "posting": "T",
+                    "voided": "F",
+                },
+                {
+                    "id": 2,
+                    "foreigntotal": 80,
+                    "taxtotal": 0,
+                    "foreignamountunpaid": 80,
+                    "customer": "B",
+                    "parents": 1,
+                    "posting": "T",
+                    "voided": "F",
+                },
             ],
         ]
     )
