@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { Sparkles, Search } from "lucide-react";
+import Link from "next/link";
+import { Button } from "@/components/ui/button";
 
 import { SkillCard } from "@/components/skills/skill-card";
 import { Input } from "@/components/ui/input";
@@ -38,6 +40,11 @@ export default function SkillsPage() {
             open a command in the composer.
           </p>
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-card p-5">
+        <p className="flex-1 text-[13px] text-muted-foreground">Turn an outcome into recurring work. Registered steps determine what can run; expertise alone does not authorize scheduled execution.</p>
+        <Button asChild variant="outline"><Link href="/scheduled-jobs/new">Build a workflow</Link></Button>
       </div>
 
       <div className="relative max-w-sm">

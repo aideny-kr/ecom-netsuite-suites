@@ -11,6 +11,7 @@ import type { ScheduleDetail } from "@/hooks/use-scheduled-jobs";
 
 const mocks = vi.hoisted(() => ({
   scheduledJob: vi.fn(),
+  validate: vi.fn(),
   update: vi.fn(),
   approve: vi.fn(),
   run: vi.fn(),
@@ -22,6 +23,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/hooks/use-scheduled-jobs", () => ({
   useScheduledJob: () => mocks.scheduledJob(),
+  useTestSchedule: () => ({ mutate: vi.fn(), isPending: false }),
+  useValidateSchedule: () => mocks.validate(),
   useUpdateSchedule: () => mocks.update(),
   useApproveSchedule: () => mocks.approve(),
   useRunSchedule: () => mocks.run(),
@@ -81,6 +84,7 @@ let deleteMutate: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   routerPush.mockClear();
+  mocks.validate.mockReturnValue({ mutate: vi.fn(), isPending: false });
   runMutate = vi.fn();
   pauseMutate = vi.fn();
   resumeMutate = vi.fn();

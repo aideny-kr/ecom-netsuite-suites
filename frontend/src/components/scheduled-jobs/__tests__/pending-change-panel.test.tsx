@@ -85,15 +85,9 @@ it("renders the diff lines with add/del/ctx distinguished", () => {
   expect(screen.getByText(/\+ WHERE location IN.*Virtual/)).toBeInTheDocument();
 });
 
-it("Approve calls the approve mutation", () => {
+it("Run pending plan (live) calls run(use_pending=true)", () => {
   wrap(<PendingChangePanel schedule={detail()} />);
-  fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
-  expect(approveMutate).toHaveBeenCalled();
-});
-
-it("Run once with this change calls run(use_pending=true)", () => {
-  wrap(<PendingChangePanel schedule={detail()} />);
-  fireEvent.click(screen.getByRole("button", { name: "Run once with this change" }));
+  fireEvent.click(screen.getByRole("button", { name: "Run pending plan (live)" }));
   expect(runMutate).toHaveBeenCalledWith(true);
 });
 

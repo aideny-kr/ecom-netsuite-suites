@@ -127,6 +127,7 @@ class StepContext:
     actor_type: str = "system"
     actor_id: uuid.UUID | None = None
     current_step_id: str | None = None
+    execution_mode: str = "live"
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,7 @@ class StepSpec:
     params_schema: dict
     executor: StepExecutor
     idempotency: IdempotencyFn | None = None
+    test_contract: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _VALID_KINDS:
@@ -228,6 +230,7 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
             actor_id=ctx.actor_id,
             actor_type=ctx.actor_type,
             mode=params.get("mode", "period"),
+            **({"test_run_id": ctx.run_id} if ctx.execution_mode == "test" else {}),
         )
 
     # compose/refresh may have committed mid-flight (an OAuth token refresh,
@@ -237,7 +240,9 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
     from app.core.database import set_tenant_context
 
     await set_tenant_context(ctx.db, str(ctx.tenant_id))
-    identity = schedule_delivery_identity(ctx.job_id, ctx.current_step_id)
+    identity = schedule_delivery_identity(
+        ctx.run_id if ctx.execution_mode == "test" else ctx.job_id, ctx.current_step_id
+    )
     report.delivery_json = {
         **(report.delivery_json or {}),
         "identity": {
@@ -603,6 +608,7 @@ STEP_REGISTRY: dict[str, StepSpec] = {
         kind="read",
         params_schema=_REPORT_COMPOSE_SCHEMA,
         executor=_report_compose_executor,
+        test_contract="new_period_statement",
     ),
     "report.render_pdf": StepSpec(
         type="report.render_pdf",

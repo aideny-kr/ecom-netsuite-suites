@@ -69,11 +69,7 @@ it("shows the plan version and status pill", () => {
 it("shows the 'What the agent may not do here' note verbatim", () => {
   render(<PlanPanel schedule={detail()} />);
   expect(screen.getByText(/What the agent may not do here:/)).toBeInTheDocument();
-  expect(
-    screen.getByText(
-      /steps come only from the job registry \(queries, reports, files, Drive, email, recon runs\)\. A NetSuite or Celigo write cannot appear in a scheduled plan today; when it can, it will require the same confirmation card the chat uses, on a human's screen, before the job may include it\./,
-    ),
-  ).toBeInTheDocument();
+  expect(screen.getByText(/Email delivery and NetSuite or Celigo transaction writes are not supported/)).toBeInTheDocument();
 });
 
 it("shows a no-plan message when plan_json has no steps yet", () => {

@@ -183,6 +183,7 @@ async def create_scheduled_job(
         plan_json=compiled.plan_json,
         plan_version=0,
         plan_status="pending_approval",
+        parameters={"workflow_review_required": True},
         delivery_json=body.delivery,
         owner_id=actor_id,
         created_via=created_via,
@@ -234,6 +235,16 @@ async def enqueue_run(
     reason — an accepted convention (agent-graph.md #10), not a one-off
     exception to "service flushes, endpoint commits once".
     """
+    if (schedule.parameters or {}).get("workflow_review_required"):
+        from app.services.jobs.readiness import approval_blocker
+
+        if use_pending:
+            raise PlanNotApproved(
+                "Approve the pending plan before live execution; use its supported report test first."
+            )
+        blocker = await approval_blocker(db, schedule)
+        if blocker:
+            raise PlanNotApproved(blocker)
     plan_to_run = schedule.pending_plan_json if use_pending else schedule.plan_json
     if not plan_to_run or not plan_to_run.get("steps"):
         raise NoPlanToRun("No compiled plan to run" if not use_pending else "No pending plan to run")
@@ -252,6 +263,7 @@ async def enqueue_run(
             "use_pending": use_pending,
             "plan": plan_to_run,
             "budget": dict(schedule.budget_json or {}),
+            "workflow_review": (schedule.parameters or {}).get("workflow_review"),
             "control_version": schedule.plan_version,
             "actor_type": "user",
             "actor_id": str(actor_id) if actor_id else None,

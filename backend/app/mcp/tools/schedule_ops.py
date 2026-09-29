@@ -129,6 +129,8 @@ async def execute_create(params: dict, **kwargs) -> dict:
 
     name = params.get("name")
     schedule_type = params.get("schedule_type")
+    if schedule_type == "job":
+        return {"error": True, "message": "Compiled workflows require an instruction and readiness approval."}
     if not name or not schedule_type:
         return {
             "error": True,

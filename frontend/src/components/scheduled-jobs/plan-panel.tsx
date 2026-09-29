@@ -24,7 +24,7 @@ import { describeStep, describeStepParams } from "./shared";
 import type { PlanStep, ScheduleDetail } from "@/hooks/use-scheduled-jobs";
 
 const AGENT_NOTE =
-  "steps come only from the job registry (queries, reports, files, Drive, email, recon runs). A NetSuite or Celigo write cannot appear in a scheduled plan today; when it can, it will require the same confirmation card the chat uses, on a human's screen, before the job may include it.";
+  "Only registered query, report, Drive, reconciliation and bounded saved-evidence review steps can run. Email delivery and NetSuite or Celigo transaction writes are not supported by this scheduler. Read steps may create in-app outputs and consume provider budget.";
 
 function StepRow({ step, index }: { step: PlanStep; index: number }): JSX.Element {
   const meta = describeStep(step.type);

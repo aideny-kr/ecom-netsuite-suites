@@ -197,6 +197,26 @@ async def test_company_workflow_still_requires_plan_approval(client, db, company
     assert (await client.post(f"/api/v1/schedules/{schedule_id}/run", headers=headers, json={})).status_code == 409
     dispatch.assert_not_called()
     response = await client.post(f"/api/v1/schedules/{schedule_id}/approve", headers=headers)
+    assert response.status_code == 409
+    from app.models.mcp_connector import McpConnector
+
+    db.add(
+        McpConnector(
+            tenant_id=tenant.id,
+            provider="bigquery",
+            label="Synthetic warehouse",
+            server_url="https://example.test",
+            status="active",
+            is_enabled=True,
+        )
+    )
+    await db.flush()
+    review = (await client.post(f"/api/v1/schedules/{schedule_id}/validate", headers=headers, json={})).json()
+    response = await client.post(
+        f"/api/v1/schedules/{schedule_id}/approve",
+        headers=headers,
+        json={"plan_hash": review["plan_hash"], "readiness_hash": review["readiness_hash"]},
+    )
     assert response.status_code == 200, response.text
     response = await client.post(f"/api/v1/schedules/{schedule_id}/run", headers=headers, json={})
     assert response.status_code == 202, response.text

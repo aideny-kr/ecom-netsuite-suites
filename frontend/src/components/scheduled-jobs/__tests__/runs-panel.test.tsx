@@ -57,3 +57,18 @@ it("shows an empty state when there are no runs yet", () => {
   wrap(<RunsPanel scheduleId="s-1" />);
   expect(screen.getByText(/No runs yet/)).toBeInTheDocument();
 });
+
+it("does not infer verification from done and links the concrete report output", () => {
+  mocks.runs.mockReturnValue({ data: [run({ outputs: { compose: { report_id: "11111111-1111-4111-8111-111111111111", version: 2 } } })], isPending: false });
+  wrap(<RunsPanel scheduleId="s-1" />);
+  expect(screen.getByText("Not verified")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /Report/ })).toHaveAttribute("href", "/reports/11111111-1111-4111-8111-111111111111");
+  expect(screen.getByText(/corr-1/)).toBeInTheDocument();
+});
+
+it("never turns provider output text into an unsafe external link", () => {
+  mocks.runs.mockReturnValue({ data: [run({ verification: "uncertain", outputs: { upload: { pdf_url: "javascript:alert(1)" } } })], isPending: false });
+  wrap(<RunsPanel scheduleId="s-1" />);
+  expect(screen.getByText("Uncertain")).toBeInTheDocument();
+  expect(screen.queryByRole("link")).not.toBeInTheDocument();
+});

@@ -451,6 +451,7 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
                         "plan_version": row.plan_version,
                         "control_version": row.plan_version,
                         "budget": dict(row.budget_json or {}),
+                        "workflow_review": (row.parameters or {}).get("workflow_review"),
                         "actor_type": "system",
                         "actor_id": None,
                         "recovery_version": 1,
@@ -602,6 +603,22 @@ async def _run_steps(
             or (control_version is not None and current.plan_version != control_version)
         ):
             return REASON_BLOCKED, outputs, "run cancelled, schedule stopped, or plan changed"
+        if (run.parameters or {}).get("execution_mode") == "test":
+            from app.services.jobs.testing import test_guard
+
+            test_error = await test_guard(db, current, run)
+            if test_error:
+                return REASON_BLOCKED, outputs, test_error
+        elif (current.parameters or {}).get("workflow_review_required"):
+            from app.services.jobs.readiness import approval_blocker
+
+            readiness_error = await approval_blocker(db, current)
+            if readiness_error:
+                from app.services.jobs.readiness import pause_for_review
+
+                await pause_for_review(db, current, readiness_error)
+                await db.commit()
+                return REASON_BLOCKED, outputs, readiness_error
         usage["seconds"] = time.monotonic() - started_at
         if any(budget.get(k) is not None and usage[k] >= budget[k] for k in usage):
             return REASON_BUDGET, outputs, "budget exhausted before next step"
@@ -640,11 +657,28 @@ async def _run_steps(
             await set_tenant_context(db, str(tenant_id))
 
         try:
+            from app.services.jobs.source_scope import SourceScopeChangedError, reviewed_sources
+
             remaining = (
                 None if budget.get("seconds") is None else max(0, budget["seconds"] - (time.monotonic() - started_at))
             )
             async with asyncio.timeout(remaining) as deadline:
-                artifact = await spec.executor(ctx, params)
+                readiness_hash = ((current.parameters or {}).get("workflow_review") or {}).get("readiness_hash")
+                if ctx.execution_mode == "test":
+                    readiness_hash = (run.parameters or {}).get("readiness_hash")
+                with reviewed_sources(ctx, control_version, readiness_hash):
+                    artifact = await spec.executor(ctx, params)
+        except SourceScopeChangedError as exc:
+            await db.rollback()
+            if ctx.execution_mode != "test":
+                from app.services.jobs.readiness import pause_for_review
+
+                await set_tenant_context(db, str(tenant_id))
+                stopped = await db.get(Schedule, ctx.job_id)
+                if stopped is not None:
+                    await pause_for_review(db, stopped, str(exc))
+                    await db.commit()
+            return REASON_BLOCKED, outputs, str(exc)
         except TimeoutError:
             await db.rollback()
             if deadline.expired():
@@ -755,7 +789,10 @@ async def _finalize_run(
     # and both scheduling a retry.
     row = (
         await db.execute(
-            select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id).with_for_update()
+            select(Schedule)
+            .where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one()
     job = (
@@ -774,7 +811,7 @@ async def _finalize_run(
         job.error_message = detail
 
     row.last_run_at = now
-    row.last_run_status = reason
+    row.last_run_status = "paused" if row.paused_at is not None else reason
     return row, job
 
 
@@ -1065,6 +1102,10 @@ async def _run_schedule_now_locked(
         ).scalar_one_or_none()
         if existing_job is None:
             return RunOutcome(REASON_BLOCKED, None, {})
+        if (existing_job.parameters or {}).get("execution_mode") == "test":
+            from app.services.jobs.testing import run_test
+
+            return await run_test(db, row, existing_job)
         saved = existing_job.parameters or {}
         if recovering and existing_job.status == "pending" and saved.get("recovery_version") != 1:
             _stamp_blocked_existing_job(existing_job, "legacy dispatch has no saved recovery identity; not replayed")
@@ -1116,6 +1157,12 @@ async def _run_schedule_now_locked(
         .all()
     )
     for interrupted_job in interrupted:
+        if (interrupted_job.parameters or {}).get("execution_mode") == "test":
+            from app.services.jobs.testing import run_test
+
+            await run_test(db, row, interrupted_job)
+            await set_tenant_context(db, str(tenant_id))
+            continue
         if await _settle_completed_receipt(db, row, interrupted_job):
             await set_tenant_context(db, str(tenant_id))
             continue
@@ -1137,6 +1184,33 @@ async def _run_schedule_now_locked(
         jid = _stamp_blocked_existing_job(
             existing_job, "schedule stopped or unresolved operation requires reconciliation"
         )
+        await db.commit()
+        return RunOutcome(REASON_BLOCKED, jid, {})
+
+    from app.services.jobs.readiness import approval_blocker
+
+    readiness_error = (
+        "Pending plan requires approval before live execution."
+        if use_pending and (row.parameters or {}).get("workflow_review_required")
+        else await approval_blocker(db, row)
+    )
+    if not readiness_error and existing_job is not None and (row.parameters or {}).get("workflow_review_required"):
+        saved = existing_job.parameters or {}
+        if (
+            saved.get("workflow_review") != (row.parameters or {}).get("workflow_review")
+            or saved.get("control_version") != row.plan_version
+            or saved.get("plan") != row.plan_json
+            or saved.get("budget") != (row.budget_json or {})
+        ):
+            # Stale queued intent does not revoke the newer, valid approval.
+            jid = _stamp_blocked_existing_job(existing_job, "Queued approval changed; request a new run.")
+            await db.commit()
+            return RunOutcome(REASON_BLOCKED, jid, {})
+    if readiness_error:
+        from app.services.jobs.readiness import pause_for_review
+
+        await pause_for_review(db, row, readiness_error)
+        jid = _stamp_blocked_existing_job(existing_job, readiness_error)
         await db.commit()
         return RunOutcome(REASON_BLOCKED, jid, {})
 
@@ -1242,6 +1316,7 @@ async def _run_schedule_now_locked(
     job_parameters.setdefault("actor_type", actor_type)
     job_parameters.setdefault("actor_id", str(actor_id) if actor_id else None)
     job_parameters.setdefault("recovery_version", 1)
+    job_parameters.setdefault("workflow_review", (row.parameters or {}).get("workflow_review"))
     job_parameters["dispatch_ready"] = True
     if attempt > 1 and job_parameters["control_version"] != row.plan_version:
         jid = _stamp_blocked_existing_job(existing_job, "plan changed since original occurrence")
@@ -1573,6 +1648,7 @@ async def _run_schedule_now_locked(
                     "plan_version": job.parameters["plan_version"],
                     "control_version": control_version,
                     "budget": job.parameters["budget"],
+                    "workflow_review": job.parameters.get("workflow_review"),
                     "remaining_budget": {
                         k: None if v is None else max(0, v - used.get(k, 0)) for k, v in run_budget.items()
                     },

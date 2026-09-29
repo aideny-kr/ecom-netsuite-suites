@@ -418,6 +418,7 @@ async def compose_playbook_report(
     mode="period",
     actor_type="user",
     closed_period=None,
+    test_run_id: uuid.UUID | None = None,
 ):
     """Deterministic compose: recipe template → fail-closed source execution →
     frozen HTML → normal Report row. Reuses the refresh engine's execution seam
@@ -456,6 +457,11 @@ async def compose_playbook_report(
         required_result_ids,
         spec_json_safe,
     )
+
+    if test_run_id is not None and (
+        mode != "period" or playbook_key not in {"income_statement", "balance_sheet", "trial_balance"}
+    ):
+        raise ValueError("Unsupported report test contract")
 
     if mode not in ("period", "tracking"):
         raise ValueError(f"mode must be 'period' or 'tracking' (got {mode!r})")
@@ -552,6 +558,8 @@ async def compose_playbook_report(
             series_id = existing_series_id
 
     title, recipe = build_playbook_recipe(playbook_key, params)
+    if test_run_id is not None:
+        title = f"Test · {title}"
     playbook_meta = recipe.get("playbook")
     # T2-review finding (retained + extended by the refresh-support follow-up):
     # registering a playbook in PLAYBOOKS makes it immediately reachable through
@@ -700,6 +708,8 @@ async def compose_playbook_report(
         .values(
             tenant_id=tenant_id,
             title=title,
+            auto_refresh="off" if test_run_id is not None else "daily",
+            source_run_id=test_run_id,
             # Risk 3: a financial_statement model carries raw Decimal (spark/trend)
             # fields — sanitize BEFORE persisting (spec_json_safe), never before
             # rendering (html above was already built from the live Decimal-bearing
@@ -754,6 +764,8 @@ async def compose_playbook_report(
 
     report = (await db.execute(select(Report).where(Report.id == report_id))).scalar_one()
     audit_payload = {"playbook": playbook_key, "source_count": len(recipe["sources"])}
+    if test_run_id is not None:
+        audit_payload.update(execution_mode="test", test_run_id=str(test_run_id))
     if series_id is not None:
         audit_payload["series_id"] = str(series_id)
     await audit_service.log_event(

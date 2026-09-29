@@ -36,9 +36,14 @@ async def _get_bigquery_connector(context: dict) -> McpConnector | None:
             McpConnector.tenant_id == tenant_id,
             McpConnector.provider == "bigquery",
             McpConnector.status == "active",
+            McpConnector.is_enabled.is_(True),
         )
     )
-    return result.scalars().first()
+    connector = result.scalars().first()
+    from app.services.jobs.source_scope import check_selected_source
+
+    await check_selected_source(db, tenant_id, "bigquery", connector)
+    return connector
 
 
 def _extract_credentials(connector: McpConnector) -> tuple[dict, str, str | None]:

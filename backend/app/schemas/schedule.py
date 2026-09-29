@@ -191,6 +191,20 @@ class ScheduleRunRequest(BaseModel):
     use_pending: bool = False
 
 
+class ScheduleValidateRequest(ScheduleRunRequest):
+    expected_plan_hash: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
+class ScheduleTestRequest(ScheduleValidateRequest):
+    expected_plan_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    readiness_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ScheduleApproveRequest(BaseModel):
+    readiness_hash: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    plan_hash: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
 class DiffLineOut(BaseModel):
     kind: str  # "add" | "del" | "ctx"
     step: Optional[int]
@@ -246,6 +260,8 @@ class ScheduleListResponse(BaseModel):
 
 
 class ScheduleDetailResponse(ScheduleResponse):
+    plan_hash: Optional[str] = None
+    pending_plan_hash: Optional[str] = None
     plan_json: Optional[dict] = None
     pending_plan_json: Optional[dict] = None
     pending_plan_reason: Optional[str] = None
@@ -268,6 +284,7 @@ class ScheduleRunResponse(BaseModel):
 
 
 class ScheduleRunItem(BaseModel):
+    execution_mode: str = "live"
     id: str
     status: str
     reason: Optional[str] = None
@@ -278,3 +295,4 @@ class ScheduleRunItem(BaseModel):
     attempt: Optional[int] = None
     outputs: dict = Field(default_factory=dict)
     detail: Optional[str] = None
+    verification: str = "not_verified"

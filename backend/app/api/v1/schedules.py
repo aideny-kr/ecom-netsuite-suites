@@ -30,6 +30,7 @@ from app.models.pipeline import Schedule
 from app.models.user import User
 from app.schemas.schedule import (
     DiffLineOut,
+    ScheduleApproveRequest,
     ScheduleCreate,
     ScheduleDetailResponse,
     ScheduleListResponse,
@@ -37,10 +38,13 @@ from app.schemas.schedule import (
     ScheduleRunItem,
     ScheduleRunRequest,
     ScheduleRunResponse,
+    ScheduleTestRequest,
     ScheduleUpdate,
+    ScheduleValidateRequest,
 )
 from app.services import audit_service, entitlement_service, schedule_service
 from app.services.jobs.compiler import Clarification, compile_instruction, plan_diff
+from app.services.jobs.inspection import inspect_plan, plan_fingerprint
 from app.services.jobs.registry import STEP_REGISTRY
 from app.workers.celery_app import celery_app
 from app.workers.tasks.scheduled_jobs import SCHEDULED_JOBS_RUN_NOW_PRIORITY
@@ -144,12 +148,17 @@ def _to_detail_response(schedule: Schedule) -> ScheduleDetailResponse:
         pending_plan_json=schedule.pending_plan_json,
         pending_plan_reason=schedule.pending_plan_reason,
         pending_plan_diff=diff,
+        plan_hash=plan_fingerprint(schedule),
+        pending_plan_hash=plan_fingerprint(schedule, use_pending=True) if schedule.pending_plan_json else None,
         owner_id=str(schedule.owner_id) if schedule.owner_id else None,
     )
 
 
-async def _get_or_404(db: AsyncSession, schedule_id: uuid.UUID, tenant_id: uuid.UUID) -> Schedule:
-    schedule = await schedule_service.get_schedule(db, schedule_id, tenant_id)
+async def _get_or_404(db: AsyncSession, schedule_id: uuid.UUID, tenant_id: uuid.UUID, *, lock=False) -> Schedule:
+    query = select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id)
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    schedule = await db.scalar(query)
     if schedule is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     return schedule
@@ -321,6 +330,24 @@ async def update_schedule(
     applies immediately, no approval needed.
     """
     schedule = await _get_or_404(db, schedule_id, user.tenant_id)
+    compiled = None
+    if body.instruction is not None and schedule.schedule_type == "job":
+        before = (plan_fingerprint(schedule), plan_fingerprint(schedule, use_pending=True), schedule.plan_status)
+        compiled = await compile_instruction(
+            db,
+            tenant_id=user.tenant_id,
+            instruction=body.instruction,
+            actor_id=user.id,
+            plan_version=schedule.plan_version,
+        )
+        if isinstance(compiled, Clarification):
+            raise HTTPException(status_code=409, detail={"clarification": compiled.question})
+        schedule = await _get_or_404(db, schedule_id, user.tenant_id, lock=True)
+        after = (plan_fingerprint(schedule), plan_fingerprint(schedule, use_pending=True), schedule.plan_status)
+        if before != after:
+            raise HTTPException(status_code=409, detail="Workflow changed during compilation. Reload and retry.")
+    else:
+        schedule = await _get_or_404(db, schedule_id, user.tenant_id, lock=True)
 
     # Item 3 (gate fix): a Scheduled-Job-only edit must not act on a
     # pre-Slice-2 `sync|report|recon` row — that row type has no
@@ -332,6 +359,9 @@ async def update_schedule(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="not a scheduled job")
 
     correlation_id = _correlation_id(request)
+    from app.services.jobs.readiness import execution_fingerprint
+
+    before_execution = execution_fingerprint(schedule)
     changed_fields: dict = {}
     cron_or_tz_changed = False
 
@@ -361,19 +391,6 @@ async def update_schedule(
         changed_fields["discard_pending"] = True
 
     if body.instruction is not None:
-        compiled = await compile_instruction(
-            db,
-            tenant_id=user.tenant_id,
-            instruction=body.instruction,
-            actor_id=user.id,
-            plan_version=schedule.plan_version,
-        )
-        if isinstance(compiled, Clarification):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={"clarification": compiled.question},
-            )
-
         schedule.instruction = body.instruction
         if schedule.plan_status == "approved" and schedule.plan_json:
             schedule.pending_plan_json = compiled.plan_json
@@ -381,6 +398,7 @@ async def update_schedule(
         else:
             schedule.plan_json = compiled.plan_json
             schedule.plan_status = "pending_approval"
+            schedule.parameters = {**(schedule.parameters or {}), "workflow_review_required": True}
         changed_fields["instruction"] = True
 
     # Item 2 (gate fix): `approve_schedule`/`resume_schedule` both recompute
@@ -392,6 +410,10 @@ async def update_schedule(
     # shared `recompute_next_run_at` also refuses to touch `next_run_at`
     # while a retry is pending (`retry_job_id` set) — `cron_or_tz_changed`
     # stays the trigger for whether to call it at all.
+    if (schedule.parameters or {}).get("workflow_review") and before_execution != execution_fingerprint(schedule):
+        schedule.paused_at = datetime.now(timezone.utc)
+        schedule.pause_reason = "Settings changed. Validate, refresh approval and resume."
+
     if cron_or_tz_changed:
         schedule_service.recompute_next_run_at(schedule, now=datetime.now(timezone.utc))
 
@@ -416,19 +438,68 @@ async def update_schedule(
 # ---------------------------------------------------------------------------
 
 
+@router.post("/{schedule_id}/validate")
+async def validate_schedule(
+    schedule_id: uuid.UUID,
+    body: ScheduleValidateRequest,
+    user: Annotated[User, Depends(require_permission("schedules.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    schedule = await _get_or_404(db, schedule_id, user.tenant_id)
+    if schedule.schedule_type != "job":
+        raise HTTPException(status_code=409, detail="not a scheduled job")
+    if body.expected_plan_hash and body.expected_plan_hash != plan_fingerprint(schedule, use_pending=body.use_pending):
+        raise HTTPException(status_code=409, detail="Displayed plan or settings changed. Reload before validating.")
+    from app.services.jobs.readiness import inspect_readiness
+
+    return await inspect_readiness(db, schedule, use_pending=body.use_pending)
+
+
+@router.post("/{schedule_id}/test", response_model=ScheduleRunResponse, status_code=202)
+async def test_schedule(
+    schedule_id: uuid.UUID,
+    body: ScheduleTestRequest,
+    user: Annotated[User, Depends(require_permission("schedules.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    from app.services.jobs.testing import enqueue_test
+
+    schedule = await _get_or_404(db, schedule_id, user.tenant_id, lock=True)
+    try:
+        job = await enqueue_test(db, schedule, user.id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    job_id = job.id
+    await db.commit()
+    celery_app.send_task(
+        "tasks.scheduled_jobs_run_now",
+        kwargs={
+            "schedule_id": str(schedule_id),
+            "tenant_id": str(user.tenant_id),
+            "use_pending": body.use_pending,
+            "actor_id": str(user.id),
+            "job_id": str(job_id),
+        },
+        queue="sync",
+        priority=SCHEDULED_JOBS_RUN_NOW_PRIORITY,
+    )
+    return ScheduleRunResponse(jobs_id=str(job_id))
+
+
 @router.post("/{schedule_id}/approve", response_model=ScheduleDetailResponse)
 async def approve_schedule(
     schedule_id: uuid.UUID,
     user: Annotated[User, Depends(require_permission("schedules.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
     request: Request,
+    body: ScheduleApproveRequest | None = None,
 ):
     """Pending -> approved, `plan_version + 1` (spec §B5, verbatim), whether
     this is the schedule's first-ever approval (its ONLY plan is `plan_json`,
     still sitting at `plan_status == "pending_approval"` from creation) or a
     later pending-CHANGE approval (`pending_plan_json` promoted over
     `plan_json`)."""
-    schedule = await _get_or_404(db, schedule_id, user.tenant_id)
+    schedule = await _get_or_404(db, schedule_id, user.tenant_id, lock=True)
 
     # Item 3 (gate fix): approve is a Scheduled-Job-only concept — a legacy
     # row's `plan_status`/`plan_json` don't mean anything (always None), so
@@ -437,15 +508,53 @@ async def approve_schedule(
     if schedule.schedule_type != "job":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="not a scheduled job")
 
+    modern = bool(body and body.readiness_hash)
+    if modern and not body.plan_hash:
+        raise HTTPException(status_code=409, detail="Approval requires the validated plan fingerprint.")
+    if (schedule.parameters or {}).get("workflow_review_required") and not modern:
+        raise HTTPException(status_code=409, detail="Validate current readiness before approval.")
+    refresh_approval = modern and schedule.plan_status == "approved" and not schedule.pending_plan_json
+    if (
+        not refresh_approval
+        and not schedule.pending_plan_json
+        and (schedule.plan_status != "pending_approval" or not schedule.plan_json)
+    ):
+        raise HTTPException(status_code=400, detail="No pending plan to approve")
+    review = inspect_plan(schedule, use_pending=bool(schedule.pending_plan_json))
+    if body is not None and body.plan_hash is not None and body.plan_hash != review["plan_hash"]:
+        raise HTTPException(status_code=409, detail="Plan or settings changed. Validate and review again.")
+    if not review["structurally_valid"]:
+        raise HTTPException(status_code=409, detail={"blockers": review["blockers"]})
+
+    if modern:
+        from app.services.jobs.readiness import inspect_readiness
+
+        readiness = await inspect_readiness(db, schedule, use_pending=bool(schedule.pending_plan_json))
+        if not readiness["ready"] or body.readiness_hash != readiness["readiness_hash"]:
+            raise HTTPException(
+                status_code=409, detail="Source, permission or policy changed or unavailable. Validate again."
+            )
+
     if schedule.pending_plan_json:
         schedule.plan_json = schedule.pending_plan_json
         schedule.pending_plan_json = None
         schedule.pending_plan_reason = None
-    elif schedule.plan_status != "pending_approval" or not schedule.plan_json:
+    elif not refresh_approval and (schedule.plan_status != "pending_approval" or not schedule.plan_json):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No pending plan to approve")
 
     schedule.plan_status = "approved"
     schedule.plan_version += 1
+    if modern:
+        from app.services.jobs.readiness import execution_fingerprint
+
+        schedule.parameters = {
+            **(schedule.parameters or {}),
+            "workflow_review_required": True,
+            "workflow_review": {
+                "execution_hash": execution_fingerprint(schedule),
+                "readiness_hash": readiness["readiness_hash"],
+            },
+        }
 
     # Item 4 (delta gate fix): the shared helper refuses to touch
     # `next_run_at` while a retry is pending (`retry_job_id` set) — approving
@@ -462,7 +571,7 @@ async def approve_schedule(
         resource_type="schedule",
         resource_id=str(schedule_id),
         correlation_id=_correlation_id(request),
-        payload={"plan_version": schedule.plan_version},
+        payload={"plan_version": schedule.plan_version, "reviewed_plan_hash": review["plan_hash"]},
     )
     await db.commit()
     await db.refresh(schedule)
@@ -593,6 +702,11 @@ async def resume_schedule(
     )
     if unresolved:
         raise HTTPException(status_code=409, detail=f"Reconcile uncertain operation {unresolved} before resuming")
+    from app.services.jobs.readiness import approval_blocker
+
+    blocker = await approval_blocker(db, schedule) if schedule.plan_status == "approved" else None
+    if blocker:
+        raise HTTPException(status_code=409, detail=blocker)
     schedule.paused_at = None
     schedule.pause_reason = None
     if schedule.last_run_status == "paused":
@@ -696,6 +810,8 @@ async def list_runs(
                 attempt=params.get("attempt"),
                 outputs=summary.get("outputs") or {},
                 detail=summary.get("detail"),
+                verification=summary.get("verification") or "not_verified",
+                execution_mode=params.get("execution_mode", "live"),
             )
         )
     return items

@@ -659,6 +659,9 @@ async def deliver_report_to_drive(
                 )
 
     connector = await _sheets_connector(db, tenant_id)
+    from app.services.jobs.source_scope import check_selected_source
+
+    await check_selected_source(db, tenant_id, "google_sheets", connector)
     if connector is None:
         raise DeliveryUnavailable("Connect a Google Sheets service account before delivering reports to Drive.")
 
