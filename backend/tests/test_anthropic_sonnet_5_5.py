@@ -67,7 +67,7 @@ async def test_thinking_off_uses_between_tools_on_sonnet_5_5_and_disabled_on_son
     assert old["thinking"] == {"type": "disabled"}  # Sonnet 5 unchanged
 
 
-@pytest.mark.parametrize(("level", "effort"), [("low", "low"), ("high", "high"), ("xhigh", "xhigh")])
+@pytest.mark.parametrize(("level", "effort"), [("low", "medium"), ("high", "high"), ("xhigh", "xhigh")])
 async def test_thinking_on_asks_sonnet_5_5_for_its_progress_updates(level, effort):
     body, headers = await _sent(NEW, thinking_level=level)
     assert body["thinking"] == {"type": "adaptive", "display": "updates"}

@@ -7,6 +7,18 @@ This module owns ONLY the vocabulary so the mapping lives in one place.
 
 LEVELS: tuple[str, ...] = ("none", "low", "med", "high", "xhigh")
 
+# The user's rule (2026-09-29): never "low"; "med" is the lowest level. "low" stays in the
+# vocabulary so stored settings and older callers still parse, but every provider mapping below
+# sends it as "med". The rule held only as a default until the #355 packet review showed a
+# CHAT_THINKING_DEFAULT_LEVEL=low override still reaching Sonnet 5.5 as effort "low".
+FLOOR = "med"
+
+
+def floored(level: str | None) -> str | None:
+    """The level actually used: "low" becomes the floor, everything else is unchanged."""
+    return FLOOR if level == "low" else level
+
+
 # Anthropic extended-thinking budget_tokens per level. 0 == thinking disabled.
 _BUDGETS: dict[str, int] = {
     "none": 0,
@@ -39,12 +51,12 @@ _NEXT: dict[str, str] = {
 
 def budget_for(level: str | None) -> int:
     """Anthropic budget_tokens for a level (0 = thinking off)."""
-    return _BUDGETS.get(level or "", 0)
+    return _BUDGETS.get(floored(level) or "", 0)
 
 
 def reasoning_effort(level: str | None) -> str | None:
     """OpenAI/OpenRouter reasoning_effort for a level (None = omit)."""
-    return _EFFORT.get(level or "")
+    return _EFFORT.get(floored(level) or "")
 
 
 # Anthropic adaptive-thinking effort per level (output_config.effort). Unlike the
@@ -63,7 +75,8 @@ def anthropic_effort(level: str | None, model: str | None = None) -> str | None:
     """Anthropic output_config.effort for a level (None = omit). MODEL-AWARE for the
     top level: 'xhigh' is only valid on Sonnet 5 / Opus 4.7+ / Fable; on the other
     adaptive models (Sonnet 4.6 / Opus 4.6) it maps to 'max' (xhigh would 400)."""
-    base = {"low": "low", "med": "medium", "high": "high"}.get(level or "")
+    level = floored(level)
+    base = {"med": "medium", "high": "high"}.get(level or "")
     if base:
         return base
     if level == "xhigh":

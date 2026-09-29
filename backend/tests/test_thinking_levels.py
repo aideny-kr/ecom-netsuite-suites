@@ -3,7 +3,7 @@ from app.services.chat import thinking
 
 def test_budget_for_known_levels():
     assert thinking.budget_for("none") == 0
-    assert thinking.budget_for("low") == 2048
+    assert thinking.budget_for("low") == thinking.budget_for("med")  # "low" is floored to med
     assert thinking.budget_for("med") == 6144
     assert thinking.budget_for("high") == 12288
     assert thinking.budget_for("xhigh") == 24576
@@ -27,7 +27,7 @@ def test_next_level_caps_at_xhigh():
 
 def test_reasoning_effort_mapping():
     assert thinking.reasoning_effort("none") is None
-    assert thinking.reasoning_effort("low") == "low"
+    assert thinking.reasoning_effort("low") == "medium"  # "low" is floored to med
     assert thinking.reasoning_effort("med") == "medium"
     assert thinking.reasoning_effort("high") == "high"
     # OpenAI/OpenRouter reasoning_effort enum is only low|medium|high — there is
@@ -50,7 +50,7 @@ def test_is_forced_tool_choice():
 
 def test_anthropic_effort_mapping():
     assert thinking.anthropic_effort("none") is None
-    assert thinking.anthropic_effort("low") == "low"
+    assert thinking.anthropic_effort("low") == "medium"  # "low" is floored to med
     assert thinking.anthropic_effort("med") == "medium"
     assert thinking.anthropic_effort("high") == "high"
     # xhigh is MODEL-AWARE: valid on Sonnet 5 / Opus 4.7+ / Fable; on adaptive models

@@ -137,10 +137,12 @@ def _is_simple_lookup(query: str) -> bool:
 
 def compute_thinking_level(*, is_simple_lookup: bool, enabled: bool, default: str) -> str:
     """Layer-1 initial thinking level. Simple lookups (Haiku) never think;
-    the global kill-switch forces none; otherwise use the configured default."""
+    the global kill-switch forces none; otherwise the configured default, never below med."""
+    from app.services.chat.thinking import floored
+
     if not enabled or is_simple_lookup:
         return "none"
-    return default
+    return floored(default)
 
 
 # ---------------------------------------------------------------------------
