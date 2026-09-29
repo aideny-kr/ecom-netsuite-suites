@@ -113,9 +113,9 @@ ROUTER_PROMPT = (
     "- IMPORTANT: When the user mentions NetSuite data or"
     " asks about transactions, orders, invoices, customers,"
     " items,\n"
-    "  vendors, etc. from NetSuite, prefer external MCP"
-    " tools if available. Fall back to local"
-    ' "netsuite.suiteql" tool only if no external tools exist.\n'
+    "  vendors, etc. from NetSuite, use the local"
+    ' "netsuite.suiteql" tool first (it sees custom records and fields);'
+    " use external MCP tools for standard tables or when no local tool exists.\n"
     "- When using netsuite.suiteql, provide the SuiteQL"
     ' query in tool_params as {{"query":'
     ' "SELECT ...", "limit": 100}}.\n'

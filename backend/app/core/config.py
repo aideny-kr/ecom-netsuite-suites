@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     # escalate_reasoning still lifts hard turns. (Legacy budget_tokens' hard cap used
     # to bound this implicitly; adaptive effort has no token ceiling.)
     CHAT_THINKING_ENABLED: bool = True
-    CHAT_THINKING_DEFAULT_LEVEL: str = "low"
+    CHAT_THINKING_DEFAULT_LEVEL: str = "med"  # never "low": med is the floor (user rule, 2026-09-29)
     # NOTE: the Layer-2 GLM-tier config (CHAT_THINKING_MODEL/PROVIDER +
     # ALLOW_CHINA_ORIGIN_ON_CUSTOMER_DATA) was removed — the model/provider switch
     # it gated was never wired into the escalation path, and shipping a dormant

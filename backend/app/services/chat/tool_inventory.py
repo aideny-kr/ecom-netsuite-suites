@@ -174,7 +174,7 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
     sections: list[str] = []
 
     if matched:
-        sections.append("\n\nNETSUITE MCP TOOLS (connect directly to NetSuite — prefer these for execution):")
+        sections.append("\n\nNETSUITE MCP TOOLS (connect directly to NetSuite):")
 
         if "REPORTS" in matched:
             sections.append(
@@ -213,7 +213,8 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
         if "SUITEQL" in matched:
             sections.append(
                 f"\n• SUITEQL (MCP): `{matched['SUITEQL']}`"
-                "\n  Ad-hoc SuiteQL queries inside NetSuite. Prefer over local netsuite_suiteql."
+                "\n  Ad-hoc SuiteQL over standard tables. Use local netsuite_suiteql first for custom records "
+                "and custom fields; on zero rows or an error, try the other tool."
                 '\n  Parameters: {"sqlQuery": "SELECT ...", "description": "..."}'
                 "\n  STILL FOLLOW all <suiteql_dialect_rules> — they apply to MCP SuiteQL too."
             )
@@ -233,7 +234,9 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
             "\n\nEXECUTION PRIORITY FOR NETSUITE (after selecting the user's requested source):"
             "\n  Financial statements → ns_runReport"
             "\n  Pre-built business reports → ns_runSavedSearch"
-            "\n  Ad-hoc data queries → ns_runCustomSuiteQL (MCP) → netsuite_suiteql (local fallback)"
+            "\n  Ad-hoc data queries → netsuite_suiteql (local; custom records and fields) first, "
+            "ns_runCustomSuiteQL (MCP) for standard tables; on zero rows or an error, try the other tool "
+            "before concluding the data does not exist"
             "\n  Accounting cases → transaction_ops_accounting_evidence first; reuse its scoped native reads."
             "\n  Existing credit posted to the wrong account → transaction_ops_propose_credit_reallocation; "
             "the server verifies the outcome, a person approves."
