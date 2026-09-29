@@ -1393,9 +1393,12 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           <DataFrameTable data={dataTableData} queryText={dataTableData.query} />
         )}
 
-        {structuredOutput?.type === "group_breakdown" && isGroupBreakdown(structuredOutput.data) && (
-          <GroupBreakdownCard data={structuredOutput.data} />
-        )}
+        {(() => {
+          // Saved as the turn's output, or under its own key when a later tool in the turn took that slot.
+          const saved =
+            structuredOutput?.type === "group_breakdown" ? structuredOutput.data : structuredOutput?.group_breakdown;
+          return isGroupBreakdown(saved) ? <GroupBreakdownCard data={saved} /> : null;
+        })()}
 
         {chartDataList && chartDataList.length > 0 && chartDataList.map((chart, idx) => (
           <ChartRenderer key={idx} data={chart} />

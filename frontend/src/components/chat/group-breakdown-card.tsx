@@ -211,6 +211,7 @@ export function GroupBreakdownCard({ data }: { data: GroupBreakdownData }) {
       <p className="border-t bg-muted/40 px-4 py-2 text-[12px] text-muted-foreground">
         Checked with saved evidence for <span className="tabular-nums">{data.checked.saved_evidence}</span> orders
         {data.checked.saved_source_orders ? ` (${data.checked.saved_source_orders} with the saved Solidus order)` : ""}
+        {data.checked.saved_source === "unavailable" ? " · saved Solidus orders could not be read, so the Solidus rules were skipped" : ""}
         {` · ${NETSUITE[data.checked.netsuite] || data.checked.netsuite}`}
         {` · ${data.checked.seconds}s. A cause shows only when its rule held for every order in it.`}
       </p>

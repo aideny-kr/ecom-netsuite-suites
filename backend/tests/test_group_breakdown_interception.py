@@ -97,3 +97,16 @@ async def test_the_tool_answers_within_its_own_limit(monkeypatch):
     monkeypatch.setattr(tools, "_BREAKDOWN_TIMEOUT", 0.05)
     result = await tools.execute_group_breakdown({"group_id": "a" * 32}, context={})
     assert result == {"success": False, "error": "transaction_investigation_timeout"}
+
+
+def test_a_later_tool_in_the_same_turn_never_takes_the_card_away():
+    # Review round 3 of #356: the message saved only the turn's LAST structured output, so a tool
+    # called after the breakdown replaced it and the card vanished when the stream ended.
+    from app.services.chat.orchestrator import _keep_group_breakdown
+
+    table = {"type": "data_table", "data": {"rows": []}}
+    assert _keep_group_breakdown(table, RESULT) == {**table, "group_breakdown": RESULT}
+    assert _keep_group_breakdown(None, RESULT) == {"group_breakdown": RESULT}
+    own = {"type": "group_breakdown", "data": RESULT}
+    assert _keep_group_breakdown(own, RESULT) is own
+    assert _keep_group_breakdown(table, None) is table

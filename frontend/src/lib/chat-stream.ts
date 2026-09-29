@@ -129,7 +129,15 @@ export interface GroupBreakdownData {
   orders: number;
   totals: Record<string, string>;
   causes: GroupBreakdownCause[];
-  checked: { saved_evidence: number; saved_source_orders: number; netsuite: string; netsuite_orders: number; seconds: number };
+  checked: {
+    saved_evidence: number;
+    saved_source_orders: number;
+    /** complete | unavailable (saved Solidus orders could not be read) | not_configured */
+    saved_source?: string;
+    netsuite: string;
+    netsuite_orders: number;
+    seconds: number;
+  };
 }
 
 /** Shape check for live and saved breakdowns: a malformed payload renders nothing rather than a broken card. */

@@ -392,8 +392,8 @@ async def execute_group_breakdown(params: dict, **kwargs) -> dict:
     try:
         if not isinstance(params, dict) or set(params) - {"group_id", "case_id", "review_run_ids", "status", "search"}:
             raise _ToolError("invalid_parameters")
-        db, tenant_id, _ = await _authorize(context, create=False)
-        async with asyncio.timeout(_BREAKDOWN_TIMEOUT):
+        async with asyncio.timeout(_BREAKDOWN_TIMEOUT):  # authorization included
+            db, tenant_id, _ = await _authorize(context, create=False)
             return await breakdown(db, tenant_id, **params)
     except TimeoutError:
         return {"success": False, "error": "transaction_investigation_timeout"}

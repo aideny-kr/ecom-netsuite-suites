@@ -154,3 +154,8 @@ it("shows every non-zero amount of a cause, not just the one it leads with", () 
   expect(within(row).getByText("tax $10.00")).toBeVisible();
   expect(within(row).getByText("refunds $25.00")).toBeVisible();
 });
+
+it("says when the saved Solidus orders could not be read", () => {
+  render(<GroupBreakdownCard data={{ ...breakdown, checked: { ...breakdown.checked, saved_source: "unavailable" } }} />);
+  expect(screen.getByText(/saved Solidus orders could not be read/)).toBeVisible();
+});

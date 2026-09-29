@@ -6,6 +6,7 @@ whose invoice already matched Solidus. "Order + Tax differences" (72) was mostly
 already corrected, whose refund reason the subsidiary's settings did not count as a tax refund.
 """
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -13,14 +14,17 @@ from uuid import uuid4
 import pytest
 
 from app.core.database import set_tenant_context
+from app.core.encryption import encrypt_credentials
 from app.models.chat import ChatMessage, ChatSession
 from app.models.connection import Connection
 from app.models.transaction_ops import TransactionCase, TransactionConfig
-from app.models.transaction_source_snapshot import TransactionSourceSnapshot
 from app.services.transaction_ops import group_breakdown as gb
+from app.services.transaction_ops import source_snapshot
 from app.services.transaction_ops.case_groups import list_groups
 from app.services.transaction_ops.state_service import StateError
 from tests.conftest import create_test_user
+from tests.test_transaction_ops_runner import NOW as SNAPSHOT_AT
+from tests.test_transaction_ops_runner import source_order
 
 NOW = datetime.now(timezone.utc)
 
@@ -89,32 +93,31 @@ class World:
         return row
 
     async def solidus(self, ref, *, customer_type="consumer", adjustments=()):
-        order = {
-            "number": ref,
-            "customer_type": customer_type,
-            "adjustments": [
+        """Saved through the app's own saver, so the breakdown reads it through the canonical loader."""
+        evidence = source_order()
+        order = evidence["orders"][0]
+        order.update(
+            number=ref,
+            customer_type=customer_type,
+            adjustments=[
                 {
+                    "id": str(900 + index),
                     "label": label,
                     "amount": amount,
                     "adjustable_type": "Spree::Order",
+                    "adjustable_id": "1",
                     "source_type": None,
                     "finalized": False,
                 }
-                for label, amount in adjustments
+                for index, (label, amount) in enumerate(adjustments)
             ],
-        }
-        self.db.add(
-            TransactionSourceSnapshot(
-                tenant_id=self.tenant.id,
-                connection_id=self.source.id,
-                order_reference=ref,
-                connection_fingerprint="f" * 64,
-                observed_at=NOW,
-                source_updated_at=NOW,
-                evidence_json={"version": 1, "evidence": {"orders": [order]}},
-            )
         )
-        await self.db.flush()
+        evidence.update(
+            source_transport="solidus_direct",
+            connection_id=str(self.source.id),
+            _connection_fingerprint=hashlib.sha256(self.source.encrypted_credentials.encode()).hexdigest(),
+        )
+        assert await source_snapshot.save(self.db, self.tenant.id, self.source.id, ref, evidence, now=SNAPSHOT_AT)
 
     async def corrected(self, case, record_type="creditmemo", record_id="15788939"):
         if self.session is None:
@@ -167,13 +170,26 @@ class World:
 async def world(db, tenant_a):
     await set_tenant_context(db, str(tenant_a.id))
     user, _ = await create_test_user(db, tenant_a, role_name="admin")
-    connections = []
-    for provider in ("framework", "netsuite"):
-        connection = Connection(tenant_id=tenant_a.id, provider=provider, label=provider, encrypted_credentials="x")
-        db.add(connection)
-        connections.append(connection)
+    source = Connection(
+        tenant_id=tenant_a.id,
+        provider="solidus",
+        label="Solidus",
+        status="active",
+        metadata_json={"api_profile": "framework_sync"},
+        encrypted_credentials=encrypt_credentials(
+            {
+                "base_url": "https://private-direct-access.frame.work/api/",
+                "auth_type": "api_key",
+                "header_name": "X-Store-Token",
+                "token": "test",
+                "api_profile": "framework_sync",
+            }
+        ),
+    )
+    netsuite = Connection(tenant_id=tenant_a.id, provider="netsuite", label="NetSuite", encrypted_credentials="x")
+    db.add_all([source, netsuite])
     await db.flush()
-    return World(db, tenant_a, user, *connections)
+    return World(db, tenant_a, user, source, netsuite)
 
 
 def link(reason, credit_memo="15788939"):
@@ -331,7 +347,7 @@ async def test_the_model_never_receives_an_amount(world, monkeypatch):
     condensed = json.dumps(gb.condensed_for_model(result))
     assert "90008" not in condensed
     assert '"amounts"' not in condensed and '"totals"' not in condensed and '"open_on_invoices"' not in condensed
-    assert "source_adjustment_not_in_netsuite" in condensed and "Ram Price Adjustment" in condensed
+    assert "source_adjustment_not_in_netsuite" in condensed and "Ram Price Adjustment" not in condensed
 
 
 async def test_one_order_is_a_group_of_one(world, monkeypatch):
@@ -458,8 +474,7 @@ async def test_the_model_never_reads_customer_names_or_numbers_inside_labels(wor
     result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
     assert any(f["fact"] == "Jane Doe" for f in by_cause(result)["invoice_matches_source"]["facts"])
     condensed = json.dumps(gb.condensed_for_model(result))
-    assert "Jane Doe" not in condensed and "50" not in condensed and "5%" not in condensed
-    assert "Refund $# per call #%" in condensed
+    assert "Jane Doe" not in condensed and "50" not in condensed and "Refund" not in condensed
 
 
 async def test_an_invoice_with_the_right_total_but_the_wrong_tax_is_not_called_right(world, monkeypatch):
@@ -529,3 +544,100 @@ async def test_a_missing_tax_amount_is_never_read_as_zero(world, monkeypatch):
         ),
     )
     assert [c["cause"] for c in result["causes"]] == ["no_shared_cause"]
+
+
+async def test_a_cause_accounts_for_every_part_of_the_difference(world, monkeypatch):
+    # Review round 3 of #356, the same shape as rounds 1 and 2: a rule that checked one part of the
+    # difference and ignored another. Every cause now needs every other part to be a known zero.
+    await world.config()
+    await world.case("R000002401", delta="-59.00", tax="-5.00")  # the adjustment explains no tax
+    await world.solidus("R000002401", adjustments=[("SKU Adjustment", "-59.0")])
+    await world.case("R000002402", delta="-10.00", source_total="100.00", refunds="-50.00", record_id="15000021")
+    corrected = await world.case("R000002403", delta="-12.80", tax="-2.80", links=[link("4")])  # more than tax
+    await world.corrected(corrected)
+    await world.case("R000002404", delta="2.80", tax="2.80", links=[link("4")])  # NetSuite tax is lower
+
+    async def invoices(db, tenant_id, config, order_ids):
+        return {
+            "15000021": {
+                "total": gb.Decimal("100.00"),
+                "tax": gb.Decimal("0"),
+                "open": gb.Decimal("0"),
+                "customers": set(),
+            }
+        }, "complete"
+
+    monkeypatch.setattr(gb, "_invoices", invoices)
+    groups = (await list_groups(world.db, world.tenant.id))["groups"]
+    causes = set()
+    for group in groups:
+        result = await gb.breakdown(world.db, world.tenant.id, group_id=group["group_id"])
+        causes |= {c["cause"] for c in result["causes"]}
+    assert causes <= {"no_shared_cause", "refund_without_credit_memo"}, causes
+
+
+async def test_a_saved_order_from_a_rotated_connection_is_not_evidence(world, monkeypatch):
+    # Review round 3 of #356: the saved Solidus order is read through the canonical loader, which
+    # rejects it once the connection's credentials change.
+    await world.config()
+    await world.case("R000002501", delta="-59.00")
+    await world.solidus("R000002501", adjustments=[("SKU Adjustment", "-59.0")])
+    world.source.encrypted_credentials = encrypt_credentials(
+        {
+            "base_url": "https://private-direct-access.frame.work/api/",
+            "auth_type": "api_key",
+            "header_name": "X-Store-Token",
+            "token": "rotated",
+            "api_profile": "framework_sync",
+        }
+    )
+    await world.db.flush()
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert [c["cause"] for c in result["causes"]] == ["no_shared_cause"]
+
+
+async def test_an_invoice_shared_by_several_orders_is_never_split_between_them(world, monkeypatch):
+    # Review round 3 of #356: a consolidated invoice's full total was counted for every order it covers.
+    from contextlib import asynccontextmanager
+
+    from app.services.transaction_ops import netsuite_bulk, netsuite_reader
+
+    @asynccontextmanager
+    async def reader(*args, **kwargs):
+        yield object()
+
+    answers = iter(
+        [
+            [{"invoice_id": 1, "order_id": 11}, {"invoice_id": 1, "order_id": 12}, {"invoice_id": 2, "order_id": 13}],
+            [
+                {"id": 1, "foreigntotal": 500, "taxtotal": 50, "foreignamountunpaid": 0, "customer": "A"},
+                {"id": 2, "foreigntotal": 80, "taxtotal": 0, "foreignamountunpaid": 80, "customer": "B"},
+            ],
+        ]
+    )
+
+    async def query(reader, sql, limit=1000):
+        return next(answers)
+
+    monkeypatch.setattr(netsuite_reader, "authenticated_reader", reader)
+    monkeypatch.setattr(netsuite_bulk, "query", query)
+    await world.config()
+    config = (await world.db.execute(gb.select(TransactionConfig))).scalars().one()
+    by_order, status = await gb._invoices(world.db, world.tenant.id, config, ["11", "12", "13"])
+    assert status == "complete" and set(by_order) == {"13"}
+    assert by_order["13"]["total"] == gb.Decimal("80")
+
+
+async def test_says_so_when_saved_solidus_orders_cannot_be_read(world, monkeypatch):
+    # Found validating round 3 live: when the loader refuses (here, credentials that cannot be
+    # decrypted), the card must not say "no saved Solidus detail yet".
+    await world.config()
+    await world.case("R000002601", delta="-59.00")
+    await world.solidus("R000002601", adjustments=[("SKU Adjustment", "-59.0")])
+    world.source.encrypted_credentials = "not-decryptable"
+    await world.db.flush()
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
+    assert result["checked"]["saved_source"] == "unavailable"
+    assert not any("no saved Solidus detail" in f["fact"] for c in result["causes"] for f in c["facts"])
