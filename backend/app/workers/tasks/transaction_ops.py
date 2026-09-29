@@ -223,13 +223,14 @@ class PolicyReplayTask(InstrumentedTask):
 @celery_app.task(
     base=PolicyReplayTask,
     name="tasks.transaction_policy_replay",
-    queue="recon",
+    queue=RECON_COLLECTOR_QUEUE,
+    priority=6,
     bind=True,
     max_retries=3,
     acks_late=True,
     reject_on_worker_lost=True,
-    soft_time_limit=110,
-    time_limit=120,
+    soft_time_limit=50,
+    time_limit=55,
 )
 def transaction_policy_replay(self, tenant_id: str, replay_id: str):
     async def execute():
@@ -240,8 +241,8 @@ def transaction_policy_replay(self, tenant_id: str, replay_id: str):
         tenant, replay = uuid.UUID(tenant_id), uuid.UUID(replay_id)
         started = time.monotonic()
         async with worker_async_session() as db:
-            while time.monotonic() - started < 75:
-                result = await process_batch(db, tenant, replay)
+            while time.monotonic() - started < 25:
+                result = await asyncio.wait_for(process_batch(db, tenant, replay), timeout=20)
                 if result != "pending":
                     return {"status": result}
         if not await publish(tenant, replay):

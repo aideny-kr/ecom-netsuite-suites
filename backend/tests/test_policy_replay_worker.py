@@ -84,3 +84,10 @@ def test_permanent_worker_failure_does_not_retry(setup, monkeypatch, code, statu
         tasks.transaction_policy_replay.run(str(tenant), str(replay))
     failure.assert_awaited_once_with(db, tenant, replay, code)
     retry.assert_not_called()
+
+
+def test_replay_uses_existing_control_workers_below_scheduler_priority():
+    task = tasks.transaction_policy_replay
+    assert task.queue == tasks.RECON_COLLECTOR_QUEUE
+    assert task.priority > tasks.RECON_COLLECTOR_PRIORITY
+    assert (task.soft_time_limit, task.time_limit) == (50, 55)
