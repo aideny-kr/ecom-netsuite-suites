@@ -206,6 +206,29 @@ if (!diff || diff.trim() === '' || diff.trim() === 'EMPTY_DIFF') {
   return { status: 'EMPTY_DIFF', base: baseUsed, error: 'nothing to review for this target (fail-closed; NOT substituting workspace state)', findings: [] }
 }
 const diffLines = diff.split('\n').length
+// DEGENERATE DIFF. EMPTY_DIFF above catches nothing-at-all; this catches
+// almost-nothing, which is just as dangerous and does not look it. On 2026-08-12 a
+// round against PR #197 resolved ONE line of a 1804-line diff — the local clone was
+// shallow, so the branch tip had no ancestry, `git diff base...head` had no merge
+// base, and prep fell back to something degenerate. The run returned status:OK with
+// zero majors after four consecutive rounds that had each found majors, and that
+// "clean" result was one step from being merged on.
+//
+// A caller who names a target is entitled to have that target reviewed. Anything
+// under a handful of lines means the resolution failed, not that the PR is tiny.
+if (targetSpec && diffLines < 5) {
+  return {
+    status: 'DEGENERATE_DIFF',
+    target: targetSpec,
+    base: baseUsed,
+    diff_lines: diffLines,
+    error:
+      `resolved only ${diffLines} line(s) for target "${targetSpec}" — the diff did not ` +
+      'resolve (a shallow clone with no merge base does exactly this). Refusing to report ' +
+      'a review of it. Run `git fetch --unshallow` and re-run.',
+    findings: [],
+  }
+}
 log(`reviewing target=${targetSpec || 'HEAD'} base=${baseUsed || '?'} (${diffLines} diff lines) — verify 'base' matches the real PR base.`)
 if (diffLines > 4000) log(`WARNING: large diff (${diffLines} lines) — finder recall may degrade; consider splitting by path.`)
 
