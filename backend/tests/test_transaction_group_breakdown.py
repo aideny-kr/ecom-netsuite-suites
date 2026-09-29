@@ -204,6 +204,7 @@ async def test_every_order_lands_in_exactly_one_cause(world, monkeypatch):
     assert {"fact": "no saved Solidus detail yet", "orders": 1} in causes["no_shared_cause"]["facts"]
     assert result["causes"][-1]["cause"] == "no_shared_cause"
     assert result["totals"]["order_total"] == "-6638.00"
+    assert result["scope"] == {"review_run_ids": None, "status": None, "search": ""}
 
 
 async def _no_invoices(db, tenant_id, config, order_ids):
@@ -316,6 +317,7 @@ async def test_one_order_is_a_group_of_one(world, monkeypatch):
     monkeypatch.setattr(gb, "_invoices", _no_invoices)
     result = await gb.breakdown(world.db, world.tenant.id, case_id=str(case.id))
     assert result["orders"] == 1 and result["causes"][0]["cause"] == "source_adjustment_not_in_netsuite"
+    assert result["scope"] is None and result["case_id"] == str(case.id)
 
 
 async def test_another_tenants_case_is_never_read(world, tenant_b):

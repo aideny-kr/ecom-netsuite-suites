@@ -468,6 +468,8 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
     return {
         "success": True,
         "group_id": group_id,
+        # The exact listing scope, so a follow-up group fix can repeat it.
+        "scope": {"review_run_ids": review_run_ids, "status": status, "search": search} if group_id else None,
         "case_id": str(case_id) if case_id is not None else None,
         "pattern": _pattern(pattern_row) if group_id is not None else None,
         "currency": balance.get("currency"),
