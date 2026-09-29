@@ -26,7 +26,7 @@ from app.schemas.transaction_runs import (
     RunCreate,
     RunOut,
 )
-from app.services.transaction_ops import case_service, order_actions, period_review, scheduler
+from app.services.transaction_ops import case_service, order_actions, period_review, policy_replay, scheduler
 from app.services.transaction_ops import state_service as service
 from app.services.transaction_ops.period_review import PeriodReview
 
@@ -489,5 +489,61 @@ async def download_review_report(request: ReviewExport, user: Reader, db: Databa
                 "Cache-Control": "no-store",
             },
         )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+# Explicit historical pilot: separate API from current-state /review and /runs.
+
+
+@router.post("/configs/{config_id}/policy-replays", status_code=202)
+async def create_policy_replay(config_id: UUID, request: policy_replay.ReplayRequest, user: Reader, db: Database):
+    try:
+        replay = await policy_replay.create_replay(db, user.tenant_id, config_id, request, actor=user)
+        queued = await policy_replay.publish(user.tenant_id, replay.id) if replay.status == "pending" else False
+        return {**await policy_replay.status(db, user.tenant_id, replay.id), "queued": queued}
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.get("/policy-replays/{replay_id}")
+async def policy_replay_status(replay_id: UUID, user: Reader, db: Database):
+    try:
+        return await policy_replay.status(db, user.tenant_id, replay_id)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.get("/policy-replays/{replay_id}/entries")
+async def policy_replay_entries(
+    replay_id: UUID,
+    user: Reader,
+    db: Database,
+    after: str = Query(default="", max_length=100),
+    limit: int = Query(default=200, ge=1, le=500),
+    outcome: Literal["equivalent", "affected", "unknown"] | None = None,
+):
+    try:
+        return await policy_replay.entries(db, user.tenant_id, replay_id, after=after, limit=limit, outcome=outcome)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/policy-replays/{replay_id}/resume", status_code=202)
+async def resume_policy_replay(replay_id: UUID, user: Reader, db: Database):
+    try:
+        await service._human(db, user.tenant_id, user, "recon.run")
+        replay = await policy_replay.get_replay(db, user.tenant_id, replay_id)
+        queued = await policy_replay.publish(user.tenant_id, replay.id) if replay.status == "pending" else False
+        return {**await policy_replay.status(db, user.tenant_id, replay_id), "queued": queued}
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/policy-replays/{replay_id}/cancel")
+async def cancel_policy_replay(replay_id: UUID, user: Reader, db: Database):
+    try:
+        await policy_replay.cancel(db, user.tenant_id, replay_id, actor=user)
+        return await policy_replay.status(db, user.tenant_id, replay_id)
     except service.StateError as exc:
         raise _http_error(exc) from None
