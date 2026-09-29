@@ -6,6 +6,8 @@ separately managed HTTPS reverse proxy. `compose.single-company.yml` remains a
 runtime. The dedicated profile does not perform migrations or company creation.
 Framework cutover, source reconciliation, backup/restore and recovery acceptance
 remain separate release gates. Do not point this installer at shared staging.
+Follow [Backup and recovery](RECOVERY.md) for a matched database, files, keys and
+release recovery set. A local restore drill does not establish off-host recovery.
 
 ## Authority and storage
 
