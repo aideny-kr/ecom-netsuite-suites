@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import String, case, cast, func, or_, select
+from sqlalchemy import String, and_, case, cast, func, or_, select
 
 from app.models.canonical import Order
 from app.models.transaction_ops import TransactionFinding as Finding
@@ -52,12 +52,60 @@ def latest_order_evidence(tenant_id):
     )
 
 
-def reconciliation_predicate(tenant_id, value):
+def reconciliation_predicate(tenant_id, value, *, source_connection_id=None):
     if value not in FILTER_STATUSES:
         raise ValueError("Invalid reconciliation status")
-    status = func.coalesce(latest_order_evidence(tenant_id).op("->>")("status"), "not_verified")
+
+    # Counts must not execute a report-reading correlated subquery for every
+    # imported order. Only evidence within the freshness window can contribute
+    # a verified status; older evidence and no evidence both mean not_verified.
+    # Select the latest recent reading once per complete evidence identity.
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    report = func.coalesce(Finding.review_metadata_json, Finding.report_json)
+    connection = Run.config_snapshot["source_connection_id"].astext
+    record = report["source"]["record_id"].astext
+    currency = report["balance"]["currency"].astext
+    identity = (Finding.order_reference, connection, record, currency)
+    readings = (
+        select(
+            Finding.order_reference.label("reference"),
+            connection.label("connection"),
+            record.label("record"),
+            currency.label("currency"),
+            Finding.created_at.label("checked_at"),
+            report["balance"]["status"].astext.label("status"),
+        )
+        .join(Run, and_(Run.id == Finding.run_id, Run.tenant_id == tenant_id))
+        .where(Finding.tenant_id == tenant_id, Finding.created_at >= cutoff)
+        .distinct(*identity)
+        .order_by(*identity, Finding.created_at.desc(), Finding.id.desc())
+    )
+    if source_connection_id is not None:
+        readings = readings.where(connection == str(source_connection_id))
+    latest = readings.cte("recent_order_evidence")
+    status = case(
+        (Order.source_updated_at > latest.c.checked_at, "not_verified"),
+        (latest.c.status.in_(BALANCE_STATUSES), latest.c.status),
+        else_="not_verified",
+    )
     if value == "needs_review":
-        return status.in_(("difference", "ambiguous", "currency_mismatch"))
-    if value == "not_verified":
-        return status.in_(("not_verified", "incomplete"))
-    return status == value
+        matching = status.in_(("difference", "ambiguous", "currency_mismatch"))
+    elif value == "not_verified":
+        matching = status.in_(("not_verified", "incomplete"))
+    else:
+        matching = status == value
+    orders = (
+        select(Order.id)
+        .outerjoin(
+            latest,
+            and_(
+                latest.c.reference == Order.order_number,
+                latest.c.connection == cast(Order.source_connection_id, String),
+                latest.c.record == Order.source_id,
+                latest.c.currency == Order.currency,
+            ),
+        )
+        .where(Order.tenant_id == tenant_id, matching)
+        .correlate(None)
+    )
+    return Order.id.in_(orders)
