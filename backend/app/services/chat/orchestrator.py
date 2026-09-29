@@ -892,6 +892,22 @@ def _intercept_tool_result(
         condensed = _stamp_result_id(condensed, event, result_id)
         return "data_table", event, condensed
 
+    # The breakdown card carries every amount; the model reads causes, counts and next steps.
+    if tool_name in ("transaction_ops.group_breakdown", "transaction_ops_group_breakdown"):
+        invalid = json.dumps({"success": False, "error": "invalid_breakdown_result"})
+        try:
+            parsed = json.loads(result_str)
+        except (ValueError, TypeError):
+            return None, None, invalid
+        if not isinstance(parsed, dict) or parsed.get("success") is not True:
+            return None, None, result_str
+        from app.services.transaction_ops.group_breakdown import condensed_for_model
+
+        try:
+            return "group_breakdown", parsed, json.dumps(condensed_for_model(parsed))
+        except (KeyError, TypeError):
+            return None, None, invalid
+
     # --- Report card path ---
     if tool_name in ("report_compose", "report.compose"):
         try:

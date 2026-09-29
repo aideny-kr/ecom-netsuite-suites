@@ -41,6 +41,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "agent.skill",
         "transaction_ops.configs",
         "transaction_ops.groups",
+        "transaction_ops.group_breakdown",
         "transaction_ops.run",
         "transaction_ops.status",
         "transaction_ops.accounting_evidence",

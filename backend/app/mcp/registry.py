@@ -92,6 +92,28 @@ TOOL_REGISTRY = {
             "offset": {"type": "integer", "description": "Page offset; default 0"},
         },
     },
+    "transaction_ops.group_breakdown": {
+        "description": (
+            "Explain an issue group before fixing it. Splits its orders into causes from saved reconciliation "
+            "evidence, the saved Solidus order and the app's verified corrections, with at most two read-only "
+            "NetSuite queries. Supply the exact group_id and the SAME review_run_ids/status/search used to list it, "
+            "or one case_id for a single order. The user sees a card with every amount; you receive causes, "
+            "counts, facts and a next step for each. Run it before transaction_ops_accounting_group, and run the "
+            "group fix only when a cause's next step is prepare_corrections. Read-only; no proposals."
+        ),
+        "execute": transaction_ops_tools.execute_group_breakdown,
+        "params_schema": {
+            "group_id": {"type": "string", "description": "Group ID from the group list; omit when giving case_id"},
+            "case_id": {"type": "string", "description": "One case UUID; omit when giving group_id"},
+            "review_run_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "The same review_run_ids used to list the group.",
+            },
+            "status": {"type": "string", "description": "The same status used to list the group."},
+            "search": {"type": "string", "description": "The same search used to list the group."},
+        },
+    },
     "transaction_ops.configs": {
         "description": "List configured Framework transaction investigation scopes before choosing a scope to inspect.",
         "execute": transaction_ops_tools.execute_configs,

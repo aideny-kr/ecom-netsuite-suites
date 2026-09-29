@@ -382,6 +382,21 @@ async def execute_groups(params: dict, **kwargs) -> dict:
     return await _with_deadline("groups", params, kwargs.get("context") or {})
 
 
+async def execute_group_breakdown(params: dict, **kwargs) -> dict:
+    """Causes for a group or one case. Read-only: the result renders as a card; no proposals."""
+    from app.services.transaction_ops.group_breakdown import breakdown
+    from app.services.transaction_ops.state_service import StateError
+
+    context = kwargs.get("context") or {}
+    try:
+        if not isinstance(params, dict) or set(params) - {"group_id", "case_id", "review_run_ids", "status", "search"}:
+            raise _ToolError("invalid_parameters")
+        db, tenant_id, _ = await _authorize(context, create=False)
+        return await breakdown(db, tenant_id, **params)
+    except (ValueError, _ToolError, StateError) as exc:
+        return {"success": False, "error": str(exc)}
+
+
 async def execute_accounting_group(params: dict, **kwargs) -> dict:
     """Freeze scoped membership for the server-side proposal handoff; no writes."""
     from app.services.transaction_ops.case_groups import preparation_members

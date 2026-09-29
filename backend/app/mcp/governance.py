@@ -52,6 +52,15 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["group_id", "limit", "offset", "review_run_ids", "status", "search"],
     },
+    "transaction_ops.group_breakdown": {
+        # Saved evidence takes seconds; the NetSuite invoice check has its own 40 s deadline inside.
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 60,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["group_id", "case_id", "review_run_ids", "status", "search"],
+    },
     "transaction_ops.configs": {
         "default_limit": None,
         "max_limit": None,
