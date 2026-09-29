@@ -238,9 +238,24 @@ async def test_receipt_database_immutability_and_real_non_bypass_rls(db, admin_u
     role = f"replay_rls_{uuid4().hex[:12]}"
     await db.execute(text(f"CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS"))
     await db.execute(text(f"GRANT USAGE ON SCHEMA public TO {role}"))
-    await db.execute(text(f"GRANT SELECT ON transaction_policy_replays,transaction_policy_replay_entries TO {role}"))
+    await db.execute(
+        text(f"GRANT SELECT, INSERT ON transaction_policy_replays,transaction_policy_replay_entries TO {role}")
+    )
     await db.execute(text(f"SET LOCAL ROLE {role}"))
     try:
+        assert await db.scalar(select(func.count()).select_from(TransactionPolicyReplay)) == 1
+        assert await db.scalar(select(func.count()).select_from(TransactionPolicyReplayEntry)) == 3
+        with pytest.raises(DBAPIError, match="row-level security"):
+            async with db.begin_nested():
+                await db.execute(
+                    text(
+                        "INSERT INTO transaction_policy_replay_entries "
+                        "(tenant_id,replay_id,order_reference,run_id,finding_id,original_hash) "
+                        "SELECT :other,replay_id,'R000000000',run_id,finding_id,original_hash "
+                        "FROM transaction_policy_replay_entries LIMIT 1"
+                    ),
+                    {"other": tenant_b.id},
+                )
         await db.execute(
             text("SELECT set_config('app.current_tenant_id', :tenant, true)"), {"tenant": str(tenant_b.id)}
         )
@@ -298,3 +313,59 @@ async def test_revoked_initiator_permission_blocks_worker_execution(db, admin_us
     await db.flush()
     with pytest.raises(state.StateError, match="human_actor_required"):
         await service.process_batch(db, actor.tenant_id, replay.id)
+
+
+async def test_changed_evaluator_contract_has_explicit_error(db, admin_user, monkeypatch):
+    actor, _ = admin_user
+    _, target, _ = await seed(db, actor)
+    replay = await service.create_replay(db, actor.tenant_id, target.id, request(), actor=actor)
+    monkeypatch.setattr(service.policy_equivalence, "VERSION", 2)
+    with pytest.raises(state.StateError, match="policy_replay_contract_changed"):
+        await service.process_batch(db, actor.tenant_id, replay.id)
+
+
+@pytest.mark.parametrize("code", ["57014", "55P03"])
+async def test_database_timeouts_are_coded_without_query_details(code):
+    class TimeoutError(Exception):
+        sqlstate = code
+
+    @service.database_errors
+    async def fails():
+        raise DBAPIError("secret query", {}, TimeoutError("secret"))
+
+    with pytest.raises(state.StateError) as error:
+        await fails()
+    assert error.value.code == "policy_replay_database_busy"
+    assert error.value.http_status == 503
+
+
+async def test_unknown_window_basis_is_not_assumed_to_be_updated_at(db, admin_user):
+    actor, _ = admin_user
+    source, target, run = await seed(db, actor)
+    ambiguous = TransactionRun(
+        tenant_id=actor.tenant_id,
+        config_id=source.id,
+        work_key=uuid4().hex,
+        origin="schedule",
+        params_json={key: value for key, value in run.params_json.items() if key != "window_basis"},
+        config_snapshot=run.config_snapshot,
+        status="finished",
+        termination_reason="done",
+        max_api_calls=100,
+        max_orders=100,
+        api_calls_used=0,
+        orders_used=0,
+        deadline_at=NOW,
+        finished_at=NOW,
+        progress_json=run.progress_json,
+    )
+    db.add(ambiguous)
+    await db.flush()
+    db.add(
+        TransactionFinding(
+            tenant_id=actor.tenant_id, run_id=ambiguous.id, order_reference="R000000000", report_json=saved_report()
+        )
+    )
+    await db.flush()
+    replay = await service.create_replay(db, actor.tenant_id, target.id, request(), actor=actor)
+    assert replay.manifest_json["candidate_count"] == 3

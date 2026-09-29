@@ -3,7 +3,17 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -42,6 +52,13 @@ class TransactionPolicyReplay(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class TransactionPolicyReplayEntry(Base):
     __tablename__ = "transaction_policy_replay_entries"
     __table_args__ = (
+        Index(
+            "ix_policy_replay_pending",
+            "tenant_id",
+            "replay_id",
+            "order_reference",
+            postgresql_where=text("result_json IS NULL"),
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "replay_id"], ["transaction_policy_replays.tenant_id", "transaction_policy_replays.id"]
         ),

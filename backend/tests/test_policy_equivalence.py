@@ -95,7 +95,7 @@ def test_equivalence_preserves_original_amounts_timestamps_and_does_not_mutate_i
     report = saved_report()
     copy = deepcopy((before, after, report))
     result = evaluate(report, before, changed_reasons(before, after), evaluated_at=NOW)
-    assert result["status"] == "equivalent"
+    assert result["status"] == "equivalent", result
     assert result["balance"] == report["balance"]
     assert result["original_observed_at"] == STAMP
     assert (before, after, report) == copy
@@ -203,3 +203,42 @@ def test_deterministic_comparison_has_same_money_and_status_for_unchanged_member
     old = reconcile_order(source, target, config, refunds=refunds)
     config["mapping_json"]["refund_adjustments"]["tax_reversal_reason_ids"].append("4")
     assert reconcile_order(source, target, config, refunds=refunds) == old
+
+
+def test_runner_built_report_retains_the_fields_needed_for_equivalence():
+    from app.services.transaction_ops.normalization import TransactionMapping
+    from app.services.transaction_ops.runner import build_report
+    from tests.test_transaction_ops_planner import planning_case
+
+    case = planning_case()
+    case.targets["lookup"]["count"] = len(case.targets["orders"])
+    before, after = snapshots()
+    for snapshot in (before, after):
+        snapshot.update(
+            netsuite_account_id="6738075-sb1",
+            subsidiary_id="3",
+            netsuite_connection_id=str(case.config.netsuite_connection_id),
+        )
+        snapshot["mapping_json"].update(case.config.mapping_json)
+        snapshot["mapping_json"]["refund_adjustments"].update(account_id="6738075-sb1", subsidiary_id="3")
+    refunds = saved_report()["refund_evidence"]
+    for side in refunds.values():
+        side.update(
+            order_reference="R123456789", currency="EUR", amount="0", refund_count=0, observed_at=case.now.isoformat()
+        )
+    refunds["target"].update(
+        connection_id=str(case.config.netsuite_connection_id), account_id="6738075-sb1", subsidiary_id="3"
+    )
+    report = build_report(
+        case.source,
+        case.targets,
+        before,
+        TransactionMapping.model_validate(before["mapping_json"]),
+        now=case.now,
+        refunds=refunds,
+    )
+    # These are the two fields attached by the runner/state persistence path.
+    report.update(refund_evidence=refunds, _observation={"final": True, "observed_at": case.now.isoformat()})
+    result = evaluate(report, before, changed_reasons(before, after), evaluated_at=case.now)
+    assert result["status"] == "equivalent", result
+    assert result["balance"] == report["balance"]

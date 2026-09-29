@@ -1,11 +1,13 @@
 """Bounded saved-evidence pilot. No provider imports, case updates or daily receipts."""
 
 from datetime import date, datetime, timezone
+from functools import wraps
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import Text, cast, func, insert, select, text
+from sqlalchemy.exc import DBAPIError
 
 from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionFinding as Finding
@@ -31,6 +33,20 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
+def database_errors(function):
+    @wraps(function)
+    async def guarded(*args, **kwargs):
+        try:
+            return await function(*args, **kwargs)
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) in {"57014", "55P03"}:
+                raise state.StateError("policy_replay_database_busy", 503) from None
+            raise
+
+    return guarded
+
+
+@database_errors
 async def get_replay(db, tenant_id, replay_id, *, lock=False):
     await set_tenant_context(db, str(tenant_id))
     query = (
@@ -46,11 +62,13 @@ async def get_replay(db, tenant_id, replay_id, *, lock=False):
     return row
 
 
+@database_errors
 async def create_replay(db, tenant_id, config_id, request, *, actor):
     await set_tenant_context(db, str(tenant_id))
     await state._human(db, tenant_id, actor, "recon.run")
     # Config lock makes idempotency and pinning one atomic operation. Only the
     # direct recorded revision is eligible; callers cannot nominate a baseline.
+    await db.execute(text("SET LOCAL lock_timeout = '5s'"))
     target = await state.get_config(db, tenant_id, config_id, lock=True)
     existing = await db.scalar(
         select(Replay).where(Replay.tenant_id == tenant_id, Replay.evaluation_key == request.evaluation_key)
@@ -92,25 +110,31 @@ async def create_replay(db, tenant_id, config_id, request, *, actor):
     # scans under the OLD policy, never a new scan or complete population proof.
     await db.execute(text("SET LOCAL statement_timeout = '15s'"))
     windows = await daily_evidence.completed_observation_windows(db, root, span)
-    candidates = (
-        select(
-            Finding.id.label("finding_id"),
-            Finding.run_id,
-            Finding.order_reference,
-            func.encode(func.sha256(func.convert_to(cast(Finding.report_json, Text), "UTF8")), "hex").label(
-                "original_hash"
-            ),
-        )
+    picked = (
+        select(Finding.id.label("finding_id"), Finding.run_id, Finding.order_reference)
         .join(Run, (Run.tenant_id == Finding.tenant_id) & (Run.id == Finding.run_id))
         .where(
             Finding.tenant_id == tenant_id,
             *daily_evidence.compatible_observation_runs(root, span),
             Run.status == "finished",
+            # Legacy unspecified bases are ambiguous; do not mix completed-at
+            # cohorts into an updated-at pilot by applying a default.
+            Run.params_json["window_basis"].astext == window["window_basis"],
         )
         .distinct(Finding.order_reference)
         .order_by(Finding.order_reference, Finding.updated_at.desc(), Finding.id.desc())
         .limit(MAX_CANDIDATES + 1)
+        .cte("policy_candidates")
+        .prefix_with("MATERIALIZED")
     )
+    # Hash only the bounded winners. Hashing before DISTINCT reads/decompresses
+    # every historical payload and timed out on the real month-sized cohort.
+    candidates = select(
+        picked,
+        func.encode(func.sha256(func.convert_to(cast(Finding.report_json, Text), "UTF8")), "hex").label(
+            "original_hash"
+        ),
+    ).join(Finding, (Finding.id == picked.c.finding_id) & (Finding.tenant_id == tenant_id))
     pinned = (await db.execute(candidates)).mappings().all()
     if len(pinned) > MAX_CANDIDATES:
         raise state.StateError("policy_replay_population_limit", 422)
@@ -168,6 +192,7 @@ async def create_replay(db, tenant_id, config_id, request, *, actor):
     return replay
 
 
+@database_errors
 async def process_batch(db, tenant_id, replay_id):
     """Result and progress commit together. Retrying a crashed batch is harmless."""
     replay = await get_replay(db, tenant_id, replay_id, lock=True)
@@ -178,7 +203,10 @@ async def process_batch(db, tenant_id, replay_id):
         raise state.StateError("policy_replay_rule_changed", 409)
     await state._human(db, tenant_id, SimpleNamespace(id=replay.initiated_by, tenant_id=tenant_id), "recon.run")
     replay.last_error_code = None
-    changed = policy_equivalence.changed_reasons(replay.source_snapshot, replay.target_snapshot)
+    try:
+        changed = policy_equivalence.changed_reasons(replay.source_snapshot, replay.target_snapshot)
+    except ValueError:
+        raise state.StateError("policy_replay_contract_changed", 409) from None
     rows = (
         await db.execute(
             select(
@@ -227,6 +255,7 @@ async def process_batch(db, tenant_id, replay_id):
     return replay.status
 
 
+@database_errors
 async def status(db, tenant_id, replay_id):
     replay = await get_replay(db, tenant_id, replay_id)
     outcome = Entry.result_json["status"].astext
@@ -246,6 +275,7 @@ async def status(db, tenant_id, replay_id):
         "id": str(replay.id),
         "status": replay.status,
         "created_at": replay.created_at,
+        "updated_at": replay.updated_at,
         "finished_at": replay.finished_at,
         "source_config_id": str(replay.source_config_id),
         "target_config_id": str(replay.target_config_id),
@@ -257,6 +287,7 @@ async def status(db, tenant_id, replay_id):
     }
 
 
+@database_errors
 async def entries(db, tenant_id, replay_id, *, after="", limit=200, outcome=None):
     await get_replay(db, tenant_id, replay_id)
     query = select(Entry).where(
@@ -278,6 +309,7 @@ async def entries(db, tenant_id, replay_id, *, after="", limit=200, outcome=None
     ]
 
 
+@database_errors
 async def cancel(db, tenant_id, replay_id, *, actor):
     await set_tenant_context(db, str(tenant_id))
     await state._human(db, tenant_id, actor, "recon.run")
@@ -297,7 +329,11 @@ async def publish(tenant_id, replay_id):
 
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(transaction_policy_replay.delay, str(tenant_id), str(replay_id)), timeout=3
+            asyncio.to_thread(
+                transaction_policy_replay.apply_async,
+                kwargs={"tenant_id": str(tenant_id), "replay_id": str(replay_id)},
+            ),
+            timeout=3,
         )
         return True
     except Exception:
@@ -306,8 +342,12 @@ async def publish(tenant_id, replay_id):
         return False
 
 
-async def record_failure(db, tenant_id, replay_id):
+async def record_failure(db, tenant_id, replay_id, code="policy_replay_failed"):
     replay = await get_replay(db, tenant_id, replay_id, lock=True)
     if replay.status == "pending":
-        replay.last_error_code = "policy_replay_failed"
+        replay.last_error_code = (
+            code
+            if code in {"policy_replay_contract_changed", "policy_replay_rule_changed", "policy_replay_database_busy"}
+            else "policy_replay_failed"
+        )
         await state._commit(db, tenant_id)

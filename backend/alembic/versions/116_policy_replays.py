@@ -63,6 +63,12 @@ def upgrade():
             ],
         ),
     )
+    op.create_index(
+        "ix_policy_replay_pending",
+        "transaction_policy_replay_entries",
+        ["tenant_id", "replay_id", "order_reference"],
+        postgresql_where=sa.text("result_json IS NULL"),
+    )
     for table in ("transaction_policy_replays", "transaction_policy_replay_entries"):
         op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
         op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")

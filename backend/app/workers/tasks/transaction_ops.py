@@ -211,8 +211,17 @@ def transaction_ops_complete_accounting(tenant_id: str, message_id: str):
         raise RuntimeError("accounting_completion_failed") from None
 
 
+class PolicyReplayTask(InstrumentedTask):
+    """Close each failed attempt before Celery creates the retry's Job record."""
+
+    abstract = True
+
+    def on_retry(self, exc, task_id, args, kwargs, einfo):
+        self.on_failure(RuntimeError("policy_replay_retry_scheduled"), task_id, args, kwargs, einfo)
+
+
 @celery_app.task(
-    base=InstrumentedTask,
+    base=PolicyReplayTask,
     name="tasks.transaction_policy_replay",
     queue="recon",
     bind=True,
@@ -241,13 +250,14 @@ def transaction_policy_replay(self, tenant_id: str, replay_id: str):
 
     try:
         return asyncio.run(execute())
-    except Exception:
+    except Exception as error:
+        error_code = getattr(error, "code", "policy_replay_failed")
 
         async def failed():
             from app.services.transaction_ops.policy_replay import record_failure
 
             async with worker_async_session() as db:
-                await record_failure(db, uuid.UUID(tenant_id), uuid.UUID(replay_id))
+                await record_failure(db, uuid.UUID(tenant_id), uuid.UUID(replay_id), error_code)
 
         try:
             asyncio.run(failed())
