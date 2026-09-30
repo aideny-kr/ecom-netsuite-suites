@@ -11,7 +11,7 @@ from io import BytesIO
 
 import pytest
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.core.encryption import encrypt_credentials
 from app.models.audit import AuditEvent
@@ -60,7 +60,7 @@ class ArtifactDrive(EvidenceDrive):
         return result
 
 
-async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failure=None):
+async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failure=None, with_delivery=True):
     payloads, params = delivery_fixture()
     sources = ia.build_sources(params)
     queries = {s["params"]["query"]: rid for rid, s in sources.items()}
@@ -110,6 +110,8 @@ async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failu
             {"id": "deliver", "type": "drive.upload", "params": {"report_step": "report"}},
         ]
     }
+    if not with_delivery:
+        plan["steps"].pop()
     row = await seed(db, user, plan)
     row.name = "Synthetic inventory delivery"
     row.parameters = {"workflow_review_required": True}
@@ -127,6 +129,31 @@ async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failu
     row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=1)
     await db.flush()
     return row, source, drive, calls
+
+
+async def test_due_workflow_report_is_frozen_at_first_insert_without_pdf(client, db, admin_user, monkeypatch):
+    user, headers = admin_user
+    await setup_report_workflow(db, client, user, headers, monkeypatch, with_delivery=False)
+    tid = user.tenant_id
+    inserts = []
+
+    def capture_insert(conn, cursor, statement, parameters, context, executemany):
+        compiled = context.compiled
+        if compiled and compiled.isinsert and compiled.statement.table.name == "reports":
+            inserts.extend(dict(p) for p in context.compiled_parameters)
+
+    bind = db.get_bind()
+    event.listen(bind, "after_cursor_execute", capture_insert)
+    try:
+        assert (await jobs.run_due_jobs(db, tid))["ran"] == 1
+    finally:
+        event.remove(bind, "after_cursor_execute", capture_insert)
+    job = (await db.scalars(select(Job).where(Job.tenant_id == tid))).one()
+    assert job.result_summary["reason"] == "done"
+    assert len(inserts) == 1
+    assert inserts[0]["auto_refresh"] == "off"
+    assert inserts[0]["source_run_id"] == job.id
+    assert (await sweep_tenant_reports(db, tid, now=datetime.now(timezone.utc) + timedelta(days=7)))["due"] == 0
 
 
 @_skip_unless_weasyprint_native_libs
