@@ -783,15 +783,31 @@ async def run_investigation(
                 return await finish("done")
         await save()
         while True:
-            if slice_enabled and slice_clock() - slice_started >= _slice_seconds:
+            if (
+                slice_enabled
+                and not staged_source
+                and not finding_batch
+                and slice_clock() - slice_started >= _slice_seconds
+            ):
                 if clock() >= deadline_at:
                     return await finish("budget")
                 await flush_findings()
                 snapshot_progress()
-                generation = await state.yield_run(
-                    db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
-                )
-                return {"run_id": str(run_id), "status": "yielded", "generation": generation}
+                try:
+                    generation = await state.yield_run(
+                        db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
+                    )
+                except state_service.StateError as exc:
+                    if exc.code != "run_not_yieldable":
+                        raise
+                    # A tolerated unsettled hold cannot cross a worker boundary.
+                    # Keep this invocation alive under its existing finite budget.
+                    await state._commit(db, tenant_id)
+                    if clock() >= deadline_at:
+                        return await finish("budget")
+                    slice_enabled = False
+                else:
+                    return {"run_id": str(run_id), "status": "yielded", "generation": generation}
             if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
                 return await finish("stall")
             if not progress["pending_refs"]:

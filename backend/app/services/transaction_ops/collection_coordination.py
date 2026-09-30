@@ -43,6 +43,7 @@ async def collection_blocker(db, tenant_id, run, now, *, scheduled_enabled=True)
     from app.services.transaction_ops import state_service as state
     from app.services.transaction_ops.auth_recovery import auth_resume_candidate
     from app.services.transaction_ops.continuation import continuation_result, next_metadata
+    from app.services.transaction_ops.review_control import stopped_clause
 
     r, child = TransactionRun, aliased(TransactionRun)
     params = run.params_json
@@ -79,6 +80,7 @@ async def collection_blocker(db, tenant_id, run, now, *, scheduled_enabled=True)
                 .where(
                     r.tenant_id == tenant_id,
                     r.config_id == run.config_id,
+                    ~stopped_clause(r),
                     r.id != run.id,
                     r.origin.in_(("manual", "chat", "schedule")),
                     (r.origin != "schedule") | (r.status == "running") if not scheduled_enabled else True,

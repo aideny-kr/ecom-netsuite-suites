@@ -235,3 +235,80 @@ async def test_expired_yield_cannot_extend_budget(db, admin_user):
     )
     assert await state.claim_run(db, actor.tenant_id, run.id, now=deadline + timedelta(seconds=1)) is None
     assert run.status == "finished" and run.termination_reason == "budget" and run.deadline_at == deadline
+
+
+async def test_stopped_childless_budget_leaf_does_not_block_replacement(db, admin_user, monkeypatch):
+    from tests.test_transaction_collection_coordination import pair
+
+    actor = admin_user[0]
+    _, old, new = await pair(db, actor, monkeypatch, owner="manual")
+    token = await state.claim_run(db, actor.tenant_id, old.id)
+    await state.update_progress(
+        db, actor.tenant_id, old.id, ProgressUpdate(progress_json={"processed": 1, "scan_count": 1}), lease_token=token
+    )
+    await state.finish_run(db, actor.tenant_id, old.id, "budget", lease_token=token)
+    assert await state.claim_run(db, actor.tenant_id, new.id) is None
+    await stop_review(db, actor.tenant_id, old.id, actor=actor)
+    assert await state.claim_run(db, actor.tenant_id, new.id) is not None
+    assert old.termination_reason == "budget"  # terminal history remains immutable
+
+
+@pytest.mark.parametrize("phase", ["orders", "refunds", "destination"])
+async def test_yield_waits_for_paid_chunk_and_resume_reads_each_member_once(db, admin_user, monkeypatch, phase):
+    from tests.test_transaction_chunk_runner import setup as chunk_setup
+
+    actor = admin_user[0]
+    run, refs, reader, writer, events = await chunk_setup(
+        db, actor, monkeypatch, size=12, phase=phase, evidence_mode="saved"
+    )
+
+    # No cached findings in this fixture: use real native source staging.
+    def ticks():
+        return 61 if any(kind == "compare" for kind, _ in events) else 0
+
+    result = await runner.run_investigation(db, actor.tenant_id, run.id, _slice_seconds=60, _slice_clock=ticks)
+    assert result["status"] == "yielded"
+    assert run.orders_used == reader.await_count == 10
+    assert run.progress_json["processed"] == 10
+    assert run.progress_json["pending_refs"] == refs[10:]
+    assert writer.await_count == 1
+    result = await runner.run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done"
+    assert run.orders_used == reader.await_count == 12
+    assert run.api_calls_used == 24
+    assert run.progress_json["processed"] == 12
+    assert len(await state.list_findings(db, actor.tenant_id, run.id)) == 12
+
+
+async def test_tolerated_hold_prevents_yield_without_crashing_or_repeating(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    _, _, _, run = await setup(db, actor)
+    yielding = AsyncMock(side_effect=state.StateError("run_not_yieldable"))
+    monkeypatch.setattr(state, "yield_run", yielding)
+    ticks = iter([0, 61])
+    result = await runner.run_investigation(
+        db, actor.tenant_id, run.id, _slice_seconds=60, _slice_clock=lambda: next(ticks)
+    )
+    assert result["termination_reason"] == "done"
+    yielding.assert_awaited_once()
+
+
+async def test_deadline_race_at_yield_finishes_budget_instead_of_crashing(db, admin_user, monkeypatch):
+    from datetime import timedelta
+
+    actor = admin_user[0]
+    _, _, _, run = await setup(db, actor)
+    now = state._clock()
+
+    async def deadline_race(*args, **kwargs):
+        nonlocal now
+        now = run.deadline_at + timedelta(seconds=1)
+        raise state.StateError("run_not_yieldable")
+
+    monkeypatch.setattr(state, "yield_run", deadline_race)
+    ticks = iter([0, 61])
+    result = await runner.run_investigation(
+        db, actor.tenant_id, run.id, _clock=lambda: now, _slice_seconds=60, _slice_clock=lambda: next(ticks)
+    )
+    assert result["termination_reason"] == "budget" and run.status == "finished"
+    assert run.progress_json["pending_refs"] == ["R123456780"]
