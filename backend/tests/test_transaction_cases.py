@@ -56,7 +56,7 @@ async def observe(db, actor, config, body, now):
 
 
 @pytest.mark.asyncio
-async def test_case_carries_across_runs_reopens_and_preserves_observations(db, admin_user):
+async def test_case_carries_across_runs_stays_reconciled_and_preserves_observations(db, admin_user):
     actor = admin_user[0]
     config = await seed_config(db, actor.tenant_id, actor)
     finding = await observe(db, actor, config, report(), NOW)
@@ -66,8 +66,9 @@ async def test_case_carries_across_runs_reopens_and_preserves_observations(db, a
     await observe(db, actor, config, report("matched"), NOW + timedelta(seconds=1))
     second = (await case_service.list_cases(db, actor.tenant_id))[0]
     assert second.id == first.id and second.status == "reconciled"
+    # A later discrepancy never reopens a reconciled case (decided 2026-09-30); it is still observed.
     await observe(db, actor, config, report(), NOW + timedelta(seconds=2))
-    assert (await case_service.get_case(db, actor.tenant_id, first.id)).status == "open"
+    assert (await case_service.get_case(db, actor.tenant_id, first.id)).status == "reconciled"
     observations = await case_service.list_observations(db, actor.tenant_id, first.id)
     assert len(observations) == 3
     with pytest.raises(DBAPIError, match="immutable"):
@@ -78,7 +79,7 @@ async def test_case_carries_across_runs_reopens_and_preserves_observations(db, a
             )
 
 
-async def test_late_old_evidence_cannot_reopen_reconciled_case_but_new_discrepancy_can(db, admin_user):
+async def test_neither_late_old_evidence_nor_a_new_discrepancy_reopens_a_reconciled_case(db, admin_user):
     actor = admin_user[0]
     config = await seed_config(db, actor.tenant_id, actor)
     await observe(db, actor, config, report(observed=NOW), NOW)
@@ -98,7 +99,8 @@ async def test_late_old_evidence_cannot_reopen_reconciled_case_but_new_discrepan
     assert len(await case_service.list_cases(db, actor.tenant_id)) == 1
     changed = later + timedelta(minutes=1)
     await observe(db, actor, config, report(observed=changed), changed)
-    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "open"
+    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "reconciled"
+    assert len(await case_service.list_observations(db, actor.tenant_id, case.id)) == 5
 
 
 async def test_finding_observation_marker_is_server_owned(db, admin_user):
@@ -130,7 +132,8 @@ async def test_repeated_scans_apply_existing_net_and_tax_credit_without_reopenin
         await observe(db, actor, config, body, now)
         cases = await case_service.list_cases(db, actor.tenant_id)
         assert len(cases) == 1
-        assert cases[0].status == ("reconciled" if tax == "2" else "open")
+        # Once reconciled it stays reconciled; the later tax edit is recorded, not reopened.
+        assert cases[0].status == ("open" if minute == 0 else "reconciled")
         assert body["balance"]["amounts"]["refunds"]["delta"] == "0.00"
 
 

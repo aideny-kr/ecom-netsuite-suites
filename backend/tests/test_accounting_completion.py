@@ -115,17 +115,6 @@ async def test_transient_failure_is_bounded_and_never_replays_financial_operatio
     assert message.structured_output["accounting_execution"]["approved_by"] == str(actor_id)
 
 
-async def test_reopened_case_never_gets_full_success_from_historical_match(db, ready, monkeypatch):
-    actor, _, case, message, _, _ = ready
-    case.status = "open"
-    await db.commit()
-    prepare = AsyncMock(side_effect=AssertionError("Historical match is not a fresh difference"))
-    monkeypatch.setattr(mod, "prepare_next", prepare)
-    assert (await mod.complete(db, actor.tenant_id, message.id))["status"] == "partially_resolved"
-    assert message.structured_output["accounting_receipt"]["next_step"]["status"] == "blocked"
-    prepare.assert_not_awaited()
-
-
 async def test_interrupted_last_read_attempt_finishes_as_review_instead_of_disappearing(db, ready, monkeypatch):
     actor, _, _, message, _, _ = ready
     so = deepcopy(message.structured_output)

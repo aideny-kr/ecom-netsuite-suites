@@ -89,6 +89,144 @@ def _cleared(report, now):
         return False
 
 
+def _amount(value):
+    try:
+        return Decimal(str(value)) if value is not None else None
+    except ArithmeticError:
+        return value
+
+
+def _solidus_refunds(report):
+    source = (report.get("refund_evidence") or {}).get("source") or {}
+    events = sorted(
+        (str(event.get("id")), _amount(event.get("amount")))
+        for event in source.get("events") or []
+        if isinstance(event, dict)
+    )
+    total = (((report.get("balance") or {}).get("amounts") or {}).get("refunds") or {}).get("source")
+    return events, _amount(total)
+
+
+def _netsuite_credits(report):
+    target = (report.get("refund_evidence") or {}).get("target") or {}
+
+    def documents(key):
+        return sorted(
+            (
+                str(item.get("credit_memo_id")),
+                str(item.get("refund_id")),
+                _amount(item.get("amount")),
+                _amount(item.get("tax_amount")),
+            )
+            for item in target.get(key) or []
+            if isinstance(item, dict)
+        )
+
+    return (
+        documents("tax_adjustments"),
+        documents("request_links"),
+        _amount(target.get("amount")),
+        target.get("refund_count"),
+    )
+
+
+def _netsuite_records(report):
+    return {
+        str(target.get("record_id")): target.get("updated_at")
+        for target in report.get("targets") or []
+        if isinstance(target, dict)
+    }
+
+
+def changes_since(reconciled, report):
+    """What really changed in Solidus or NetSuite between a case's reconciling report and a later one.
+
+    Only what was read counts: the Solidus order and its refunds, which NetSuite records were read and
+    when they were last edited, and the NetSuite credits and refunds with their amounts. The same
+    records compared another way are no change. Checked against every reconciled case that reopened
+    on Framework in the 14 days to 2026-09-30: 63 of 66 had no change, and the other 3 each had a
+    real Solidus change.
+    """
+    changes = []
+    before, after = reconciled.get("source") or {}, report.get("source") or {}
+    if (before.get("record_id"), before.get("updated_at")) != (after.get("record_id"), after.get("updated_at")):
+        changes.append("solidus_order_updated")
+    if _solidus_refunds(reconciled) != _solidus_refunds(report):
+        changes.append("solidus_refunds_changed")
+    before, after = _netsuite_records(reconciled), _netsuite_records(report)
+    if set(before) != set(after):
+        changes.append("netsuite_records_changed")
+    elif before != after:
+        changes.append("netsuite_record_updated")
+    if _netsuite_credits(reconciled) != _netsuite_credits(report):
+        changes.append("netsuite_credits_changed")
+    return changes
+
+
+def settle_observation(case, report, *, cleared, now):
+    """Apply a newer observation to its case and return the audit actions it causes.
+
+    A reconciled case stays reconciled (decided 2026-09-30): only a clearing observation may refresh
+    its evidence. Any other later observation leaves the status and the reconciling evidence as they
+    are and is recorded as kept, or as changed after reconciliation when a record really changed.
+    The database refuses any update that would reopen one (migration 117).
+    """
+    if case.status == "reconciled" and not cleared:
+        changes = changes_since(case.latest_report_json, report)
+        if changes:
+            return [("case.changed_after_reconciliation", {"changes": changes})]
+        return [("case.kept_reconciled", {})]
+    prior = case.status
+    case.status = "reconciled" if cleared else "open"
+    case.last_observed_at = now
+    case.latest_report_json = report
+    return [("case.reconciled", {})] if prior != case.status else []
+
+
+async def changed_after_reconciliation(db, tenant_id, *, limit=100):
+    """Reconciled cases whose Solidus order or NetSuite records changed after reconciliation.
+
+    They stay reconciled; this is the list a person reviews, newest change first, one row per case.
+    """
+    from sqlalchemy import String, cast
+
+    from app.models.audit import AuditEvent
+
+    await set_tenant_context(db, str(tenant_id))
+    latest = (
+        select(AuditEvent.resource_id, AuditEvent.payload, AuditEvent.timestamp)
+        .where(
+            AuditEvent.tenant_id == tenant_id,
+            AuditEvent.action == "transaction_ops.case.changed_after_reconciliation",
+            AuditEvent.resource_type == TransactionCase.__tablename__,
+        )
+        .distinct(AuditEvent.resource_id)
+        .order_by(AuditEvent.resource_id, AuditEvent.timestamp.desc())
+        .subquery()
+    )
+    rows = await db.execute(
+        select(TransactionCase, latest.c.payload, latest.c.timestamp)
+        .join(latest, cast(TransactionCase.id, String) == latest.c.resource_id)
+        .where(TransactionCase.tenant_id == tenant_id, TransactionCase.status == "reconciled")
+        .order_by(latest.c.timestamp.desc(), TransactionCase.id)
+        .limit(min(500, max(1, limit)))
+    )
+    return {
+        "cases": [
+            {
+                "case_id": str(case.id),
+                "order_reference": case.order_reference,
+                "scope": case.scope_json,
+                "status": case.status,
+                "changes": list((payload or {}).get("changes") or []),
+                "observation_id": (payload or {}).get("observation_id"),
+                "changed_at": changed_at.isoformat(),
+            }
+            for case, payload, changed_at in rows
+        ]
+    }
+
+
 def case_scope(run):
     config = run.config_snapshot
     scope = {
@@ -196,13 +334,13 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
         },
     )
     if became_current:
-        prior = case.status
-        case.status = "reconciled" if cleared else "open"
-        case.last_observed_at = now
-        case.latest_report_json = report
-        if prior != case.status:
+        for action, payload in settle_observation(case, report, cleared=cleared, now=now):
             await _audit(
-                db, tenant_id, "case.reconciled" if cleared else "case.reopened", case, payload={"run_id": str(run.id)}
+                db,
+                tenant_id,
+                action,
+                case,
+                payload={"run_id": str(run.id), "observation_id": str(observation_id), **payload},
             )
         if excluded:
             await _audit(

@@ -154,7 +154,7 @@ async def test_examples_require_same_scope_mapping_issue_and_verified_financial_
     assert (await history(db, actor.tenant_id, old.id))["resolutions"][0]["verified_example"]
 
 
-async def test_mapping_revision_and_reopened_case_remove_example_applicability(db, admin_user):
+async def test_mapping_revision_removes_example_applicability_and_a_later_scan_keeps_the_fix(db, admin_user):
     from app.services.transaction_ops.resolution_history import history
     from tests.test_transaction_ops_state import config_input
 
@@ -177,12 +177,12 @@ async def test_mapping_revision_and_reopened_case_remove_example_applicability(d
     again, _ = await case_and_proposal(db, actor, revised, "R222222222")
     assert again.id == current.id
     assert not (await history(db, actor.tenant_id, current.id))["examples"]
-    # Reopening does not erase the successful financial check, but stops the
-    # previous fix from being presented as a currently resolved example.
+    # A later scan never reopens the reconciled case (decided 2026-09-30), so the
+    # verified fix stays a resolved example.
     await case_and_proposal(db, actor, config, "R111111111", fingerprint="b" * 64)
     rows = (await history(db, actor.tenant_id, old.id))["resolutions"]
     assert any(row["settlement_status"] == "succeeded" for row in rows)
-    assert all(row["verified_example"] is False for row in rows)
+    assert any(row["verified_example"] is True for row in rows)
 
 
 async def test_resolution_history_http_auth_scope_and_pagination(client, app, db, admin_user, admin_user_b):

@@ -15,7 +15,7 @@ from app.models.audit import AuditEvent
 from app.models.transaction_netsuite_dependency import TransactionNetSuiteDependency
 from app.models.transaction_ops import TransactionCase, TransactionCaseObservation, TransactionFinding
 from app.schemas.transaction_runs import FindingReport
-from app.services.transaction_ops.case_service import _cleared, case_scope, observation_time
+from app.services.transaction_ops.case_service import _cleared, case_scope, observation_time, settle_observation
 from app.services.transaction_ops.dependency_index import observed_dependencies
 from app.services.transaction_ops.netsuite_reader import _account
 from app.services.transaction_ops.source_eligibility import excluded_report
@@ -174,10 +174,9 @@ async def persist(db, tenant_id, run, reports, *, now):
             ),
         )
         if current:
-            prior = case.status
-            case.status, case.last_observed_at, case.latest_report_json = "open", now, report
-            if prior != "open":
-                audit(case, "case.reopened", {})
+            # The batch writes only findings that do not clear their order.
+            for action, extra in settle_observation(case, report, cleared=False, now=now):
+                audit(case, action, {"observation_id": str(observation_id), **extra})
     db.add_all(events)
     await db.flush()
     return findings

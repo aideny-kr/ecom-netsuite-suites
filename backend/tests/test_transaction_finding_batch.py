@@ -163,7 +163,7 @@ async def test_invalid_or_revoked_batch_never_advances(db, batch_setup, failure)
     assert (await state.get_run(db, actor.tenant_id, run.id)).progress_json["pending_refs"] == refs
 
 
-async def test_batch_reopens_cases_and_older_evidence_does_not_replace_newer(db, batch_setup):
+async def test_batch_keeps_reconciled_cases_and_older_evidence_does_not_replace_newer(db, batch_setup):
     actor, _, run, token, refs, reports = batch_setup
     now = datetime.now(timezone.utc)
     await publish(db, batch_setup, now=now)
@@ -182,18 +182,17 @@ async def test_batch_reopens_cases_and_older_evidence_does_not_replace_newer(db,
     for report in changed:
         report["reason_for_test"] = "new observation"
     await publish(db, batch_setup, reports=changed, now=now + timedelta(seconds=1))
-    assert all(case.status == "open" for case in cases)
-    assert (
-        await db.scalar(
-            select(func.count())
-            .select_from(AuditEvent)
-            .where(
-                AuditEvent.tenant_id == actor.tenant_id,
-                AuditEvent.action == "transaction_ops.case.reopened",
+    # A reconciled case stays reconciled (decided 2026-09-30); the batch records it as kept.
+    assert all(case.status == "reconciled" for case in cases)
+    for action, expected in (("transaction_ops.case.reopened", 0), ("transaction_ops.case.kept_reconciled", 3)):
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.tenant_id == actor.tenant_id, AuditEvent.action == action)
             )
+            == expected
         )
-        == 3
-    )
     newer_reports = [deepcopy(c.latest_report_json) for c in cases]
     await state.update_progress(
         db,
