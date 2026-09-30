@@ -165,11 +165,27 @@ async def continue_review(db, tenant_id, run_id):
     previous = await state.get_run(db, tenant_id, run_id)
     if previous.status != "finished" or previous.termination_reason != "done" or not previous.params_json.get("review"):
         return None
-    from app.services.transaction_ops.daily_evidence import scan_complete
+    from app.services.transaction_ops.daily_evidence import coverage_receipt, reuses_coverage, scan_complete
 
-    if not scan_complete(previous) or previous.progress_json.get("review_coverage_complete") is True:
+    if previous.progress_json.get("review_coverage_complete") is True:
         return None
     span = ReviewSpan.model_validate(previous.params_json["review"])
+    if reuses_coverage(previous):
+        # A receipt is not a fresh dependency scan. Revalidate its original,
+        # scoped observations instead of requiring fabricated scan flags.
+        source_ids = previous.progress_json.get(
+            "reused_observation_run_ids", previous.progress_json.get("reused_daily_run_ids", [])
+        )
+        if not source_ids:
+            return None
+        try:
+            receipt = await coverage_receipt(db, previous, span, source_ids=source_ids)
+        except (ValueError, TypeError):
+            return None
+        if receipt is None:
+            return None
+    elif not scan_complete(previous):
+        return None
     start = datetime.fromisoformat(previous.params_json["window_end"])
     if start >= span.end:
         return None
