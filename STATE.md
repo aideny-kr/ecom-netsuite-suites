@@ -1,605 +1,143 @@
 # STATE
 
+What the next session must know without replaying history. Both of us read and write it;
+it lives in the repo so it survives a context reset, a new session and another machine.
+Update it at the end of every task. **Keep it short enough to read in full before acting:**
+history goes to `docs/state/archive/` (the 2026-09-16 version, 605 lines, is there verbatim),
+not here. A NOW row names its PR and date; a row older than a week is re-checked before anyone
+acts on it.
+
 ## GOAL — read this before anything else
 
-**Product.** Completely automate the end-to-end daily and monthly accounting operations
-routine — reconciliation, close, reporting — via scheduled jobs and agentic flows, with
-memory + reporting tools and **read AND WRITE** access to NetSuite and further MCPs.
+**Product.** Automate the daily and monthly accounting routine (reconciliation, close,
+reporting) with scheduled jobs and agents that read AND write NetSuite, with a person
+approving every financial write.
 
-*Where we are (2026-09-17): the write half now exists as a KERNEL. The transaction_ops
-operations ledger is the single write path (#269, migration 109 on staging): outcomes
-`executing | rejected_before_effect | committed_unverified | unknown | verified |
-needs_review`, a one-use dispatch permit before any send, independent readback before
-`verified`, `unknown` handed to a person by the daily ops digest (#265), one operator kill
-switch. Chat accounting cards run through it (#270); the native amendment card is the last
-legacy path. Compensation/reversal still does not exist. The longest-lead blocker is still
-evidence: no complete staging journey has been proven yet, and no reject/dispute action
-generates negative labels for unattended posting.*
+**The current push (user, 2026-09-30):** the in-app agent should resolve accounting issues
+the way Claude + the NetSuite MCP does by hand — find the real cause from our own saved
+evidence and the NetSuite document chain, propose the exact create/update in ONE approval
+card, and talk less. Mock approved: https://claude.ai/artifact/HPjd5nua1a9p151k1hgkEm.
+Measured starting point (Framework staging, 09-29/30): 0 of 6 real resolve-it conversations
+ended with an approval card; median reply 366 words; median 147k input tokens per turn
+(831k for one order); every turn carries 70 tools and ~57k tokens of fixed context.
 
-**The write-agent program's goal (2026-09-16, Aiden + Claude, from the two post-mortems in
-`docs/postmortem/2026-09-16-*`):** an agent that can carry out what it proposes. Every
-approved correction is prepared from fresh evidence, approved exactly by a human, sent at
-most once, verified by independent readback, and recovered truthfully when interrupted, so
-that a FULL accounting group (the 54-order Framework case) completes end to end on staging
-with every member in a specific final state. **Acceptance = one complete staging journey**
-(fresh evidence → scope → persisted proposal → exact approval → execution → readback →
-reconciliation → record/audit links → truthful status), never passing parts. Keep: exact
-approval, tenant/account/role boundaries, exact money, duplicate prevention, independent
-verification, audit. Relax: prescribed investigation sequences, unnecessarily narrow
-adapters. Ticket draft (ClickUp Suite Studio AI › Framework Launch, blocked on the MCP
-daily limit on 2026-09-16): `docs/superpowers/plans/2026-09-17-write-agent-program-ticket.md`.*
-
-**How we work** (this is a means, not the goal). A development cycle that suits a frontier
-model: minimum harness, loop engineering for feedback, graph engineering for flow, and one
-place for state. Portable across projects — process global, knowledge local.
-
-> The goal is the product. If a session is producing process artifacts and no movement on
-> the ladder, that is drift — it happened on 2026-08-02 and cost a day.
-
----
-
-The development loop's state: what the next session must know **without replaying history**.
-
-Both of us read and write this. It lives in the repo because it has to survive a context
-reset, a new session, and a different machine. ClickUp keeps the session ticket; work
-state lives here — two systems only break at the seam between them.
-
-Updated at the end of every task, not "later".
-
----
+**Where we are (2026-09-30).** The write kernel (transaction_ops ledger) is the single write
+path. #355 (SuiteQL local first, thinking floor med) and #356 (issue-group breakdown) are live
+on staging. #364 (a reconciled order stays reconciled) is ready to merge.
 
 ## NOW — in flight
 
-| branch | tier | state | blocked on |
+| PR / branch | tier | state (2026-09-30) | blocked on |
 |---|---|---|---|
-| `feat/g3-native-amendment-adapter` | T2 | **write-agent program, slices 2+3**: NativeAmendmentAdapter (retire `execution_claim` / `previous_execution` / reservation audit / `_via_kernel`), then G3.4 group durability (resumable per-member preparation, summary derived from child state, per-call timing + cost on the ledger row, receipts off the shared `recon` queue). Started 2026-09-17 from main@33038759; readers mapping the code first | nothing |
-| `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
-| `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
+| #364 `feat/reconciled-stays-reconciled` → release | T2 | verify.sh PASS c7a5d6c6; packet review round 5 PASS, receipt in body; CI green | Aiden merges; migration 117 must run on deploy |
+| #360 `feat/group-breakdown-staging-ui` → `release/frontend-preserved` | T2 | #356's card on the staging UI line (56156d96, deployed); needs #364's "Reconciled" label ported too | codex / Aiden merge |
+| local `feat/changed-after-reconciliation` (79b62dc4, unpushed) | T2 | the "changed after reconciliation" flag, split out of #364 after 4 review rounds | rebuild with the narrow rule (NEXT 4) |
+| #357 `fix/records-status-query` → release | T2 | Records order-status filter timeout | review |
+| #333 `release/recon-excel-group-reliability` → main | T2 | the release integration PR; codex merges into the release branch daily (#358–#363 on 09-29/30) | release owner |
+| codex line `codex/framework-launch-integration` (#365, #275) | — | codex's Framework-launch work | codex |
 
-**SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
-`54729804`, deployed and live-verified on staging.** Ticket 86bba299w closed. It had
-been invisible in this table for six days and read as "stalled, 2 days idle" when it
-was one gate round from landing — that omission IS the failure mode this file exists to
-prevent, which is why the entry went in before anything else.
-
-Delivered: the OAuth silent account repoint (overwrite, but loudly), the chat burst cap
-on all three entry points, the replica-safe MCP limiter — plus two blocker-grade
-security defects the gate surfaced, both pre-existing and both AMPLIFIED by this
-branch's own supersede logic, so they were pulled in rather than deferred: an
-unauthenticated reflected XSS on the API origin, and a cross-tenant takeover via the
-OAuth state's positional parse.
-
-What to carry forward — the process lessons cost more than the code did:
-
-- **Nine gate rounds, and rounds 5→8 were mostly fixing the previous round's fixes.**
-  Three fixes were half-applied (callback template, escaping funnel, state validator):
-  each correct, each applied to one of N call sites. The two that stuck removed the
-  possibility instead — `render_callback()` (one template, no site can forget) and
-  `encode_state()` (JSON, so no field can shift another). Ask "what makes this
-  unrepresentable?" before "where else does this appear?".
-- **~30 KB is the gate's practical ceiling.** 81.9 KB had to be split into path-chunks,
-  proven lossless (every changed file in exactly one chunk, byte-identical). The cost
-  is that no single run sees a cross-chunk seam.
-- **`args` passed to `Workflow` arrive JSON-STRINGIFIED even when written as a proper
-  object**, so `args.target` reads `undefined` and the gate silently reviews the
-  CURRENT checkout — status still `OK`, findings plausible, all about the wrong branch.
-  Drive it from a wrapper script and ALWAYS check the returned `target`/`base` first.
-  Cost 4.6M tokens on an unrelated branch before the check caught it.
-- **`failed_angles` counts FINDER angles only.** The last round lost all 163 verifier
-  agents to the weekly rate limit and still reported `failed_angles: []` — a clean-
-  looking pass with an entirely unadjudicated verify stage. Fail closed on the
-  UNVERIFIED count too. **~161 of that round's findings remain unadjudicated; two were
-  hand-checked and both were real blockers, so this is a genuine gap, not noise.** A
-  fresh round on the merged diff is owed once quota resets.
-
-Live-measured after deploy (30d of `audit_events`, staging): peak MCP tool rate is
-9/min (`netsuite.suiteql`) against a 60/min ceiling — 6.7× headroom, and nothing else
-is within 6× either. **`recon.approve_group` has ZERO calls in 30 days**, so its
-40→20/min halving is untested by real usage; a close-week bulk-approval burst is the
-one thing that data cannot see. Watch `mcp_rate_limit_rejections_total`.
-
-Contents of that branch, honestly:
-
-**Split 2026-08-04** — the two were on one 136 KB branch, which the review gate cannot
-process in a single run (~30 KB practical limit).
-
-**"Zero shared files" was FALSE and it is a merge hazard.** Verified 2026-08-05:
-`comm -12` over the two name-only diffs returns **8 shared files** — the split copied the
-process work onto `dev-loop` but never removed it from `agent-graph`, which therefore
-still carries the PRE-FIX `scripts/ship.sh` (7 `TIER` references — the unbound-variable
-blocker), a 240-line `scripts/verify.sh`, and `scripts/loop.sh`. Merging `agent-graph`
-after `dev-loop` would silently resurrect both blockers. **Do not merge `agent-graph` as
-it stands.** The reject slice is separable and clean: commits `8c8ca1f` + `01a42bd`, four
-files (`recon_reject.py`, `093_recon_reject_labels.py`, `models/reconciliation.py`,
-`test_recon_reject.py`), zero overlap with the process files — cherry-pick those onto a
-fresh branch off `main` and leave Track O behind pending its own decision.
-
-- **`feat/dev-loop-and-harness` (this branch, 47 KB)** — `verify.sh` · `ship.sh` ·
-  `STATE.md`. **There is no `loop.sh`** — it was deleted on this branch (see DECIDED:
-  enforcement lives in hooks); the two hooks in `~/.claude/hooks/` replace it and are
-  the only part that runs whether or not the agent cooperates. Routine + verification
-  standard now global in
-  `~/.claude/CLAUDE.md`; gate target-check in `.claude/rules/uat-review.md`;
-  `agent-graph.md` cut 35 rules → 15. Finished; gating now.
-- **`feat/agent-graph-operating-model` (58 KB + 24 KB)** — Track O (ops digest, Sentry in
-  workers, InstrumentedTask coverage; **22 open majors**) and the reject action (service +
-  migration 093 + 16 tests, but **no endpoint, so no labels accrue yet**).
-- **Track O — product code (PARKED)** — ops digest + Sentry-in-workers + InstrumentedTask
-  coverage. Passed no gate round cleanly: **22 open majors** from round 2.
+**Staging (re-query before relying on it; codex redeployed three times on 09-30).** Backend was
+release 2ba3a713 (contains #355, #356), frontend group-breakdown-56156d9 (e5649dd4 + #356).
+Framework's Inc September period review was resuming day by day after the 09-29 NetSuite
+auth outage.
 
 ## NEXT — ordered, with the why
 
-**Write-agent program order (agreed 2026-09-16; G3.4 pulled AHEAD of G3.3 because the
-post-mortem's losses were durability and attribution, not capability):**
-
-1. **Native amendment adapter** — the last card on the legacy claim path; retiring it deletes
-   the whole "a legacy reader assumes the card's own claim" defect class (four gate rounds on
-   #267 were that shape).
-2. **G3.4 group durability** — resumable per-case preparation (23 of 54 members lost to the
-   450 s cap), group summary derived from child state (7 shown vs 30 reconciled), per-call
-   timing + cost on the ledger row (~1 min per correction unattributed), receipts/completion
-   off the shared `recon` queue (298 s median check→publish delay).
-3. **The staging journey** — the acceptance rule, on the full Framework group. Staging's
-   NetSuite connection is Framework PRODUCTION 6738075: Aiden starts that run, never a session.
-4. **G3.3 generic writes + evidence-driven repair** (GenericRecordAdapter, repair policy in
-   code with per-class budgets, unchanged retries refused, changed meaning ⇒ new card).
-5. **G4 account-aware coverage** (needs a real account's rules; the staging read of the stored
-   live proposal is still blocked) · **G5 persist before scaling** · **G6 reviewed account
-   playbooks** · **G7 measurement** (cost per verified case) + the **llmOps super-admin page**
-   (traces per turn/tool/hook/provider call; the tool-timing metric today stops BEFORE the
-   preparation hook, which is how 474 s logged as 5 s).
-
-**Multimodal record creation (2026-08-28).** User asked for: upload xlsx/pdf/csv/photo →
-agent proposes NetSuite records → existing HITL card. Research (7-agent survey) found upload,
-storage, `file_id` plumbing and an injection-hardened preview ALREADY EXIST for
-xlsx/csv/xls/json. Slice ordering chosen by the user, recorded so it is not re-litigated:
-
-1. ~~**Slice 1** — one file → one record~~ **CERTIFIED LIVE 2026-08-28.** Driven end to end
-   on staging: a 1-row CSV produced a card targeting `SANDBOX 6738075-sb1` with every value
-   transcribed correctly and `subsidiary` resolved from the NAME "Framework Computer UK Ltd"
-   to internal id 5, then labelled back. Needed no new code — it was certify, not build.
-2. **Slice 2** — `task_file.read` tool, so the agent sees past the 20-row/12-col preview.
-   BUILT on branch `feat/read-task-file-tool` (`ef9ee29e`), **unpushed, unmerged,
-   `verify.sh` NOT-DONE** (celigo flakes, see OPEN). **CERTIFIED LIVE 2026-08-29** — a
-   60-row xlsx with a random token planted at row 47 (past the 20-row preview): the agent
-   returned the exact token, which is unobtainable without reading the file.
-   *Two things this cost, both worth remembering: (a) the tool's signature was wrong
-   — the dispatcher calls `execute_fn(params, context=context)` with db INSIDE context,
-   so every live call died while 17 unit tests passed, because the test helper had invented
-   its own calling convention; (b) the first two certification designs were answerable from
-   the preview (CSV previews are not row-capped, and `Vendor NN Ltd` is extrapolable), so
-   "correct answer, zero tool calls" was the result. The third design planted an unguessable
-   value.*
-   *Correction: I twice claimed the frontend picker rejects `.xls`. It does not —
-   chat-input.tsx accepts it at both the handler and the accept attribute. The REAL gap was
-   the opposite: the tool advertised `.xls` while openpyxl cannot read legacy binary .xls
-   (BadZipFile) and xlrd is not a dependency. Now refused by name with a re-save remedy.*
-   *Note: a successful tool call logs NOTHING at the container's effective level (only
-   errors do), so `grep task_file.read` in docker logs is a false negative — do not read
-   its absence as "the tool was not called".*
-3. **Slice 3** — text-layer PDF via pdfplumber (already a dependency, wired only into
-   drive_rag). Scanned PDFs must fail with an honest "no text layer", never a guess.
-4. **Slice 4** — small-N sequential proposals, cap ≤10 enforced in CODE, shared
-   `correlation_id`. **BLOCKED** until the idempotency key + pre-call side-effect log exist
-   (agent-graph.md #10 — explicitly unbuilt).
-5. **Slice 5+** — true batch review surface, and photos via Anthropic vision (adapter-gated;
-   OpenAI/Gemini adapters are text-only). Both need mock-first design per report-design.md.
-
-**Decided, do not re-open:** values may pass through the model for a SINGLE record (the human
-reads every field on the card); deterministic server-side extraction is a hard precondition of
-any BATCH slice, because nobody eyeballs 200 rows. No OCR dependency for an accounting write
-path — OCR confidence is unquantified and the card cannot show what was misread.
-
-1. ~~Cut `agent-graph.md`~~ **DONE** — 35 rules → 15; the two that contradicted shipped
-   code are now recorded as decisions not to re-litigate.
-2. ~~Cut the ceremonial layer~~ **DONE** — both false lines fixed; routine + verification
-   standard moved to `~/.claude/CLAUDE.md` (global, applies to every project), removing
-   3.2 KB of duplication from this repo's always-loaded context.
-3. ~~Convert the two rules I keep breaking into hooks~~ **DONE 2026-08-05** — both live in
-   `~/.claude/hooks/` and merged into `~/.claude/settings.json` alongside the 9 existing.
-   `record-verify-run.sh` was rewritten the same day: v1 fired on any command merely
-   *containing* the string `verify.sh` and stamped the HOOK cwd's branch, so it logged
-   phantom runs against a branch that was not under test. It now reads branch, sha and
-   verdict out of verify.sh's own banner — the one source that only a real run emits.
-4. ~~Single-agent baseline~~ **DONE 2026-08-05** — see DECIDED. One agent, 31× cheaper,
-   both blockers, ~44% of distinct defects. Ordering changed; gate not retired.
-5. ~~Build the dev-cycle graph~~ **DONE** — `verify.sh` (evidence) and `ship.sh` (gate
-   target pinned). No `loop.sh`: a script you must choose to run enforces nothing, so
-   the stopping rule moved to hooks. FRAME and SCOPE stay human nodes on purpose —
-   that is ownership, not capability.
-6. ~~Split this branch~~ **DONE 2026-08-04** — process extracted to
-   `feat/dev-loop-and-harness`, zero shared files with the sibling branch.
-7. **→ NOW: ship the reject endpoint + MCP tool.** The service, migration 093 and 16
-   passing tests exist, but nothing exposes them — **no labels can be recorded, so the
-   evidence clock Rung 3 depends on has not started.** The only item that moves the ladder.
-8. **Decide Track O** — finish the 22 majors, or drop it. Not both fronts at once.
-9. **Check whether tests can reach production Redis.** `backend/tests/conftest.py` has
-   zero Redis handling and FakeRedis appears in only 4 test files, so nothing globally
-   prevents `rate_limit` / `redis_lock` / `token_denylist` from building a live client
-   from `settings.REDIS_URL`. Documented defaults are local, so this may be fine — one
-   command settles it: `grep -E '^REDIS_URL=' backend/.env .env | cut -d@ -f2`. If the
-   host is remote, `release_lock` can DEL a key a production recon worker holds.
+1. **Count credit memos created from each order's invoice in the reconciliation** (decided
+   09-30). 14 of the 20 orders the breakdown calls "adjustment never reached NetSuite" already
+   have a credit memo for exactly that amount (e.g. R000227174: CM11788 −4.82 on INV363632);
+   the comparison reads only the sales order total and refund-linked credits. Reads: invoices
+   created from the SO, then CustCred lines with createdfrom = invoice, batched; register them
+   as dependencies so a new credit re-checks the order. Scan engine = codex's active area:
+   build on the latest release head.
+2. **Fix the breakdown's `source_adjustment_not_in_netsuite` label** (#356 defect): check for a
+   matching credit memo inside the existing NetSuite read budget; a match is a new cause,
+   "already credited in NetSuite; the check ignores it".
+3. **The resolver (the approved mock), per slice:** evidence first (case by order number →
+   saved Solidus order → NetSuite chain: SO, invoices, deposits, payments, credits, returns);
+   one general propose-NetSuite-change card (exact before/after, dry run, one approval, the
+   write kernel, readback), copying how the team booked the same situation (e.g. item 1471
+   "Sales Adjustments" → 40050, memo "<order> <Solidus label>"); reply contract (≤ ~60 words,
+   numbers only in server cards, tool steps collapsed to one line, no unused source chips, no
+   tier box); accounting turns get ~10 tools and schema on demand (≤ 20k fixed tokens);
+   a resolve-case benchmark built from cases with known answers gates each change.
+4. **The changed-after-reconciliation flag, narrow rule:** flag only when a record's version or
+   a refund/credit document changes (Solidus updated_at, NetSuite record ids/updated_at, refund
+   and credit document ids and amounts including the refund read's dependency_manifest
+   transaction ids); detail omitted by a fallback read is never a change. Start from branch
+   79b62dc4 and its four rounds of findings (PR #364 comment 5920747940).
+5. Carried from before: the staging write-agent journey (Aiden starts it: staging's NetSuite
+   is Framework PRODUCTION), the vs-MCP benchmark baseline is still toolless on main (#205
+   closed unmerged), and the Track O decision.
 
 ## DECIDED — date · chose X over Y · because
 
-Written so the next session does not re-litigate these.
+Today's first, then the standing ones in one line each (full reasoning in the 2026-09-16
+archive).
 
-- **2026-09-16 · The transaction_ops ledger IS the write kernel, over a fourth ledger or
-  PR #218's `write_side_effects`** · because three idempotency mechanisms already competed
-  and the ledger had the strongest claim → permit → guard → readback path; #218 is folded
-  (externalId + duplicate:posted), its table never applied. Spec:
-  `docs/superpowers/specs/2026-09-15-write-kernel-design.md`.
-- **2026-09-16 · Tracing over a LangGraph/LangChain rewrite** · because the product agent is
-  ONE tool-use loop on the raw SDK with no LLM sub-agents (the group run's concurrency is
-  three asyncio workers), the post-mortems' failures were contracts/execution/acceptance,
-  never orchestration, the ledger with its DB triggers already is the state machine, and a
-  rewrite reopens the vs-MCP benchmark gate on every chat change. Visibility comes from
-  spans + per-call cost on the ledger row + an llmOps super-admin page after G3.
-- **2026-09-16 · Acceptance is one complete staging journey, not passing parts** · because
-  focused regressions and four gate rounds passed while the real proposal→group path still
-  crashed (post-mortem); the 55-item staging test had exercised rejection, not correction.
-- **2026-09-16 · Rebased work ships as NEW branches/PRs (`-r2`), never a force-push** ·
-  because `.claude/settings.local.json` denies `git push --force*` on purpose; the review
-  record stays on the closed PR (#266 → #269, #267 → #270) and is linked from the new one.
-- **2026-09-16 · The kill switch runs BEFORE the ledger claim for chat cards** · because a
-  halted send must consume no permit and leave no execution record; the
-  `precondition_failed` audit alone releases the card for a fresh approval.
-- **2026-09-10 · Rolling period is SHIPPED and RUNNING UNATTENDED — do not resume it** ·
-  because STATE.md previously said "gate round 1 in flight" and pointed "resume here" at a
-  worktree that no longer exists, which is exactly the stale-state trap this file exists to
-  prevent. Final state: **#209** (wall follows a series), **#212** (daily scheduled compose),
-  **#213** (NetSuite returns dates in the ACCOUNT'S format, not ISO — a live bug the operator
-  hit). All on main, all deployed. Branches and worktrees deleted.
-  **Proof it works unattended:** 11 nightly fan-outs on staging, zero non-`done` reasons. On
-  2026-09-05 NetSuite closed July and the sweep composed Framework's July statement by
-  itself (`"period": "Jul 2026", "composed": 1`); every night since is
-  `already_current: 1, composed: 0` — the `(series_id, period)` idempotency key holding on
-  real runs. **The sweep is ON in staging** (`ROLLING_PERIOD_AUTO_COMPOSE_ENABLED=true` in
-  `/opt/ecom-netsuite/.env.production`, backup `.bak-rolling-period-20260901230811`); the
-  kill switch is that flag OR setting the cap to 0 — both feed one predicate,
-  `settings.auto_compose_is_scheduled`, so either also silences the ribbon's promise.
-  **Open follow-ups, no tickets yet:** (1) the tracking ribbon still says "Couldn't reach
-  NetSuite" for ANY resolver failure including ones where NetSuite answered fine — needs a
-  4th `PeriodUnavailableReason`; (2) the fan-out duplicates `report_auto_refresh` /
-  `recon_scheduled_run_all`; (3) with a cap of N, a series past position N still reads
-  "within a day".
-
-- **2026-08-30 · Stage 2 gates the RIBBON DATA on the scheduler being enabled, not just the
-  wording** · because the amber ribbon promises a statement "is scheduled", and a promise
-  about a background job is only as true as the job's on/off switch. The approved Stage 1
-  mock said "building X's statement now"; on a daily cadence that is false for up to a day,
-  which is the SAME defect the T2 gate caught in the Stage 1 launcher copy ("composed
-  automatically...", no scheduler behind it) — the identical lie relocated to another
-  component. Two changes, and the second is the load-bearing one: the copy now says
-  "scheduled and will appear within a day", AND `closed_days_ago` is withheld entirely
-  unless the series is behind AND `ROLLING_PERIOD_AUTO_COMPOSE_ENABLED` is on. Wording
-  drifts; a withheld field cannot lie. The FE must therefore keep gating amber on the
-  field's PRESENCE and must never derive it by comparing `period`/`resolved_period` —
-  deriving it client-side puts "is scheduled" on a deployment where nothing is scheduled.
-  Recorded because deriving it looks like a harmless simplification.
-
-- **2026-08-27 · On `feat/rolling-period` we answered a repeating gate shape with a SIBLING
-  AUDIT, not a 4th patch** · because two of round 3's three majors were regressions from
-  round 2's *own* fixes, and both shared one shape: *a guard applied to one path but not to
-  its sibling* (ReportSeries insert got ON CONFLICT, the Report insert next to it did not;
-  the resolver's GUC-restore `finally` covered the cache MISS but not the HIT). CLAUDE.md's
-  PR #194 lesson is that when consecutive rounds' findings share a shape you stop looping
-  and make the shape unrepresentable. So instead of only fixing the two instances, we
-  enumerated every sibling of both classes on the branch: **all 3 insert sites** (
-  `UserDashboardPreference` upsert, `ReportSeries`, `Report`) now carry conflict handling,
-  and **all 6 `db.commit()` sites** in `dashboard.py` are followed only by in-memory
-  response building. The one asymmetry left — the `report_id` branch of
-  `set_active_dashboard` lacking the series branch's defense-in-depth `set_tenant_context`
-  — is deliberate: it does no live I/O between its read and its write, so nothing can clear
-  the GUC there. Recorded because a future reader will otherwise "fix" that asymmetry.
-- **2026-08-27 · The HITL guard lives at the DISPATCHER, default-denied, over "each caller checks"**
-  · because a caller that forgets is a hole, and one already existed. Verified reachable: a chat
-  session with `workspace_id` set skips the guarded unified-agent block
-  (`orchestrator.py:2933`, which ends in `return` at 4009) and falls through to the single-agent
-  loop at 4016, whose toolset includes `ns_createRecord`/`ns_updateRecord`/`ns_deleteRecord` and
-  whose only gate is `policy_evaluate` — SQL params and row limits, never mutations.
-  `classify_mutation` appears **zero** times in orchestrator.py. So a workspace-attached session
-  could write to PRODUCTION NetSuite with no card, no HMAC, no approval — contradicting CLAUDE.md's
-  own stated invariant. Pre-existing; `agent-graph.md` #3 had named the shape without anyone
-  establishing reachability. Measured urgency before fixing: 11 workspace-attached sessions exist,
-  **zero active in 60 days**. Fix: `execute_tool_call(..., human_approved=False)` refusing at the
-  choke point; exactly ONE caller passes True (the approve branch, whose payload is HMAC-verified
-  against what a human accepted). **The default is the mechanism** — a caller added tomorrow that
-  has never heard of HITL is refused rather than trusted.
-- **2026-08-27 · NetSuite tools are ALLOW-listed, over the four-name deny-list** · because the
-  NetSuite tool surface is *discovered at runtime* from Oracle's MCP server
-  (`session.list_tools()`, `mcp_client_service.py:164`), so any write tool Oracle exposes that
-  `classify_mutation` has not heard of would pass the HITL guard and mutate production unapproved.
-  `agent-graph.md` states the rule ("allow-list derived from a registry, never a deny-list"). The
-  trade is asymmetric on purpose: a new READ tool being refused is visible, logged with the remedy,
-  and recoverable; a new WRITE tool being allowed is an irreversible ERP mutation nobody sees until
-  after. `human_approved` still passes, so it is fail-closed, not fail-permanently.
-  **`_BLOCKED_RECORD_TYPES` stays a deny-list** — agent-graph.md #1 says so, and record types are a
-  different axis from tool names.
-- **2026-08-27 · Sandbox environment binding must be ENFORCED, not hinted** ·
-  `docs/superpowers/specs/2026-08-27-sandbox-environment-binding-design.md`. `source_pin` is
-  deliberately advisory and is the wrong model: on an irreversible ERP write, a hint followed 95% of
-  the time is a 5% chance of hitting production when the user said sandbox. It is also unusable
-  mechanically — its column was dropped in migration 067. Environment is derived server-side from
-  the account id (never operator-asserted — `metadata_json['account_id']` is unvalidated free text,
-  so a row labelled "sandbox" can point at production), stored NOT NULL with an explicit
-  `production` backfill, re-derived at dispatch, and signed into the confirmation envelope. Three of
-  the nine threat-model holes were bugs in the CURRENT system and are already fixed.
-
-- **2026-08-25 · Required NetSuite fields are CURATED IN CODE, over "discovered at runtime
-  from `ns_getRecordTypeMetadata`"** · because the runtime option does not exist. The plan
-  (`docs/superpowers/plans/2026-08-19-agentic-netsuite-write-loop.md:20`) forbade hardcoding
-  field names and required every requiredness fact to come from that tool. Three independent
-  checks killed it: the tool returns a JSON-Schema catalog whose per-field keys are only
-  `{description, format, nullable, properties, title, type, x-ns-custom-field}` — no
-  `required` array, and `nullable` is `false` on **zero of 177** customer fields;
-  `ns_getSuiteQLMetadata` returns the identical shape; and SuiteQL `CustomField.ismandatory`
-  covers **custom fields only**, never `subsidiary`/`companyname`/`entityid`. Consequence
-  while it stood: every card was `unvalidated: True` with `editable_slots: []`, so required
-  field validation was inert and the agent picked values like `subsidiary` by reasoning
-  alone. `backend/app/services/chat/required_field_registry.py` is the reversal.
-  **The risk runs BACKWARDS from the usual one** — a missing entry is cheap (NetSuite
-  rejects, the repair loop recovers), a WRONG entry blocks a write NetSuite would have
-  accepted and reads to an operator as the product being broken. So entries must clear two
-  bars (NetSuite really rejects without it AND it does not auto-derive), carry provenance,
-  and stay OUT when unproven. Deliberately excluded, each a live trap: `subsidiary` on any
-  transaction carrying an `entity` (it derives FROM the entity — required=false), `trandate`
-  anywhere (NetSuite defaults it), `location`/`department`/`class` (per-account config), and
-  all of `expenseReport` (never observed here). Only `customer.subsidiary` is
-  account-evidenced; everything else is domain knowledge, marked as such.
-- **2026-08-25 · A resolved `ask_user` slot DELEGATES a missing field to the human, over
-  letting the repair loop own every gap** · because once the registry made `customer`
-  actually validate, the two mechanisms met for the first time and the old ordering was
-  wrong: `ask_user` is the model stating it *cannot* determine a value, so bouncing that
-  exact field back to the model is the one action that cannot help — it re-proposes, burns
-  its repair budget to a `stall`, and the human who could answer in one click never sees a
-  card. Resolution therefore runs BEFORE the repair decision in `base_agent`, and
-  `ValidationResult.with_delegated_slots()` reclassifies a resolved field from "missing" to
-  "asked". Terminal things never delegate: `invariant_errors` (a closed period is not a
-  question a dropdown answers) and `missing_line_required` (no line-slot mechanism in v1).
-  An UNresolved hint — unknown field name, or zero options — still goes to the repair loop,
-  because a card with an unfillable required field is refused by the approve path's
-  slot-coverage gate and is a dead end for the operator.
-
-- **2026-08-06 · We had been SKIPPING RUNGS on the agentic-engineering ladder** · because
-  the ladder (flat capture → code graph → domain graph → single-agent loop → verifier →
-  small fan-out → gated team → worktrees) says each rung needs an entry trigger and a kill
-  rule, and we were running 60-agent fan-outs (rung 6) with no working single-agent loop
-  (rung 3), no Stop hook, and no measured baseline. The 31×-cost finding was the bill for
-  that. Corrective: fix rung 3 first, and treat "does it beat one agent on cost per
-  successful outcome" as the gate for climbing at all.
-- **2026-08-06 · A deterministic Stop hook backs every done-claim — `stop_guard.py`** ·
-  because `/goal`'s evaluator (and any transcript-reading judge) **cannot run commands or
-  read files**, so it cannot distinguish a true claim from a confident one — the
-  "narrated success" failure, which is this workspace's single most repeated defect. The
-  hook blocks a turn that asserts green when no verify PASS is recorded for the CURRENT
-  HEAD. Narrow by design: it only fires where `scripts/verify.sh` exists, and a recorded
-  PASS at that exact sha silences it regardless of wording. Honours `stop_hook_active`,
-  or the session wedges. Rejected: making it a model-evaluated prompt hook — that
-  reintroduces the exact weakness it exists to cover.
-- **2026-08-06 · Compaction carries ground truth forward — `compact_snapshot.py`** ·
-  because a summary compresses narrative and drops state: on 2026-08-05 this session hit
-  100% context and branch/sha, verify status and parked branches all had to be
-  reconstructed by hand, while the summary confidently carried claims that were no longer
-  true. PostCompact now re-reads those facts from git at injection time (never trusting
-  the pre-snapshot) and states that where it disagrees with the summary, it wins.
-- **2026-08-06 · The stopping rule is now IN RUN STATE — `~/.claude/hooks/loop_state.py`** ·
-  because deleting `loop.sh` was right (a script you must invoke enforces nothing) but
-  nothing replaced the function it served, so for three days the iteration cap lived in
-  `CLAUDE.md` prose — the precise arrangement the doctrine rejects. The claim "the hooks
-  replace it" was FALSE: the two installed hooks pin a gate target and record verify runs;
-  neither counts anything. Three mechanisms now, none needing the agent to cooperate:
-  `capture` (UserPromptSubmit) records the session goal from the first substantive prompt,
-  so there is nothing to remember to invoke; `mirror` (PreToolUse Edit|Write) prints the
-  recorded goal beside the directories actually edited every 25 edits; `attempt`
-  (PostToolUse Bash) counts real verify.sh runs and escalates to `ask` at 15.
-  *Mirror, not blocker, on purpose:* topic drift is a judgement, not a computation — but
-  the PAIR (goal, dirs-touched) is mechanical, and on 2026-08-05 it would have read
-  `goal: "change how we work daily"` / `edited: backend/app/api/v1 (24)`. That is enough.
-  Escalation is `ask` not `deny` because this session's brief was to REMOVE restrictions
-  that degrade the work; an ask you must answer is enforcement, a deny you route around is
-  an obstacle. A failed state write is LOUD, not silent — if it were silent the counters
-  would reset every call and the whole mechanism would look installed while doing nothing,
-  which is the absence-is-not-success trap it exists to catch.
-- **2026-08-05 · Enforcement lives in HOOKS, not in shell scripts we choose to run** ·
-  because a script that must be invoked is the same category as prose, just executable.
-  `loop.sh` was deleted on the belief that self-imposed iteration budgets are
-  unenforceable — that was wrong. `PreToolUse`/`PostToolUse`/`SessionStart` hooks run
-  whether or not the agent cooperates, and 9 were already configured in
-  `~/.claude/settings.json` the whole time. Split verification into PULL (verify.sh —
-  fine to invoke) and PUSH (hooks — the only real enforcement).
-- **2026-08-05 · MEASURED: one strong agent runs FIRST on every review; the fan-out gate
-  runs second, only if the cheap pass comes back thin** · because on the round-3 diff
-  (~700 lines, commit `fabd731`) one Opus agent cost 146k tokens and 12 minutes against
-  the gate's 4.55M tokens and 60 agents — **31×** — and found ~44% of the distinct
-  defects, including **both blockers**, plus one the gate missed entirely (the DB guard
-  pins three `DATABASE_URL*` vars but leaves `REDIS_URL` to `.env`, and
-  `redis_lock.release_lock` does a live `DEL` — a test could release a lock a production
-  recon worker holds). It also *reproduced* its findings rather than arguing them. The
-  ordering is strictly dominant: the cheap pass can only add findings, and the gate still
-  runs afterwards. NOT decided: whether small diffs can skip the gate entirely — that
-  needs a number I did not contaminate (I wrote the baseline prompt after reading round 3
-  and aimed it at "checks that pass on broken code", which is where the blocker lived).
-  Get it free on the next T2 diff: single agent first, then the gate, record the delta.
-- **2026-08-05 · Count DISTINCT DEFECTS, not findings** · because round 3 reported 30
-  confirmed findings that collapse to ~18 real defects — `TIER: unbound` appeared 7 times
-  and the flag inversion 7 times. Volume read as thoroughness. The same run also returned
-  two mutually contradictory CONFIRMED findings about the same three lines: per-finding
-  verification has no view of the set, so it cannot catch inconsistency between findings.
-- **2026-08-05 · Freeze the dev toolchain after the two blockers; no 4th gate round** ·
-  because the pre-agreed kill rule said so and the exit reason is `done`, not `stall` —
-  the question the rounds existed to answer got answered. Three consecutive rounds each
-  fixed a blocker and left another of the same class (`-rf`→ERROR blindness, then
-  `TIER: unbound`, then the inverted `-z "$MODE"` test). Remaining ~37 findings are
-  quality work on a script only we use; triage by "does it change the exit code?" —
-  almost none do. They live in OPEN, not in another round.
-- **2026-08-05 · Every tooling pilot gets a KILL RULE set in advance** · because round 3
-  was stopped by reaction to bad results, not against a pre-agreed threshold. A pilot
-  that ends in "do not build" is a success only if the bar was set beforehand.
-
-- **2026-08-02 · Adopt the Agent-Graph track, reject the Knowledge-Graph track** · because
-  our matching is 1-hop on `order_ref` and measured graph advantage starts at ≥3 hops.
-  Rejected specifically: graph DB, GraphRAG, `TenantMemoryEdge` traversal, a LangGraph-style
-  rewrite, critical-path orchestration, full event sourcing, entity-resolution machinery.
-- **2026-08-02 · `verify.sh` is the loop's exit condition, not my judgement** · because the
-  same "tests pass, zero regressions" claim was made three times on code that would have
-  crash-looped every Celery worker. Same-context self-assessment is the one verification
-  pattern every source rejects.
-- **2026-08-02 · No scheduled autonomous dev cycle yet; closed loop first** · because METR
-  measures near-100% success under ~4 human-minutes and under 10% over ~4 hours, and this
-  session produced two fleet-killing blockers semi-autonomously. Automate only steps that
-  traces prove boring. The "decide what to build" step is never automated — that is
-  ownership, not capability.
-- **2026-08-02 · Process global (`~/.claude/`), knowledge local (repo)** · because process
-  is identical across projects and currently duplicated into each one, while planning
-  harness barely exists anywhere.
-- **2026-08-04 · Reversals post to the CURRENT OPEN period; periods are never reopened
-  programmatically** · answered by the operator (accounting). A wrong posting discovered
-  after close is corrected by a reversing entry dated in the current open period. Reopening
-  a closed period requires an accounting controller's approval and is therefore a HUMAN
-  action outside the automated path — **no endpoint, no flag, no admin override may reopen
-  a period.** The close-lock invariant stays absolute in code.
-  *Consequence: the compensation design never fights our own guard, and needs no exception
-  path. Materiality was left open on purpose — with current-period reversal as the
-  unconditional default, materiality only decides whether a human escalates for the
-  exceptional reopen. It is a controller's judgement, not a constant in the codebase.*
-- **2026-08-02 · The cut test is "recoverable from the repo?", not "execution vs planning"** ·
-  because the bare-body test showed an agent with no harness recovered the SET LOCAL
-  landmine from a docstring in `database.py:65-73`, but could not recover the T2 gate
-  policy at any capability. **Prefer a docstring next to the code over a rule in CLAUDE.md.**
+- **2026-09-30 · A reconciled order stays reconciled, forever, over reopening on a later
+  scan** · because 63 of the 66 reopens in 14 days had no change in either system (the scan
+  compared another way), and the user ruled "should not open again". A real later change is
+  surfaced separately, never by reopening (#364; database guard migration 117).
+- **2026-09-30 · Reconciliation counts ALL credit memos created from the order's invoice, over
+  only app-verified ones** · because the team books Solidus adjustments as hand-made credit
+  memos (14 of 20 checked) and those are the proof the order is right.
+- **2026-09-30 · The resolver asks before closing a case, over closing net-zero cases itself**
+  · because trust comes first; switch to automatic later. NetSuite changes always need approval.
+- **2026-09-30 · Ship the lock alone and split the change flag, over a fifth review round** ·
+  because rounds 2-4 found only detector/list issues and each round's findings shared a shape;
+  the doctrine is to stop looping and change the mechanism.
+- **2026-09-30 · Detect "changed" from record versions and document identities, never from
+  hand-picked content fields or a generic *_complete gate** · because field lists missed a
+  variant every round (F1, F5-F8, F10), and `tax_complete` is False on every real report, so a
+  generic completeness gate hid real changes.
+- 2026-09-29 · Thinking level floor is `med`, never `low` (#355).
+- 2026-09-28 · Sonnet 5.5: forced tool calls run on Sonnet 5 (`_FORCEABLE_MODEL`); blocking
+  calls are text-only (#353).
+- 2026-09-16 · The transaction_ops ledger IS the write kernel; no fourth ledger.
+- 2026-09-16 · Tracing over a LangGraph/LangChain rewrite; one tool-use loop.
+- 2026-09-16 · Acceptance is one complete staging journey, not passing parts.
+- 2026-09-16 · Rebased work ships as a NEW branch/PR; never force-push.
+- 2026-09-16 · The kill switch runs BEFORE the ledger claim for chat cards.
+- 2026-08-27 · The HITL guard lives at the DISPATCHER, default-denied.
+- 2026-08-27 · NetSuite tools are ALLOW-listed; `_BLOCKED_RECORD_TYPES` stays a deny-list.
+- 2026-08-27 · Sandbox environment binding is enforced server-side from the account id.
+- 2026-08-27 · A repeating gate shape gets a sibling audit / an unrepresentable fix, not a patch.
+- 2026-08-25 · Required NetSuite fields are curated in code (`required_field_registry.py`).
+- 2026-08-25 · A resolved `ask_user` slot delegates the field to the human.
+- 2026-08-06 · Climb the agentic ladder in order; fan out only if it beats one agent on cost.
+- 2026-08-06 · Hooks back every done-claim (`stop_guard.py`), carry state across compaction
+  (`compact_snapshot.py`) and hold the stopping rule (`loop_state.py`). Enforcement lives in
+  hooks, not in scripts we choose to run.
+- 2026-08-05 · One strong agent reviews first; the fan-out gate second. Count distinct defects.
+- 2026-08-05 · Every tooling pilot gets a kill rule set in advance.
+- 2026-08-04 · Reversals post to the CURRENT OPEN period; periods are never reopened by code.
+- 2026-08-02 · `verify.sh` is the loop's exit condition. Process global, knowledge local.
+- 2026-08-02 · Prefer a docstring next to the code over a rule in CLAUDE.md.
 
 ## DON'T — tried, failed, stop re-proposing
 
-- **Don't verify by inspecting.** An AST/grep check over source cannot catch a NameError,
-  and a disk scan cannot catch an untracked file. Import it, run it.
-- **Don't trust a gate result without reading `target` and `base`.** `target: null` means it
-  reviewed the session cwd's branch, which in this repo is usually the wrong one. It
-  already burned a full 59-agent run.
-- **Don't claim "no regressions" without a baseline.** This repo carries pre-existing
-  failures; green-vs-nothing proves nothing. `verify.sh --full` does the comparison.
-- **Don't put a new file under `backend/app/workers/tasks/` without checking `git status`.**
-  `.gitignore` anchored `tasks/` and silently swallowed a module. (Fixed to `/tasks/`, but
-  the class of bug recurs.)
-- **Don't treat one clean gate round as done.** Observed major counts across rounds on a
-  single PR: 0 → 2 → 3 → 1 → 0.
-- **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
-- **Don't add a fourth write ledger, a per-kind Python recipe, or a new RESTlet for a write
-  path.** The kernel + adapters + treatment registry carry new kinds; count mechanisms before
-  adding one.
-- **Don't name a keyword parameter `scope` in transaction_ops.** Twice in one day a local
-  `scope` list shadowed a new `scope=` parameter (`chat_confirmation.intent_of`,
-  `review_evidence.current_review_evidence`); both were caught only by a test.
-- **Don't leave a subquery/CTE anonymous when it is copied generatively** (`.prefix_with`,
-  `.alias()` chains): the anonymous name is derived from `id()` and the copy keeps the freed
-  original's id → `table name "anon_8" specified more than once` in CI only. Name it.
-- **Don't force-push, and don't ask to relax that rule.** Ship the rebased head as a new
-  branch and PR.
+- **Don't hand-pick fields to decide whether evidence changed.** Four review rounds on #364.
+- **Don't assume what staging runs.** Codex redeploys often; read the running digest and
+  compare files with git before a rollout, and never roll an older build over a newer one.
+- **Don't merge docs or anything else to `main` casually:** a main merge auto-deploys staging.
+- Don't verify by inspecting; import it, run it.
+- Don't trust a gate or packet result without its `target`/`base` (or base/head sha).
+- Don't claim "no regressions" without a baseline; don't treat one clean round as done.
+- Don't add a rule to CLAUDE.md when a docstring would carry it.
+- Don't add a fourth write ledger, a per-kind recipe or a new RESTlet for a write path.
+- Don't name a keyword parameter `scope` in transaction_ops; don't leave a copied CTE anonymous.
+- Don't force-push, and don't ask to relax that rule.
 
 ## OPEN — needs a human, blocking something
 
-- **The staging journey run (write-agent acceptance) needs Aiden to start it**: staging's
-  NetSuite connection is Framework PRODUCTION; a session must never initiate that write.
-- **ClickUp program ticket** (`docs/superpowers/plans/2026-09-17-write-agent-program-ticket.md`, list Suite Studio
-  AI › Framework Launch 901421078818): the MCP connector's daily limit blocked creation on
-  2026-09-16; create it on the next session and bind sessions to it. The G3 slices have no
-  tickets of their own (Aiden, 2026-09-16).
-- **The staging read of the stored live CM proposal** (G4's real-account fixture) is still
-  blocked by the auto-mode classifier refusing the Supabase query.
-
-
-- **`feat/rolling-period`'s last full `verify.sh` is RED — on two auth tests this branch
-  does not touch.** `test_auth_security.py::TestLoginRateLimit::test_rate_limit_blocks_after_10`
-  and `test_auth.py::TestLogin::test_login_creates_audit_event`. Evidence it is NOT a
-  regression from this branch: (a) the SAME code passed full verify twice earlier
-  (after Task 4 and Task 5, 5642 passed / 0 new failures each time) and failed on the
-  third run; (b) both tests pass in isolation and as an ordered pair; (c) the branch
-  contains zero auth/rate-limiter changes; (d) my tests cannot pollute them — the audit
-  assertion is scoped to its own tenant and action, and nothing here touches limiter state.
-  There is no `pytest-randomly`/`xdist`, so ordering is deterministic — which makes the
-  intermittency *more* suspicious, not less: it points at shared limiter state or a
-  time-window boundary crossed on a slow run. **This is very likely the risk already
-  logged as NEXT #9** (nothing globally prevents `rate_limit`/`redis_lock` from building a
-  live client from `settings.REDIS_URL`). Do not gate or land this branch on a red
-  record: get ONE clean full run, and if it recurs, treat it as the NEXT #9 investigation
-  rather than a rolling-period defect.
-
-- **TWO migrations are both numbered `093` off parent `092`, on different branches.**
-  `feat/rolling-period` has `093_report_series`; `feat/recon-reject-action` (and
-  `agent-graph`) has `093_recon_reject_labels`. They are schema-orthogonal
-  (`report_series`/`reports` vs `reconciliation_results`), so nothing conflicts
-  logically — but if BOTH merge as-is, `alembic upgrade head` sees **two heads and
-  fails**, and staging auto-migrates on every main merge, so that breaks deploys
-  fleet-wide. **Whichever merges SECOND must re-parent to `094` off the first**
-  (linearize — never a merge migration; see `memory/feedback_merge_migration_breaks_downgrade`).
-  Decide merge order deliberately, not by whoever pushes first.
-  *Local-only side effect:* the shared docker Postgres now has BOTH sets of DDL applied
-  but `alembic_version` stamped at `093_report_series`, so the recon worktree's
-  `alembic upgrade head` cannot locate its own revision. One shared local DB cannot track
-  two divergent branches — whoever works locally re-stamps to their own head
-  (`alembic stamp --purge <their 093>`); no DDL is lost either way. CI and staging use
-  their own databases and are unaffected.
-- **ROTATE THE `gh` OAUTH TOKEN — leaked twice on 2026-08-28, by me, both times the same way.**
-  The token is `gh auth token` for `aideny-kr` (scopes: repo, write:packages, read:org, gist).
-  Leak #1: authenticating the staging VM to GHCR, I wrote
-  `TOKEN=$(gh auth token); ssh vm "echo '$TOKEN' | docker login …"` — interpolating it into
-  the ssh command string puts it in the REMOTE process's argv, readable via `ps aux` on the
-  VM. Leak #2: after the user rotated, I verified the new token *using the same construction*,
-  burning the fresh one within minutes of having described the hazard. It is also in this
-  session's transcript `.jsonl` in plaintext, permanently.
-  **Do:** revoke at github.com → Settings → Applications → Authorized OAuth Apps → GitHub CLI
-  (logout alone may not revoke server-side), then `gh auth login` and
-  `gh auth refresh -h github.com -s write:packages` — the deploy needs write:packages for GHCR.
-  **The only safe form, use it every time:**
-  `gh auth token | ssh aidenyi@34.73.236.64 "sudo docker login ghcr.io -u aideny-kr --password-stdin"`
-  — the secret travels on stdin and never appears in any argv.
-  **The real lesson:** knowing the rule did not prevent the leak; I recited it and then broke
-  it because the unsafe form was one line shorter. Never put a secret in a shell variable that
-  a later command can interpolate — pipe it, or it will eventually end up in argv.
-- **Three test customers still active in PRODUCTION NetSuite (6738075)** — internal ids
-  `5803124`, `5800803`, `5795008`, created while proving the write path. Harmless but real
-  records in a real ledger; inactivate them. (Sandbox `6738075-sb1` also holds test rows —
-  `5264348` "Sandbox Smoke Test", plus the Card Rate Probe / Northwind Slice One rows — those
-  are sandbox and can stay.)
-- **`test_celigo_flows_api.py` leaks state from somewhere in the wider suite — UNLOCATED.**
-  Fails only in a full run, naming DIFFERENT tests each time while head and baseline failure
-  totals stay identical (123 = 123). Ruled out with evidence on 2026-08-30: in-file ordering
-  (3/3 clean alone), `tests/api` siblings (2/2 clean, 195 tests), and the module-level
-  `_FLAG_CACHE` in feature_flag_service (131 passed with four flag-mutating files ordered
-  first). The leaking file is elsewhere in ~5000 tests and bisecting costs ~6 min a run.
-  *Mostly defused rather than fixed:* `verify.sh` now re-runs each newly-failing test in
-  isolation, so a flake no longer produces a false "these are yours". Still worth locating —
-  a test that only fails in company can also hide a real interaction bug.
-- **Never deploy an unmerged branch to shared staging.** Any main merge auto-deploys and will
-  silently replace it — PR #209 did exactly that at 01:00:46 on 2026-08-31, wiping a build
-  whose live certification had passed 40 minutes earlier. Three failure modes: others testing
-  staging get YOUR branch (including the write path); your live certification decays the
-  moment someone merges; and your manual deploy can clobber their freshly-merged feature.
-  If a live test genuinely needs it, record `git rev-parse origin/main` BEFORE and AFTER and
-  treat any change as invalidating the result. "Verified live" needs a timestamp and a
-  main-sha beside it, not a checkmark.
-
-- ~~Framework's NetSuite connection dead~~ **RESOLVED 2026-08-04.** Re-authed; connection
-  `active`, health-checked 02:55, deposit sync completed 02:00, data current to 02:13
-  (75,534 postings). The outage was real — failed 08-03 02:00, data frozen at 07-29 for
-  four nights while recon kept completing against it — and it is the exact failure the
-  liveness check in `services/ops_digest.py` was built to catch: *absence is not failure*,
-  so the fan-out completed successfully while silently skipping this tenant.
-  *Still uncovered: per-tenant silence inside a healthy fan-out. That is the shape that
-  actually bit us, and the Beat-level liveness check does not see it.*
-- ~~Frozen-period reversal policy~~ **ANSWERED 2026-08-04** — see DECIDED. Reversals go to
-  the current open period; reopening needs a controller and stays out of the code.
-  *One sub-question deferred, not blocking: at what materiality would a controller prefer a
-  prior-period adjustment over a current-period reversal? Only matters once a reversal is
-  large enough to distort the current month — ask before the first material one, not now.*
-- **`.gitignore` still shadows tracked FRONTEND files.** `tasks/` was anchored on this
-  branch, which immediately exposed 3 lint violations in worker modules CI had never
-  linted. The same defect remains at `.gitignore:59` — unanchored `memory/` matches
-  `frontend/src/components/memory/` and `frontend/src/app/(dashboard)/memory/`, shadowing
-  **5 tracked files** including `memory-graph-canvas.tsx`, `learned-rules-section.tsx` and
-  their two test files. Verify with `git check-ignore -v --no-index <path>` — plain
-  `check-ignore` stays SILENT for tracked paths, which is why this survived this long.
-  *Not fixed here: anchoring it will likely surface a batch of eslint findings on files
-  that have never been linted, and that is its own task, not a rider on this one. Unknown
-  and worth 5 minutes: whether vitest also skips those two test files (it uses include
-  globs, so probably not) or only eslint does.*
-- **Track O: finish or drop?** 22 open majors. *Blocking: nothing, but it rots.*
+- **Merge #364** (Aiden). Migration 117 runs on deploy; port the "Reconciled" label to the
+  preserved UI line with #360.
+- **ClickUp tickets for #355, #356, #364** (Aiden is creating them; the MCP daily limit blocks
+  the session). The ticket hook keeps asking for 86bc7eebh, which is already closed by hand.
+- **The staging write-agent journey** needs Aiden to start it (Framework PRODUCTION NetSuite).
+- **Unverified since 2026-08-28:** the leaked `gh` OAuth token rotation, and three test
+  customers in PRODUCTION NetSuite (5803124, 5800803, 5795008) to inactivate.
+- **`.gitignore:64` unanchored `memory/`** still shadows tracked frontend files under
+  `frontend/src/**/memory/`.
+- **Track O: finish or drop?** 22 open majors; nothing blocked by it.
