@@ -34,6 +34,9 @@ async def test_checkpoint_yields_without_spend_or_deadline_reset_and_resumes(db,
     await db.refresh(run)
     deadline = run.deadline_at
     assert run.status == "running" and run.lease_token is run.lease_until is None
+    from app.services.transaction_ops.operational_status import run_snapshot
+
+    assert run_snapshot(run, state._clock())["execution_state"] == "queued"
     assert run.api_calls_used == run.orders_used == 0
     assert run.progress_json["pending_refs"] == ["R123456780"]
     assert run.id in await scheduler._recovery_ids(db, actor.tenant_id, state._clock())

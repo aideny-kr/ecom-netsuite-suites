@@ -123,7 +123,7 @@ def run_snapshot(run, now):
     if run.status == "running":
         if run.deadline_at <= now:
             execution = "deadline_expired"
-        elif run.lease_token is None and progress.get("worker_yielded_at"):
+        elif progress.get("worker_yielded_at") and run.lease_token is None:
             execution = "queued"
         elif run.lease_until is None or run.lease_until <= now:
             execution = "lease_expired"
