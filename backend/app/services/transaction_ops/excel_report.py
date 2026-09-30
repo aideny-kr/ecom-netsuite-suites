@@ -215,11 +215,16 @@ def _build_workbook(wb, rows, scopes, *, status, search, generated_at, report_id
     ]
     for scope in scopes:
         config = scope["config"]
+        evidence = (
+            "saved observations with targeted refresh" if scope.get("evidence_mode") == "saved" else "standard review"
+        )
         info.append(
             [
                 config.get("name") or f"Entity {config.get('subsidiary_id')}",
                 f"{scope['period']['start']} to {scope['period']['end']} (exclusive); "
-                f"source date basis: {scope.get('window_basis', 'completed_at')}; review run {scope['run_id']}",
+                f"source date basis: {scope.get('window_basis', 'completed_at')}; "
+                f"evidence: {evidence}; "
+                f"review run {scope['run_id']}",
             ]
         )
     _sheet(wb, "Report", ["Field", "Value"], info, numeric_columns=(2,), overview=True)

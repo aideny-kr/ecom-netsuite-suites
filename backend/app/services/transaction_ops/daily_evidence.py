@@ -63,6 +63,8 @@ def compatible_scope(root):
         "record_type",
     ):
         predicates.append(r.config_snapshot[key].astext == snapshot.get(key))
+    if root.params_json.get("evidence_mode") != "saved" or getattr(root, "origin", None) == "schedule":
+        predicates.append(func.coalesce(r.params_json["evidence_mode"].astext, "current") != "saved")
     return predicates
 
 

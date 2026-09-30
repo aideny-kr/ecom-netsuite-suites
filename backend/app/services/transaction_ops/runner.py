@@ -384,8 +384,10 @@ async def run_investigation(
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
     deadline_at = run.deadline_at
     progress = _initial_progress(run)
+    from app.services.transaction_ops import cached_review
     from app.services.transaction_ops.run_timing import RunTiming
 
+    cached = cached_review.CachedReview(db, tenant_id, run)
     timing = RunTiming(progress)
     state = timing.state(state)
     from app.services.transaction_ops.refund_reader import MAX_BATCH_ORDERS, RefundBatch
@@ -984,6 +986,33 @@ async def run_investigation(
                 _page_progress(page, progress, run.params_json, config)
                 await save()
                 continue
+            if cached_review.saved(run):
+                await flush_findings()
+                await cached.prepare(progress["pending_refs"], progress, now=clock())
+                if staged is not None:
+                    staged.reusable_references = {ref for ref, report in cached.prepared.items() if report is not None}
+                reports = cached.prefix(progress["pending_refs"])
+                if reports:
+                    # No order/provider budget is consumed by local replay.
+                    # Original read times survive and no case writer is called.
+                    before = deepcopy(progress)
+                    for report in reports:
+                        progress.update(completed_progress(report).progress_json)
+                    progress["cached_results_reused"] = progress.get("cached_results_reused", 0) + len(reports)
+                    if not await cached_review.persist(
+                        db,
+                        tenant_id,
+                        run_id,
+                        reports,
+                        lease_token=token,
+                        checkpoint=ProgressUpdate(progress_json=progress),
+                        now=clock(),
+                    ):
+                        progress.clear()
+                        progress.update(before)
+                        for report in reports:
+                            cached.prepared[report["order_reference"]] = None
+                    continue
             reference = progress["pending_refs"][0]
             # Validate a small group before comparing it. Calls and order work
             # are paid before prefetch; only durable source snapshots survive a
@@ -999,6 +1028,8 @@ async def run_investigation(
             if chunk_path and reference not in staged_source:
                 await flush_findings()
                 count = min(10, len(progress["pending_refs"]), run.max_orders - run.orders_used)
+                if cached_review.saved(run):
+                    count = min(count, cached.fresh_prefix_size(progress["pending_refs"]))
                 # Leave the existing target batch/fallback headroom untouched.
                 count = min(
                     count, max(0, (run.max_api_calls - run.api_calls_used - (run.api_calls_held or 0) - 91) // 2)

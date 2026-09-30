@@ -460,6 +460,8 @@ async def create_run(
         raise StateError("period_reader_unavailable", 422)
     # Preserve idempotency for requests made before calendar cohorts were added.
     excluded = {"window_basis"} if request.window_basis == "updated_at" and request.review is None else set()
+    if request.evidence_mode == "current":
+        excluded.add("evidence_mode")
     if request.review is None:
         excluded.add("review")
     elif request.review.end > now:
@@ -487,6 +489,9 @@ async def create_run(
                 raise StateError("invalid_run_continuation")
         previous_scope = {k: v for k, v in previous.params_json.items() if k not in {"evaluation_key", "origin"}}
         new_scope = {k: v for k, v in params.items() if k not in {"evaluation_key", "origin"}}
+        for scope in (previous_scope, new_scope):
+            if scope.get("evidence_mode") == "current":
+                scope.pop("evidence_mode")
         if (
             previous.config_id != config.id
             or previous.status != "finished"

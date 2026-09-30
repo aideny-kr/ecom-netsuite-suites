@@ -48,6 +48,7 @@ async def selected_evidence(db, tenant_id, run_ids):
                 "config_id": str(run.config_id),
                 "period": span.model_dump(mode="json"),
                 "window_basis": run.params_json.get("window_basis", "completed_at"),
+                "evidence_mode": run.params_json.get("evidence_mode", "current"),
                 "config": run.config_snapshot,
             }
         )
@@ -78,7 +79,10 @@ def result_item(row):
         "review_run_id": row["review_run_id"],
         "config_id": row["config_id"],
         "order_reference": row["order_reference"],
-        "observed_at": row["updated_at"].isoformat(),
+        "observed_at": report["_observation"]["observed_at"]
+        if report.get("cached_evidence")
+        else row["updated_at"].isoformat(),
+        "cached_evidence": report.get("cached_evidence"),
         "balance": report.get("balance"),
         "case_id": report.get("case_id"),
         "action": (report.get("comparison") or {}).get("recommended_action"),

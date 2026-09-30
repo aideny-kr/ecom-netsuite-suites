@@ -65,7 +65,7 @@ function dateBasisLabel(run: TransactionRun) {
   return dateBasis(run) === "updated_at" ? "Source update date (updated_at)" : "Order completion date (completed_at)";
 }
 function reviewKey(run: TransactionRun) {
-  return JSON.stringify([span(run).start, span(run).end, dateBasis(run)]);
+  return JSON.stringify([span(run).start, span(run).end, dateBasis(run), run.params_json.evidence_mode || "current"]);
 }
 export function TransactionWorkspace() {
   const access = useTransactionAccess();
@@ -86,6 +86,7 @@ function Workspace() {
   const investigate = useBulkCaseInvestigation();
   const [entity, setEntity] = useState("");
   const [period, setPeriod] = useState<PeriodInput["period"]>("last_week");
+  const [evidenceMode, setEvidenceMode] = useState<"current" | "saved">("current");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [pinned, setPinned] = useState<TransactionRun[]>([]);
@@ -147,7 +148,8 @@ function Workspace() {
             currentConfig(r)?.id === c.id &&
             span(r).start === (anchor && span(anchor).start) &&
             span(r).end === (anchor && span(anchor).end) &&
-            dateBasis(r) === (anchor && dateBasis(anchor)),
+            dateBasis(r) === (anchor && dateBasis(anchor)) &&
+            (r.params_json.evidence_mode || "current") === (anchor?.params_json.evidence_mode || "current"),
         );
         return found ? [found] : [];
       });
@@ -222,6 +224,7 @@ function Workspace() {
       if (!alive.current) break;
       const body = {
         period,
+        ...(evidenceMode === "saved" ? { evidence_mode: "saved" as const } : {}),
         ...(period === "custom" ? { start_date: from, end_date: to } : {}),
       };
       const identity = JSON.stringify([access.tenantId, config.id, body]);
@@ -343,6 +346,16 @@ function Workspace() {
                 </option>
               ))}
             </select>
+            <select
+              aria-label="Review evidence"
+              className={input}
+              value={evidenceMode}
+              disabled={starting}
+              onChange={(e) => setEvidenceMode(e.target.value as "current" | "saved")}
+            >
+              <option value="current">Standard review</option>
+              <option value="saved">Reuse saved evidence</option>
+            </select>
             {period === "custom" && (
               <>
                 <input
@@ -375,8 +388,10 @@ function Workspace() {
           </Button>
         </div>
         <p className="mt-4 text-[13px] text-muted-foreground">
-          Source activity in the selected period, compared with current
-          NetSuite records. Each review records its source date basis.
+          {evidenceMode === "saved"
+            ? "Reuses compatible saved results with their original read dates. Changed or incomplete evidence is collected again. Uncovered periods still require order discovery."
+            : "Source activity in the selected period, compared with NetSuite records. Completed compatible reviews may be reused."}
+          {" "}Each review records its source date basis.
           Refund activity also checks older orders. Calendar
           boundaries use the configured business timezone.
         </p>
@@ -404,6 +419,7 @@ function Workspace() {
           <p className="mt-2 text-[13px] text-muted-foreground">
             Viewing {dateLabel(span(anchor).start)} →{" "}
             {dateLabel(span(anchor).end)} (end exclusive). {dateBasisLabel(anchor)}. Review jobs available for{" "}
+            {anchor.params_json.evidence_mode === "saved" ? "Saved evidence with targeted refresh. " : ""}
             {selectedRuns.length} of{" "}
             {Math.max(scopes.length, selectedRuns.length)} selected entities.
           </p>
@@ -434,6 +450,7 @@ function Workspace() {
               {savedReviews.map((r) => (
                 <option key={reviewKey(r)} value={reviewKey(r)}>
                   {dateLabel(span(r).start)} → {dateLabel(span(r).end)} · {dateBasisLabel(r)}
+                  {r.params_json.evidence_mode === "saved" ? " · Saved evidence" : ""}
                 </option>
               ))}
             </select>
@@ -447,7 +464,7 @@ function Workspace() {
               {q.error
                 ? "Coverage unavailable"
                 : q.data
-                  ? `${q.data.complete ? "Scan complete" : (q.data.current_run_status || selectedRuns[i]?.status) === "pending" ? "Queued" : q.data.status === "running" ? "Scanning" : "Needs attention"} · ${q.data.completed_slices} daily slices complete`
+                  ? `${q.data.evidence_mode === "saved" ? "Saved review · " : ""}${q.data.complete ? "Scan complete" : (q.data.current_run_status || selectedRuns[i]?.status) === "pending" ? "Queued" : q.data.status === "running" ? "Scanning" : "Needs attention"} · ${q.data.completed_slices} daily slices complete${q.data.evidence_mode === "saved" ? ` · ${q.data.cached_results_reused || 0} results reused` : ""}`
                   : "Loading coverage…"}
             </span>
           ))}

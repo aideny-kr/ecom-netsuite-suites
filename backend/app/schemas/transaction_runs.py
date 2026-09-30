@@ -97,9 +97,12 @@ class RunCreate(InputModel):
     window_end: AwareDatetime | None = None
     window_basis: Literal["updated_at", "completed_at"] = "updated_at"
     review: ReviewSpan | None = None
+    evidence_mode: Literal["current", "saved"] = "current"
 
     @model_validator(mode="after")
     def exact_scope(self):
+        if self.evidence_mode == "saved" and (not self.review or self.origin == "schedule"):
+            raise ValueError("Saved evidence is only available for human period reviews")
         if self.review and (
             self.order_references
             or self.window_start is None
