@@ -175,7 +175,7 @@ async def persist(db, tenant_id, run, reports, *, now):
         )
         if current:
             # The batch writes only findings that do not clear their order.
-            for action, extra in settle_observation(case, report, cleared=False, now=now):
+            for action, extra in settle_observation(case, report, cleared=False, now=now, observed=observed):
                 audit(case, action, {"observation_id": str(observation_id), **extra})
     db.add_all(events)
     await db.flush()

@@ -54,6 +54,13 @@ def with_refunds(reports):
     return reports
 
 
+def read_at(report, when):
+    """A scan that read the order and its NetSuite records at this time."""
+    for part in (report["source"], *report["targets"]):
+        part["observed_at"] = when.isoformat()
+    return report
+
+
 async def rearm(db, setup):
     actor, _, run, token, refs, _ = setup
     await state.update_progress(
@@ -167,12 +174,12 @@ async def test_a_flag_clears_only_when_a_complete_scan_is_back_at_the_reconciled
     actor, _, _, _, _, reports = batch_setup
     with_refunds(reports)
     now = datetime.now(timezone.utc)
-    await publish(db, batch_setup, now=now)
+    await publish(db, batch_setup, reports=[read_at(deepcopy(r), now) for r in reports], now=now)
     await reconcile_all(db, actor.tenant_id)
     steps = []
     for step, edit in enumerate(("changed", "unread", "back")):
         await rearm(db, batch_setup)
-        again = deepcopy(reports)
+        again = [read_at(deepcopy(r), now + timedelta(seconds=step + 1)) for r in reports]
         for report in again:
             report["reason_for_test"] = edit
             if edit == "changed":
@@ -358,3 +365,47 @@ async def test_the_export_and_results_page_show_a_reconciled_order_as_reconciled
     [reference] = [key for key in findings if "R900000001" in key]
     assert findings[reference] == "matched"
     assert sum(row[5].value for row in wb["Issue groups"].iter_rows(min_row=2)) == 2
+
+
+async def test_a_complete_matching_scan_clears_a_flag(db, admin_user):
+    # Changed-scope review finding F1 (#364): a clearing read of a reconciled case must clear the flag.
+    from tests.test_transaction_cases import NOW, observe, report
+    from tests.test_transaction_ops_state_db import seed_config
+
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+
+    def read(status, second, edited):
+        body = report(status, NOW + timedelta(seconds=second))
+        body["source"]["updated_at"] = edited.isoformat()
+        return body
+
+    await observe(db, actor, config, report(), NOW)
+    await observe(db, actor, config, read("matched", 1, NOW), NOW + timedelta(seconds=1))
+    await observe(db, actor, config, read("mismatch", 2, NOW + timedelta(days=1)), NOW + timedelta(seconds=2))
+    assert len((await case_service.changed_after_reconciliation(db, actor.tenant_id))["cases"]) == 1
+    await observe(db, actor, config, read("matched", 3, NOW + timedelta(days=1)), NOW + timedelta(seconds=3))
+    assert (await case_service.changed_after_reconciliation(db, actor.tenant_id))["cases"] == []
+
+
+async def test_an_older_read_saved_later_does_not_clear_a_newer_flag(db, batch_setup):  # noqa: F811
+    # Changed-scope review finding F4 (#364): the list follows when evidence was read, not when saved.
+    actor, _, _, _, _, reports = batch_setup
+    with_refunds(reports)
+    base = datetime.now(timezone.utc)
+
+    await publish(db, batch_setup, reports=[read_at(deepcopy(r), base) for r in reports], now=base)
+    await reconcile_all(db, actor.tenant_id)
+    await rearm(db, batch_setup)
+    changed = [read_at(deepcopy(r), base + timedelta(seconds=3)) for r in reports]
+    for report in changed:
+        report["source"]["updated_at"] = (base + timedelta(days=3)).isoformat()
+    await publish(db, batch_setup, reports=changed, now=base + timedelta(seconds=3))
+    await rearm(db, batch_setup)
+    stale = [read_at(deepcopy(r), base + timedelta(seconds=2)) for r in reports]
+    for report in stale:
+        report["reason_for_test"] = "an older read that finished late"
+    await publish(db, batch_setup, reports=stale, now=base + timedelta(seconds=4))
+    listed = await case_service.changed_after_reconciliation(db, actor.tenant_id)
+    assert len(listed["cases"]) == 3
+    assert all(item["changes"] == ["solidus_order_updated"] for item in listed["cases"])

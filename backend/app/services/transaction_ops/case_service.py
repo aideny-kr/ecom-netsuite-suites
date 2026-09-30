@@ -180,18 +180,25 @@ def changes_since(reconciled, report):
     return changes, unknown
 
 
-def settle_observation(case, report, *, cleared, now):
+def settle_observation(case, report, *, cleared, now, observed):
     """Apply a newer observation to its case and return the audit actions it causes.
 
     A reconciled case stays reconciled (decided 2026-09-30): only a clearing observation may refresh
     its evidence. Any other later observation leaves the status and the reconciling evidence as they
     are and is recorded as kept, or as changed after reconciliation when a record really changed.
-    Parts the observation could not read are listed as unknown. The database refuses any update that
-    would reopen a reconciled case (migration 117).
+    Parts the observation could not read are listed as unknown. Every event carries when its evidence
+    was read, so the changed list follows the newest read, not the latest save. The database refuses
+    any update that would reopen a reconciled case (migration 117).
     """
-    if case.status == "reconciled" and not cleared:
+    stamp = {"evidence_observed_at": observed.isoformat()}
+    if case.status == "reconciled":
+        if cleared:
+            case.last_observed_at = now
+            case.latest_report_json = report
+            # A complete matching read is conclusive: it clears any earlier change flag.
+            return [("case.kept_reconciled", {"matched": True, **stamp})]
         changes, unknown = changes_since(case.latest_report_json, report)
-        extra = {"unknown": unknown} if unknown else {}
+        extra = {"unknown": unknown, **stamp} if unknown else stamp
         if changes:
             return [("case.changed_after_reconciliation", {"changes": changes, **extra})]
         return [("case.kept_reconciled", extra)]
@@ -209,7 +216,7 @@ async def changed_after_reconciliation(db, tenant_id, *, limit=100):
     A case leaves the list once a later scan read everything and found the reconciled records again;
     a scan that could not read some part neither adds nor clears a case.
     """
-    from sqlalchemy import String, and_, cast, or_
+    from sqlalchemy import DateTime, String, and_, cast, or_
 
     from app.models.audit import AuditEvent
 
@@ -227,7 +234,14 @@ async def changed_after_reconciliation(db, tenant_id, *, limit=100):
             ),
         )
         .distinct(AuditEvent.resource_id)
-        .order_by(AuditEvent.resource_id, AuditEvent.timestamp.desc(), AuditEvent.id.desc())
+        .order_by(
+            AuditEvent.resource_id,
+            # The newest read wins, not the latest save: an older read that finished late never
+            # clears a newer change.
+            cast(AuditEvent.payload["evidence_observed_at"].as_string(), DateTime(timezone=True)).desc().nulls_last(),
+            AuditEvent.timestamp.desc(),
+            AuditEvent.id.desc(),
+        )
         .subquery()
     )
     rows = await db.execute(
@@ -364,7 +378,7 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
         },
     )
     if became_current:
-        for action, payload in settle_observation(case, report, cleared=cleared, now=now):
+        for action, payload in settle_observation(case, report, cleared=cleared, now=now, observed=observed):
             await _audit(
                 db,
                 tenant_id,
