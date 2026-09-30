@@ -335,16 +335,6 @@ async def list_cases(
     return await case_service.list_cases(db, user.tenant_id, status=status, limit=limit, offset=offset)
 
 
-@router.get("/cases/changed-after-reconciliation")
-async def changed_after_reconciliation(
-    user: Reader,
-    db: Database,
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
-):
-    """Reconciled orders whose Solidus or NetSuite records changed later. They stay reconciled."""
-    return await case_service.changed_after_reconciliation(db, user.tenant_id, limit=limit)
-
-
 @router.get("/cases/{case_id}", response_model=CaseOut)
 async def get_case(case_id: UUID, user: Reader, db: Database):
     try:

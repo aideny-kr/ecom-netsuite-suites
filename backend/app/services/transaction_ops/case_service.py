@@ -1,6 +1,5 @@
 """Carry exact reconciliation evidence across runs; no approval or write authority."""
 
-import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -90,180 +89,22 @@ def _cleared(report, now):
         return False
 
 
-# What a read records about itself rather than about the records: when and how it was read. Two
-# reads of the same unchanged records differ only in these; on the 66 real reopen pairs (Framework,
-# 14 days to 2026-09-30) the only other differences were NetSuite's refund-read api_calls count and
-# a dependency manifest.
-_READ_METADATA = frozenset({"read_at", "api_calls", "dependency_manifest", "body_collected_at", "_observation"})
-
-
-def _canonical(value):
-    if isinstance(value, dict):
-        return {
-            key: _canonical(item)
-            for key, item in value.items()
-            if not (key.endswith("observed_at") or key in _READ_METADATA)
-        }
-    if isinstance(value, list):
-        return sorted(
-            (_canonical(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True, default=str)
-        )
-    return value
-
-
-def _snapshot_unread(snapshot):
-    return not isinstance(snapshot, dict) or snapshot.get("authoritative") is not True or not snapshot.get("updated_at")
-
-
-def _refunds_unread(report, side):
-    evidence = (report.get("refund_evidence") or {}).get(side)
-    return (
-        not isinstance(evidence, dict)
-        or evidence.get("complete") is not True
-        or evidence.get("events_complete") is False
-    )
-
-
-# Each part of a report that was read: its name when unknown, its change when it differs, what was
-# read, and whether the read failed. Only explicit read failures make a part unknown; detail flags
-# such as tax_complete describe the records, not the read, and are compared like any other content.
-_PARTS = (
-    ("solidus_order", "solidus_order_updated", lambda r: r.get("source"), lambda r: _snapshot_unread(r.get("source"))),
-    (
-        "solidus_refunds",
-        "solidus_refunds_changed",
-        lambda r: (r.get("refund_evidence") or {}).get("source"),
-        lambda r: _refunds_unread(r, "source"),
-    ),
-    (
-        "netsuite_records",
-        "netsuite_records_changed",
-        lambda r: {"lookup": r.get("lookup"), "records": r.get("targets")},
-        lambda r: (
-            (r.get("lookup") or {}).get("complete") is not True
-            or any(_snapshot_unread(target) for target in r.get("targets") or [])
-        ),
-    ),
-    (
-        "netsuite_credits",
-        "netsuite_credits_changed",
-        lambda r: (r.get("refund_evidence") or {}).get("target"),
-        lambda r: _refunds_unread(r, "target"),
-    ),
-)
-
-
-def changes_since(reconciled, report):
-    """What really changed in Solidus or NetSuite between a case's reconciling report and a later one.
-
-    Everything each part read is compared, minus read metadata: the Solidus order, its refunds, the
-    NetSuite lookup and records, and the NetSuite credits and refunds. So any difference in the
-    records themselves is a change (an edit, a new refund, a replaced or vanished record), without a
-    list of fields to keep up to date. A part either report failed to read (no evidence, a record not
-    read authoritatively or without its edit time, an incomplete lookup or refund read) is unknown,
-    never a change. Checked against every reconciled case that reopened on Framework in the 14 days
-    to 2026-09-30: 63 of 66 had no change, and the other 3 each had a real Solidus change.
-
-    Returns (changes, unknown).
-    """
-    changes, unknown = [], []
-    for part, change, read, unread in _PARTS:
-        if unread(reconciled) or unread(report):
-            unknown.append(part)
-        elif _canonical(read(reconciled)) != _canonical(read(report)):
-            changes.append(change)
-    return changes, unknown
-
-
 def settle_observation(case, report, *, cleared, now, observed):
     """Apply a newer observation to its case and return the audit actions it causes.
 
-    A reconciled case stays reconciled (decided 2026-09-30): only a clearing observation may refresh
-    its evidence. Any other later observation leaves the status and the reconciling evidence as they
-    are and is recorded as kept, or as changed after reconciliation when a record really changed.
-    Parts the observation could not read are listed as unknown. Every event carries when its evidence
-    was read, so the changed list follows the newest read, not the latest save. The database refuses
-    any update that would reopen a reconciled case (migration 117).
+    A reconciled case stays reconciled (decided 2026-09-30): a clearing observation may refresh its
+    evidence, and any other later observation leaves the status and the reconciling evidence as they
+    are. That observation is still stored, and recorded as case.kept_reconciled with when it was
+    read. Telling a real later change from a re-read is a separate change. The database refuses any
+    update that would reopen a reconciled case (migration 117).
     """
-    stamp = {"evidence_observed_at": observed.isoformat()}
-    if case.status == "reconciled":
-        if cleared:
-            case.last_observed_at = now
-            case.latest_report_json = report
-            # A complete matching read is conclusive: it clears any earlier change flag.
-            return [("case.kept_reconciled", {"matched": True, **stamp})]
-        changes, unknown = changes_since(case.latest_report_json, report)
-        extra = {"unknown": unknown, **stamp} if unknown else stamp
-        if changes:
-            return [("case.changed_after_reconciliation", {"changes": changes, **extra})]
-        return [("case.kept_reconciled", extra)]
+    if case.status == "reconciled" and not cleared:
+        return [("case.kept_reconciled", {"evidence_observed_at": observed.isoformat()})]
     prior = case.status
     case.status = "reconciled" if cleared else "open"
     case.last_observed_at = now
     case.latest_report_json = report
     return [("case.reconciled", {})] if prior != case.status else []
-
-
-async def changed_after_reconciliation(db, tenant_id, *, limit=100):
-    """Reconciled cases whose Solidus order or NetSuite records changed after reconciliation.
-
-    They stay reconciled; this is the list a person reviews, newest change first, one row per case.
-    A case leaves the list once a later scan read everything and found the reconciled records again;
-    a scan that could not read some part neither adds nor clears a case.
-    """
-    from sqlalchemy import DateTime, String, and_, cast, or_
-
-    from app.models.audit import AuditEvent
-
-    await set_tenant_context(db, str(tenant_id))
-    changed = "transaction_ops.case.changed_after_reconciliation"
-    kept = "transaction_ops.case.kept_reconciled"
-    latest = (
-        select(AuditEvent.resource_id, AuditEvent.action, AuditEvent.payload, AuditEvent.timestamp)
-        .where(
-            AuditEvent.tenant_id == tenant_id,
-            AuditEvent.resource_type == TransactionCase.__tablename__,
-            or_(
-                AuditEvent.action == changed,
-                and_(AuditEvent.action == kept, AuditEvent.payload["unknown"].as_string().is_(None)),
-            ),
-        )
-        .distinct(AuditEvent.resource_id)
-        .order_by(
-            AuditEvent.resource_id,
-            # The newest read wins, not the latest save: an older read that finished late never
-            # clears a newer change.
-            cast(AuditEvent.payload["evidence_observed_at"].as_string(), DateTime(timezone=True)).desc().nulls_last(),
-            AuditEvent.timestamp.desc(),
-            AuditEvent.id.desc(),
-        )
-        .subquery()
-    )
-    rows = await db.execute(
-        select(TransactionCase, latest.c.payload, latest.c.timestamp)
-        .join(latest, cast(TransactionCase.id, String) == latest.c.resource_id)
-        .where(
-            TransactionCase.tenant_id == tenant_id,
-            TransactionCase.status == "reconciled",
-            latest.c.action == changed,
-        )
-        .order_by(latest.c.timestamp.desc(), TransactionCase.id)
-        .limit(min(500, max(1, limit)))
-    )
-    return {
-        "cases": [
-            {
-                "case_id": str(case.id),
-                "order_reference": case.order_reference,
-                "scope": case.scope_json,
-                "status": case.status,
-                "changes": list((payload or {}).get("changes") or []),
-                "observation_id": (payload or {}).get("observation_id"),
-                "changed_at": changed_at.isoformat(),
-            }
-            for case, payload, changed_at in rows
-        ]
-    }
 
 
 def case_scope(run):
