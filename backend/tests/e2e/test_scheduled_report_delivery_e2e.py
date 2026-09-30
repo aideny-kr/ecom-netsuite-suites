@@ -6,6 +6,7 @@ customer source accuracy, Google availability or authorize a production run.
 """
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from io import BytesIO
 
 import pytest
@@ -29,6 +30,17 @@ from tests.report.test_report_delivery import _add_sheets_connector
 from tests.report.test_report_pdf import _skip_unless_weasyprint_native_libs
 
 
+def delivery_fixture():
+    payloads, params = _full_fixture()
+    # The older unit fixture exercises components independently;
+    # its Acme trend disagrees with its current/prior inventory. Delivery needs
+    # one coherent source snapshot, with independently stated control values.
+    for row in payloads["r_trend"]:
+        if row["location"] == "Acme" and row["d"] in {"2026-09-01", "2026-09-08"}:
+            row["value_90p"], row["pct_90p"] = (19000, 86.4) if row["d"] == "2026-09-01" else (21000, 87.5)
+    return payloads, params
+
+
 class ArtifactDrive(EvidenceDrive):
     """Retains actual rendered bytes for independent artifact/control checks."""
 
@@ -49,7 +61,7 @@ class ArtifactDrive(EvidenceDrive):
 
 
 async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failure=None):
-    payloads, params = _full_fixture()
+    payloads, params = delivery_fixture()
     sources = ia.build_sources(params)
     queries = {s["params"]["query"]: rid for rid, s in sources.items()}
     calls = []
@@ -132,6 +144,10 @@ async def test_approved_due_report_delivers_real_artifacts_once_and_stays_frozen
     assert not report.title.startswith("Test ·")
     assert "Sources" in report.rendered_html and "A-G6" in report.rendered_html
     assert report.version == 1
+    model = delivery._inventory_aging_model(report)
+    assert Decimal(model["trend"]["Acme"][-1]["value_90p"]) == 21000
+    assert Decimal(model["trend"]["Acme"][-1]["pct_90p"]) == Decimal("87.5")
+    assert Decimal(model["all_locations"]["aged90_value"]) == 27000
     receipt = job.result_summary["outputs"]["deliver"]
     assert drive.content[receipt["pdf_file_id"]].startswith(b"%PDF-")
     book = load_workbook(BytesIO(drive.content[receipt["xlsx_file_id"]]), data_only=True)
