@@ -137,10 +137,11 @@ async def test_a_real_change_after_reconciliation_is_recorded_and_the_case_stays
     assert not await events(db, actor.tenant_id, "case.kept_reconciled")
     flagged = await events(db, actor.tenant_id, "case.changed_after_reconciliation")
     assert len(flagged) == 3
-    assert all(event.payload["changes"] == [change] and event.payload["observation_id"] for event in flagged)
+    expected = {"netsuite_record_updated": "netsuite_records_changed"}.get(change, change)
+    assert all(event.payload["changes"] == [expected] and event.payload["observation_id"] for event in flagged)
     listed = await case_service.changed_after_reconciliation(db, actor.tenant_id)
     assert sorted(item["case_id"] for item in listed["cases"]) == sorted(str(case.id) for case in cases)
-    assert all(item["changes"] == [change] and item["status"] == "reconciled" for item in listed["cases"])
+    assert all(item["changes"] == [expected] and item["status"] == "reconciled" for item in listed["cases"])
 
 
 @pytest.mark.parametrize("unread", ["solidus_refunds", "netsuite_credits", "netsuite_records"])
@@ -409,3 +410,36 @@ async def test_an_older_read_saved_later_does_not_clear_a_newer_flag(db, batch_s
     listed = await case_service.changed_after_reconciliation(db, actor.tenant_id)
     assert len(listed["cases"]) == 3
     assert all(item["changes"] == ["solidus_order_updated"] for item in listed["cases"])
+
+
+@pytest.mark.parametrize(
+    "variant, changes, unknown",
+    [
+        # Round-3 packet review of #364 (F5-F8), and the only difference seen on real unchanged reads.
+        ("refund_event_details_unread", [], ["solidus_refunds"]),
+        ("netsuite_edit_time_missing", [], ["netsuite_records"]),
+        ("netsuite_order_vanished", ["netsuite_records_changed"], []),
+        ("netsuite_refund_records_replaced", ["netsuite_credits_changed"], []),
+        ("read_metadata_only", [], []),
+    ],
+)
+def test_changes_since_compares_everything_that_was_read(variant, changes, unknown):
+    from tests.test_transaction_ops_planner import planning_case
+
+    before = with_refunds([deepcopy(planning_case().report)])[0]
+    before["refund_evidence"]["source"].update(events=[{"id": "30", "amount": "20"}], events_complete=True)
+    before["refund_evidence"]["target"].update(record_ids=["4"], api_calls=3)
+    after = deepcopy(before)
+    if variant == "refund_event_details_unread":
+        after["refund_evidence"]["source"].update(events=[], events_complete=False)
+    elif variant == "netsuite_edit_time_missing":
+        after["targets"][0]["updated_at"] = None
+    elif variant == "netsuite_order_vanished":
+        after["targets"] = []
+        after["lookup"] = {**after["lookup"], "count": 0}
+    elif variant == "netsuite_refund_records_replaced":
+        after["refund_evidence"]["target"]["record_ids"] = ["5"]
+    else:
+        after["refund_evidence"]["target"].update(api_calls=7, dependency_manifest={"refund_requests": ["20"]})
+        after["source"]["observed_at"] = after["targets"][0]["observed_at"] = datetime.now(timezone.utc).isoformat()
+    assert case_service.changes_since(before, after) == (changes, unknown)

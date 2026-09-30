@@ -1,5 +1,6 @@
 """Carry exact reconciliation evidence across runs; no approval or write authority."""
 
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -89,94 +90,88 @@ def _cleared(report, now):
         return False
 
 
-def _amount(value):
-    try:
-        return Decimal(str(value)) if value is not None else None
-    except ArithmeticError:
-        return value
+# What a read records about itself rather than about the records: when and how it was read. Two
+# reads of the same unchanged records differ only in these; on the 66 real reopen pairs (Framework,
+# 14 days to 2026-09-30) the only other differences were NetSuite's refund-read api_calls count and
+# a dependency manifest.
+_READ_METADATA = frozenset({"read_at", "api_calls", "dependency_manifest", "body_collected_at", "_observation"})
 
 
-def _solidus_refunds(report):
-    source = (report.get("refund_evidence") or {}).get("source") or {}
-    events = sorted(
-        (str(event.get("id")), _amount(event.get("amount")))
-        for event in source.get("events") or []
-        if isinstance(event, dict)
-    )
-    total = (((report.get("balance") or {}).get("amounts") or {}).get("refunds") or {}).get("source")
-    return events, _amount(total)
-
-
-def _netsuite_credits(report):
-    target = (report.get("refund_evidence") or {}).get("target") or {}
-
-    def documents(key):
+def _canonical(value):
+    if isinstance(value, dict):
+        return {
+            key: _canonical(item)
+            for key, item in value.items()
+            if not (key.endswith("observed_at") or key in _READ_METADATA)
+        }
+    if isinstance(value, list):
         return sorted(
-            (
-                str(item.get("credit_memo_id")),
-                str(item.get("refund_id")),
-                _amount(item.get("amount")),
-                _amount(item.get("tax_amount")),
-            )
-            for item in target.get(key) or []
-            if isinstance(item, dict)
+            (_canonical(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True, default=str)
         )
+    return value
 
+
+def _snapshot_unread(snapshot):
+    return not isinstance(snapshot, dict) or snapshot.get("authoritative") is not True or not snapshot.get("updated_at")
+
+
+def _refunds_unread(report, side):
+    evidence = (report.get("refund_evidence") or {}).get(side)
     return (
-        documents("tax_adjustments"),
-        documents("request_links"),
-        _amount(target.get("amount")),
-        target.get("refund_count"),
+        not isinstance(evidence, dict)
+        or evidence.get("complete") is not True
+        or evidence.get("events_complete") is False
     )
 
 
-def _netsuite_records(report):
-    return {
-        str(target.get("record_id")): target.get("updated_at")
-        for target in report.get("targets") or []
-        if isinstance(target, dict)
-    }
-
-
-def _complete(evidence):
-    return isinstance(evidence, dict) and evidence.get("complete") is True
+# Each part of a report that was read: its name when unknown, its change when it differs, what was
+# read, and whether the read failed. Only explicit read failures make a part unknown; detail flags
+# such as tax_complete describe the records, not the read, and are compared like any other content.
+_PARTS = (
+    ("solidus_order", "solidus_order_updated", lambda r: r.get("source"), lambda r: _snapshot_unread(r.get("source"))),
+    (
+        "solidus_refunds",
+        "solidus_refunds_changed",
+        lambda r: (r.get("refund_evidence") or {}).get("source"),
+        lambda r: _refunds_unread(r, "source"),
+    ),
+    (
+        "netsuite_records",
+        "netsuite_records_changed",
+        lambda r: {"lookup": r.get("lookup"), "records": r.get("targets")},
+        lambda r: (
+            (r.get("lookup") or {}).get("complete") is not True
+            or any(_snapshot_unread(target) for target in r.get("targets") or [])
+        ),
+    ),
+    (
+        "netsuite_credits",
+        "netsuite_credits_changed",
+        lambda r: (r.get("refund_evidence") or {}).get("target"),
+        lambda r: _refunds_unread(r, "target"),
+    ),
+)
 
 
 def changes_since(reconciled, report):
     """What really changed in Solidus or NetSuite between a case's reconciling report and a later one.
 
-    Only what was read counts: the Solidus order and its refunds, which NetSuite records were read and
-    when they were last edited, and the NetSuite credits and refunds with their amounts. The same
-    records compared another way are no change. Checked against every reconciled case that reopened
-    on Framework in the 14 days to 2026-09-30: 63 of 66 had no change, and the other 3 each had a
-    real Solidus change.
+    Everything each part read is compared, minus read metadata: the Solidus order, its refunds, the
+    NetSuite lookup and records, and the NetSuite credits and refunds. So any difference in the
+    records themselves is a change (an edit, a new refund, a replaced or vanished record), without a
+    list of fields to keep up to date. A part either report failed to read (no evidence, a record not
+    read authoritatively or without its edit time, an incomplete lookup or refund read) is unknown,
+    never a change. Checked against every reconciled case that reopened on Framework in the 14 days
+    to 2026-09-30: 63 of 66 had no change, and the other 3 each had a real Solidus change.
 
-    Returns (changes, unknown). A part that either report did not read completely is unknown, never a
-    change: a failed refund read, an incomplete NetSuite lookup, an order without its edit time.
+    Returns (changes, unknown).
     """
     changes, unknown = [], []
-    before, after = reconciled.get("source") or {}, report.get("source") or {}
-    if before.get("updated_at") is None or after.get("updated_at") is None:
-        unknown.append("solidus_order")
-    elif (before.get("record_id"), before.get("updated_at")) != (after.get("record_id"), after.get("updated_at")):
-        changes.append("solidus_order_updated")
-    pair = (reconciled, report)
-    if not all(_complete((side.get("refund_evidence") or {}).get("source")) for side in pair):
-        unknown.append("solidus_refunds")
-    elif _solidus_refunds(reconciled) != _solidus_refunds(report):
-        changes.append("solidus_refunds_changed")
-    if not all(_complete(side.get("lookup")) and _netsuite_records(side) for side in pair):
-        unknown.append("netsuite_records")
-    else:
-        before, after = _netsuite_records(reconciled), _netsuite_records(report)
-        if set(before) != set(after):
-            changes.append("netsuite_records_changed")
-        elif before != after:
-            changes.append("netsuite_record_updated")
-    if not all(_complete((side.get("refund_evidence") or {}).get("target")) for side in pair):
-        unknown.append("netsuite_credits")
-    elif _netsuite_credits(reconciled) != _netsuite_credits(report):
-        changes.append("netsuite_credits_changed")
+    for part, change, read, unread in _PARTS:
+        if unread(reconciled) or unread(report):
+            unknown.append(part)
+        elif _canonical(read(reconciled)) != _canonical(read(report)):
+            changes.append(change)
     return changes, unknown
 
 
