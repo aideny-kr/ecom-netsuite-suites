@@ -1,13 +1,14 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
 
 from app.models.transaction_ops import TransactionCaseObservation, TransactionFinding
 from app.models.transaction_source_snapshot import TransactionSourceSnapshot
-from app.schemas.transaction_runs import RunCreate
+from app.schemas.transaction_runs import ReviewSpan, RunCreate
 from app.services.transaction_ops import finding_batch, source_validation, staged_netsuite
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.runner import run_investigation
@@ -29,6 +30,7 @@ async def setup(
     phase="orders",
     mapping=None,
     origin="manual",
+    evidence_mode="current",
 ):
     if mapping and mapping.get("metabase_replica"):
         from app.services.transaction_ops import metabase_reader
@@ -76,11 +78,14 @@ async def setup(
         config.id,
         RunCreate(
             origin=origin,
+            evidence_mode=evidence_mode,
+            review=ReviewSpan(id=uuid4(), start=now - timedelta(days=1), end=now) if evidence_mode == "saved" else None,
             evaluation_key="chunk-runner",
             window_start=now - timedelta(days=1),
             window_end=now,
         ),
         actor=actor,
+        now=now,
     )
     refs = [f"R1000000{i:02}" for i in range(size)]
     run.progress_json = dict(

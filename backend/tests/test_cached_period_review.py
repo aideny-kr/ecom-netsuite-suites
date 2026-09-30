@@ -1,5 +1,6 @@
 """Provider-free cached members with real DB leases, atomic cursors and isolation."""
 
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -225,3 +226,175 @@ async def test_mode_is_bound_to_idempotency_key(db, admin_user):
         await period_review.create_review(
             db, actor.tenant_id, target.id, body.model_copy(update={"evidence_mode": "current"}), actor=actor
         )
+
+
+async def test_two_cached_batches_keep_complete_cursor_and_original_amounts(db, admin_user):
+    actor = admin_user[0]
+    _, _, original, run = await setup(db, actor)
+    template = deepcopy(
+        (
+            await db.scalar(
+                select(TransactionFinding).where(
+                    TransactionFinding.run_id == original.id, TransactionFinding.order_reference == "R123456780"
+                )
+            )
+        ).report_json
+    )
+    refs = [f"R{800000000 + i}" for i in range(105)]
+    for ref in refs:
+        report = deepcopy(template)
+        report["order_reference"] = ref
+        for side in report["refund_evidence"].values():
+            side["order_reference"] = ref
+        db.add(
+            TransactionFinding(tenant_id=actor.tenant_id, run_id=original.id, order_reference=ref, report_json=report)
+        )
+    run.progress_json = {**run.progress_json, "pending_refs": refs}
+    await db.flush()
+    fail = AsyncMock(side_effect=AssertionError("cached batch contacted provider"))
+    outcome = await runner.run_investigation(db, actor.tenant_id, run.id, _source_reader=fail, _target_reader=fail)
+    assert outcome["termination_reason"] == "done" and outcome["processed"] == 105
+    assert run.progress_json["cached_results_reused"] == 105 and run.progress_json["pending_refs"] == []
+    assert run.api_calls_used == run.orders_used == 0
+    findings = list(await db.scalars(select(TransactionFinding).where(TransactionFinding.run_id == run.id)))
+    assert len(findings) == 105
+    assert all(
+        f.report_json["balance"] == template["balance"] and f.report_json["_observation"] == template["_observation"]
+        for f in findings
+    )
+    assert (
+        await db.scalar(
+            select(func.count()).select_from(TransactionCase).where(TransactionCase.tenant_id == actor.tenant_id)
+        )
+        == 0
+    )
+    fail.assert_not_awaited()
+
+
+@pytest.mark.parametrize("invalidate", [None, "deletion", "hash", "refunds"])
+async def test_native_mixed_batches_skip_only_proven_cached_members(db, admin_user, monkeypatch, invalidate):
+    import hashlib
+
+    from app.core.encryption import encrypt_credentials
+    from app.models.connection import Connection
+    from app.models.transaction_ops import TransactionRun
+    from app.services.transaction_ops import netsuite_bulk, staged_netsuite
+    from tests.test_transaction_chunk_runner import setup as chunk_setup
+    from tests.test_transaction_ops_runner import missing_target
+
+    native = staged_netsuite.StagedNetSuite
+    actor = admin_user[0]
+    run, refs, reader, writer, events = await chunk_setup(
+        db,
+        actor,
+        monkeypatch,
+        size=5,
+        evidence_mode="saved",
+        mapping={"solidus_refund_step_id": str(uuid4())} if invalidate == "refunds" else None,
+    )
+    monkeypatch.setattr(staged_netsuite, "StagedNetSuite", native)
+    observed = datetime.now(timezone.utc)
+    original = TransactionRun(
+        tenant_id=actor.tenant_id,
+        config_id=run.config_id,
+        work_key=uuid4().hex,
+        origin="manual",
+        params_json={},
+        config_snapshot=deepcopy(run.config_snapshot),
+        status="finished",
+        termination_reason="done",
+        max_orders=100,
+        max_api_calls=500,
+        orders_used=0,
+        api_calls_used=0,
+        deadline_at=observed,
+        finished_at=observed,
+    )
+    db.add(original)
+    await db.flush()
+    report = saved_report()
+    report["order_reference"] = refs[2]
+    for value in [report["_observation"], report["source"], *report["targets"], *report["refund_evidence"].values()]:
+        value["observed_at"] = observed.isoformat()
+    for value in report["refund_evidence"].values():
+        value["order_reference"] = refs[2]
+    report["refund_evidence"]["target"].update(
+        connection_id=run.config_snapshot["netsuite_connection_id"], account_id="6738075", subsidiary_id="1"
+    )
+    retained = TransactionFinding(
+        tenant_id=actor.tenant_id, run_id=original.id, order_reference=refs[2], report_json=report
+    )
+    db.add(retained)
+    if invalidate == "deletion":
+        run.progress_json = {
+            **run.progress_json,
+            "phase": "destination",
+            "pending_evidence_since": datetime.now(timezone.utc).isoformat(),
+        }
+    if invalidate == "hash":
+        persist = cached_review.persist
+
+        async def changed(*args, **kwargs):
+            retained.report_json = {**retained.report_json, "changed": True}
+            await db.flush()
+            return await persist(*args, **kwargs)
+
+        monkeypatch.setattr(cached_review, "persist", changed)
+    connection = await db.get(Connection, UUID(run.config_snapshot["netsuite_connection_id"]))
+    connection.encrypted_credentials = encrypt_credentials({"account_id": "6738075"})
+    fingerprint = hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest()
+    await db.commit()
+
+    if invalidate == "refunds":
+        from app.services.transaction_ops import refund_reader
+
+        refund = {"complete": True, "currency": "USD", "amount": "0", "observed_at": observed.isoformat()}
+
+        class RefundBatch:
+            def __init__(self):
+                self.values = {}
+
+            async def get(self, db, tenant, step, ref, **kw):
+                return self.values.get(ref)
+
+            async def read(self, db, tenant, step, references):
+                assert refs[2] not in references
+                events.append(("refund batch", references))
+                self.values.update({ref: refund for ref in references})
+                return refund
+
+        monkeypatch.setattr(refund_reader, "RefundBatch", RefundBatch)
+        monkeypatch.setattr(
+            refund_reader,
+            "read_solidus_refunds",
+            AsyncMock(side_effect=AssertionError("unexpected single refund read")),
+        )
+
+    async def target(*args, **kwargs):
+        selected = args[5]
+        if invalidate in (None, "refunds"):
+            assert refs[2] not in selected
+        values = {}
+        for ref in selected:
+            value = missing_target()
+            value["observed_at"] = datetime.now(timezone.utc).isoformat()
+            values[ref] = value
+        return {"orders": values, "credential_fingerprint": fingerprint, "concurrency_peak": 1}
+
+    bulk_reader = AsyncMock(side_effect=target)
+    monkeypatch.setattr(netsuite_bulk, "read_orders", bulk_reader)
+    result = await runner.run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done", result
+    assert result["processed"] == 5
+    expected = refs if invalidate in ("hash", "deletion") else refs[:2] + refs[3:]
+    assert [call.args[3] for call in reader.await_args_list] == expected
+    assert run.progress_json.get("cached_results_reused", 0) == (0 if invalidate in ("hash", "deletion") else 1)
+    assert run.progress_json["pending_refs"] == []
+    assert len(await state.list_findings(db, actor.tenant_id, run.id)) == 5
+    if invalidate in (None, "refunds"):
+        if invalidate is None:
+            assert [event[1] for event in events if event[0] == "commit"] == [refs[:2], refs[3:]]
+        assert bulk_reader.await_count == 1
+
+    if invalidate == "refunds":
+        assert [event[1] for event in events if event[0] == "refund batch"] == [refs[:2] + refs[3:]]

@@ -387,7 +387,7 @@ async def run_investigation(
     from app.services.transaction_ops import cached_review
     from app.services.transaction_ops.run_timing import RunTiming
 
-    cached = cached_review.CachedReview(db, tenant_id, run)
+    saved_cache = cached_review.CachedReview(db, tenant_id, run)
     timing = RunTiming(progress)
     state = timing.state(state)
     from app.services.transaction_ops.refund_reader import MAX_BATCH_ORDERS, RefundBatch
@@ -987,12 +987,14 @@ async def run_investigation(
                 await save()
                 continue
             if cached_review.saved(run):
-                await flush_findings()
-                await cached.prepare(progress["pending_refs"], progress, now=clock())
+                await saved_cache.prepare(progress["pending_refs"], progress, now=clock())
                 if staged is not None:
-                    staged.reusable_references = {ref for ref, report in cached.prepared.items() if report is not None}
-                reports = cached.prefix(progress["pending_refs"])
+                    staged.reusable_references = {
+                        ref for ref, report in saved_cache.prepared.items() if report is not None
+                    }
+                reports = saved_cache.prefix(progress["pending_refs"])
                 if reports:
+                    await flush_findings()
                     # No order/provider budget is consumed by local replay.
                     # Original read times survive and no case writer is called.
                     before = deepcopy(progress)
@@ -1011,7 +1013,7 @@ async def run_investigation(
                         progress.clear()
                         progress.update(before)
                         for report in reports:
-                            cached.prepared[report["order_reference"]] = None
+                            saved_cache.prepared[report["order_reference"]] = None
                     continue
             reference = progress["pending_refs"][0]
             # Validate a small group before comparing it. Calls and order work
@@ -1029,7 +1031,7 @@ async def run_investigation(
                 await flush_findings()
                 count = min(10, len(progress["pending_refs"]), run.max_orders - run.orders_used)
                 if cached_review.saved(run):
-                    count = min(count, cached.fresh_prefix_size(progress["pending_refs"]))
+                    count = min(count, saved_cache.fresh_prefix_size(progress["pending_refs"]))
                 # Leave the existing target batch/fallback headroom untouched.
                 count = min(
                     count, max(0, (run.max_api_calls - run.api_calls_used - (run.api_calls_held or 0) - 91) // 2)
@@ -1287,6 +1289,8 @@ async def run_investigation(
                     else:
                         await preserve_order_evidence()
                         references = list(dict.fromkeys(progress["pending_refs"][:MAX_BATCH_ORDERS]))
+                        if cached_review.saved(run):
+                            references = [ref for ref in references if saved_cache.prepared.get(ref) is None]
                         if use_batch and len(references) > 1:
                             if not await reserve(2):
                                 return await finish("budget")
