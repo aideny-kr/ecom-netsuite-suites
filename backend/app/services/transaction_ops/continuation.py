@@ -173,6 +173,12 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None):
     previous = await state_service.get_run(db, tenant_id, run_id)
     config = await state_service.get_config(db, tenant_id, previous.config_id, lock=True)
     await db.refresh(previous)
+    if previous.params_json.get("review"):
+        from app.services.transaction_ops.review_control import stopped
+
+        if await stopped(db, tenant_id, previous.config_id, previous.params_json["review"]["id"]):
+            await state_service._commit(db, tenant_id)
+            return None
     auth_retry = auth_stop(previous)
     if (
         previous.status != "finished"

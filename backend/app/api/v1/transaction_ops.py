@@ -387,6 +387,16 @@ async def investigate_case(case_id: UUID, request: OrderInvestigation, user: Rea
         raise _http_error(exc) from None
 
 
+@router.post("/runs/{run_id}/review/stop")
+async def stop_period_review(run_id: UUID, user: Reader, db: Database):
+    from app.services.transaction_ops.review_control import stop_review
+
+    try:
+        return await stop_review(db, user.tenant_id, run_id, actor=user)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 @router.get("/runs/{run_id}/review")
 async def review_status(run_id: UUID, user: Reader, db: Database):
     try:

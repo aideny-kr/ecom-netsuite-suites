@@ -45,7 +45,7 @@ def test_run_uses_worker_session_and_shared_runner(monkeypatch):
     )
     result = mod.transaction_ops_run.run(str(tenant_id), str(run_id))
     mod.set_tenant_context_session.assert_awaited_once_with(db, str(tenant_id))
-    runner.assert_awaited_once_with(db, tenant_id, run_id)
+    runner.assert_awaited_once_with(db, tenant_id, run_id, _slice_seconds=60)
     next_review.assert_awaited_once_with(db, tenant_id, run_id)
     assert result["termination_reason"] == "done"
 

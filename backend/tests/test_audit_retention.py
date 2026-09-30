@@ -62,3 +62,29 @@ class TestRetentionStats:
 
         stats = await get_retention_stats(db, tenant_id=tenant_id)
         assert stats["archivable_events"] >= 1
+
+
+async def test_retention_preserves_durable_review_stop(db):
+    from sqlalchemy import select
+
+    from app.services.audit_retention import purge_old_events_sync
+
+    tenant = uuid.uuid4()
+    old = datetime.now(timezone.utc) - timedelta(days=settings.AUDIT_RETENTION_DAYS + 1)
+    stop = AuditEvent(
+        tenant_id=tenant,
+        timestamp=old,
+        category="transaction_ops",
+        action="transaction_ops.review.stopped",
+        resource_type="transaction_review",
+        resource_id=str(uuid.uuid4()),
+    )
+    ordinary = AuditEvent(tenant_id=tenant, timestamp=old, category="test", action="test.old")
+    db.add_all([stop, ordinary])
+    await db.flush()
+    stop_id, ordinary_id = stop.id, ordinary.id
+    stats = await get_retention_stats(db, tenant)
+    assert stats["archivable_events"] == 1
+    await db.run_sync(purge_old_events_sync)
+    assert await db.scalar(select(AuditEvent.id).where(AuditEvent.id == stop_id)) == stop_id
+    assert await db.scalar(select(AuditEvent.id).where(AuditEvent.id == ordinary_id)) is None

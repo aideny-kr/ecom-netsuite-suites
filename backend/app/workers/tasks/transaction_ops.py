@@ -51,7 +51,13 @@ def transaction_ops_run(tenant_id: str, run_id: str):
         tenant, run = uuid.UUID(tenant_id), uuid.UUID(run_id)
         async with worker_async_session(pin_connection=True) as db:
             await set_tenant_context_session(db, str(tenant))
-            result = await run_investigation(db, tenant, run)
+            result = await run_investigation(db, tenant, run, _slice_seconds=60)
+            if result.get("status") == "yielded" and "generation" in result:
+                from app.services.transaction_ops.scheduler import _dispatch
+
+                stats = {"dispatched": 0, "dispatch_failed": 0}
+                await _dispatch(tenant, run, stats, generation=result["generation"])
+                return {**result, **stats}
             child = None
             if result.get("termination_reason") == "budget":
                 from app.services.transaction_ops.continuation import continue_budget_run

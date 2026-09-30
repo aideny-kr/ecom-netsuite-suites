@@ -13,6 +13,12 @@ from app.models.audit import AuditEvent
 logger = structlog.get_logger()
 
 
+def archivable_before(cutoff):
+    # This row is also the durable control record that prevents stopped
+    # historical reviews from being recreated. Routine retention must keep it.
+    return (AuditEvent.timestamp < cutoff) & (AuditEvent.action != "transaction_ops.review.stopped")
+
+
 def get_retention_cutoff() -> datetime:
     """Return the cutoff date for audit retention."""
     return datetime.now(timezone.utc) - timedelta(days=settings.AUDIT_RETENTION_DAYS)
@@ -23,7 +29,7 @@ async def get_retention_stats(db: AsyncSession, tenant_id=None) -> dict:
     cutoff = get_retention_cutoff()
 
     total_query = select(func.count()).select_from(AuditEvent)
-    archivable_query = select(func.count()).select_from(AuditEvent).where(AuditEvent.timestamp < cutoff)
+    archivable_query = select(func.count()).select_from(AuditEvent).where(archivable_before(cutoff))
 
     if tenant_id:
         total_query = total_query.where(AuditEvent.tenant_id == tenant_id)
@@ -47,7 +53,7 @@ def purge_old_events_sync(db: Session, batch_size: int = 5000) -> dict:
     total_deleted = 0
     while True:
         # Delete in batches to avoid long locks
-        subq = select(AuditEvent.id).where(AuditEvent.timestamp < cutoff).limit(batch_size).subquery()
+        subq = select(AuditEvent.id).where(archivable_before(cutoff)).limit(batch_size).subquery()
         result = db.execute(delete(AuditEvent).where(AuditEvent.id.in_(select(subq.c.id))))
         deleted = result.rowcount
         db.commit()

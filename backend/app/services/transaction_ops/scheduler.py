@@ -80,10 +80,13 @@ async def _recovery_ids(db, tenant_id, now):
     review_enabled = exists(
         select(config.id).where(config.tenant_id == tenant_id, config.id == run.config_id, config.enabled.is_(True))
     )
+    from app.services.transaction_ops.review_control import stopped_clause
+
     query = (
         select(run.id)
         .where(
             run.tenant_id == tenant_id,
+            ~stopped_clause(run),
             or_(
                 and_(
                     run.status.in_(("pending", "running")),
@@ -311,8 +314,10 @@ def _scope(config, latest, now):
     return {"window_start": start, "window_end": now}, None, None
 
 
-def _reserve_publication(connection, tenant_id, run_id):
+def _reserve_publication(connection, tenant_id, run_id, generation=None):
     key = f"transaction-investigation:published:{UUID(str(tenant_id))}:{UUID(str(run_id))}"
+    if generation is not None:
+        key += f":slice:{int(generation)}"
     return connection.default_channel.client.set(key, "1", nx=True, ex=_PUBLICATION_COOLDOWN)
 
 
@@ -334,7 +339,7 @@ async def _run_queues(db, tenant_id, run_ids):
     return {row.id: investigation_queue(row.origin, row.max_orders) for row in rows}
 
 
-def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon"):
+def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon", generation=None):
     # wait_for cannot cancel a blocking thread, and asyncio.run waits for its
     # executor during shutdown. Bound the real Redis sockets and connection
     # attempts as well; use a private connection so these options cannot leak
@@ -354,7 +359,12 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon"):
         # Reserve on this bounded private Redis connection before publishing.
         # Retain the reservation on ambiguous send failures; it expires so a
         # lost publication cannot strand the durable pending run indefinitely.
-        if not _reserve_publication(connection, tenant_id, run_id):
+        reserved = (
+            _reserve_publication(connection, tenant_id, run_id)
+            if generation is None
+            else _reserve_publication(connection, tenant_id, run_id, generation)
+        )
+        if not reserved:
             return False
         app.send_task(
             "tasks.transaction_ops_run",
@@ -368,10 +378,14 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon"):
         return True
 
 
-async def _dispatch(tenant_id, run_id, stats, queue="recon"):
+async def _dispatch(tenant_id, run_id, stats, queue="recon", *, generation=None):
     try:
         published = await asyncio.wait_for(
-            asyncio.to_thread(lambda: publish_investigation(tenant_id, run_id, queue=queue)),
+            asyncio.to_thread(
+                lambda: publish_investigation(
+                    tenant_id, run_id, queue=queue, **({"generation": generation} if generation is not None else {})
+                )
+            ),
             timeout=_DISPATCH_TIMEOUT,
         )
         if published is False:

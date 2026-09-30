@@ -456,6 +456,11 @@ async def create_run(
             raise StateError("schedule_disabled")
     else:
         await _human(db, tenant_id, actor, "recon.run")
+    if request.review is not None:
+        from app.services.transaction_ops.review_control import stopped
+
+        if await stopped(db, tenant_id, config_id, request.review.id):
+            raise StateError("review_stopped", 409)
     if request.window_basis == "completed_at" and not (config.mapping_json or {}).get("metabase_replica"):
         raise StateError("period_reader_unavailable", 422)
     # Preserve idempotency for requests made before calendar cohorts were added.
@@ -697,6 +702,13 @@ async def claim_run(db, tenant_id, run_id, *, now=None, coverage_only=False):
     if row.status == "finished":
         await _commit(db, tenant_id)
         return None
+    if row.params_json.get("review"):
+        from app.services.transaction_ops.review_control import stopped
+
+        if await stopped(db, tenant_id, row.config_id, row.params_json["review"]["id"]):
+            await _finish_audited(db, tenant_id, row, "stall", now)
+            await _commit(db, tenant_id)
+            return None
     deadline = row.deadline_at
     if (
         row.status == "pending"
@@ -736,6 +748,8 @@ async def claim_run(db, tenant_id, run_id, *, now=None, coverage_only=False):
     row.deadline_at = deadline
     row.status, row.lease_token = "running", uuid.uuid4()
     row.lease_until = min(row.deadline_at, now + _LEASE)
+    if "worker_yielded_at" in (row.progress_json or {}):
+        row.progress_json = {k: v for k, v in row.progress_json.items() if k != "worker_yielded_at"}
     await _commit(db, tenant_id)
     return row.lease_token
 
@@ -886,6 +900,25 @@ async def update_progress(db, tenant_id, run_id, request: ProgressUpdate, *, lea
     row.lease_until = min(row.deadline_at, now + _LEASE)
     await _commit(db, tenant_id)
     return row
+
+
+async def yield_run(db, tenant_id, run_id, request: ProgressUpdate, *, lease_token, now=None):
+    """Release a checkpointed manual review without extending any spend/time budget."""
+    now = _clock(now)
+    row = await get_run(db, tenant_id, run_id, lock=True)
+    _lease(row, lease_token, now)
+    if row.origin not in {"manual", "chat"} or not row.params_json.get("review"):
+        raise StateError("not_a_period_review", 422)
+    if row.api_calls_held or now >= row.deadline_at:
+        raise StateError("run_not_yieldable")
+    generation = (row.progress_json or {}).get("worker_yields", 0) + 1
+    row.progress_json = {**request.progress_json, "worker_yields": generation, "worker_yielded_at": now.isoformat()}
+    # Running -> pending is forbidden by the immutable run guard. An explicit
+    # unleased running checkpoint is reclaimable under the ORIGINAL deadline.
+    row.lease_token = row.lease_until = None
+    await _audit(db, tenant_id, "run.yield", row, payload={"generation": generation})
+    await _commit(db, tenant_id)
+    return generation
 
 
 async def finish_run(db, tenant_id, run_id, reason: Termination, *, lease_token, now=None):
