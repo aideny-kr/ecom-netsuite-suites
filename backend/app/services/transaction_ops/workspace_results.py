@@ -106,6 +106,7 @@ async def review_page(db, tenant_id, run_ids, *, limit=50, offset=0, status=None
                     "review_run_id",
                     "config_id",
                     "balance_status",
+                    "case_reconciled",
                 )
             )
         )
