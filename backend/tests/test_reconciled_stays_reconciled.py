@@ -44,6 +44,16 @@ async def reconcile_all(db, tenant):
     return cases
 
 
+def with_refunds(reports):
+    """Complete refund reads on both sides, as a normal scan records them."""
+    for report in reports:
+        report["refund_evidence"] = {
+            "source": {"complete": True, "amount": "0", "refund_count": 0, "events": []},
+            "target": {"complete": True, "amount": "0", "refund_count": 0, "tax_adjustments": [], "request_links": []},
+        }
+    return reports
+
+
 async def rearm(db, setup):
     actor, _, run, token, refs, _ = setup
     await state.update_progress(
@@ -93,6 +103,7 @@ async def test_a_later_scan_of_the_same_records_keeps_the_case_reconciled(db, ba
 )
 async def test_a_real_change_after_reconciliation_is_recorded_and_the_case_stays_reconciled(db, batch_setup, change):  # noqa: F811
     actor, _, _, _, _, reports = batch_setup
+    with_refunds(reports)
     now = datetime.now(timezone.utc)
     await publish(db, batch_setup, now=now)
     cases = await reconcile_all(db, actor.tenant_id)
@@ -104,16 +115,14 @@ async def test_a_real_change_after_reconciliation_is_recorded_and_the_case_stays
         if change == "solidus_order_updated":
             report["source"]["updated_at"] = later
         elif change == "solidus_refunds_changed":
-            report["balance"]["amounts"]["refunds"]["source"] = "41.38"
+            report["refund_evidence"]["source"]["events"] = [{"id": "30", "amount": "41.38"}]
         elif change == "netsuite_record_updated":
             report["targets"][0]["updated_at"] = later
         elif change == "netsuite_records_changed":
             report["targets"][0]["record_id"] = "999"
         else:
             # A credit memo booked in NetSuite after the order was reconciled.
-            report["refund_evidence"] = {
-                "target": {"amount": "41.38", "refund_count": 1, "tax_adjustments": [{"credit_memo_id": "15840539"}]}
-            }
+            report["refund_evidence"]["target"]["tax_adjustments"] = [{"credit_memo_id": "15840539", "amount": "41.38"}]
     await publish(db, batch_setup, reports=again, now=now + timedelta(seconds=1))
     assert [case.status for case in cases] == ["reconciled"] * 3
     assert [case.latest_report_json for case in cases] == proof
@@ -125,6 +134,55 @@ async def test_a_real_change_after_reconciliation_is_recorded_and_the_case_stays
     listed = await case_service.changed_after_reconciliation(db, actor.tenant_id)
     assert sorted(item["case_id"] for item in listed["cases"]) == sorted(str(case.id) for case in cases)
     assert all(item["changes"] == [change] and item["status"] == "reconciled" for item in listed["cases"])
+
+
+@pytest.mark.parametrize("unread", ["solidus_refunds", "netsuite_credits", "netsuite_records"])
+async def test_evidence_a_scan_could_not_read_is_unknown_not_a_change(db, batch_setup, unread):  # noqa: F811
+    # Review finding F1 (#364): a failed refund read or an incomplete lookup is not a change.
+    actor, _, _, _, _, reports = batch_setup
+    with_refunds(reports)
+    now = datetime.now(timezone.utc)
+    await publish(db, batch_setup, now=now)
+    cases = await reconcile_all(db, actor.tenant_id)
+    await rearm(db, batch_setup)
+    again = deepcopy(reports)
+    for report in again:
+        if unread == "solidus_refunds":
+            report["refund_evidence"]["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
+            report["balance"]["amounts"]["refunds"]["source"] = None
+        elif unread == "netsuite_credits":
+            report["refund_evidence"]["target"] = {"complete": False, "reason": "target_refunds_unavailable"}
+        else:
+            report["lookup"] = {**report["lookup"], "complete": False}
+            report["targets"] = []
+    await publish(db, batch_setup, reports=again, now=now + timedelta(seconds=1))
+    assert [case.status for case in cases] == ["reconciled"] * 3
+    assert not await events(db, actor.tenant_id, "case.changed_after_reconciliation")
+    kept = await events(db, actor.tenant_id, "case.kept_reconciled")
+    assert len(kept) == 3 and all(event.payload["unknown"] == [unread] for event in kept)
+    assert (await case_service.changed_after_reconciliation(db, actor.tenant_id))["cases"] == []
+
+
+async def test_a_flag_clears_only_when_a_complete_scan_is_back_at_the_reconciled_records(db, batch_setup):  # noqa: F811
+    actor, _, _, _, _, reports = batch_setup
+    with_refunds(reports)
+    now = datetime.now(timezone.utc)
+    await publish(db, batch_setup, now=now)
+    await reconcile_all(db, actor.tenant_id)
+    steps = []
+    for step, edit in enumerate(("changed", "unread", "back")):
+        await rearm(db, batch_setup)
+        again = deepcopy(reports)
+        for report in again:
+            report["reason_for_test"] = edit
+            if edit == "changed":
+                report["source"]["updated_at"] = (now + timedelta(days=3)).isoformat()
+            elif edit == "unread":
+                report["refund_evidence"]["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
+        await publish(db, batch_setup, reports=again, now=now + timedelta(seconds=step + 1))
+        steps.append(len((await case_service.changed_after_reconciliation(db, actor.tenant_id))["cases"]))
+    # Flagged; an incomplete scan cannot clear it; a complete scan of the reconciled records does.
+    assert steps == [3, 3, 0]
 
 
 async def test_the_single_writer_keeps_a_reconciled_case_reconciled(db, batch_setup):  # noqa: F811
@@ -239,7 +297,9 @@ async def test_the_changed_after_reconciliation_list_is_served_to_the_tenant_onl
             await enable_feature_flag(db, user.tenant_id, feature)
     config = await seed_config(db, actor.tenant_id, actor)
     await observe(db, actor, config, report(), NOW)
-    await observe(db, actor, config, report("matched"), NOW + timedelta(seconds=1))
+    matched = report("matched", NOW + timedelta(seconds=1))
+    matched["source"]["updated_at"] = NOW.isoformat()
+    await observe(db, actor, config, matched, NOW + timedelta(seconds=1))
     later = report(observed=NOW + timedelta(seconds=2))
     later["source"]["updated_at"] = (NOW + timedelta(days=2)).isoformat()
     await observe(db, actor, config, later, NOW + timedelta(seconds=2))
@@ -250,3 +310,51 @@ async def test_the_changed_after_reconciliation_list_is_served_to_the_tenant_onl
     [item] = response.json()["cases"]
     assert item["status"] == "reconciled" and item["changes"] == ["solidus_order_updated"]
     assert (await client.get(path, headers=other_headers)).json() == {"cases": []}
+
+
+async def test_the_export_and_results_page_show_a_reconciled_order_as_reconciled(
+    app, client, db, admin_user, monkeypatch
+):
+    # Review findings F2 and F3 (#364): the workbook and the table label rows from the raw verdict.
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from app.api.v1.transaction_ops import router
+    from app.services.transaction_ops.case_service import case_scope
+    from app.services.transaction_ops.workspace_results import review_page
+    from tests.test_transaction_workspace_reports import fixture_rows, linked
+
+    app.include_router(router, prefix="/api/v1")
+    actor, headers = admin_user
+    first, second, cases = await fixture_rows(db, actor, monkeypatch, count=2)
+    identity = uuid4()
+    reconciled = TransactionCase(
+        id=identity,
+        tenant_id=actor.tenant_id,
+        case_key=identity.hex,
+        order_reference="R900000001",
+        scope_json=case_scope(first),
+        status="reconciled",
+        first_observed_at=first.created_at,
+        last_observed_at=first.created_at,
+        latest_report_json=deepcopy(cases[0].latest_report_json),
+    )
+    db.add(reconciled)
+    await db.flush()
+    await linked(db, actor, first, reconciled)
+    page = await review_page(db, actor.tenant_id, [first.id, second.id], limit=10)
+    flags = {item["order_reference"]: item["reconciled"] for item in page["items"]}
+    assert flags == {"R900000001": True, cases[0].order_reference: False, cases[1].order_reference: False}
+    assert page["summary"]["matched"] == 1 and page["summary"]["needs_review"] == 2
+    response = await client.post(
+        "/api/v1/transaction-ops/review-export",
+        headers=headers,
+        json={"review_run_ids": [str(first.id), str(second.id)]},
+    )
+    assert response.status_code == 200, response.text[:300]
+    wb = load_workbook(BytesIO(response.content))
+    findings = {str(row[0].value): row[4].value for row in wb["Reconciliation"].iter_rows(min_row=2)}
+    [reference] = [key for key in findings if "R900000001" in key]
+    assert findings[reference] == "matched"
+    assert sum(row[5].value for row in wb["Issue groups"].iter_rows(min_row=2)) == 2

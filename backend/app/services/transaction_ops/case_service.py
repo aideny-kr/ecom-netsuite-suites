@@ -138,6 +138,10 @@ def _netsuite_records(report):
     }
 
 
+def _complete(evidence):
+    return isinstance(evidence, dict) and evidence.get("complete") is True
+
+
 def changes_since(reconciled, report):
     """What really changed in Solidus or NetSuite between a case's reconciling report and a later one.
 
@@ -146,21 +150,34 @@ def changes_since(reconciled, report):
     records compared another way are no change. Checked against every reconciled case that reopened
     on Framework in the 14 days to 2026-09-30: 63 of 66 had no change, and the other 3 each had a
     real Solidus change.
+
+    Returns (changes, unknown). A part that either report did not read completely is unknown, never a
+    change: a failed refund read, an incomplete NetSuite lookup, an order without its edit time.
     """
-    changes = []
+    changes, unknown = [], []
     before, after = reconciled.get("source") or {}, report.get("source") or {}
-    if (before.get("record_id"), before.get("updated_at")) != (after.get("record_id"), after.get("updated_at")):
+    if before.get("updated_at") is None or after.get("updated_at") is None:
+        unknown.append("solidus_order")
+    elif (before.get("record_id"), before.get("updated_at")) != (after.get("record_id"), after.get("updated_at")):
         changes.append("solidus_order_updated")
-    if _solidus_refunds(reconciled) != _solidus_refunds(report):
+    pair = (reconciled, report)
+    if not all(_complete((side.get("refund_evidence") or {}).get("source")) for side in pair):
+        unknown.append("solidus_refunds")
+    elif _solidus_refunds(reconciled) != _solidus_refunds(report):
         changes.append("solidus_refunds_changed")
-    before, after = _netsuite_records(reconciled), _netsuite_records(report)
-    if set(before) != set(after):
-        changes.append("netsuite_records_changed")
-    elif before != after:
-        changes.append("netsuite_record_updated")
-    if _netsuite_credits(reconciled) != _netsuite_credits(report):
+    if not all(_complete(side.get("lookup")) and _netsuite_records(side) for side in pair):
+        unknown.append("netsuite_records")
+    else:
+        before, after = _netsuite_records(reconciled), _netsuite_records(report)
+        if set(before) != set(after):
+            changes.append("netsuite_records_changed")
+        elif before != after:
+            changes.append("netsuite_record_updated")
+    if not all(_complete((side.get("refund_evidence") or {}).get("target")) for side in pair):
+        unknown.append("netsuite_credits")
+    elif _netsuite_credits(reconciled) != _netsuite_credits(report):
         changes.append("netsuite_credits_changed")
-    return changes
+    return changes, unknown
 
 
 def settle_observation(case, report, *, cleared, now):
@@ -169,13 +186,15 @@ def settle_observation(case, report, *, cleared, now):
     A reconciled case stays reconciled (decided 2026-09-30): only a clearing observation may refresh
     its evidence. Any other later observation leaves the status and the reconciling evidence as they
     are and is recorded as kept, or as changed after reconciliation when a record really changed.
-    The database refuses any update that would reopen one (migration 117).
+    Parts the observation could not read are listed as unknown. The database refuses any update that
+    would reopen a reconciled case (migration 117).
     """
     if case.status == "reconciled" and not cleared:
-        changes = changes_since(case.latest_report_json, report)
+        changes, unknown = changes_since(case.latest_report_json, report)
+        extra = {"unknown": unknown} if unknown else {}
         if changes:
-            return [("case.changed_after_reconciliation", {"changes": changes})]
-        return [("case.kept_reconciled", {})]
+            return [("case.changed_after_reconciliation", {"changes": changes, **extra})]
+        return [("case.kept_reconciled", extra)]
     prior = case.status
     case.status = "reconciled" if cleared else "open"
     case.last_observed_at = now
@@ -187,27 +206,38 @@ async def changed_after_reconciliation(db, tenant_id, *, limit=100):
     """Reconciled cases whose Solidus order or NetSuite records changed after reconciliation.
 
     They stay reconciled; this is the list a person reviews, newest change first, one row per case.
+    A case leaves the list once a later scan read everything and found the reconciled records again;
+    a scan that could not read some part neither adds nor clears a case.
     """
-    from sqlalchemy import String, cast
+    from sqlalchemy import String, and_, cast, or_
 
     from app.models.audit import AuditEvent
 
     await set_tenant_context(db, str(tenant_id))
+    changed = "transaction_ops.case.changed_after_reconciliation"
+    kept = "transaction_ops.case.kept_reconciled"
     latest = (
-        select(AuditEvent.resource_id, AuditEvent.payload, AuditEvent.timestamp)
+        select(AuditEvent.resource_id, AuditEvent.action, AuditEvent.payload, AuditEvent.timestamp)
         .where(
             AuditEvent.tenant_id == tenant_id,
-            AuditEvent.action == "transaction_ops.case.changed_after_reconciliation",
             AuditEvent.resource_type == TransactionCase.__tablename__,
+            or_(
+                AuditEvent.action == changed,
+                and_(AuditEvent.action == kept, AuditEvent.payload["unknown"].as_string().is_(None)),
+            ),
         )
         .distinct(AuditEvent.resource_id)
-        .order_by(AuditEvent.resource_id, AuditEvent.timestamp.desc())
+        .order_by(AuditEvent.resource_id, AuditEvent.timestamp.desc(), AuditEvent.id.desc())
         .subquery()
     )
     rows = await db.execute(
         select(TransactionCase, latest.c.payload, latest.c.timestamp)
         .join(latest, cast(TransactionCase.id, String) == latest.c.resource_id)
-        .where(TransactionCase.tenant_id == tenant_id, TransactionCase.status == "reconciled")
+        .where(
+            TransactionCase.tenant_id == tenant_id,
+            TransactionCase.status == "reconciled",
+            latest.c.action == changed,
+        )
         .order_by(latest.c.timestamp.desc(), TransactionCase.id)
         .limit(min(500, max(1, limit)))
     )

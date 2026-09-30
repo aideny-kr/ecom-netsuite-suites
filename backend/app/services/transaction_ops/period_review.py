@@ -409,6 +409,7 @@ async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=No
                 "case_id": report.get("case_id"),
                 "action": (report.get("comparison") or {}).get("recommended_action"),
                 "automation": report.get("automation"),
+                "reconciled": bool(row.get("case_reconciled")),
             }
         )
     return {
