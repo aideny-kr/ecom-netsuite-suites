@@ -32,6 +32,7 @@ class TestAllowedChatToolsFromOld:
             "transaction_ops.run",
             "transaction_ops.status",
             "transaction_ops.groups",
+            "transaction_ops.group_breakdown",
             "transaction_ops.accounting_evidence",
             "transaction_ops.propose_credit_reallocation",
             "transaction_ops.accounting_group",

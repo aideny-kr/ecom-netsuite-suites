@@ -12,7 +12,9 @@ import { tokenUsageSummary } from "@/lib/token-usage";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage, ClarificationData, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
+import { isGroupBreakdown } from "@/lib/chat-stream";
 import { PreparationProgress } from "./preparation-progress";
+import { GroupBreakdownCard } from "./group-breakdown-card";
 import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
 import { WriteConfirmationCard } from "@/components/chat/write-confirmation-card";
@@ -1133,6 +1135,8 @@ export function MessageList({
                     );
                   case "preparation_progress":
                     return <PreparationProgress key={block.id} data={block.data} />;
+                  case "group_breakdown":
+                    return <GroupBreakdownCard key={block.id} data={block.data} />;
                   default:
                     return null;
                 }
@@ -1388,6 +1392,13 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         {dataTableData && (
           <DataFrameTable data={dataTableData} queryText={dataTableData.query} />
         )}
+
+        {(() => {
+          // Saved as the turn's output, or under its own key when a later tool in the turn took that slot.
+          const saved =
+            structuredOutput?.type === "group_breakdown" ? structuredOutput.data : structuredOutput?.group_breakdown;
+          return isGroupBreakdown(saved) ? <GroupBreakdownCard data={saved} /> : null;
+        })()}
 
         {chartDataList && chartDataList.length > 0 && chartDataList.map((chart, idx) => (
           <ChartRenderer key={idx} data={chart} />

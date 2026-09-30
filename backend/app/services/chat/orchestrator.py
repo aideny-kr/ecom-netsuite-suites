@@ -894,6 +894,22 @@ def _intercept_tool_result(
         condensed = _stamp_result_id(condensed, event, result_id)
         return "data_table", event, condensed
 
+    # The breakdown card carries every amount; the model reads causes, counts and next steps.
+    if tool_name in ("transaction_ops.group_breakdown", "transaction_ops_group_breakdown"):
+        invalid = json.dumps({"success": False, "error": "invalid_breakdown_result"})
+        try:
+            parsed = json.loads(result_str)
+        except (ValueError, TypeError):
+            return None, None, invalid
+        if not isinstance(parsed, dict) or parsed.get("success") is not True:
+            return None, None, result_str
+        from app.services.transaction_ops.group_breakdown import condensed_for_model
+
+        try:
+            return "group_breakdown", parsed, json.dumps(condensed_for_model(parsed))
+        except (KeyError, TypeError):
+            return None, None, invalid
+
     # --- Report card path ---
     if tool_name in ("report_compose", "report.compose"):
         try:
@@ -1316,7 +1332,18 @@ def _intercept_tool_result(
     return None, None, result_str
 
 
-_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready"})
+# group_breakdown is a card, not a query result: caching it would replace the conversation's
+# last real result with an empty one.
+def _keep_group_breakdown(persisted, breakdown):
+    """Save a turn's breakdown under its own key too. The message keeps only the turn's last structured
+    output, so a tool called after the breakdown would otherwise take the card away (review round 3
+    of #356)."""
+    if not breakdown or (isinstance(persisted, dict) and persisted.get("type") == "group_breakdown"):
+        return persisted
+    return {**(persisted or {}), "group_breakdown": breakdown}
+
+
+_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready", "group_breakdown"})
 
 # The SSE event types for which _intercept_tool_result STAMPS the result_id into
 # the LLM-facing condensed string (so the model actually SEES the id). The unified
@@ -4335,6 +4362,7 @@ async def run_chat_turn(
                     streamed_text_parts: list[str] = []
                     agent_result = None
                     last_structured_output: dict | None = None
+                    turn_group_breakdown: dict | None = None
                     suppress_streamed_text = False
                     _charts_output: list[dict] = []
 
@@ -4539,6 +4567,8 @@ async def run_chat_turn(
                         elif event_type == "tool_intercept":
                             # payload is (event_type_str, event_data_dict)
                             last_structured_output = {"type": payload[0], "data": payload[1]}
+                            if payload[0] == "group_breakdown":
+                                turn_group_breakdown = payload[1]
                             yield {"type": payload[0], "data": payload[1]}
                             if _is_pricing_task_output(last_structured_output):
                                 suppress_streamed_text = True
@@ -4647,6 +4677,7 @@ async def run_chat_turn(
                             _persisted_output = {**_persisted_output, "charts": _charts_output}
                         else:
                             _persisted_output = {"charts": _charts_output}
+                    _persisted_output = _keep_group_breakdown(_persisted_output, turn_group_breakdown)
 
                     assistant_msg = ChatMessage(
                         tenant_id=tenant_id,
@@ -4827,6 +4858,7 @@ async def run_chat_turn(
         total_cache_creation_tokens = 0
         total_cache_read_tokens = 0
         last_structured_output: dict | None = None
+        turn_group_breakdown: dict | None = None
         suppress_streamed_text = False
         # Dedup workspace_propose_patch per canonical file path across the
         # whole turn so a single model response that emits two identical
@@ -5019,6 +5051,8 @@ async def run_chat_turn(
                 )
                 if intercept_type is not None:
                     last_structured_output = {"type": intercept_type, "data": intercept_data}
+                    if intercept_type == "group_breakdown":
+                        turn_group_breakdown = intercept_data
                     yield {"type": intercept_type, "data": intercept_data}
                     if _is_pricing_task_output(last_structured_output):
                         suppress_streamed_text = True
@@ -5136,7 +5170,7 @@ async def run_chat_turn(
             provider_used=provider,
             is_byok=is_byok,
             query_importance=importance_tier.value,
-            structured_output=last_structured_output,
+            structured_output=_keep_group_breakdown(last_structured_output, turn_group_breakdown),
             created_at=datetime.now(timezone.utc),
         )
         db.add(assistant_msg)

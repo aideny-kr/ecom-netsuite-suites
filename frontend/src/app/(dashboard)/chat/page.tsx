@@ -268,6 +268,9 @@ export default function ChatPage() {
               return next;
             });
           },
+          onGroupBreakdown: (data) => {
+            setStreamBlocks(prev => [...prev, { type: "group_breakdown" as const, data, id: `gb-${Date.now()}` }]);
+          },
           onFinancialReport: (data) => {
             setFinancialReport(data);
             setStreamBlocks(prev => [...prev, { type: "financial_report" as const, data, id: `fr-${Date.now()}` }]);

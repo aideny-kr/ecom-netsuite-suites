@@ -102,6 +102,72 @@ export interface PreparationProgressData {
   now: string[];
 }
 
+/** One cause in a group breakdown. Every amount is the server's; the model never states them. */
+export interface GroupBreakdownCause {
+  cause: string;
+  label: string;
+  why: string;
+  next_step: string;
+  /** The server's short name for the next step; the card only colours it. */
+  next_pill?: string;
+  next_label: string;
+  orders: number;
+  order_references: string[];
+  /** The exact case of each order, paired with order_references by position. */
+  case_ids?: string[];
+  /** null when an amount is missing for some order: unknown, never zero. */
+  amounts: Record<string, string | null>;
+  /** The amount this cause shows, chosen by the server; null when none is known and non-zero. */
+  primary?: { metric: string; amount: string } | null;
+  facts: Array<{ fact: string; orders: number; kind?: string }>;
+}
+
+/** A group (or one order) split into causes, from saved evidence and at most two NetSuite reads. */
+export interface GroupBreakdownData {
+  group_id: string | null;
+  case_id: string | null;
+  scope: { review_run_ids?: string[] | null; status?: string | null; search?: string | null } | null;
+  pattern: string | null;
+  currency: string | null;
+  orders: number;
+  totals: Record<string, string | null>;
+  causes: GroupBreakdownCause[];
+  checked: {
+    saved_evidence: number;
+    saved_source_orders: number;
+    /** complete | unavailable (saved Solidus orders could not be read) | not_configured */
+    saved_source?: string;
+    netsuite: string;
+    netsuite_orders: number;
+    seconds: number;
+  };
+}
+
+/** Shape check for live and saved breakdowns: a malformed payload renders nothing rather than a broken card. */
+export function isGroupBreakdown(value: unknown): value is GroupBreakdownData {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data.orders === "number" &&
+    !!data.totals &&
+    typeof data.totals === "object" &&
+    !!data.checked &&
+    typeof data.checked === "object" &&
+    Array.isArray(data.causes) &&
+    data.causes.every(
+      (cause) =>
+        !!cause &&
+        typeof cause === "object" &&
+        typeof (cause as GroupBreakdownCause).label === "string" &&
+        typeof (cause as GroupBreakdownCause).orders === "number" &&
+        Array.isArray((cause as GroupBreakdownCause).order_references) &&
+        Array.isArray((cause as GroupBreakdownCause).facts) &&
+        !!(cause as GroupBreakdownCause).amounts &&
+        typeof (cause as GroupBreakdownCause).amounts === "object",
+    )
+  );
+}
+
 export type StreamBlock =
   | { type: "text"; content: string; id: string }
   | { type: "tool"; tool: StreamingToolCall; id: string }
@@ -114,7 +180,8 @@ export type StreamBlock =
   | { type: "report_ready"; data: ReportReadyData; id: string }
   | { type: "thinking"; content: string; isActive: boolean; id: string }
   | { type: "write_confirmation"; data: WriteConfirmationData; id: string }
-  | { type: "preparation_progress"; data: PreparationProgressData; id: string };
+  | { type: "preparation_progress"; data: PreparationProgressData; id: string }
+  | { type: "group_breakdown"; data: GroupBreakdownData; id: string };
 
 export type ChatStreamEvent =
   | { type: "text"; content: string }
@@ -131,6 +198,7 @@ export type ChatStreamEvent =
   | { type: "chart"; data: ChartData }
   | { type: "clarification_required"; data: ClarificationData }
   | { type: "preparation_progress"; data: PreparationProgressData }
+  | { type: "group_breakdown"; data: GroupBreakdownData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage }
   | { type: "tool_start"; tool_name: string; tool_input: Record<string, unknown>; step: number }
@@ -159,6 +227,7 @@ type StreamHandlers = {
   // structured_output — defeating the point of the mid-stream gate.
   onClarificationRequired?: (data: ClarificationData) => void;
   onPreparationProgress?: (data: PreparationProgressData) => void;
+  onGroupBreakdown?: (data: GroupBreakdownData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
   onToolStart?: (tool_name: string, tool_input: Record<string, unknown>, step: number) => void;
@@ -284,6 +353,8 @@ export async function consumeChatStream(
           handlers.onClarificationRequired?.(event.data);
         } else if (event.type === "preparation_progress") {
           handlers.onPreparationProgress?.(event.data);
+        } else if (event.type === "group_breakdown") {
+          handlers.onGroupBreakdown?.(event.data);
         } else if (event.type === "error") {
           handlers.onError?.(event.error);
           terminalSeen = true;
@@ -444,6 +515,9 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
       return { type, data: progress };
     }
     return null;
+  }
+  if (type === "group_breakdown") {
+    return isGroupBreakdown(data.data) ? { type, data: data.data } : null;
   }
   if (type === "error" && typeof data.error === "string") {
     return { type, error: data.error };
