@@ -343,6 +343,8 @@ async def run_investigation(
     _celigo_reader=None,
     _enabled=None,
     _clock=None,
+    _slice_seconds=None,
+    _slice_clock=None,
 ):
     from app.services.ingestion.solidus_sync import save_observed_order
     from app.services.transaction_ops import dependency_index, dependency_scan, metabase_reader, source_snapshot
@@ -382,6 +384,15 @@ async def run_investigation(
     token = await state.claim_run(db, tenant_id, run_id, now=clock() if _clock is not None else None)
     if token is None:
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
+    import time
+
+    slice_clock = _slice_clock or time.monotonic
+    slice_started = slice_clock()
+    slice_enabled = (
+        _slice_seconds is not None
+        and getattr(run, "origin", None) in {"manual", "chat"}
+        and bool(run.params_json.get("review"))
+    )
     deadline_at = run.deadline_at
     progress = _initial_progress(run)
     from app.services.transaction_ops import cached_review
@@ -772,6 +783,15 @@ async def run_investigation(
                 return await finish("done")
         await save()
         while True:
+            if slice_enabled and slice_clock() - slice_started >= _slice_seconds:
+                if clock() >= deadline_at:
+                    return await finish("budget")
+                await flush_findings()
+                snapshot_progress()
+                generation = await state.yield_run(
+                    db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
+                )
+                return {"run_id": str(run_id), "status": "yielded", "generation": generation}
             if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
                 return await finish("stall")
             if not progress["pending_refs"]:

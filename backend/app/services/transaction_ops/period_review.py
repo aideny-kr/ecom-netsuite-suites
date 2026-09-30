@@ -90,6 +90,10 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
     if previous:
         summary = await review_status(db, tenant_id, previous.id)
         previous = await state.get_run(db, tenant_id, UUID(summary["current_run_id"]))
+    from app.services.transaction_ops.review_control import stopped
+
+    if previous and await stopped(db, tenant_id, previous.config_id, previous.params_json["review"]["id"]):
+        previous = None
     if previous and previous.status in ("pending", "running"):
         raise state.StateError("review_already_running")
     if previous and previous.status == "finished" and previous.termination_reason in ("error", "budget", "stall"):
@@ -170,6 +174,11 @@ async def continue_review(db, tenant_id, run_id):
     if start >= span.end:
         return None
     config = await state.get_config(db, tenant_id, previous.config_id, lock=True)
+    from app.services.transaction_ops.review_control import stopped
+
+    if await stopped(db, tenant_id, previous.config_id, span.id):
+        await state._commit(db, tenant_id)
+        return None
     if not config.enabled:
         await state._commit(db, tenant_id)
         return None
@@ -284,7 +293,11 @@ async def review_status(db, tenant_id, run_id):
     completed_slices = covered_days(span.start, span.end, windows, policy.get("timezone_name", "America/Los_Angeles"))
     complete = completed_until == span.end and len(runs) <= 512
     active = next((r for r in reversed(runs) if r.status in ("pending", "running")), None)
+    from app.services.transaction_ops.review_control import stopped
+
+    is_stopped = await stopped(db, tenant_id, root.config_id, span.id)
     return {
+        "stopped": is_stopped,
         "review_id": str(span.id),
         "period_start": span.model_dump(mode="json")["start"],
         "period_end": span.model_dump(mode="json")["end"],
@@ -300,7 +313,7 @@ async def review_status(db, tenant_id, run_id):
         "cached_results_reused": sum((r.progress_json or {}).get("cached_results_reused", 0) for r in slices.values()),
         "source_freshness": "unverified",
         "financial_status": "not_certified",
-        "status": "complete" if complete else "running" if active else "needs_attention",
+        "status": "complete" if complete else "stopped" if is_stopped else "running" if active else "needs_attention",
         "completed_slices": completed_slices,
         "reused_daily_windows": len(daily_windows),
         "saved_coverage_windows": len(saved_windows),

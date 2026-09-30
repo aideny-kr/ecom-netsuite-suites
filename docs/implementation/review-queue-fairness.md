@@ -1,0 +1,18 @@
+# Historical review control and worker fairness
+
+The operator authorized replacing Inc's September 1–26 current-state historical review with saved-evidence mode, while leaving daily reconciliation enabled. No infrastructure, schema, financial-write or application-model changes.
+
+## Goals and acceptance
+
+1. Stop the old review safely, retain all findings and completed slices, then create an explicit saved-evidence review. Stop is tenant/config/review scoped, requires recon.run, is audited and idempotent. It fences active leases, conservatively settles in-flight holds as spent, and prevents stale workers, budget continuations and next-day recovery from recreating stopped work. A new human request uses a new review identity. A stop may return review_busy rather than invert the runner's row/config locks; retry after the checkpoint.
+2. Manual/chat calendar reviews cooperatively yield at a safe main-loop boundary after 60 seconds. The checkpoint commits before releasing ownership; it keeps the same run, original deadline, spend limits, counters and continuation cap. In-flight reads finish normally. This is not a hard 60-second wall-time ceiling. Scheduled and exact-order/action work retain their current behavior.
+3. The worker republishes a yielded run at the queue tail using a generation-specific, five-minute deduplication key. A crash between release and publish is recoverable by existing Beat lease recovery (the ordinary publication cooldown can delay this by up to five minutes). No new worker/queue is introduced. Other long tasks, including group preparation, can still delay the shared queue.
+4. Verify the live Inc workload and repeated September requests, including queue wait, cache reuse, provider calls, preserved observation timestamps, and unchanged daily coverage. Separate real workload results from synthetic cached-only measurements.
+
+A yielded run stays `running` with no lease, as required by the database's immutable state-transition guard. Ops status presents the explicit checkpoint as `queued`; claiming clears that marker. Stopping a review stores the terminal control record in audit because finished run rows are immutable. The stop endpoint is operational API functionality; this release does not redesign the frontend.
+
+The saved-evidence engine's existing compatibility and discovery checks are unchanged. At the initial live probe only September 1–9 had complete current-policy scan coverage. Later dates may reuse individual compatible historical findings but still need uncovered discovery and affected/missing evidence. No full-period speed guarantee follows from the previous 210-member synthetic benchmark.
+
+## Validation
+
+Real-DB tests cover stop authorization/isolation, terminal history preservation, stale continuation/recovery rejection, fresh review identity, lease fencing, settled/held spend, deadline preservation, lost-publication recovery eligibility and provider-free cached resume. Worker tests verify generation publication and deduplication. Required seeded reconciliation lifecycle, relevant regression suites, independent eight-angle review, full CI and zero-residue staging smoke are release gates. Live measurements and rollout details are recorded in the handoff artifact.
