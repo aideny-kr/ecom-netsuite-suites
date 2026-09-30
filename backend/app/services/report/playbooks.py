@@ -419,11 +419,14 @@ async def compose_playbook_report(
     actor_type="user",
     closed_period=None,
     test_run_id: uuid.UUID | None = None,
+    scheduled_run_id: uuid.UUID | None = None,
 ):
     """Deterministic compose: recipe template → fail-closed source execution →
     frozen HTML → normal Report row. Reuses the refresh engine's execution seam
     on purpose — identical validation, identical failure semantics, and the
-    resulting report auto-refreshes like any composed one.
+    resulting report auto-refreshes like any composed one unless its cadence is
+    owned by a workflow. Workflow outputs are frozen from the first insert, so
+    the independent report sweep cannot keep spending after that workflow stops.
 
     ``actor_type`` defaults to "user" because the HTTP endpoint (a real person) was the
     only caller for Stage 1. Stage 2's scheduled sweep passes "system" with
@@ -458,6 +461,9 @@ async def compose_playbook_report(
         spec_json_safe,
     )
 
+    if test_run_id is not None and scheduled_run_id is not None:
+        raise ValueError("A report cannot belong to both a test and a live workflow run")
+    source_run_id = test_run_id or scheduled_run_id
     if test_run_id is not None and (
         mode != "period" or playbook_key not in {"income_statement", "balance_sheet", "trial_balance"}
     ):
@@ -708,8 +714,8 @@ async def compose_playbook_report(
         .values(
             tenant_id=tenant_id,
             title=title,
-            auto_refresh="off" if test_run_id is not None else "daily",
-            source_run_id=test_run_id,
+            auto_refresh="off" if source_run_id is not None else "daily",
+            source_run_id=source_run_id,
             # Risk 3: a financial_statement model carries raw Decimal (spark/trend)
             # fields — sanitize BEFORE persisting (spec_json_safe), never before
             # rendering (html above was already built from the live Decimal-bearing

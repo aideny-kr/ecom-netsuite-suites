@@ -230,7 +230,7 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
             actor_id=ctx.actor_id,
             actor_type=ctx.actor_type,
             mode=params.get("mode", "period"),
-            **({"test_run_id": ctx.run_id} if ctx.execution_mode == "test" else {}),
+            **({"test_run_id": ctx.run_id} if ctx.execution_mode == "test" else {"scheduled_run_id": ctx.run_id}),
         )
 
     # compose/refresh may have committed mid-flight (an OAuth token refresh,
