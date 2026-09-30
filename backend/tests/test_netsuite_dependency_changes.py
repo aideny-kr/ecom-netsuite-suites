@@ -1,3 +1,4 @@
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -100,6 +101,63 @@ async def test_transaction_and_line_changes_keep_parent_identity_and_subsidiary(
         assert page["changes"][0]["record_keys"] == [("transaction", "17")]
         assert page["changes"][0]["transaction_type"] == "CustRfnd"
         assert page["scope"]["subsidiary_id"] == "2"
+
+
+@pytest.mark.parametrize("after,expected_ids", [(0, [10, 20]), (10, [20]), (20, [])])
+def test_line_inventory_preserves_line_only_changes_and_parent_grain(monkeypatch, after, expected_ids):
+    # Execute the generated relational query over an independent fixture.
+    # Only Oracle timestamp rendering is adapted; live REST equivalence covers
+    # that dialect. Old header dates must not exclude newly changed lines.
+    monkeypatch.setattr(reader, "_utc", lambda column: column)
+    monkeypatch.setattr(reader, "_stamp", lambda expression: f"{expression} AS modified_utc")
+    monkeypatch.setattr(
+        reader,
+        "_dates",
+        lambda column, lower, upper: f"{column}>='{lower}' AND {column}<'{upper}'",
+    )
+    with sqlite3.connect(":memory:") as db:
+        db.executescript(
+            'CREATE TABLE "transaction" (id INTEGER, type TEXT, ref TEXT, lastmodifieddate TEXT);'
+            'CREATE TABLE transactionline ("transaction" INTEGER, mainline TEXT, subsidiary INTEGER, '
+            "linelastmodifieddate TEXT);"
+        )
+        db.executemany(
+            'INSERT INTO "transaction" VALUES (?,?,?,?)',
+            [
+                (i, kind, f"R{i}", "2026-01-01")
+                for i, kind in [(10, "SalesOrd"), (20, "CustCred"), (30, "SalesOrd"), (40, "Journal"), (50, "SalesOrd")]
+            ],
+        )
+        lo = "2026-09-06 00:00:00.000000"
+        middle = "2026-09-06 18:00:00.000000"
+        hi = "2026-09-07 00:00:00.000000"
+        db.executemany(
+            "INSERT INTO transactionline VALUES (?,?,?,?)",
+            [
+                (10, "T", 2, "2026-01-01"),
+                (10, "T", 2, "2026-01-01"),
+                (10, "F", 2, lo),
+                (10, "F", 2, middle),
+                (10, "F", 2, hi),
+                (20, "T", 2, "2026-01-01"),
+                (20, "F", 2, lo),
+                (30, "T", 3, middle),
+                (40, "T", 2, middle),
+                (50, "T", 2, "2026-01-01"),
+                (50, "F", 2, hi),
+            ],
+        )
+        query = reader.change_query("transaction_lines", "2", "ref", START, END, [after])
+        query = query.replace("l.transaction", 'l."transaction"').replace("m.transaction", 'm."transaction"')
+        # The derived alias is an identifier, not the quoted source column.
+        query = query.replace('l."transaction"_id', "l.transaction_id").replace(
+            "JOIN transaction t", 'JOIN "transaction" t'
+        )
+        rows = db.execute(query).fetchall()
+    assert [r[0] for r in rows] == expected_ids
+    assert rows == [
+        (i, "SalesOrd" if i == 10 else "CustCred", f"R{i}", 2, middle if i == 10 else lo) for i in expected_ids
+    ]
 
 
 async def test_deletion_identity_nominates_both_record_namespaces(transport):

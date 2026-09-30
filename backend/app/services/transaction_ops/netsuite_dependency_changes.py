@@ -67,14 +67,19 @@ def change_query(stream, subsidiary_id, reference_field, start, end, after):
             f"AND {_dates('t.lastmodifieddate', lower, upper)} ORDER BY t.id"
         )
     if stream == "transaction_lines":
+        # Aggregate changed line identities before joining header/mainline data.
+        # Grouping the joined population timed out even at a 20-row REST page
+        # on the Framework role; the equivalent derived inventory avoids that
+        # work. DISTINCT retains the old grouping's duplicate-mainline collapse.
         return (
-            f"SELECT t.id,t.type,t.{reference_field} AS order_reference,m.subsidiary,"
-            f"{_stamp('MAX(' + _utc('l.linelastmodifieddate') + ')')} "
-            "FROM transactionline l JOIN transaction t ON t.id=l.transaction "
+            f"SELECT DISTINCT t.id,t.type,t.{reference_field} AS order_reference,m.subsidiary,"
+            f"{_stamp('l.modified_utc')} "
+            f"FROM (SELECT l.transaction AS transaction_id,MAX({_utc('l.linelastmodifieddate')}) AS modified_utc "
+            f"FROM transactionline l WHERE l.transaction>{after[0]} "
+            f"AND {_dates('l.linelastmodifieddate', lower, upper)} GROUP BY l.transaction) l "
+            "JOIN transaction t ON t.id=l.transaction_id "
             "JOIN transactionline m ON m.transaction=t.id AND m.mainline='T' "
-            f"WHERE m.subsidiary={subsidiary} AND t.type IN ({_TYPES}) AND t.id>{after[0]} "
-            f"AND {_dates('l.linelastmodifieddate', lower, upper)} "
-            f"GROUP BY t.id,t.type,t.{reference_field},m.subsidiary ORDER BY t.id"
+            f"WHERE m.subsidiary={subsidiary} AND t.type IN ({_TYPES}) ORDER BY t.id"
         )
     if stream == "transaction_links":
         return (
