@@ -40,6 +40,8 @@ def latest_order_evidence(tenant_id):
         .join(Run, (Run.id == Finding.run_id) & (Run.tenant_id == tenant_id))
         .where(
             Finding.tenant_id == tenant_id,
+            # Historical copies are not new observations of the source.
+            func.coalesce(Run.params_json["evidence_mode"].astext, "current") != "saved",
             Finding.order_reference == Order.order_number,
             Run.config_snapshot["source_connection_id"].astext == cast(Order.source_connection_id, String),
             Finding.report_json["source"]["record_id"].astext == Order.source_id,

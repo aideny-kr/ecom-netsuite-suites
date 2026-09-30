@@ -114,12 +114,20 @@ async def test_default_window_work_key_is_compatible_with_existing_runs(db, admi
     actor = admin_user[0]
     config = await seed_config(db, actor.tenant_id, actor)
     request = RunCreate(evaluation_key="legacy-retry", order_references=["R000000001"])
-    expected = state_service.business_digest(
-        {"config": config.config_key, "params": request.model_dump(exclude={"window_basis", "review"})}
-    )
+    # Pin the historical shape independently of new request-schema defaults.
+    legacy_params = {
+        "origin": "manual",
+        "evaluation_key": "legacy-retry",
+        "order_references": ["R000000001"],
+        "window_start": None,
+        "window_end": None,
+    }
+    expected = state_service.business_digest({"config": config.config_key, "params": legacy_params})
     run = await state_service.create_run(db, actor.tenant_id, config.id, request, actor=actor)
     assert run.work_key == expected
-    assert "window_basis" not in run.params_json
+    assert run.params_json == legacy_params
+    explicit = request.model_copy(update={"evidence_mode": "current"})
+    assert (await state_service.create_run(db, actor.tenant_id, config.id, explicit, actor=actor)).id == run.id
 
 
 @pytest.mark.asyncio

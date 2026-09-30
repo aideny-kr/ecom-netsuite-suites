@@ -18,6 +18,7 @@ from app.services.transaction_ops.periods import ReconciliationPolicy, review_wi
 class PeriodReview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     evaluation_key: UUID
+    evidence_mode: Literal["current", "saved"] = "current"
     period: Literal["yesterday", "last_week", "last_month", "custom"]
     start_date: date | None = None
     end_date: date | None = None
@@ -56,9 +57,21 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
         raise state.StateError("invalid_review_period", 422) from None
     span = ReviewSpan(id=request.evaluation_key, start=scope["window_start"], end=scope["window_end"])
     contract = span.model_dump(mode="json")
+    keyed = await db.scalar(
+        select(TransactionRun)
+        .where(
+            TransactionRun.tenant_id == tenant_id,
+            TransactionRun.config_id == config_id,
+            TransactionRun.params_json["evaluation_key"].astext == str(request.evaluation_key),
+        )
+        .limit(1)
+    )
+    if keyed and keyed.params_json.get("evidence_mode", "current") != request.evidence_mode:
+        raise state.StateError("evaluation_key_conflict", 409)
     same_period = select(TransactionRun).where(
         TransactionRun.tenant_id == tenant_id,
         TransactionRun.config_id == config_id,
+        func.coalesce(TransactionRun.params_json["evidence_mode"].astext, "current") == request.evidence_mode,
         TransactionRun.params_json["review"]["start"].astext == contract["start"],
         TransactionRun.params_json["review"]["end"].astext == contract["end"],
         func.coalesce(TransactionRun.params_json["window_basis"].astext, "updated_at") == scope["window_basis"],
@@ -104,7 +117,9 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
         db,
         tenant_id,
         config_id,
-        RunCreate(evaluation_key=str(request.evaluation_key), review=span, **scope),
+        RunCreate(
+            evaluation_key=str(request.evaluation_key), review=span, evidence_mode=request.evidence_mode, **scope
+        ),
         actor=actor,
     )
     return await _complete_saved_review(db, tenant_id, run)
@@ -167,12 +182,15 @@ async def continue_review(db, tenant_id, run_id):
         window_end=end,
         window_basis=previous.params_json.get("window_basis", "completed_at"),
         review=span,
+        evidence_mode=previous.params_json.get("evidence_mode", "current"),
     )
     child = await db.scalar(
         select(TransactionRun).where(
             TransactionRun.tenant_id == tenant_id,
             TransactionRun.config_id == config.id,
             TransactionRun.params_json["review"] == contract,
+            func.coalesce(TransactionRun.params_json["evidence_mode"].astext, "current")
+            == previous.params_json.get("evidence_mode", "current"),
             TransactionRun.params_json["window_start"].astext == request.model_dump(mode="json")["window_start"],
         )
     )
@@ -226,6 +244,8 @@ async def review_status(db, tenant_id, run_id):
                 .where(
                     TransactionRun.tenant_id == tenant_id,
                     TransactionRun.config_id == root.config_id,
+                    func.coalesce(TransactionRun.params_json["evidence_mode"].astext, "current")
+                    == root.params_json.get("evidence_mode", "current"),
                     TransactionRun.params_json["review"] == span.model_dump(mode="json"),
                 )
                 .order_by(TransactionRun.created_at, TransactionRun.id)
@@ -273,7 +293,11 @@ async def review_status(db, tenant_id, run_id):
         "complete": complete,
         # A finished scan is neither a replica watermark nor an accounting sign-off.
         "completion_basis": "scan_coverage",
-        "comparison_basis": "current_evidence_for_period_cohort",
+        "comparison_basis": "saved_evidence_with_targeted_refresh"
+        if root.params_json.get("evidence_mode") == "saved"
+        else "current_evidence_for_period_cohort",
+        "evidence_mode": root.params_json.get("evidence_mode", "current"),
+        "cached_results_reused": sum((r.progress_json or {}).get("cached_results_reused", 0) for r in slices.values()),
         "source_freshness": "unverified",
         "financial_status": "not_certified",
         "status": "complete" if complete else "running" if active else "needs_attention",
@@ -348,7 +372,10 @@ async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=No
                 "id": str(row["id"]),
                 "run_id": str(row["run_id"]),
                 "order_reference": row["order_reference"],
-                "observed_at": row["updated_at"].isoformat(),
+                "observed_at": report["_observation"]["observed_at"]
+                if report.get("cached_evidence")
+                else row["updated_at"].isoformat(),
+                "cached_evidence": report.get("cached_evidence"),
                 "balance": report.get("balance"),
                 "case_id": report.get("case_id"),
                 "action": (report.get("comparison") or {}).get("recommended_action"),

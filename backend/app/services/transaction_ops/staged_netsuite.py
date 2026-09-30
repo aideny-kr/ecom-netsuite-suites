@@ -13,6 +13,7 @@ class StagedNetSuite:
         self.clock, self.reserve, self.read, self.checkpoint = clock, reserve, read, checkpoint
         self.cache, self.attempted = {}, set()
         self.order_id = None
+        self.reusable_references = set()
 
     def scope(self):
         from uuid import UUID
@@ -101,7 +102,11 @@ class StagedNetSuite:
     async def order(self, reference, *, source_updated_at=None, _count_hit=True):
         # Include this page's references so advancing the source/dependency feed
         # never reuses a negative result or an older parent-only observation.
-        refs = list(dict.fromkeys(self.progress["pending_refs"][: bulk.MAX_ORDERS]))
+        refs = list(
+            dict.fromkeys(
+                ref for ref in self.progress["pending_refs"][: bulk.MAX_ORDERS] if ref not in self.reusable_references
+            )
+        )
         if not refs:
             return None
         phase = self.progress.get("phase")

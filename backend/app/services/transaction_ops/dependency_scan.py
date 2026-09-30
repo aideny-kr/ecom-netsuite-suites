@@ -129,6 +129,7 @@ async def advance(progress, *, read_page, read_owners, indexed_owners, unobserve
         # an unzoned envelope, so require an observation after THIS page read.
         # An interim, stale, or cached finding cannot suppress a recheck.
         since = page["observed_at"] if stream == "deletions" else page["scope"]["window_end"]
+        progress["pending_evidence_since"] = since
         progress["pending_refs"] = await unobserved(sorted(set(refs)), since=since)
         progress["phase"] = "destination"
         return

@@ -130,13 +130,21 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
     f, r = TransactionFinding, TransactionRun
     cohort_scope = and_(
         r.config_id == root.config_id,
+        func.coalesce(r.params_json["evidence_mode"].astext, "current")
+        == root.params_json.get("evidence_mode", "current")
+        if root.params_json.get("evidence_mode") != "saved"
+        else literal(True),
         or_(
             r.params_json["review"] == span.model_dump(mode="json"),
             and_(*compatible_observation_runs(root, span)),
         ),
     )
     replacement = replacement_scope(root.config_snapshot)
-    replacement_filter = and_(*replacement) if replacement else literal(False)
+    replacement_filter = (
+        and_(*replacement, func.coalesce(Run.params_json["evidence_mode"].astext, "current") != "saved")
+        if replacement
+        else literal(False)
+    )
     # JSON scope predicates badly underestimate run cardinality. Resolve the
     # immutable authorized run IDs first, so PostgreSQL can estimate findings
     # from ordinary indexed run_id values instead of multiplying nested scans.
@@ -208,7 +216,16 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
     )
     winners = current_review_evidence(cohort, readings, replacement_ids, name=name)
     latest = (
-        select(f.id, f.run_id, winners.c.order_reference, f.report_json, f.updated_at, readings.c.balance_status)
+        select(
+            f.id,
+            f.run_id,
+            winners.c.order_reference,
+            f.report_json,
+            case(
+                (f.report_json["cached_evidence"].astext.is_not(None), readings.c.observed_at), else_=f.updated_at
+            ).label("updated_at"),
+            readings.c.balance_status,
+        )
         .join(winners, (f.id == winners.c.id) & (f.tenant_id == tenant_id))
         .join(readings, readings.c.id == winners.c.id)
         .where(readings.c.eligible)

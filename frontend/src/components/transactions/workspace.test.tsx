@@ -471,3 +471,16 @@ it("shows completed daily coverage separately from enabled schedule", async () =
   expect(screen.getByText(/Behind schedule/)).toBeInTheDocument();
   expect(screen.getByText(/Daily checks on/)).toBeInTheDocument();
 });
+
+it("makes cached evidence explicit and sends the chosen mode on the normal review endpoint", async () => {
+  vi.mocked(apiClient.post).mockResolvedValue(run);
+  mount();
+  expect(screen.getByLabelText("Review evidence")).toHaveValue("current");
+  fireEvent.change(screen.getByLabelText("Review evidence"), { target: { value: "saved" } });
+  expect(screen.getByText(/original read dates/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile period" }));
+  await waitFor(() => expect(apiClient.post).toHaveBeenCalledWith(
+    "/api/v1/transaction-ops/configs/scope-a/review",
+    expect.objectContaining({ evidence_mode: "saved", evaluation_key: expect.any(String) }),
+  ));
+});
