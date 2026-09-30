@@ -8,6 +8,7 @@ customer source accuracy, Google availability or authorize a production run.
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
+from uuid import uuid4
 
 import pytest
 from openpyxl import load_workbook
@@ -153,7 +154,27 @@ async def test_due_workflow_report_is_frozen_at_first_insert_without_pdf(client,
     assert len(inserts) == 1
     assert inserts[0]["auto_refresh"] == "off"
     assert inserts[0]["source_run_id"] == job.id
+    audit = (
+        await db.scalars(select(AuditEvent).where(AuditEvent.tenant_id == tid, AuditEvent.action == "report.compose"))
+    ).one()
+    assert audit.payload["execution_mode"] == "live" and audit.payload["scheduled_run_id"] == str(job.id)
     assert (await sweep_tenant_reports(db, tid, now=datetime.now(timezone.utc) + timedelta(days=7)))["due"] == 0
+
+
+async def test_report_rejects_conflicting_run_origins_before_source_execution():
+    from app.services.report.playbooks import compose_playbook_report
+
+    # No DB exists: rejection must precede any source or persistence operation.
+    with pytest.raises(ValueError, match="both a test and a live"):
+        await compose_playbook_report(
+            None,
+            playbook_key="trial_balance",
+            params={"period": "Jun 2026"},
+            tenant_id=uuid4(),
+            actor_id=None,
+            test_run_id=uuid4(),
+            scheduled_run_id=uuid4(),
+        )
 
 
 @_skip_unless_weasyprint_native_libs
@@ -198,6 +219,7 @@ async def test_approved_due_report_delivers_real_artifacts_once_and_stays_frozen
     before = list(drive.calls)
     replay = await jobs.run_schedule_now(db, sid, tenant_id=tid, actor_id=user.id, existing_job_id=job.id)
     assert replay.reason == "done" and drive.calls == before
+    assert len((await db.scalars(select(Report).where(Report.tenant_id == tid))).all()) == 1
     assert (await jobs.run_due_jobs(db, tid))["ran"] == 0
     row.paused_at = datetime.now(timezone.utc)
     row.pause_reason = "Synthetic operator stop"

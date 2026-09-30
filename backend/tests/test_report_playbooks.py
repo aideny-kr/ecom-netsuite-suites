@@ -839,6 +839,8 @@ async def test_compose_playbook_trial_balance_renders_full_statement(db, monkeyp
     )
 
     assert len(calls) == 2
+    assert report.auto_refresh == "daily" and report.source_run_id is None
+    assert not report.title.startswith("Test ·")
     html = report.rendered_html
     assert html.count("<h1") == 1
     assert "Debits = Credits" in html  # the statement's own check row

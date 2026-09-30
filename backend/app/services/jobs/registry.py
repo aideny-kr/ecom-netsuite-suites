@@ -222,6 +222,13 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
     else:
         from app.services.report.playbooks import compose_playbook_report
 
+        run_origin = {}
+        if ctx.execution_mode == "test":
+            run_origin = {"test_run_id": ctx.run_id}
+        elif params.get("mode", "period") == "period":
+            # Legacy tracking series own their cadence independently. Only a
+            # workflow's new period snapshot is owned by this particular run.
+            run_origin = {"scheduled_run_id": ctx.run_id}
         report = await compose_playbook_report(
             ctx.db,
             playbook_key=params["playbook_key"],
@@ -230,7 +237,7 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
             actor_id=ctx.actor_id,
             actor_type=ctx.actor_type,
             mode=params.get("mode", "period"),
-            **({"test_run_id": ctx.run_id} if ctx.execution_mode == "test" else {"scheduled_run_id": ctx.run_id}),
+            **run_origin,
         )
 
     # compose/refresh may have committed mid-flight (an OAuth token refresh,

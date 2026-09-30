@@ -424,9 +424,10 @@ async def compose_playbook_report(
     """Deterministic compose: recipe template → fail-closed source execution →
     frozen HTML → normal Report row. Reuses the refresh engine's execution seam
     on purpose — identical validation, identical failure semantics, and the
-    resulting report auto-refreshes like any composed one unless its cadence is
-    owned by a workflow. Workflow outputs are frozen from the first insert, so
-    the independent report sweep cannot keep spending after that workflow stops.
+    resulting report auto-refreshes unless a workflow owns its period snapshot.
+    Those snapshots default to auto-refresh off from the first insert, avoiding
+    independent sweep spending after the workflow stops. An explicit report
+    settings change can opt back in. Legacy tracking series are unchanged.
 
     ``actor_type`` defaults to "user" because the HTTP endpoint (a real person) was the
     only caller for Stage 1. Stage 2's scheduled sweep passes "system" with
@@ -772,6 +773,8 @@ async def compose_playbook_report(
     audit_payload = {"playbook": playbook_key, "source_count": len(recipe["sources"])}
     if test_run_id is not None:
         audit_payload.update(execution_mode="test", test_run_id=str(test_run_id))
+    elif scheduled_run_id is not None:
+        audit_payload.update(execution_mode="live", scheduled_run_id=str(scheduled_run_id))
     if series_id is not None:
         audit_payload["series_id"] = str(series_id)
     await audit_service.log_event(
