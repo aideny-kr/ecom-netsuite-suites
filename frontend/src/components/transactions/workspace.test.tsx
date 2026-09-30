@@ -279,6 +279,15 @@ it("preserves source-order browsing when reconciliation access is unavailable", 
   expect(apiClient.get).not.toHaveBeenCalled();
 });
 
+it("explains a group without preparing fixes", async () => {
+  mount();
+  const link = await screen.findByRole("link", { name: "Explain group →" });
+  const prompt = new URL(link.getAttribute("href")!, "https://example.test").searchParams.get("compose")!;
+  expect(prompt).toContain("transaction_ops.group_breakdown");
+  expect(prompt).not.toContain("transaction_ops.accounting_group");
+  expect(prompt).toContain('"review_run_ids":["review-a"]');
+});
+
 it("launches one group investigation with all-member pagination and exact scope", async () => {
   mount();
   const link = await screen.findByRole("link", { name: "Prepare group fixes →" });
@@ -287,6 +296,12 @@ it("launches one group investigation with all-member pagination and exact scope"
     "https://example.test",
   ).searchParams.get("compose")!;
   expect(prompt).toContain("transaction_ops.accounting_group");
+  // A mixed group sent straight to the fix prepared nothing: the breakdown runs first.
+  expect(prompt.indexOf("transaction_ops.group_breakdown")).toBeGreaterThan(-1);
+  expect(prompt.indexOf("transaction_ops.group_breakdown")).toBeLessThan(
+    prompt.indexOf("transaction_ops.accounting_group"),
+  );
+  expect(prompt).toContain("only if a cause's next step is prepare_corrections");
   expect(prompt).toContain("show every unsupported case separately");
   expect(prompt).toContain("bounded concurrency and per-order verification and audit");
   expect(prompt).toContain("Do not treat this request or the group ID as financial approval");
