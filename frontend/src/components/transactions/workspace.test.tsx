@@ -505,3 +505,16 @@ it("closes the portaled case drawer on view navigation without submitting a deci
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(apiClient.post).not.toHaveBeenCalled();
 });
+
+it("makes cached evidence explicit and sends the chosen mode on the normal review endpoint", async () => {
+  vi.mocked(apiClient.post).mockResolvedValue(run);
+  mount();
+  expect(screen.getByLabelText("Review evidence")).toHaveValue("current");
+  fireEvent.change(screen.getByLabelText("Review evidence"), { target: { value: "saved" } });
+  expect(screen.getByText(/original read dates/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile period" }));
+  await waitFor(() => expect(apiClient.post).toHaveBeenCalledWith(
+    "/api/v1/transaction-ops/configs/scope-a/review",
+    expect.objectContaining({ evidence_mode: "saved", evaluation_key: expect.any(String) }),
+  ));
+});

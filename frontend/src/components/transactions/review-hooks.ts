@@ -45,6 +45,8 @@ export type ReviewResults = {
   };
 };
 export type Coverage = {
+  evidence_mode?: "current" | "saved";
+  cached_results_reused?: number;
   current_run_status?: "pending" | "running" | "finished";
   complete: boolean;
   status: string;
@@ -55,6 +57,7 @@ export type Coverage = {
   current_run_id: string;
 };
 export type PeriodInput = {
+  evidence_mode?: "current" | "saved";
   period: "last_week" | "last_month" | "yesterday" | "custom";
   start_date?: string;
   end_date?: string;
