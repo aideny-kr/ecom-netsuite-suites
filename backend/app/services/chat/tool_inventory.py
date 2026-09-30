@@ -11,6 +11,7 @@ prompt string — call this helper at prompt-assembly time.
 from __future__ import annotations
 
 from app.services.chat.tool_categories import is_celigo_source
+from app.services.chat.tool_guidance import SUITEQL_TOOL_ORDER
 
 
 def available_data_sources(tool_definitions: list[dict]) -> dict[str, str]:
@@ -174,7 +175,7 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
     sections: list[str] = []
 
     if matched:
-        sections.append("\n\nNETSUITE MCP TOOLS (connect directly to NetSuite — prefer these for execution):")
+        sections.append("\n\nNETSUITE MCP TOOLS (connect directly to NetSuite):")
 
         if "REPORTS" in matched:
             sections.append(
@@ -213,7 +214,7 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
         if "SUITEQL" in matched:
             sections.append(
                 f"\n• SUITEQL (MCP): `{matched['SUITEQL']}`"
-                "\n  Ad-hoc SuiteQL queries inside NetSuite. Prefer over local netsuite_suiteql."
+                "\n  Ad-hoc SuiteQL over standard tables only. Tool order: see the execution priority below."
                 '\n  Parameters: {"sqlQuery": "SELECT ...", "description": "..."}'
                 "\n  STILL FOLLOW all <suiteql_dialect_rules> — they apply to MCP SuiteQL too."
             )
@@ -233,8 +234,9 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
             "\n\nEXECUTION PRIORITY FOR NETSUITE (after selecting the user's requested source):"
             "\n  Financial statements → ns_runReport"
             "\n  Pre-built business reports → ns_runSavedSearch"
-            "\n  Ad-hoc data queries → ns_runCustomSuiteQL (MCP) → netsuite_suiteql (local fallback)"
-            "\n  Accounting cases → transaction_ops_accounting_evidence first; reuse its scoped native reads."
+            "\n  Ad-hoc data queries → "
+            + SUITEQL_TOOL_ORDER
+            + "\n  Accounting cases → transaction_ops_accounting_evidence first; reuse its scoped native reads."
             "\n  Existing credit posted to the wrong account → transaction_ops_propose_credit_reallocation; "
             "the server verifies the outcome, a person approves."
             "\n  Fix an issue group → transaction_ops_accounting_group with the exact group scope; "

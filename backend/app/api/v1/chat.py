@@ -492,8 +492,8 @@ async def send_message(
 # (multi-statement reports: ~9 NetSuite calls at 5-21s each ≈ ~135s of tool time,
 # plus several thinking turns) completes WITHOUT being cut off mid-thought. The old
 # 300s cap gave up on legitimate report work. Let the model think through; this still
-# bounds a truly runaway turn. Pairs with the "low" default effort (fast but still
-# reasons) so reports land well inside this window.
+# bounds a truly runaway turn. The default thinking level is "med" (never "low");
+# config.CHAT_THINKING_DEFAULT_LEVEL records the report latencies it was checked against.
 # Safe with the SSE proxy: the stream emits a `: heartbeat` every 15s (below), so the
 # connection never idles long enough to trip nginx proxy_read_timeout, regardless of
 # total task duration.

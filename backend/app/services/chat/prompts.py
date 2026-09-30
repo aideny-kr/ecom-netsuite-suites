@@ -1,3 +1,5 @@
+from app.services.chat.tool_guidance import SUITEQL_TOOL_ORDER
+
 SYSTEM_PROMPT = (
     "You are a helpful read-only data assistant for an"
     " e-commerce operations platform that integrates"
@@ -67,63 +69,6 @@ NETSUITE_MCP_SYSTEM_PROMPT = (
     "- Use [table: table_name] for database table results\n"
     "- Use [tool: tool_name] for tool call results"
     " (including NetSuite MCP tool results)\n"
-)
-
-ROUTER_PROMPT = (
-    "You are a routing assistant. Given a user question,"
-    " determine what data sources are needed to answer it.\n"
-    "\n"
-    "{table_summary}\n"
-    "\n"
-    "{external_tools_summary}\n"
-    "\n"
-    "Respond with ONLY a JSON object"
-    " (no markdown, no explanation):\n"
-    "{{\n"
-    '  "needs_docs": true/false,\n'
-    '  "needs_db": true/false,\n'
-    '  "db_tables": ["table_name1", "table_name2"],\n'
-    '  "tools": [\n'
-    '    {{"source": "local", "tool_name":'
-    ' "data.sample_table_read", "tool_params":'
-    ' {{"table_name": "orders"}}}},\n'
-    '    {{"source": "external", "connector_id":'
-    ' "uuid-string", "tool_name": "tool_name",'
-    ' "tool_params": {{}}}}\n'
-    "  ],\n"
-    '  "direct_answer": true/false\n'
-    "}}\n"
-    "\n"
-    "Rules:\n"
-    "- Set needs_docs=true if the question is about how"
-    " something works, documentation, or processes.\n"
-    "- Set needs_db=true if the question requires looking"
-    " at actual data from local canonical tables.\n"
-    "- Set db_tables to the relevant table names"
-    " from the summary above.\n"
-    '- Include items in "tools" only when a specific'
-    " tool call is needed.\n"
-    '- For local tools use source "local". Available local'
-    ' tool names: "data.sample_table_read",'
-    ' "netsuite.suiteql", "netsuite.get_metadata",\n'
-    '  "netsuite.connectivity", "netsuite.refresh_metadata",'
-    ' "report.compose", "rag.search".\n'
-    '- For external MCP server tools use source "external"'
-    " with the connector_id from the list above.\n"
-    "- IMPORTANT: When the user mentions NetSuite data or"
-    " asks about transactions, orders, invoices, customers,"
-    " items,\n"
-    "  vendors, etc. from NetSuite, prefer external MCP"
-    " tools if available. Fall back to local"
-    ' "netsuite.suiteql" tool only if no external tools exist.\n'
-    "- When using netsuite.suiteql, provide the SuiteQL"
-    ' query in tool_params as {{"query":'
-    ' "SELECT ...", "limit": 100}}.\n'
-    "- Set direct_answer=true if you can answer from"
-    " general knowledge without any data sources.\n"
-    "- Maximum 3 tools per turn.\n"
-    "\n"
-    "User question: {user_message}"
 )
 
 TABLE_SUMMARY_TEMPLATE = (
@@ -309,8 +254,7 @@ AGENTIC_SYSTEM_PROMPT = (  # noqa: E501
     "\n"
     "<workflow_guidance>\n"
     "- When the user asks about NetSuite data (transactions, invoices, customers, "
-    "items, vendors, etc.), use the external MCP SuiteQL tool if available, "
-    "otherwise fall back to netsuite_suiteql.\n"
+    "items, vendors, etc.): " + SUITEQL_TOOL_ORDER + "\n"
     "- If you're unsure about field names, call netsuite_get_metadata FIRST "
     "to discover available custom fields, THEN construct your query.\n"
     "- If a query fails with 'Unknown identifier' or similar errors, READ the error, "

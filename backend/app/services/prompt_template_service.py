@@ -15,6 +15,7 @@ from app.models.policy_profile import PolicyProfile
 from app.models.prompt_template import SystemPromptTemplate
 from app.models.tenant_profile import TenantProfile
 from app.services.chat.prompts import AGENTIC_SYSTEM_PROMPT
+from app.services.chat.tool_guidance import SUITEQL_TOOL_ORDER
 
 logger = structlog.get_logger()
 
@@ -259,9 +260,7 @@ def _build_suiteql_rules_section(profile: TenantProfile) -> str:
 def _build_tool_rules_section() -> str:
     return (
         "WORKFLOW GUIDANCE:\n"
-        "- To query NetSuite data, prefer external MCP tools (prefixed with 'ext__') if available. "
-        "These connect directly to NetSuite and are the most reliable option.\n"
-        "- If no external MCP tools are available, use the netsuite_suiteql tool as fallback.\n"
+        "- " + SUITEQL_TOOL_ORDER + " External MCP tools are prefixed with 'ext__'.\n"
         "- To discover custom field names before writing a query, call netsuite_get_metadata first.\n"
         "- If a query fails with 'Unknown identifier', call netsuite_get_metadata to look up "
         "correct field names, fix the query, and retry automatically.\n"
@@ -420,8 +419,24 @@ async def get_active_template(
     )
     template = result.scalar_one_or_none()
     if template:
-        return template.template_text
+        return _with_current_tool_rules(template)
     return AGENTIC_SYSTEM_PROMPT
+
+
+def _with_current_tool_rules(template: SystemPromptTemplate) -> str:
+    """The saved text, with its tool-rules section replaced by the current one.
+
+    Tool rules describe the running code's tools, and generate_template() is the only writer, so a
+    stored copy only goes stale. Framework's template (saved 2026-03-16) still said "prefer external
+    MCP tools" after #355 changed the rule. Text without the stored section verbatim is served as saved.
+    """
+    stored = (template.sections or {}).get("tool_rules")
+    if stored and stored in template.template_text:
+        return template.template_text.replace(stored, _build_tool_rules_section(), 1)
+    logger.warning(
+        "prompt_template.tool_rules_not_refreshed", tenant_id=str(template.tenant_id), template_id=str(template.id)
+    )
+    return template.template_text
 
 
 async def get_active_template_obj(

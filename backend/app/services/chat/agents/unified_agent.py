@@ -17,6 +17,7 @@ from xml.sax.saxutils import escape as _xml_escape
 
 from app.services.chat.agents.base_agent import AgentResult, BaseSpecialistAgent
 from app.services.chat.metabase_context import is_metabase_connector
+from app.services.chat.tool_guidance import SUITEQL_TOOL_ORDER
 from app.services.chat.tools import build_local_tool_definitions
 
 if TYPE_CHECKING:
@@ -180,7 +181,8 @@ def build_reasoning_instruction(*, thinking_enabled: bool) -> str:
     return _REASONING_INSTRUCTION
 
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT = (
+    """\
 <role>
 {{INJECT_ROLE_PROMPT}}
 You combine deep knowledge of SuiteQL (Oracle-based SQL dialect), \
@@ -205,7 +207,9 @@ Choose the user's requested connected source first. NetSuite-specific tools, sch
 FINANCIAL STATEMENTS → netsuite_financial_report (local) or ns_runReport (MCP, call ns_listAllReports first).
   Parameters: report_type ("income_statement"|"balance_sheet"|"trial_balance"|"income_statement_trend"|"balance_sheet_trend"), period ("Feb 2026"), subsidiary_id (optional). ALWAYS use accounting period names, NEVER date ranges.
 SAVED SEARCHES → ns_runSavedSearch (call ns_listSavedSearches to discover).
-AD-HOC DATA → ns_runCustomSuiteQL (MCP, preferred) or netsuite_suiteql (local, fallback). Check <tenant_schema>, <tenant_vernacular>, <proven_patterns>, <learned_rules> before querying. Follow ALL <suiteql_dialect_rules>.
+AD-HOC DATA → """
+    + SUITEQL_TOOL_ORDER
+    + """ Check <tenant_schema>, <tenant_vernacular>, <proven_patterns>, <learned_rules> before querying. Follow ALL <suiteql_dialect_rules>.
 PIVOT/CROSSTAB → pivot_query_result tool (NOT manual CASE WHEN SQL). Run flat GROUP BY first, then pivot.
 CROSS-SOURCE (NetSuite × BigQuery in ONE answer) → cross_source_query tool (pass both queries + join key). Joins server-side into one table — never eyeball two separate tables.
 SCHEMA DISCOVERY → check <tenant_schema> and <standard_table_schemas> first. If missing, use netsuite_get_metadata (local) or ns_getSuiteQLMetadata (MCP). NEVER guess column names.
@@ -269,7 +273,7 @@ If a query fails, diagnose WHY before trying a different approach — read the e
 - "Record not found" or "Invalid or unsupported search" → switch to netsuite_suiteql (local REST API).
 - "Unknown identifier" → `SELECT * FROM <table> WHERE ROWNUM <= 1` to discover columns, then retry.
 - 0 rows on ITEM table → call netsuite_get_metadata. Do NOT retry with different column combos.
-- 0 rows on other tables → report "0 rows found". Only retry if query logic was wrong.
+- 0 rows on other tables → apply the SuiteQL tool order above before reporting "0 rows found". Only rewrite the query if its logic was wrong.
 After 2 failures → report clearly and suggest what info would help.
 
 STOP WHEN YOU HAVE DATA:
@@ -291,6 +295,7 @@ Rate 1-5: 5=proven pattern/simple lookup, 4=successful query, 3=may be incomplet
 Output: <confidence>N</confidence> (parsed and logged).
 </output_instructions>
 """
+)
 
 _INVESTIGATION_OUTPUT_INSTRUCTIONS = (
     "<output_instructions>\n"
@@ -518,8 +523,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             base = re.sub(
                 r"<tool_selection>.*?</tool_selection>",
                 (
-                    "<tool_selection>\n"
-                    "Use MCP ns_runCustomSuiteQL (preferred) or local netsuite_suiteql for data queries.\n"
+                    "<tool_selection>\n" + SUITEQL_TOOL_ORDER + "\n"
                     "Check <tenant_schema> for valid column names before querying.\n"
                     "Use netsuite_get_metadata for column discovery if needed.\n"
                     "</tool_selection>"
