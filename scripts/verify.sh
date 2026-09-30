@@ -311,9 +311,15 @@ record() {  # $1 = verdict
     echo "verify.sh: WARNING — cannot create $dir; this run leaves NO evidence" >&2
     return 0
   fi
-  if ! printf '%s %s@%s %s quick=%s tree=%s\n' \
+  # session= names the Claude Code session that ran this (none outside one), so the loop
+  # budget hook (~/.claude/hooks/loop_state.py) charges each run to the session that made
+  # it — including a backgrounded run whose line lands long after the launching command
+  # returned — without parsing that command. Readers take fields by position; keep new
+  # fields at the end.
+  if ! printf '%s %s@%s %s quick=%s tree=%s session=%s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$VERIFIED_BRANCH" "$VERIFIED_SHA" \
-    "$1" "$([[ $QUICK -eq 1 ]] && echo yes || echo no)" "$tree" >> "$dir/log" 2>/dev/null
+    "$1" "$([[ $QUICK -eq 1 ]] && echo yes || echo no)" "$tree" \
+    "${CLAUDE_CODE_SESSION_ID:-none}" >> "$dir/log" 2>/dev/null
   then
     # Silence here is the worst outcome: verify.sh prints PASS and exits 0, then the
     # Stop hook blocks with "no PASS recorded for HEAD" — the two most authoritative
