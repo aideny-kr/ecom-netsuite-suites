@@ -146,7 +146,10 @@ export function IssueGroups({
                         ]
                       : [];
                   });
-                  const prompt = `Prepare fixes for all orders in issue group ${group.group_id} (${group.pattern}). Call transaction_ops.accounting_group with group_id "${group.group_id}"${reviewRunIds ? ` and these exact scope parameters: ${JSON.stringify(scope)}` : ""}. Prepare supported exact invoice corrections together for human approval; show every unsupported case separately. Execute only after I approve the exact group card, with bounded concurrency and per-order verification and audit. Do not treat this request or the group ID as financial approval.`;
+                  const exactScope = reviewRunIds ? ` and these exact scope parameters: ${JSON.stringify(scope)}` : "";
+                  // A group shares a symptom, not a cause: break it down before preparing anything.
+                  const explain = `Explain issue group ${group.group_id} (${group.pattern}). Call transaction_ops.group_breakdown with group_id "${group.group_id}"${exactScope}. Explain each cause and its next step. Do not prepare fixes.`;
+                  const prompt = `Prepare fixes for all orders in issue group ${group.group_id} (${group.pattern}). First call transaction_ops.group_breakdown with group_id "${group.group_id}"${exactScope}. Then call transaction_ops.accounting_group with the same group_id and scope only if a cause's next step is prepare_corrections; otherwise explain the causes and stop. Prepare supported exact invoice corrections together for human approval; show every unsupported case separately. Execute only after I approve the exact group card, with bounded concurrency and per-order verification and audit. Do not treat this request or the group ID as financial approval.`;
                   return (
                     <tr key={group.group_id} className="border-b last:border-0">
                       <td className="p-3 font-medium">
@@ -167,12 +170,20 @@ export function IssueGroups({
                         {group.case_count}
                       </td>
                       <td className="p-3">
-                        <Link
-                          className="whitespace-nowrap text-primary underline"
-                          href={`/chat?${new URLSearchParams({ compose: prompt, new_session: "true" })}`}
-                        >
-                          Prepare group fixes →
-                        </Link>
+                        <div className="flex flex-col gap-1">
+                          <Link
+                            className="whitespace-nowrap text-primary underline"
+                            href={`/chat?${new URLSearchParams({ compose: explain, new_session: "true" })}`}
+                          >
+                            Explain group →
+                          </Link>
+                          <Link
+                            className="whitespace-nowrap text-primary underline"
+                            href={`/chat?${new URLSearchParams({ compose: prompt, new_session: "true" })}`}
+                          >
+                            Prepare group fixes →
+                          </Link>
+                        </div>
                       </td>
                     </tr>
                   );

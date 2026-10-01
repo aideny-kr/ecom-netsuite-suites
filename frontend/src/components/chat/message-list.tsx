@@ -11,7 +11,9 @@ import { tokenUsageSummary } from "@/lib/token-usage";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage, ClarificationData, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
+import { isGroupBreakdown } from "@/lib/chat-stream";
 import { PreparationProgress } from "./preparation-progress";
+import { GroupBreakdownCard } from "./group-breakdown-card";
 import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
 import { WriteConfirmationCard } from "@/components/chat/write-confirmation-card";
@@ -1118,6 +1120,8 @@ export function MessageList({
                     );
                   case "preparation_progress":
                     return <PreparationProgress key={block.id} data={block.data} />;
+                  case "group_breakdown":
+                    return <GroupBreakdownCard key={block.id} data={block.data} />;
                   default:
                     return null;
                 }
@@ -1214,6 +1218,13 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   // Exact child cards are displayed inside their signed group review.
   if (structuredOutput?.accounting_group_child) return null;
 
+  // Saved as the turn's output, or under its own key when a later tool in the turn took that
+  // slot. That includes an approval card or a clarification, whose branches return early below:
+  // "Prepare fixes" asks for the breakdown and then the fix, so the card must survive both.
+  const savedBreakdown =
+    structuredOutput?.type === "group_breakdown" ? structuredOutput.data : structuredOutput?.group_breakdown;
+  const breakdownCard = isGroupBreakdown(savedBreakdown) ? <GroupBreakdownCard data={savedBreakdown} /> : null;
+
   if (structuredOutput?.type === "write_confirmation") {
     return (
       <div className="flex min-w-0 justify-start gap-3">
@@ -1232,6 +1243,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
               <MarkdownRenderer content={message.content} isTerminal={isTerminal} />
             </div>
           )}
+          {breakdownCard && <div className="mb-2">{breakdownCard}</div>}
           <WriteConfirmationCard
             disabled={writeDisabled}
             data={structuredOutput as unknown as WriteConfirmationData}
@@ -1277,6 +1289,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
               {message.content}
             </div>
           )}
+          {breakdownCard && <div className="mb-2">{breakdownCard}</div>}
           <ClarificationCard
             data={clarification}
             expired={expired}
@@ -1373,6 +1386,8 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         {dataTableData && (
           <DataFrameTable data={dataTableData} queryText={dataTableData.query} />
         )}
+
+        {breakdownCard}
 
         {chartDataList && chartDataList.length > 0 && chartDataList.map((chart, idx) => (
           <ChartRenderer key={idx} data={chart} />
