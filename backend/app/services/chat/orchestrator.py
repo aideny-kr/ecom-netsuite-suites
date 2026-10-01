@@ -855,6 +855,9 @@ def _stamp_result_id(condensed: str, sse_event_data: dict, result_id: str | None
     return condensed
 
 
+_RESULT_CARD_TOOLS = frozenset({"present_result", "present.result", "compare_results", "compare.results"})
+
+
 def _intercept_tool_result(
     tool_name: str, result_str: str, context_need: str = ContextNeed.DATA, result_id: str | None = None
 ) -> tuple[str | None, dict | None, str]:
@@ -909,6 +912,15 @@ def _intercept_tool_result(
             return "group_breakdown", parsed, json.dumps(condensed_for_model(parsed))
         except (KeyError, TypeError):
             return None, None, invalid
+    # --- Result card path (present_result / compare_results) ---
+    if tool_name in _RESULT_CARD_TOOLS:
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("result_card"), dict):
+            return None, None, result_str
+        return "result_card", parsed["result_card"], json.dumps(parsed.get("llm") or {"card_shown": True})
 
     # --- Report card path ---
     if tool_name in ("report_compose", "report.compose"):
@@ -1343,7 +1355,7 @@ def _keep_group_breakdown(persisted, breakdown):
     return {**(persisted or {}), "group_breakdown": breakdown}
 
 
-_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready", "group_breakdown"})
+_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready", "group_breakdown", "result_card"})
 
 # The SSE event types for which _intercept_tool_result STAMPS the result_id into
 # the LLM-facing condensed string (so the model actually SEES the id). The unified
@@ -4365,6 +4377,7 @@ async def run_chat_turn(
                     turn_group_breakdown: dict | None = None
                     suppress_streamed_text = False
                     _charts_output: list[dict] = []
+                    _result_cards: list[dict] = []
 
                     unified_model = model if is_byok else settings.MULTI_AGENT_SQL_MODEL
 
@@ -4564,6 +4577,10 @@ async def run_chat_turn(
                             yield {"type": "tool_end", **payload}
                         elif event_type == "progress":
                             yield progress_event(payload)
+                        elif event_type == "tool_intercept" and payload[0] == "result_card":
+                            # Several cards may accompany one answer; persisted as a list.
+                            _result_cards.append(payload[1])
+                            yield {"type": "result_card", "data": payload[1]}
                         elif event_type == "tool_intercept":
                             # payload is (event_type_str, event_data_dict)
                             last_structured_output = {"type": payload[0], "data": payload[1]}
@@ -4678,6 +4695,8 @@ async def run_chat_turn(
                         else:
                             _persisted_output = {"charts": _charts_output}
                     _persisted_output = _keep_group_breakdown(_persisted_output, turn_group_breakdown)
+                    if _result_cards:
+                        _persisted_output = {**(_persisted_output or {}), "result_cards": _result_cards}
 
                     assistant_msg = ChatMessage(
                         tenant_id=tenant_id,
@@ -4859,6 +4878,7 @@ async def run_chat_turn(
         total_cache_read_tokens = 0
         last_structured_output: dict | None = None
         turn_group_breakdown: dict | None = None
+        legacy_result_cards: list[dict] = []
         suppress_streamed_text = False
         # Dedup workspace_propose_patch per canonical file path across the
         # whole turn so a single model response that emits two identical
@@ -5049,7 +5069,11 @@ async def run_chat_turn(
                     context_need=ContextNeed.FULL,
                     session_id=str(session.id),
                 )
-                if intercept_type is not None:
+                if intercept_type == "result_card":
+                    # Cards never replace the turn's data output; they ride beside it.
+                    legacy_result_cards.append(intercept_data)
+                    yield {"type": "result_card", "data": intercept_data}
+                elif intercept_type is not None:
                     last_structured_output = {"type": intercept_type, "data": intercept_data}
                     if intercept_type == "group_breakdown":
                         turn_group_breakdown = intercept_data
@@ -5170,7 +5194,14 @@ async def run_chat_turn(
             provider_used=provider,
             is_byok=is_byok,
             query_importance=importance_tier.value,
-            structured_output=_keep_group_breakdown(last_structured_output, turn_group_breakdown),
+            structured_output=(
+                {
+                    **(_keep_group_breakdown(last_structured_output, turn_group_breakdown) or {}),
+                    "result_cards": legacy_result_cards,
+                }
+                if legacy_result_cards
+                else _keep_group_breakdown(last_structured_output, turn_group_breakdown)
+            ),
             created_at=datetime.now(timezone.utc),
         )
         db.add(assistant_msg)

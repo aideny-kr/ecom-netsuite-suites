@@ -278,7 +278,7 @@ class TestInvestigationMode:
         agent = _make_agent()
         agent._context_need = "data"
         prompt = agent.system_prompt
-        assert "ONE sentence summary" in prompt
+        assert "lead with one or two plain sentences that answer the question" in prompt
 
     def test_investigation_has_systemnote_expertise(self):
         agent = _make_agent()

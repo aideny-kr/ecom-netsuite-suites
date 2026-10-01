@@ -90,6 +90,10 @@ _PROMPT_NOISE_WHITELIST: set[str] = {
     "field_name",
     "source_id",
     "pending_qty",
+    # present_result / compare_results parameter names referenced in the output rules
+    "control_result_id",
+    "result_ids",
+    "share_of",
     # HITL write confirmation flow identifiers (JSON response field names, not tools)
     "confirmation_required",
     # NetSuite custom field prefixes referenced as schema patterns (not tools)
@@ -132,6 +136,8 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "bigquery_cost_estimate",
         "pivot_query_result",
         "cross_source_query",
+        "present_result",
+        "compare_results",
         "tenant_save_learned_rule",
         "pricing_config_read",
         "pricing_convert",

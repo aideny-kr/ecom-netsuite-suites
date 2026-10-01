@@ -23,6 +23,7 @@ from app.mcp.tools import (
     recon_resolution_summary,
     recon_run,
     report_export,
+    result_card_tool,
     save_learned_rule,
     schedule_ops,
     sheets_tools,
@@ -315,6 +316,109 @@ TOOL_REGISTRY = {
                 "required": False,
                 "description": "SQL query mode only: 'suiteql' (default) or 'bigquery'. Omit when using result_id.",
             },
+        },
+    },
+    "present.result": {
+        "description": (
+            "Show a query result to the user as a finished result card: title, readable column "
+            "labels and formats, a totals row, an optional share-of-total column and summary tiles. "
+            "Call it once per table the answer should show, after the query, with the result_id the "
+            "query returned. You supply labels only. Totals, the share column and the tiles come "
+            "ONLY from control_result_id: the same query without its grouping -- same FROM, joins "
+            "and WHERE, the same aggregate expressions and column names, no GROUP BY and no row "
+            "limit (the overall total you ran earlier, or run one); the server never adds "
+            "rows up and checks the rows against that total. "
+            "Use collapsed=true for a secondary breakdown, and no_total_reason when the rows must "
+            "not be added together (for example amounts in different currencies)."
+        ),
+        "execute": result_card_tool.execute_present,
+        "params_schema": {
+            "result_id": {"type": "string", "required": True, "description": "Result to show (rN)."},
+            "title": {
+                "type": "string",
+                "required": True,
+                "description": "What the table shows, e.g. '<measure> by <dimension>'.",
+            },
+            "subtitle": {
+                "type": "string",
+                "description": "Short population phrase. The source and time are added.",
+            },
+            "scope": {
+                "type": "string",
+                "description": (
+                    "One line on what the figures include and exclude (filters, exclusions, currency). "
+                    "Replaces a caveat list in your text."
+                ),
+            },
+            "row_label": {"type": "string", "description": "Singular noun for one row."},
+            "row_label_plural": {"type": "string", "description": "Plural noun for the rows."},
+            "columns": {
+                "type": "object",
+                "description": (
+                    'Per-column display: {"<column>": {"label": "<label>", "format": '
+                    '"text|integer|number|currency|percent|date", "currency": "USD"}}. Omit to use defaults.'
+                ),
+            },
+            "sort_by": {"type": "string", "description": "Numeric column to sort rows by, descending."},
+            "share_of": {"type": "string", "description": "Add a share-of-total column computed from this column."},
+            "share_label": {"type": "string", "description": "Header for the share column."},
+            "control_result_id": {
+                "type": "string",
+                "description": (
+                    "The same query without its grouping: same FROM, joins and WHERE, the same aggregate "
+                    "expressions and column names, no GROUP BY or row limit. The only source of "
+                    "totals, shares and tiles; the rows are checked against it."
+                ),
+            },
+            "totals": {"type": "boolean", "description": "Show a totals row (default true)."},
+            "tiles": {"type": "boolean", "description": "Show summary tiles above the card (default false)."},
+            "collapsed": {"type": "boolean", "description": "Show the card collapsed under its title."},
+            "no_total_reason": {
+                "type": "string",
+                "description": "Why the rows must not be added together; disables totals and collapses the card.",
+            },
+            "top_n": {"type": "integer", "description": "Rows shown before 'Show more' (default 7 for long tables)."},
+        },
+    },
+    "compare.results": {
+        "description": (
+            "Compare two query results row by row on a shared key -- for example the same breakdown "
+            "from two connected sources -- and show one side-by-side card with the differences. "
+            "Use it whenever the user asks for the same figures from a second source. The server "
+            "matches keys, computes every difference and writes the headline; you supply labels only."
+        ),
+        "execute": result_card_tool.execute_compare,
+        "params_schema": {
+            "left_result_id": {"type": "string", "required": True, "description": "First result (rN)."},
+            "right_result_id": {"type": "string", "required": True, "description": "Second result (rN)."},
+            "left_label": {"type": "string", "required": True, "description": "Name of the first source."},
+            "right_label": {"type": "string", "required": True, "description": "Name of the second source."},
+            "key": {
+                "type": "object",
+                "required": True,
+                "description": 'Key columns: {"left": "<column in left result>", "right": "<column in right result>"}.',
+            },
+            "key_label": {"type": "string", "required": True, "description": "Noun for one key value."},
+            "key_label_plural": {"type": "string", "required": True, "description": "Plural of the key noun."},
+            "measures": {
+                "type": "array",
+                "required": True,
+                "description": (
+                    'Measures to compare: [{"left": "<column>", "right": "<column>", "label": "<label>", '
+                    '"format": "integer"}].'
+                ),
+            },
+            "title": {"type": "string", "required": True, "description": "Card title."},
+            "subtitle": {"type": "string", "description": "Short note on how keys were matched."},
+            "left_control_result_id": {
+                "type": "string",
+                "description": "The left query without its grouping (same FROM, joins, WHERE and aggregates).",
+            },
+            "right_control_result_id": {
+                "type": "string",
+                "description": "The right query without its grouping (same FROM, joins, WHERE and aggregates).",
+            },
+            "top_n": {"type": "integer", "description": "Rows shown before 'Show more' (default 7 for long tables)."},
         },
     },
     "cross_source.query": {
