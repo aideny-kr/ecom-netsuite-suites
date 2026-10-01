@@ -87,6 +87,8 @@ def result_item(row):
         "case_id": report.get("case_id"),
         "action": (report.get("comparison") or {}).get("recommended_action"),
         "automation": report.get("automation"),
+        # The balance stays the scan's raw evidence; a reconciled order is shown as reconciled.
+        "reconciled": bool(row.get("case_reconciled")),
     }
 
 
@@ -106,6 +108,7 @@ async def review_page(db, tenant_id, run_ids, *, limit=50, offset=0, status=None
                     "review_run_id",
                     "config_id",
                     "balance_status",
+                    "case_reconciled",
                 )
             )
         )

@@ -32,6 +32,8 @@ export type ReviewRow = {
   observed_at: string;
   balance: JsonObject | null;
   action?: string;
+  /** The order's case is reconciled; it stays reconciled whatever a later scan read. */
+  reconciled?: boolean;
 };
 export type ReviewResults = {
   items: ReviewRow[];

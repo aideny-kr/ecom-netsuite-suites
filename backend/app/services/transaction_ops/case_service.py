@@ -89,6 +89,24 @@ def _cleared(report, now):
         return False
 
 
+def settle_observation(case, report, *, cleared, now, observed):
+    """Apply a newer observation to its case and return the audit actions it causes.
+
+    A reconciled case stays reconciled (decided 2026-09-30): a clearing observation may refresh its
+    evidence, and any other later observation leaves the status and the reconciling evidence as they
+    are. That observation is still stored, and recorded as case.kept_reconciled with when it was
+    read. Telling a real later change from a re-read is a separate change. The database refuses any
+    update that would reopen a reconciled case (migration 117).
+    """
+    if case.status == "reconciled" and not cleared:
+        return [("case.kept_reconciled", {"evidence_observed_at": observed.isoformat()})]
+    prior = case.status
+    case.status = "reconciled" if cleared else "open"
+    case.last_observed_at = now
+    case.latest_report_json = report
+    return [("case.reconciled", {})] if prior != case.status else []
+
+
 def case_scope(run):
     config = run.config_snapshot
     scope = {
@@ -196,13 +214,13 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
         },
     )
     if became_current:
-        prior = case.status
-        case.status = "reconciled" if cleared else "open"
-        case.last_observed_at = now
-        case.latest_report_json = report
-        if prior != case.status:
+        for action, payload in settle_observation(case, report, cleared=cleared, now=now, observed=observed):
             await _audit(
-                db, tenant_id, "case.reconciled" if cleared else "case.reopened", case, payload={"run_id": str(run.id)}
+                db,
+                tenant_id,
+                action,
+                case,
+                payload={"run_id": str(run.id), "observation_id": str(observation_id), **payload},
             )
         if excluded:
             await _audit(

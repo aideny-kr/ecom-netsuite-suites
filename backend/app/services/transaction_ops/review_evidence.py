@@ -215,6 +215,21 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
         .prefix_with("MATERIALIZED")
     )
     winners = current_review_evidence(cohort, readings, replacement_ids, name=name)
+    from app.models.transaction_ops import TransactionCase
+    from app.services.transaction_ops.case_service import case_scope
+
+    # A reconciled order stays reconciled whatever a later scan read (decided 2026-09-30). Match the
+    # case by this review's own scope, never by the order number alone.
+    reconciled = (
+        select(TransactionCase.id)
+        .where(
+            TransactionCase.tenant_id == tenant_id,
+            TransactionCase.order_reference == winners.c.order_reference,
+            TransactionCase.scope_json == case_scope(root),
+            TransactionCase.status == "reconciled",
+        )
+        .exists()
+    )
     latest = (
         select(
             f.id,
@@ -225,6 +240,7 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
                 (f.report_json["cached_evidence"].astext.is_not(None), readings.c.observed_at), else_=f.updated_at
             ).label("updated_at"),
             readings.c.balance_status,
+            reconciled.label("case_reconciled"),
         )
         .join(winners, (f.id == winners.c.id) & (f.tenant_id == tenant_id))
         .join(readings, readings.c.id == winners.c.id)
@@ -241,7 +257,10 @@ def result_category(latest):
     verdict = (
         latest.c.balance_status if "balance_status" in latest.c else latest.c.report_json["balance"]["status"].astext
     )
+    # A reconciled case counts as matched in every review, group and export (decided 2026-09-30).
+    reconciled = [(latest.c.case_reconciled, "matched")] if "case_reconciled" in latest.c else []
     return case(
+        *reconciled,
         (verdict == "matched", "matched"),
         (
             verdict.in_(["difference", "mismatch", "missing_in_netsuite", "ambiguous", "currency_mismatch"]),

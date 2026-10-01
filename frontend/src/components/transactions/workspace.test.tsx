@@ -1,6 +1,6 @@
 import React from "react";
 import { beforeEach, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { TransactionWorkspace } from "./workspace";
@@ -168,6 +168,22 @@ it("renders server totals and exact evidence without claiming a complete financi
   ).toBeInTheDocument();
   expect(screen.queryByText("Financially reconciled")).not.toBeInTheDocument();
 });
+it("shows a reconciled order as reconciled, whatever a later scan read", async () => {
+  // Decided 2026-09-30: a reconciled order stays reconciled. The row's balance is the later
+  // scan's raw evidence (a difference), and the server says the order is reconciled.
+  const base = vi.mocked(apiClient.get).getMockImplementation()!;
+  vi.mocked(apiClient.get).mockImplementation(async (...args) => {
+    const result = (await base(...args)) as { items?: object[] };
+    if (String(args[0]).includes("/review-results?"))
+      return { ...result, items: result.items!.map((item) => ({ ...item, reconciled: true })) } as never;
+    return result as never;
+  });
+  mount();
+  const row = (await screen.findByText("R123456789")).closest("tr")!;
+  expect(within(row).getByText("Reconciled")).toBeInTheDocument();
+  expect(within(row).queryByText("Needs review")).not.toBeInTheDocument();
+});
+
 it("queues selected cases as one read/proposal batch and never submits approval", async () => {
   vi.mocked(apiClient.post).mockResolvedValue({
     runs: [{ id: "batch-run", config_id: "scope-a", case_ids: ["case-a"] }],

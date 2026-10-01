@@ -192,7 +192,8 @@ async def test_real_tool_dispatch_delivers_verified_history_to_agent(db, reconci
     assert "accounting_resolution_history" not in denied
 
 
-@pytest.mark.parametrize("variant", ["same_scope", "profile_changed", "mapping_changed", "issue_changed", "reopened"])
+# A "reopened" variant is gone: a reconciled case can no longer be reopened (migration 117).
+@pytest.mark.parametrize("variant", ["same_scope", "profile_changed", "mapping_changed", "issue_changed"])
 async def test_related_examples_require_compatible_current_policy_and_verified_case(
     db, reconciled_credit, monkeypatch, variant
 ):
@@ -219,8 +220,6 @@ async def test_related_examples_require_compatible_current_policy_and_verified_c
         values = {key: getattr(config, key) for key in ConfigCreate.model_fields}
         values["mapping_json"] = {**config.mapping_json, "action_mode": "detect_only"}
         config = await state.create_config(db, actor.tenant_id, ConfigCreate(**values), actor=actor)
-    if variant == "reopened":
-        old_case.status = "open"
     await db.flush()
     run = await state.create_run(
         db, actor.tenant_id, config.id, RunCreate(evaluation_key=str(uuid4()), order_references=[ref]), actor=actor

@@ -950,7 +950,7 @@ function ResultRow({
       )}
       <td className="p-4">
         <span className="whitespace-nowrap rounded-full border px-2.5 py-1 text-xs">
-          {verdicts[String(balance.status)] || "Not verified"}
+          {row.reconciled ? "Reconciled" : verdicts[String(balance.status)] || "Not verified"}
         </span>
       </td>
       <td className="whitespace-nowrap p-4">

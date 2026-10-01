@@ -136,9 +136,11 @@ def _build_workbook(wb, rows, scopes, *, status, search, generated_at, report_id
         scope = scope_map[row["review_run_id"]]
         config = scope["config"]
         balance = row["balance"] or {}
+        # A reconciled order is matched in every review (decided 2026-09-30); the raw verdict
+        # stays in its own column.
         category = (
             "matched"
-            if row["status"] == "matched"
+            if row.get("case_reconciled") or row["status"] == "matched"
             else "needs_review"
             if row["status"] in REVIEW_STATUSES
             else "not_verified"
@@ -317,6 +319,7 @@ async def export_review(db, actor, run_ids, *, status=None, search=""):
                         source.c.report_json["balance"].label("balance"),
                         source.c.report_json["case_id"].astext.label("case_id"),
                         source.c.report_json.label("report_json"),
+                        source.c.case_reconciled,
                         *columns,
                         identifier,
                     )
