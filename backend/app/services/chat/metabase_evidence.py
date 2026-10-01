@@ -72,16 +72,19 @@ _ALIAS_ARROW = re.compile(r"(?<!\w)([A-Za-z_]\w*) → ")
 _BLOCK_OPEN, _BLOCK_CLOSE = "\x00mb-block-open\x00", "\x00mb-block-close\x00"
 
 
-def _display_value(value, *, numeric: bool) -> str:
+_BUCKETED = re.compile(r":\s*(?:Day|Week|Month|Quarter|Year)\s*$", re.I)
+
+
+def _display_value(value, *, numeric: bool, bucketed: bool = False) -> str:
     """Human formatting for a rendered table cell; the bound value itself is unchanged.
 
     Only aggregate (measure) columns get number formatting: identifier columns
     such as order numbers must never gain thousands separators."""
     if isinstance(value, str):
-        # Day buckets ("Completed At: Day") arrive as local midnight; show the date.
-        # Any other timestamp keeps its full text, offset included.
+        # A column Metabase bucketed ("Completed At: Day") holds the bucket's start; show
+        # its date. Every other timestamp keeps its full text, offset included.
         match = _ISO_DATETIME.match(value)
-        if match and re.search(r"T00:00(?::00(?:\.0+)?)?(?:Z|[+-]\d{2}:?\d{2})?$", value):
+        if bucketed and match:
             return match[1]
         return value
     number = _decimal(value) if numeric else None
@@ -93,15 +96,22 @@ def _display_value(value, *, numeric: bool) -> str:
     return f"{number:,.{max(2, -number.as_tuple().exponent)}f}"
 
 
-def _cell(value, *, display: bool = False, numeric: bool = False) -> str:
-    text = "—" if value is None else (_display_value(value, numeric=numeric) if display else str(value))
+def _cell(value, *, display: bool = False, numeric: bool = False, bucketed: bool = False) -> str:
+    text = (
+        "—" if value is None else (_display_value(value, numeric=numeric, bucketed=bucketed) if display else str(value))
+    )
     return html.escape(text).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
 
 
 def _table(columns: list[str], rows: list[list], numeric_columns: frozenset[int] = frozenset()) -> str:
     lines = ["| " + " | ".join(_cell(c) for c in columns) + " |", "| " + " | ".join("---" for _ in columns) + " |"]
     lines.extend(
-        "| " + " | ".join(_cell(v, display=True, numeric=i in numeric_columns) for i, v in enumerate(row)) + " |"
+        "| "
+        + " | ".join(
+            _cell(v, display=True, numeric=i in numeric_columns, bucketed=bool(_BUCKETED.search(str(columns[i]))))
+            for i, v in enumerate(row)
+        )
+        + " |"
         for row in rows
     )
     return "\n".join(lines)
@@ -122,7 +132,9 @@ def _join_entities(query: dict) -> dict[str, str]:
         table = source[-1] if isinstance(source, list) and source else source
         if isinstance(table, str) and not table.isdigit():
             name = re.sub(r"^spree_", "", table.rsplit(".", 1)[-1]).replace("_", " ").strip()
-            if name.endswith("ies"):
+            if name.endswith(("ses", "xes", "zes", "ches", "shes")):
+                name = name[:-2]
+            elif name.endswith("ies"):
                 name = name[:-3] + "y"
             elif name.endswith("s") and not name.endswith("ss"):
                 name = name[:-1]
@@ -186,6 +198,7 @@ class EvidenceTable:
     complete: bool
     measures: dict[int, tuple[str, str]] = field(default_factory=dict)
     control_query: dict = field(default_factory=dict)
+    display_columns: list[str] = field(default_factory=list)
 
 
 class MetabaseEvidence:
@@ -405,7 +418,15 @@ These reference requirements apply to the final answer, not tool arguments.
         if control_query:
             for key in ("breakout", "order-by", "limit"):
                 control_query["stages"][-1].pop(key, None)
-        table = EvidenceTable(columns, copy.deepcopy(rows), grouped, complete, measures, control_query)
+        table = EvidenceTable(
+            columns,
+            copy.deepcopy(rows),
+            grouped,
+            complete,
+            measures,
+            control_query,
+            _display_columns(columns, query),
+        )
         self.tables.append(table)
         rendered_table = _table(_display_columns(columns, query), rows[:100], frozenset(measures))
         if len(rows) > 100 or not complete:
@@ -500,7 +521,8 @@ These reference requirements apply to the final answer, not tool arguments.
                 continue
             # With several measures each sentence names its column, so an overlapping
             # distinct count and a reconciling sum never read as one claim.
-            name = _ALIAS_ARROW.sub("", str(table.columns[column])).strip() if len(table.measures) > 1 else ""
+            headers = table.display_columns or table.columns
+            name = str(headers[column]) if len(table.measures) > 1 else ""
             subject = f"{name}: the rows" if name else "The rows"
             if operation == "distinct":
                 statements.append(
@@ -570,6 +592,10 @@ These reference requirements apply to the final answer, not tool arguments.
         resolved = _REFERENCE.sub(render, text)
         if _BLOCK_OPEN not in resolved:
             return resolved
-        resolved = re.sub(r"[ \t]*" + _BLOCK_OPEN, "\n\n", resolved)
-        resolved = re.sub(_BLOCK_CLOSE + r"[ \t]*", "\n\n", resolved)
-        return re.sub(r"\n{3,}", "\n\n", resolved).strip()
+        resolved = re.sub(r"[ \t\n]*" + _BLOCK_OPEN, "\n\n", resolved)
+        resolved = re.sub(_BLOCK_CLOSE + r"[ \t\n]*", "\n\n", resolved)
+        if resolved.startswith("\n\n") and not text.startswith("\n"):
+            resolved = resolved[2:]
+        if resolved.endswith("\n\n") and not text.endswith("\n"):
+            resolved = resolved[:-2]
+        return resolved

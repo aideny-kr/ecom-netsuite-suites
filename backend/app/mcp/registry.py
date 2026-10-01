@@ -336,11 +336,11 @@ TOOL_REGISTRY = {
             "title": {
                 "type": "string",
                 "required": True,
-                "description": "What the table shows, e.g. 'Yucca orders by ship country'.",
+                "description": "What the table shows, e.g. '<measure> by <dimension>'.",
             },
             "subtitle": {
                 "type": "string",
-                "description": "Short population phrase, e.g. 'open sales orders'. Source and time are added.",
+                "description": "Short population phrase. The source and time are added.",
             },
             "scope": {
                 "type": "string",
@@ -349,18 +349,18 @@ TOOL_REGISTRY = {
                     "Replaces a caveat list in your text."
                 ),
             },
-            "row_label": {"type": "string", "description": "Singular noun for one row, e.g. 'country'."},
-            "row_label_plural": {"type": "string", "description": "Plural noun for the rows, e.g. 'countries'."},
+            "row_label": {"type": "string", "description": "Singular noun for one row."},
+            "row_label_plural": {"type": "string", "description": "Plural noun for the rows."},
             "columns": {
                 "type": "object",
                 "description": (
-                    'Per-column display: {"<column>": {"label": "Country", "format": '
+                    'Per-column display: {"<column>": {"label": "<label>", "format": '
                     '"text|integer|number|currency|percent|date", "currency": "USD"}}. Omit to use defaults.'
                 ),
             },
             "sort_by": {"type": "string", "description": "Numeric column to sort rows by, descending."},
             "share_of": {"type": "string", "description": "Add a share-of-total column computed from this column."},
-            "share_label": {"type": "string", "description": "Header for the share column, e.g. 'Share of value'."},
+            "share_label": {"type": "string", "description": "Header for the share column."},
             "control_result_id": {
                 "type": "string",
                 "description": (
@@ -380,7 +380,7 @@ TOOL_REGISTRY = {
     "compare.results": {
         "description": (
             "Compare two query results row by row on a shared key -- for example the same breakdown "
-            "from NetSuite and from Metabase -- and show one side-by-side card with the differences. "
+            "from two connected sources -- and show one side-by-side card with the differences. "
             "Use it whenever the user asks for the same figures from a second source. The server "
             "matches keys, computes every difference and writes the headline; you supply labels only."
         ),
@@ -388,25 +388,25 @@ TOOL_REGISTRY = {
         "params_schema": {
             "left_result_id": {"type": "string", "required": True, "description": "First result (rN)."},
             "right_result_id": {"type": "string", "required": True, "description": "Second result (rN)."},
-            "left_label": {"type": "string", "required": True, "description": "Source name, e.g. 'NetSuite'."},
-            "right_label": {"type": "string", "required": True, "description": "Source name, e.g. 'Metabase'."},
+            "left_label": {"type": "string", "required": True, "description": "Name of the first source."},
+            "right_label": {"type": "string", "required": True, "description": "Name of the second source."},
             "key": {
                 "type": "object",
                 "required": True,
-                "description": 'Key columns: {"left": "ship_country", "right": "<column in right result>"}.',
+                "description": 'Key columns: {"left": "<column in left result>", "right": "<column in right result>"}.',
             },
-            "key_label": {"type": "string", "required": True, "description": "Key noun, e.g. 'Country'."},
-            "key_label_plural": {"type": "string", "required": True, "description": "Plural, e.g. 'countries'."},
+            "key_label": {"type": "string", "required": True, "description": "Noun for one key value."},
+            "key_label_plural": {"type": "string", "required": True, "description": "Plural of the key noun."},
             "measures": {
                 "type": "array",
                 "required": True,
                 "description": (
-                    'Measures to compare: [{"left": "orders", "right": "<column>", "label": "Orders", '
+                    'Measures to compare: [{"left": "<column>", "right": "<column>", "label": "<label>", '
                     '"format": "integer"}].'
                 ),
             },
             "title": {"type": "string", "required": True, "description": "Card title."},
-            "subtitle": {"type": "string", "description": "Short note, e.g. 'Matched on country name'."},
+            "subtitle": {"type": "string", "description": "Short note on how keys were matched."},
             "left_control_result_id": {
                 "type": "string",
                 "description": "Ungrouped control for the left result (needed to total distinct counts).",

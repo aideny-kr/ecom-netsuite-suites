@@ -508,7 +508,9 @@ def test_rendered_table_humanizes_join_aliases_and_formats_measures_only():
         "Distinct values of Order ID",
         "Sum of Quantity",
     ]
-    table = _table(["id", "day", "value"], [[1001, "2026-09-30T00:00:00-07:00", 44828.0]], frozenset({2}))
+    table = _table(
+        ["id", "o → Completed At: Day", "value"], [[1001, "2026-09-30T00:00:00-07:00", 44828.0]], frozenset({2})
+    )
     assert "| 1001 | 2026-09-30 | 44,828 |" in table
 
 
@@ -524,6 +526,7 @@ def test_control_sentences_name_their_column_when_a_table_has_several_measures()
         True,
         True,
         {1: ("orders", "distinct"), 2: ("units", "sum")},
+        display_columns=["Country Name", "Distinct values of Order ID", "Sum of Quantity"],
     )
     control = EvidenceTable(
         ["Distinct values of o → ID", "Sum of Quantity"],
@@ -534,7 +537,8 @@ def test_control_sentences_name_their_column_when_a_table_has_several_measures()
     )
     evidence.tables = [grouped, control]
     statement = evidence._control_statement(grouped)
-    assert "⚠ Distinct values of ID: the groups overlap" in statement
+    # The sentence names the column exactly as the table header shows it.
+    assert "⚠ Distinct values of Order ID: the groups overlap" in statement
     assert "✓ Sum of Quantity: the rows add up to the overall total." in statement
 
 
@@ -544,5 +548,16 @@ def test_headers_keep_an_alias_with_no_known_entity_and_timestamps_keep_their_of
 
     assert _display_columns(["o → ID", "p → ID"], {"stages": [{"joins": []}]}) == ["o → ID", "p → ID"]
     assert _display_value("2026-03-31T23:30:00-08:00", numeric=False) == "2026-03-31T23:30:00-08:00"
-    assert _display_value("2026-09-30T00:00:00-07:00", numeric=False) == "2026-09-30"
+    assert _display_value("2026-09-30T00:00:00-07:00", numeric=False, bucketed=True) == "2026-09-30"
+    assert _display_value("2026-03-01T00:00:00Z", numeric=False) == "2026-03-01T00:00:00Z"
     assert _display_value(0.00000015, numeric=True) == "0.00000015"
+
+
+def test_resolve_leaves_text_away_from_an_inserted_table_untouched():
+    # T2 gate round 3 on #369, finding 13: a code block with deliberate blank lines survives.
+    evidence = MetabaseEvidence({TOOL})
+    status = observed(evidence, [["complete", 41]], grouped=True)
+    observed(evidence, [[41]])
+    code = "```text\nline one\n\n\n\nline two  \n```"
+    rendered = evidence.resolve(code + "\n\nBy state: " + status["table_reference"])
+    assert rendered.startswith(code)

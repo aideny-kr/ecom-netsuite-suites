@@ -455,7 +455,7 @@ def test_opposite_differences_are_not_netted_away():
         _table([["Germany", 15], ["Switzerland", 5]]),
         (None, None),
     )
-    assert card["detail"] == "Metabase has 5 more units in Germany and 5 fewer in Switzerland."
+    assert card["detail"] == "Metabase has more units in Germany and fewer in Switzerland."
 
 
 def test_a_one_sided_check_names_the_unchecked_source():
@@ -532,3 +532,51 @@ async def test_a_pivoted_result_is_refused():
     payload = {"columns": ["a"], "rows": [[1]], "source_kind": "metabase", "pivot_provenance": {}}
     with pytest.raises(ValueError, match="pivoted"):
         await _check_access(None, None, "pivot_query_result", payload)
+
+
+# --- T2 gate round 3 on #369 (wf_a9550ab6-83c) ---
+
+
+def test_a_text_value_in_a_measure_column_is_shown_as_given_and_flagged():
+    loaded = ns_country()
+    loaded["payload"] = {**loaded["payload"], "rows": [["United States", "162", "170", "N/A"], *NS_ROWS[1:]]}
+    card = build_present_card(PresentResult(result_id="r9", title="t"), loaded, None)
+    assert card["rows"][0][3] == "N/A"
+    assert card["check"]["status"] == "warn" and "not plain numbers" in card["check"]["text"]
+
+
+def test_the_model_never_receives_a_cards_rows_on_any_path():
+    import json
+
+    from app.services.chat.agents.base_agent import _suppress_metric_value_for_llm
+
+    card = build_present_card(
+        PresentResult(result_id="r9", title="t", control_result_id="r5"), ns_country(), ns_total()
+    )
+    raw = json.dumps({"result_card": card, "llm": {"card_shown": True, "note": "n"}})
+    assert json.loads(_suppress_metric_value_for_llm(raw)) == {"card_shown": True, "note": "n"}
+
+
+def test_key_pairing_scales_linearly():
+    import time
+
+    left = _table([[f"left-{i}", 1] for i in range(2000)])
+    right = _table([[f"right-{i}", 1] for i in range(2000)])
+    started = time.perf_counter()
+    build_compare_card(_compare(), left, right, (None, None))
+    assert time.perf_counter() - started < 2
+
+
+def test_a_comparison_without_controls_has_no_total_row():
+    card, _ = build_compare_card(_compare(), _table([["X", 1]]), _table([["X", 2]]), (None, None))
+    assert card["totals"] is None and card["totals_label"] is None
+
+
+def test_the_source_label_follows_the_payloads_provenance():
+    loaded = {
+        "tool": "metric_compute",
+        "as_of": "x",
+        "payload": {"columns": ["k", "v"], "rows": [["a", 1]], "query": "SELECT 1", "source_kind": "bigquery"},
+    }
+    card = build_present_card(PresentResult(result_id="r1", title="t"), loaded, None)
+    assert card["source"] == "BigQuery" and card["queries"][0]["label"] == "BigQuery SQL"

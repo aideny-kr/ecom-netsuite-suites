@@ -416,8 +416,13 @@ def _infer_format(payload: dict, index: int, values: list[Decimal | None]) -> st
 
 
 def _source_label(tool: str, payload: dict) -> str:
-    if isinstance(payload.get("metabase_source"), dict):
+    kind = str(payload.get("source_kind") or "").casefold()
+    if isinstance(payload.get("metabase_source"), dict) or kind == "metabase":
         return "Metabase"
+    if kind == "bigquery":
+        return "BigQuery"
+    if kind == "suiteql":
+        return "NetSuite"
     name = tool.casefold()
     if "bigquery" in name:
         return "BigQuery"
@@ -436,7 +441,9 @@ def _query_block(tool: str, payload: dict) -> dict | None:
     query = payload.get("query")
     if not isinstance(query, str) or not query.strip():
         return None
-    label = "BigQuery SQL" if "bigquery" in tool.casefold() else "SuiteQL query"
+    label = "BigQuery SQL" if _source_label(tool, payload) == "BigQuery" else "SuiteQL query"
+    if _source_label(tool, payload) not in {"BigQuery", "NetSuite"}:
+        label = "Query"
     return {"label": label, "text": query.strip()}
 
 
@@ -625,10 +632,26 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
         totals = [_json_number(all_totals[i]) for i in range(len(columns))]
 
     shown = min(len(rows), _MAX_CARD_ROWS)
-    out_rows = [
-        [_json_number(numbers[r][i]) if i in measure_indexes else rows[r][i] for i in range(len(columns))]
-        for r in range(shown)
-    ]
+
+    def cell(r: int, i: int):
+        # A measure cell that is not a number keeps its source text, never a blank.
+        if i in measure_indexes and numbers[r][i] is not None:
+            return _json_number(numbers[r][i])
+        return rows[r][i]
+
+    out_rows = [[cell(r, i) for i in range(len(columns))] for r in range(shown)]
+    unreadable = any(
+        rows[r][i] is not None and str(rows[r][i]).strip() != "" and numbers[r][i] is None
+        for r in range(len(rows))
+        for i in measure_indexes
+    )
+    if unreadable:
+        note = "Some values are not plain numbers and are shown as the source returned them."
+        check = (
+            {"status": "warn", "text": f"{check['text']} {note}" if check["status"] == "warn" else note}
+            if check
+            else {"status": "warn", "text": note}
+        )
 
     share = None
     if spec.share_of and totals:
@@ -770,23 +793,23 @@ def _pair_keys(a_rows: dict, b_rows: dict) -> list[tuple[str | None, str | None,
     """Pair keys across sources. Exact (normalised) keys pair first. A key then pairs with
     its bare form only: "New Zealand" with "New Zealand/Aotearoa", "Taiwan" with "Taiwan
     (Province of China)". Two qualified names ("Congo (Kinshasa)", "Congo (Brazzaville)")
-    never pair, whatever is on the other side."""
+    never pair, whatever is on the other side. Each key is normalised once."""
+    left_bare = {k: _norm_key(entry["raw"]) for k, entry in a_rows.items()}
+    right_by_bare: dict[str, list[str]] = {}
+    for k, entry in b_rows.items():
+        right_by_bare.setdefault(_norm_key(entry["raw"]), []).append(k)
+    left_count: dict[str, int] = {}
+    for bare in left_bare.values():
+        left_count[bare] = left_count.get(bare, 0) + 1
     pairs: dict[str, str] = {k: k for k in a_rows if k in b_rows}
     used_right = set(pairs.values())
     fallback: set[str] = set()
     for k in a_rows:
         if k in pairs:
             continue
-        left_bare = _norm_key(a_rows[k]["raw"])
-        candidates = [
-            r
-            for r in b_rows
-            if r not in used_right
-            and _norm_key(b_rows[r]["raw"]) == left_bare
-            and (k == left_bare or r == left_bare)  # one side IS the bare name
-        ]
-        same_bare_left = [x for x in a_rows if _norm_key(a_rows[x]["raw"]) == left_bare]
-        if len(candidates) == 1 and len(same_bare_left) == 1:
+        bare = left_bare[k]
+        candidates = [r for r in right_by_bare.get(bare, []) if r not in used_right and (k == bare or r == bare)]
+        if len(candidates) == 1 and left_count[bare] == 1:
             pairs[k] = candidates[0]
             used_right.add(candidates[0])
             fallback.add(k)
@@ -803,36 +826,29 @@ def _pair_keys(a_rows: dict, b_rows: dict) -> list[tuple[str | None, str | None,
 _QUERY_KIND = {"SuiteQL query": "SuiteQL", "BigQuery SQL": "SQL", "Metabase query (query builder)": "query builder"}
 
 
-def _detail_for(measure: str, right_label: str, deltas: list[tuple[Decimal, str]], plural: str) -> str | None:
-    """Describe signed differences honestly: opposite directions are never netted."""
-    more = [(d, n) for d, n in deltas if d > 0]
-    fewer = [(-d, n) for d, n in deltas if d < 0]
+def _detail_for(
+    measure: str, right_label: str, deltas: list[tuple[Decimal, str]], plural: str, overall: Decimal | None
+) -> str | None:
+    """Name where a measure differs, largest first. A figure is stated only from the two
+    sources' own overall totals: per-key differences of a distinct count or a ratio do not
+    add up, so they are never summed here."""
+    more = sorted(((d, n) for d, n in deltas if d > 0), key=lambda item: -item[0])
+    fewer = sorted(((-d, n) for d, n in deltas if d < 0), key=lambda item: -item[0])
 
     def where(items: list[tuple[Decimal, str]]) -> str:
-        names = [n for _, n in sorted(items, key=lambda item: -item[0])]
+        names = [n for _, n in items]
         return _join_names(names) if len(names) <= 5 else f"{len(names)} {plural}"
 
     label = measure.lower()
     if more and fewer:
-        return (
-            f"{right_label} has {_json_number(sum((d for d, _ in more), Decimal(0)))} more {label} in {where(more)} "
-            f"and {_json_number(sum((d for d, _ in fewer), Decimal(0)))} fewer in {where(fewer)}."
-        )
-    if fewer:
-        total = _json_number(sum((d for d, _ in fewer), Decimal(0)))
-        return (
-            f"{right_label} has {total} fewer {label}, all in {where(fewer)}."
-            if len(fewer) <= 5
-            else (f"{right_label} has {total} fewer {label}, across {where(fewer)}.")
-        )
-    if more:
-        total = _json_number(sum((d for d, _ in more), Decimal(0)))
-        return (
-            f"{right_label} has {total} more {label}, all in {where(more)}."
-            if len(more) <= 5
-            else (f"{right_label} has {total} more {label}, across {where(more)}.")
-        )
-    return None
+        return f"{right_label} has more {label} in {where(more)} and fewer in {where(fewer)}."
+    if not (more or fewer):
+        return None
+    direction, items = ("more", more) if more else ("fewer", fewer)
+    scope = f"all in {where(items)}" if len(items) <= 5 else f"across {where(items)}"
+    if overall is not None and overall != 0 and (overall > 0) == bool(more):
+        return f"{right_label} has {_json_number(abs(overall))} {direction} {label}, {scope}."
+    return f"{right_label} has {direction} {label}, {scope}."
 
 
 def build_compare_card(
@@ -926,7 +942,10 @@ def build_compare_card(
             continue
         noun = key_noun if len(names) == 1 else plural
         headline_parts.append(f"{measure.label} differ in {len(names)} {noun}.")
-        detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural)
+        index = spec.measures.index(measure)
+        lt, rt = a["totals"][index], b["totals"][index]
+        overall = rt - lt if lt is not None and rt is not None else None
+        detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural, overall)
         if detail:
             detail_parts.append(detail)
         if blank[measure.label]:
@@ -996,8 +1015,8 @@ def build_compare_card(
         "rows": rows,
         "row_flags": flags,
         "share": None,
-        "totals": totals,
-        "totals_label": f"Total · {len(paired)} {plural}",
+        "totals": totals if any(value is not None for value in totals) else None,
+        "totals_label": f"Total · {len(paired)} {plural}" if any(value is not None for value in totals) else None,
         "check": check,
         "tiles": [],
         "top_n": top_n,
