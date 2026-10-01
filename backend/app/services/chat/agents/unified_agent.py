@@ -181,6 +181,14 @@ def build_reasoning_instruction(*, thinking_enabled: bool) -> str:
     return _REASONING_INSTRUCTION
 
 
+# How a data answer presents query results. Shared by the normal and the investigation
+# output blocks: investigation mode (context need "full") replaces the whole
+# <output_instructions> block, and the live check on 2026-10-01 showed every Yucca question
+# taking that path -- so the card rules must be in both, from one source.
+_RESULT_RULES = "1. Query results → lead with one or two plain sentences that answer the question. Do not restate figures a tool returned, and no markdown table, JSON or SQL of query rows: the UI shows the rows, and each result card shows the exact query you ran (collapsed), which satisfies any instruction to show the SQL.\n2. Present the answer's tables with present_result after the query: a title, readable column labels and formats, and a one-line scope of what is included and excluded. For the main breakdown also pass tiles=true, share_of for the main value column, and control_result_id: the same query without its grouping -- same FROM, joins and WHERE, the same aggregate expressions and column names, no GROUP BY (reuse an earlier one, or run it). Totals, shares and tiles appear only with it. Put exclusions and caveats in scope, never as a caveat list in your text; mention a caveat in text only if it changes the conclusion.\n3. Same figures from a second source → run that query, then call compare_results with both result_ids (and their ungrouped controls) instead of showing two separate tables. Then explain in words how the two queries define the population differently; no figures.\n"
+_FOLLOWUPS_RULE = "End a data answer with two or three short next steps the user can click, without numbers, in a fenced block; offer only steps your connected sources can do:\n```followups\n<next step>\n<next step>\n```\n\n"
+
+
 _SYSTEM_PROMPT = (
     """\
 <role>
@@ -285,19 +293,14 @@ BUDGET: Data queries = 1-2 tool calls. Investigation = more to follow evidence c
 
 <output_instructions>
 {{INJECT_REASONING_INSTRUCTION}}
-1. Query results → lead with one or two plain sentences that answer the question. Do not restate figures a tool returned, and no markdown table, JSON or SQL of query rows: the UI shows the rows, and each result card shows the exact query you ran (collapsed), which satisfies any instruction to show the SQL.
-2. Present the answer's tables with present_result after the query: a title, readable column labels and formats, and a one-line scope of what is included and excluded. For the main breakdown also pass tiles=true, share_of for the main value column, and control_result_id: the same query without its grouping -- same FROM, joins and WHERE, the same aggregate expressions and column names, no GROUP BY (reuse an earlier one, or run it). Totals, shares and tiles appear only with it. Put exclusions and caveats in scope, never as a caveat list in your text; mention a caveat in text only if it changes the conclusion.
-3. Same figures from a second source → run that query, then call compare_results with both result_ids (and their ungrouped controls) instead of showing two separate tables. Then explain in words how the two queries define the population differently; no figures.
-4. Financial report → markdown table grouped by section (Revenue, COGS, Expenses, etc.). Include every account row. Use ONLY the pre-computed summary totals — do NOT calculate yourself.
+"""
+    + _RESULT_RULES
+    + """4. Financial report → markdown table grouped by section (Revenue, COGS, Expenses, etc.). Include every account row. Use ONLY the pre-computed summary totals — do NOT calculate yourself.
 5. workspace_propose_patch → ```diff block + one-sentence summary.
 6. 0 rows → say so clearly with possible reasons. Documentation → info with source paths. Code → fenced blocks.
-7. End a data answer with two or three short next steps the user can click, without numbers, in a fenced block; offer only steps your connected sources can do:
-```followups
-<next step>
-<next step>
-```
-
-CONFIDENCE SCORING:
+7. """
+    + _FOLLOWUPS_RULE
+    + """CONFIDENCE SCORING:
 Rate 1-5: 5=proven pattern/simple lookup, 4=successful query, 3=may be incomplete, 2=uncertain after retries, 1=guessing.
 Output: <confidence>N</confidence> (parsed and logged).
 </output_instructions>
@@ -308,6 +311,7 @@ _INVESTIGATION_OUTPUT_INSTRUCTIONS = (
     "<output_instructions>\n"
     "LANGUAGE: Always respond in English unless the user asks in another language "
     "but do not get the language mixed when output.\n\n"
+    "When an answer shows query results:\n" + _RESULT_RULES + "4. " + _FOLLOWUPS_RULE + "\n"
     "Present your findings progressively as you investigate.\n"
     "After each tool result, share what you learned before continuing.\n"
     "Build a chronological narrative — explain what happened, when, and why.\n"
