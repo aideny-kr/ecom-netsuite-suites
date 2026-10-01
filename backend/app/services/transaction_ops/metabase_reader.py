@@ -19,8 +19,8 @@ from sqlalchemy import select
 
 from app.models.mcp_connector import McpConnector
 from app.services.chat.write_outcome import INDETERMINATE_KEY
-from app.services.mcp_client_service import call_external_mcp_tool
-from app.services.metabase_oauth_service import is_metabase
+from app.services.mcp_client_service import McpAuthenticationError, call_external_mcp_tool
+from app.services.metabase_oauth_service import OAuthError, is_metabase
 from app.services.public_http import validate_endpoint
 
 ORDER_FIELDS = (
@@ -52,6 +52,41 @@ TABLES = {
     "payments": ("spree_payments", PAYMENT_FIELDS),
 }
 _REFERENCE = re.compile(r"R[0-9]{9}(?:-[A-Z0-9]+)?\Z")
+
+TRANSIENT_REPLICA_READ_CODES = frozenset(
+    {"replica_transport_failed", "replica_query_incomplete", "replica_read_not_fresh", "replica_cached_response"}
+)
+REPLICA_READ_CODES = TRANSIENT_REPLICA_READ_CODES | frozenset(
+    {
+        "replica_evidence_incomplete",
+        "replica_authentication_required",
+        "replica_database_mismatch",
+        "replica_schema_mismatch",
+        "replica_page_incomplete",
+        "replica_response_invalid",
+        "replica_response_too_large",
+        "replica_connection_unavailable",
+        "replica_identity_ambiguous",
+        "replica_entity_mismatch",
+        "replica_window_mismatch",
+        "replica_payment_mismatch",
+        "replica_order_mismatch",
+        "replica_lineage_incomplete",
+        "invalid_replica_binding",
+        "invalid_replica_identity",
+        "invalid_replica_amount",
+        "inexact_replica_amount",
+        "invalid_replica_timestamp",
+        "invalid_replica_window",
+        "invalid_replica_page",
+        "invalid_replica_entity_scope",
+        "invalid_replica_currency",
+        "invalid_order_reference",
+        "invalid_payment_scope",
+        "invalid_refund_evidence",
+        "invalid_lineage_scope",
+    }
+)
 
 
 class ReplicaReadError(ValueError):
@@ -193,29 +228,42 @@ async def _rows(db, tenant_id, binding, table, filters, limit, *, now):
         # permits a bounded read retry. The generic MCP write policy is intact.
         if isinstance(result, dict) and result.get(INDETERMINATE_KEY) is True:
             raise ReplicaReadError("replica_transport_failed")
+        if not isinstance(result, dict):
+            raise ReplicaReadError("replica_response_invalid")
         if len(str(result)) > 2_000_000:
             raise ReplicaReadError("replica_response_too_large")
+        if "database_id" in result and result["database_id"] != binding.database_id:
+            raise ReplicaReadError("replica_database_mismatch")
+        # A fixed read may be reissued within the existing retry/cost bounds,
+        # but no rows or cursor from an unfinished/failed query are consumed.
+        if result.get("status") in {"pending", "running", "failed"}:
+            raise ReplicaReadError("replica_query_incomplete")
+        if result.get("status") != "completed":
+            raise ReplicaReadError("replica_response_invalid")
+        if result["database_id"] != binding.database_id:
+            raise ReplicaReadError("replica_database_mismatch")
         started = datetime.fromisoformat(result["started_at"])
-        if (
-            started.utcoffset() is None
-            or not -30 <= (now - started).total_seconds() <= 120
-            or result.get("status") != "completed"
-            or result.get("database_id") != binding.database_id
-            or result.get("cached") not in (False, None)
-            or result.get("continuation_token") is not None
-        ):
-            raise ReplicaReadError()
+        if started.utcoffset() is None:
+            raise ReplicaReadError("replica_response_invalid")
+        if not -30 <= (now - started).total_seconds() <= 120:
+            raise ReplicaReadError("replica_read_not_fresh")
+        if result.get("cached") not in (False, None):
+            raise ReplicaReadError("replica_cached_response")
+        if result.get("continuation_token") is not None:
+            raise ReplicaReadError("replica_page_incomplete")
         data = result["data"]
         columns, rows = data["cols"], data["rows"]
+        if [column["name"] for column in columns] != list(fields) or any(
+            column.get("table_id") != getattr(binding, table + "_table_id") for column in columns
+        ):
+            raise ReplicaReadError("replica_schema_mismatch")
         if (
-            [column["name"] for column in columns] != list(fields)
-            or any(column.get("table_id") != getattr(binding, table + "_table_id") for column in columns)
-            or type(result["row_count"]) is not int
+            type(result["row_count"]) is not int
             or result["row_count"] != len(rows)
             or len(rows) > limit
             or any(not isinstance(row, list) or len(row) != len(fields) for row in rows)
         ):
-            raise ReplicaReadError()
+            raise ReplicaReadError("replica_response_invalid")
         records = [dict(zip(fields, row, strict=True)) for row in rows]
         ids = [_id(row["id"]) for row in records]
         if ids != sorted(set(ids)):
@@ -223,10 +271,16 @@ async def _rows(db, tenant_id, binding, table, filters, limit, *, now):
         return records
     except ReplicaReadError:
         raise
+    except McpAuthenticationError:
+        raise ReplicaReadError("replica_authentication_required") from None
+    except OAuthError as exc:
+        raise ReplicaReadError(
+            "replica_transport_failed" if exc.transient else "replica_authentication_required"
+        ) from None
     except TimeoutError:
         raise ReplicaReadError("replica_transport_failed") from None
     except (KeyError, TypeError, ValueError):
-        raise ReplicaReadError() from None
+        raise ReplicaReadError("replica_response_invalid") from None
 
 
 def _order(row):

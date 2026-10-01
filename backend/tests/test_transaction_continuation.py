@@ -215,11 +215,16 @@ async def scheduled_failure(db, user, *, progress=None):
     return prior, config
 
 
-async def test_scheduled_transient_read_waits_then_resumes_old_blocked_checkpoint_once(db, admin_user):
+@pytest.mark.parametrize(
+    "code", ["source_transport_failed", "replica_query_incomplete", "replica_read_not_fresh", "replica_cached_response"]
+)
+async def test_scheduled_transient_read_waits_then_resumes_old_blocked_checkpoint_once(db, admin_user, code):
     from app.services.transaction_ops.scheduler import _recovery_ids
 
     user = admin_user[0]
-    prior, _ = await scheduled_failure(db, user)
+    prior, _ = await scheduled_failure(
+        db, user, progress={"last_read_failure": {"code": code, "retryable": True, "resolved": False}}
+    )
     before = dict(prior.progress_json)
     due = prior.finished_at + continuation.READ_RETRY_DELAYS[0]
     assert not continuation.read_retry_due(prior, due - timedelta(seconds=1))
