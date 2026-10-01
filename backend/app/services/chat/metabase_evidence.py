@@ -140,7 +140,9 @@ def _join_entities(query: dict) -> dict[str, str]:
                 name = name[:-1]
             if name:
                 entities[join["alias"]] = name[:1].upper() + name[1:]
-    return entities
+    # Two joins to one table (billing and shipping addresses) would read the same: keep aliases.
+    names = list(entities.values())
+    return {alias: name for alias, name in entities.items() if names.count(name) == 1}
 
 
 def _display_columns(columns: list[str], query: dict) -> list[str]:

@@ -13,6 +13,7 @@ reconcile with that control.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -124,7 +125,7 @@ class _Loader:
         db, tenant, session = self.auth
         entry = None
         try:
-            sidecar = get_full_payload_entry(str(session), rid)
+            sidecar = await asyncio.to_thread(get_full_payload_entry, str(session), rid)
         except Exception:
             sidecar = None
         if isinstance(sidecar, dict) and isinstance(sidecar.get("payload"), dict):
@@ -198,11 +199,12 @@ async def _check_access(db, tenant, tool: str, payload: dict) -> None:
     policy = await get_active_policy(db, tenant)
     if policy is None:
         return
-    if policy.tool_allowlist and tool and tool not in policy.tool_allowlist:
+    if policy.tool_allowlist and (not tool or tool not in policy.tool_allowlist):
         raise ValueError("The current policy no longer permits this result's source.")
     blocked = {str(name).casefold() for name in (policy.blocked_fields or [])}
     names = [*payload["columns"], *((source or {}).get("column_names") or [])]
-    if any(str(name).casefold() in blocked for name in names):
+    query_words = set(re.findall(r"[A-Za-z_][\w$#]*", str(payload.get("query") or "").casefold()))
+    if any(str(name).casefold() in blocked for name in names) or blocked & query_words:
         raise ValueError("This result contains fields blocked by the current policy.")
 
 
@@ -522,7 +524,10 @@ def _control_values(control: dict | None, columns: list[str]) -> dict[int, Decim
 
 
 def _totals(
-    columns: list[str], numbers: list[list[Decimal | None]], control: dict[int, Decimal]
+    columns: list[str],
+    numbers: list[list[Decimal | None]],
+    control: dict[int, Decimal],
+    kinds: list[str] | None = None,
 ) -> tuple[list[Decimal | None], dict | None]:
     """Totals come only from the source's own ungrouped control result, never from
     adding the rows up here: the rows may be a capped page (FETCH FIRST n), mixed
@@ -530,19 +535,30 @@ def _totals(
 
     The check then states how the rows relate to that figure -- add up, more (groups
     overlap), less (part of the total is outside these rows), or cannot be checked
-    (a row has no value) -- for every control column.
+    (a row has no value). Only sums, counts and distinct counts are checked: the rows
+    of an average or a ratio are not meant to add up to its overall value. Rounded
+    rows may differ from the total by up to half a unit of their precision each.
     """
     totals: list[Decimal | None] = [control.get(index) for index in range(len(columns))]
-    if not control:
+    checkable = {
+        index
+        for index in control
+        if kinds is None or (index < len(kinds) and kinds[index] in {"sum", "count", "distinct"})
+    }
+    if not checkable:
         return totals, None
     outcomes = set()
-    for index, total in control.items():
+    for index in checkable:
+        total = control[index]
         values = [row[index] for row in numbers]
         if not values or any(value is None for value in values):
             outcomes.add("blank")
             continue
         summed = sum(values, Decimal(0))
-        outcomes.add("ok" if summed == total else "over" if summed > total else "under")
+        places = max([-v.as_tuple().exponent for v in values if v.as_tuple().exponent < 0] or [0])
+        tolerance = Decimal(len(values)) * Decimal(5).scaleb(-(places + 1)) if places else Decimal(0)
+        delta = summed - total
+        outcomes.add("ok" if abs(delta) <= tolerance else "over" if delta > 0 else "under")
     messages = {
         "blank": "Some rows have no value, so they cannot be checked against the overall total.",
         "over": "The rows add up to more than the overall total, so the groups overlap.",
@@ -628,7 +644,7 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
 
     totals, check = (None, None)
     if spec.totals and spec.no_total_reason is None and control_values:
-        all_totals, check = _totals(columns, numbers, control_values)
+        all_totals, check = _totals(columns, numbers, control_values, kinds)
         totals = [_json_number(all_totals[i]) for i in range(len(columns))]
 
     shown = min(len(rows), _MAX_CARD_ROWS)
@@ -654,8 +670,9 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
         )
 
     share = None
-    if spec.share_of and totals:
-        share_index = _column_index(payload, spec.share_of, "share_of")
+    share_index = _column_index(payload, spec.share_of, "share_of") if spec.share_of else None
+    # A share of the total is meaningful only for a measure whose rows add up to it.
+    if share_index is not None and totals and kinds[share_index] in {"sum", "count"}:
         total = _number(totals[share_index])
         values = [numbers[r][share_index] for r in range(shown)]
         if total and total > 0 and all(value is not None and value >= 0 for value in values):
@@ -774,12 +791,14 @@ def _side(loaded: dict, key: str, measures: list[str], control: dict | None) -> 
         rows[full] = {
             "raw": "(blank)" if raw is None or not str(raw).strip() else str(raw),
             "values": [_number(cell) for cell in cells],
+            "cells": cells,
             # A cell with content that is not a number cannot be compared.
             "unreadable": [cell is not None and str(cell).strip() != "" and _number(cell) is None for cell in cells],
         }
     numbers = [entry["values"] for entry in rows.values()]
     names = [payload["columns"][i] for i in indexes]
-    totals, check = _totals(names, numbers, _control_values(control, names))
+    kinds = _aggregate_kinds(payload)
+    totals, check = _totals(names, numbers, _control_values(control, names), [kinds[i] for i in indexes])
     return {
         "rows": rows,
         "totals": totals,
@@ -876,8 +895,10 @@ def build_compare_card(
     differing: dict[str, list[tuple[Decimal, str]]] = {m.label: [] for m in spec.measures}
     signed: dict[str, list[tuple[Decimal, str]]] = {m.label: [] for m in spec.measures}
     blank: dict[str, list[str]] = {m.label: [] for m in spec.measures}
-    only_left = [display for lk, rk, display in paired if rk is None]
-    only_right = [display for lk, rk, display in paired if lk is None]
+    partial = a["partial"] or b["partial"]
+    # Keys absent from a partial result were never fetched: not listed as differences.
+    only_left = [] if b["partial"] else [display for lk, rk, display in paired if rk is None]
+    only_right = [] if a["partial"] else [display for lk, rk, display in paired if lk is None]
     entries = []
     for lk, rk, display in paired:
         left_row, right_row = entry_of(lk, rk)
@@ -888,7 +909,8 @@ def build_compare_card(
             rv = right_row["values"][index] if right_row else None
             unreadable = any(side["unreadable"][index] for side in (left_row, right_row) if side)
             if not both:
-                differing[measure.label].append((Decimal(0), display))
+                if not partial:
+                    differing[measure.label].append((Decimal(0), display))
             elif unreadable or (lv is None) != (rv is None):
                 differing[measure.label].append((Decimal(0), display))
                 blank[measure.label].append(display)
@@ -897,7 +919,9 @@ def build_compare_card(
                 differing[measure.label].append((abs(rv - lv), display))
                 signed[measure.label].append((rv - lv, display))
                 row_differs = True
-            values.append((lv, rv))
+            lcell = left_row["cells"][index] if left_row else None
+            rcell = right_row["cells"][index] if right_row else None
+            values.append((lv, rv, lcell, rcell))
         flag = "missing" if not both else "diff" if row_differs else None
         entries.append((display, values, flag))
 
@@ -905,8 +929,9 @@ def build_compare_card(
     rows, flags = [], []
     for display, values, flag in entries:
         row: list = [display]
-        for index, (lv, rv) in enumerate(values):
-            row += [_json_number(lv), _json_number(rv)]
+        for index, (lv, rv, lcell, rcell) in enumerate(values):
+            # A value that is not a number keeps its source text.
+            row += [_json_number(lv) if lv is not None else lcell, _json_number(rv) if rv is not None else rcell]
             if index in delta_measures:
                 row.append(None if lv is None or rv is None else _json_number(rv - lv))
         rows.append(row)
@@ -930,21 +955,20 @@ def build_compare_card(
         if index in delta_measures:
             totals.append(None if lt is None or rt is None else _json_number(rt - lt))
 
-    partial = a["partial"] or b["partial"]
     plural = spec.key_label_plural
     key_noun = spec.key_label.lower()
     headline_parts, detail_parts = [], []
     for measure in spec.measures:
         names = differing[measure.label]
         if not names:
-            scope = f"every {key_noun} shown" if partial else f"every {key_noun}"
+            scope = f"every {key_noun} in both results" if partial else f"every {key_noun}"
             headline_parts.append(f"{measure.label} match {spec.left_label} in {scope}.")
             continue
         noun = key_noun if len(names) == 1 else plural
         headline_parts.append(f"{measure.label} differ in {len(names)} {noun}.")
         index = spec.measures.index(measure)
         lt, rt = a["totals"][index], b["totals"][index]
-        overall = rt - lt if lt is not None and rt is not None else None
+        overall = rt - lt if lt is not None and rt is not None and not (only_left or only_right or partial) else None
         detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural, overall)
         if detail:
             detail_parts.append(detail)
@@ -1065,6 +1089,8 @@ async def execute_present(params: dict, context: dict | None = None, **_kwargs) 
         card = build_present_card(spec, loaded, control)
     except ValueError as exc:
         return _error(str(exc))
+    except (IndexError, KeyError, TypeError, ArithmeticError):
+        return _error("The stored result is malformed and cannot be shown as a card. Run the query again.")
     return json.loads(
         json.dumps(
             {"result_card": card, "llm": {"card_shown": True, "card_id": card["card_id"], "note": _NOTE}}, default=str
@@ -1088,6 +1114,8 @@ async def execute_compare(params: dict, context: dict | None = None, **_kwargs) 
         card, facts = build_compare_card(spec, left, right, controls)
     except ValueError as exc:
         return _error(str(exc))
+    except (IndexError, KeyError, TypeError, ArithmeticError):
+        return _error("The stored result is malformed and cannot be shown as a card. Run the query again.")
     return json.loads(
         json.dumps(
             {

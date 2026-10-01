@@ -501,7 +501,7 @@ def test_a_partial_comparison_never_claims_every_key_matches():
     left = _table([["X", 1], ["Y", 2]])
     left["payload"]["truncated"] = True
     card, facts = build_compare_card(_compare(), left, _table([["X", 1], ["Y", 2]]), (None, None))
-    assert card["headline"] == "Units match NetSuite in every country shown."
+    assert card["headline"] == "Units match NetSuite in every country in both results."
     assert "partial" in card["detail"] and card["truncated"] is True and facts["partial"] is True
 
 
@@ -580,3 +580,85 @@ def test_the_source_label_follows_the_payloads_provenance():
     }
     card = build_present_card(PresentResult(result_id="r1", title="t"), loaded, None)
     assert card["source"] == "BigQuery" and card["queries"][0]["label"] == "BigQuery SQL"
+
+
+# --- T2 gate round 4 on #369 (wf_a75d8be0-a99) ---
+
+
+def test_an_average_gets_its_overall_value_but_no_share_or_reconciliation():
+    loaded = {
+        "tool": "netsuite_suiteql",
+        "as_of": "x",
+        "payload": {
+            "columns": ["k", "avg_price"],
+            "rows": [["a", "10"], ["b", "20"]],
+            "query": "SELECT k, SUM(v)/COUNT(*) AS avg_price FROM t GROUP BY k",
+        },
+    }
+    control = {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["avg_price"], "rows": [["15"]]}}
+    card = build_present_card(
+        PresentResult(result_id="r1", title="t", control_result_id="r2", share_of="avg_price"), loaded, control
+    )
+    assert card["totals"] == [None, 15] and card["share"] is None and card["check"] is None
+
+
+def test_rounded_rows_reconcile_within_their_precision():
+    loaded = _table([["a", "333.33"], ["b", "333.33"], ["c", "333.34"]])
+    control = {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["units"], "rows": [["1000.01"]]}}
+    card = build_present_card(PresentResult(result_id="r1", title="t", control_result_id="r2"), loaded, control)
+    assert card["check"]["status"] == "ok"
+
+
+def test_keys_beyond_a_partial_result_are_not_differences():
+    left = _table([["X", 1]])
+    left["payload"]["truncated"] = True
+    card, facts = build_compare_card(_compare(), left, _table([["X", 1], ["Y", 2]]), (None, None))
+    assert card["headline"] == "Units match NetSuite in every country in both results."
+    assert facts["only_in_right"] == []
+
+
+def test_no_figure_is_blamed_on_keys_that_hold_none_of_it():
+    control = lambda v: {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["units"], "rows": [[v]]}}  # noqa: E731
+    card, _ = build_compare_card(
+        _compare(), _table([["a", 10]]), _table([["a", 11], ["b", 100]]), (control(10), control(111))
+    )
+    assert card["detail"].startswith("Metabase has more units, all in a.")
+
+
+def test_comparison_cells_keep_their_source_text():
+    card, _ = build_compare_card(_compare(), _table([["X", "N/A"]]), _table([["X", "pending"]]), (None, None))
+    assert card["rows"][0][:3] == ["X", "N/A", "pending"]
+
+
+async def test_an_allowlist_refuses_a_result_with_no_recorded_source():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from app.mcp.tools.result_card_tool import _check_access
+
+    policy = SimpleNamespace(tool_allowlist=["netsuite_suiteql"], blocked_fields=[])
+    with patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=policy)):
+        with pytest.raises(ValueError, match="no longer permits"):
+            await _check_access(None, None, "", {"columns": ["a"], "rows": [[1]]})
+
+
+async def test_a_blocked_field_cannot_hide_behind_an_alias():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from app.mcp.tools.result_card_tool import _check_access
+
+    policy = SimpleNamespace(tool_allowlist=None, blocked_fields=["email"])
+    payload = {"columns": ["contact"], "rows": [["a@b.c"]], "query": "SELECT email AS contact FROM customer"}
+    with patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=policy)):
+        with pytest.raises(ValueError, match="blocked"):
+            await _check_access(None, None, "netsuite_suiteql", payload)
+
+
+def test_a_malformed_stored_result_is_an_error_not_a_crash():
+    from app.mcp.tools.result_card_tool import build_present_card as build
+
+    loaded = ns_country()
+    loaded["payload"] = {**loaded["payload"], "rows": [["United States", "162"]]}
+    with pytest.raises(IndexError):
+        build(PresentResult(result_id="r9", title="t"), loaded, None)

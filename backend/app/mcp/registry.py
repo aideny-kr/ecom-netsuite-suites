@@ -375,6 +375,7 @@ TOOL_REGISTRY = {
                 "type": "string",
                 "description": "Why the rows must not be added together; disables totals and collapses the card.",
             },
+            "top_n": {"type": "integer", "description": "Rows shown before 'Show more' (default 7 for long tables)."},
         },
     },
     "compare.results": {
@@ -415,6 +416,7 @@ TOOL_REGISTRY = {
                 "type": "string",
                 "description": "Ungrouped control for the right result (needed to total distinct counts).",
             },
+            "top_n": {"type": "integer", "description": "Rows shown before 'Show more' (default 7 for long tables)."},
         },
     },
     "cross_source.query": {
