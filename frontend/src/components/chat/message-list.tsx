@@ -11,7 +11,7 @@ import { tokenUsageSummary } from "@/lib/token-usage";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage, ClarificationData, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
-import { isGroupBreakdown, resultCardsOf } from "@/lib/chat-stream";
+import { isGroupBreakdown, resultCardsOf, tableCoveredByCards } from "@/lib/chat-stream";
 import type { ResultCardData } from "@/lib/chat-stream";
 import { ResultCard, ResultCardHeadline, ResultCardTiles } from "@/components/chat/result-card";
 import {
@@ -1189,9 +1189,10 @@ export function MessageList({
                     if (blockIndex !== firstTool) return null;
                     const tools = streamBlocks.flatMap((b) => (b.type === "tool" ? [b.tool] : []));
                     const steps = activityStepsFromStream(tools);
+                    // Any answer block after the last step (text or a card) ends the "running" row.
                     const answering = streamBlocks
                       .slice(streamBlocks.findLastIndex((b) => b.type === "tool") + 1)
-                      .some((b) => b.type === "text" && b.content.trim().length > 0);
+                      .some((b) => b.type !== "tool" && b.type !== "thinking" && (b.type !== "text" || b.content.trim().length > 0));
                     const running = tools.some((t) => t.status === "running") || !answering;
                     return <ToolActivityRow key="tool-activity" steps={steps} running={running} />;
                   }
@@ -1203,14 +1204,16 @@ export function MessageList({
                         <ResultCard card={block.data} />
                       </div>
                     );
-                  case "data_table":
-                    // A presented card supersedes the raw table it was built from.
-                    if (streamBlocks.some((b) => b.type === "result_card")) return null;
+                  case "data_table": {
+                    // A presented card supersedes only the raw table it was built from.
+                    const streamCards = streamBlocks.flatMap((b) => (b.type === "result_card" ? [b.data] : []));
+                    if (tableCoveredByCards(block.data, streamCards)) return null;
                     return (
                       <div key={block.id} className="animate-table-appear">
                         <DataFrameTable data={block.data} queryText={block.data.query} />
                       </div>
                     );
+                  }
                   case "financial_report":
                     return (
                       <div key={block.id} className="animate-table-appear">
@@ -1536,7 +1539,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           <FinancialReport data={financialReportData} />
         )}
 
-        {!hasCards && dataTableData && (
+        {dataTableData && !tableCoveredByCards(dataTableData, resultCards) && (
           <DataFrameTable data={dataTableData} queryText={dataTableData.query} />
         )}
 
@@ -1598,7 +1601,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           <FollowUpChips items={followups} onPick={onFollowUp} disabled={followUpDisabled} />
         )}
 
-        {!hasCards && message.tool_calls?.some((tc) => tc.tool === "netsuite_suiteql") && (
+        {message.tool_calls?.some((tc) => tc.tool === "netsuite_suiteql") && (
           <InlineSaveLink
             message={message}
             messages={messages}
@@ -1613,7 +1616,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           />
         )}
 
-        {!isStreamingPreview && (message.model_used || sources.length > 0) && (
+        {!isStreamingPreview && (message.model_used || sources.length > 0 || (message.tool_calls?.length ?? 0) > 0) && (
           <div data-testid="answer-footer" className="mt-1 flex flex-wrap items-center gap-2.5 text-[12px] text-muted-foreground">
             {message.tool_calls && message.tool_calls.length > 0 && <FeedbackButtons message={message} />}
             <SourcesToggle sources={sources} open={sourcesOpen} onToggle={() => setSourcesOpen((v) => !v)} />

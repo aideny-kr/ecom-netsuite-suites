@@ -25,6 +25,8 @@ export interface DataTableData {
    *  unchecked-error flags, stall verdicts, etc. Absent when the backend result
    *  carried none; the card renders nothing in that case. */
   caveats?: string[];
+  /** Conversation-wide result id (rN); a result card names the ids it presents. */
+  result_id?: string;
 }
 
 /**
@@ -61,7 +63,14 @@ export function coerceDataTableData(d: Record<string, unknown>): DataTableData {
     truncated: Boolean(d.truncated),
     isMetric: deriveDataTableIsMetric(d),
     ...(Array.isArray(d.caveats) && d.caveats.length > 0 ? { caveats: d.caveats as string[] } : {}),
+    ...(typeof d.result_id === "string" ? { result_id: d.result_id } : {}),
   };
+}
+
+/** True when a result card presents this table (by result id), so the raw table is redundant. */
+export function tableCoveredByCards(table: { result_id?: string } | null | undefined, cards: ResultCardData[]): boolean {
+  if (!table?.result_id || cards.length === 0) return false;
+  return cards.some((card) => card.result_ids.includes(table.result_id!));
 }
 
 export interface TaskOutputData {
@@ -217,8 +226,23 @@ export function coerceResultCard(raw: unknown): ResultCardData | null {
   const d = raw as Record<string, unknown>;
   if (typeof d.card_id !== "string" || typeof d.title !== "string") return null;
   if (!Array.isArray(d.columns) || !Array.isArray(d.rows)) return null;
+  const width = (d.columns as unknown[]).length;
+  const rows = (d.rows as unknown[]).filter((row): row is unknown[] => Array.isArray(row));
+  const fit = (row: unknown[]) => (row.length >= width ? row : [...row, ...Array(width - row.length).fill(null)]);
+  const share = d.share as ResultCardData["share"];
+  const shareValid =
+    !!share &&
+    Array.isArray(share.values) &&
+    share.values.length >= rows.length &&
+    share.values.every((v) => typeof v === "number" && Number.isFinite(v));
+  const totals = Array.isArray(d.totals) ? (d.totals as (number | null)[]) : null;
   return {
     ...(d as unknown as ResultCardData),
+    result_ids: Array.isArray(d.result_ids) ? (d.result_ids as string[]) : [],
+    rows: rows.map(fit),
+    row_flags: Array.isArray(d.row_flags) ? (d.row_flags as ResultCardData["row_flags"]) : null,
+    share: shareValid ? share : null,
+    totals: totals && totals.length >= width ? totals : null,
     queries: Array.isArray(d.queries) ? (d.queries as ResultCardData["queries"]) : [],
     tiles: Array.isArray(d.tiles) ? (d.tiles as ResultCardData["tiles"]) : [],
     top_n: typeof d.top_n === "number" ? d.top_n : (d.rows as unknown[]).length,
@@ -500,6 +524,7 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
         // The honesty channel (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
         // §8) — absent for every data_table tool that doesn't set it.
         ...(Array.isArray(d.caveats) && d.caveats.length > 0 ? { caveats: d.caveats as string[] } : {}),
+        ...(typeof d.result_id === "string" ? { result_id: d.result_id } : {}),
       },
     };
   }

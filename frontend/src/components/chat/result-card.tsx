@@ -276,7 +276,8 @@ function CardTable({ card }: { card: ResultCardData }) {
             {card.columns.map((column, columnIndex) => {
               const value = row[columnIndex];
               const isDelta = column.format === "delta";
-              const nonZero = isDelta && toNumber(value) !== 0 && value !== null;
+              const numeric = toNumber(value);
+              const nonZero = isDelta && numeric !== null && numeric !== 0;
               return (
                 <div
                   key={column.key}
@@ -328,7 +329,7 @@ function CardTable({ card }: { card: ResultCardData }) {
               key={column.key}
               className={cn(
                 column.align === "right" && "text-right",
-                column.format === "delta" && toNumber(card.totals![index]) && "text-amber-500 dark:text-amber-400",
+                column.format === "delta" && !!toNumber(card.totals![index]) && "text-amber-500 dark:text-amber-400",
               )}
             >
               {index === 0 ? (
@@ -388,6 +389,7 @@ export function ResultCard({ card }: { card: ResultCardData }) {
                 No total: {card.no_total_reason}.
               </div>
             )}
+            <CardFooter card={card} />
           </div>
         )}
       </div>
@@ -405,6 +407,15 @@ export function ResultCard({ card }: { card: ResultCardData }) {
       </div>
       <QueryRows card={card} />
       <CardTable card={card} />
+      <CardFooter card={card} />
+    </div>
+  );
+}
+
+/** Check, scope and partial-result notes under a card's table (open or collapsed). */
+function CardFooter({ card }: { card: ResultCardData }) {
+  return (
+    <>
       {card.check && !(card.kind !== "comparison" && card.check.status === "ok" && card.totals) && (
         <div
           data-testid="result-card-check"
@@ -428,7 +439,7 @@ export function ResultCard({ card }: { card: ResultCardData }) {
           Partial result: not every row is shown.
         </div>
       )}
-    </div>
+    </>
   );
 }
 

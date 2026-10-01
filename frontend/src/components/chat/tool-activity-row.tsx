@@ -5,6 +5,8 @@ import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { StreamingToolCall, ToolCallStep } from "@/lib/types";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
+import { ToolCallStepCard } from "@/components/chat/tool-call-step";
+import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 
 /**
  * One row for all of a turn's data-gathering steps. While the turn runs, each
@@ -164,7 +166,9 @@ export function activityStepsFromCalls(
       params: call.params ?? {},
       summary: call.result_summary,
       durationMs: call.duration_ms,
-      status: /error|failed/i.test(call.result_summary ?? "") && !rowsOutput(call.result_summary) ? "error" : "complete",
+      // Only a summary that states a failure up front marks the step failed; "0 errors" or a
+      // column named "failed" does not.
+      status: /^\s*(?:error|failed|tool error|exception)\b/i.test(call.result_summary ?? "") ? "error" : "complete",
       source: call,
     }));
 }
@@ -206,7 +210,9 @@ function StepList({ steps, userQuestion }: { steps: ActivityStep[]; userQuestion
     <div data-testid="tool-activity-steps" className="overflow-hidden rounded-[10px] border border-border bg-card">
       {steps.map((step, index) => {
         const { kind, label, output } = describeStep(step);
-        const canOpen = !!step.source?.result_payload;
+        // Every finished step opens: a SQL table result in the query card, anything else
+        // (Metabase MBQL, schema reads, workspace steps, failures) in its plain detail view.
+        const canOpen = !!step.source;
         const inAnswer = step.role === "answer";
         return (
           <div key={index} className="border-b border-border/60 last:border-b-0">
@@ -243,7 +249,13 @@ function StepList({ steps, userQuestion }: { steps: ActivityStep[]; userQuestion
             </button>
             {open === index && step.source && (
               <div className="border-t border-border/60 p-2">
-                <SuiteQLToolCard step={step.source} userQuestion={userQuestion} />
+                {typeof step.source.params?.query === "string" && step.source.result_payload?.kind === "table" ? (
+                  <SuiteQLToolCard step={step.source} userQuestion={userQuestion} />
+                ) : step.source.tool.startsWith("workspace_") ? (
+                  <WorkspaceToolCard step={step.source} />
+                ) : (
+                  <ToolCallStepCard step={step.source} />
+                )}
               </div>
             )}
           </div>

@@ -50,10 +50,25 @@ export type ProseSegment = { kind: "prose"; markdown: string } | { kind: "table"
  * only bold text, directly above a table, becomes that table's title.
  */
 export function proseSegments(content: string): ProseSegment[] {
-  const blocks = content
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean);
+  // Split on blank lines, but keep a fenced code block (which may contain blank lines
+  // and lines starting with "|") in one piece.
+  const blocks: string[] = [];
+  let open: string[] | null = null;
+  for (const part of content.split(/\n{2,}/)) {
+    const fences = (part.match(/^\s*(```|~~~)/gm) || []).length;
+    if (open) {
+      open.push(part);
+      if (fences % 2 === 1) {
+        blocks.push(open.join("\n\n").trim());
+        open = null;
+      }
+    } else if (fences % 2 === 1) {
+      open = [part];
+    } else if (part.trim()) {
+      blocks.push(part.trim());
+    }
+  }
+  if (open) blocks.push(open.join("\n\n").trim());
   const segments: ProseSegment[] = [];
   let prose: string[] = [];
   const flush = () => {
