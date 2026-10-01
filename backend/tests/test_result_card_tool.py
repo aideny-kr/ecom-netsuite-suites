@@ -195,6 +195,17 @@ def test_mixed_currency_card_is_collapsed_without_totals():
     assert card["collapsed_note"] == "2 currencies, not added together"
 
 
+def test_a_comparison_carries_each_sources_own_time():
+    # Round 3 on #370 (R5): the caption must not call an older result "as of" the newer one.
+    left = {**_table([["X", 1]]), "as_of": "2026-09-30T08:00:00+00:00"}
+    right = {**_table([["X", 1]]), "as_of": "2026-10-01T05:07:03+00:00"}
+    card, _ = build_compare_card(_compare(), left, right, (None, None))
+    assert card["as_of_sources"] == [
+        {"label": "NetSuite", "as_of": "2026-09-30T08:00:00+00:00"},
+        {"label": "Metabase", "as_of": "2026-10-01T05:07:03+00:00"},
+    ]
+
+
 def test_compare_card_matches_the_approved_mock():
     spec = CompareResults(
         left_result_id="r9",
@@ -213,10 +224,8 @@ def test_compare_card_matches_the_approved_mock():
         right_control_result_id="r22",
     )
     card, facts = build_compare_card(spec, ns_country(), mb_country(), (ns_total(), mb_total()))
-    assert card["headline"] == "Orders match NetSuite in every country. Units differ in 4 countries."
-    assert card["detail"] == (
-        "Metabase has 8 fewer units, all in United States, Switzerland, Germany and United Kingdom."
-    )
+    assert card["headline"] == "Orders match in all 20 countries compared. Units differ in 4 countries."
+    assert card["detail"] == "Metabase has fewer units in United States, Switzerland, Germany and United Kingdom."
     assert [c["label"] for c in card["columns"]] == [
         "Country",
         "NetSuite",
@@ -501,7 +510,7 @@ def test_a_blank_key_is_compared_like_any_other():
     card, facts = build_compare_card(
         _compare(), _table([["X", 1], [None, 4]]), _table([["X", 1], [None, 4]]), (None, None)
     )
-    assert card["headline"] == "Units match NetSuite in every country."
+    assert card["headline"] == "Units match in all 2 countries compared."
     assert sorted(r[0] for r in card["rows"]) == ["(blank)", "X"]
     card, _ = build_compare_card(_compare(), _table([["X", 1], [None, 4]]), _table([["X", 1]]), (None, None))
     assert card["detail"] == "Only in NetSuite: (blank)."
@@ -511,7 +520,7 @@ def test_a_partial_comparison_never_claims_every_key_matches():
     left = _table([["X", 1], ["Y", 2]])
     left["payload"]["truncated"] = True
     card, facts = build_compare_card(_compare(), left, _table([["X", 1], ["Y", 2]]), (None, None))
-    assert card["headline"] == "Units match NetSuite in every country in both results."
+    assert card["headline"] == "Units match in all 2 countries compared."
     assert "partial" in card["detail"] and card["truncated"] is True and facts["partial"] is True
 
 
@@ -623,7 +632,7 @@ def test_keys_beyond_a_partial_result_are_not_differences():
     left = _table([["X", 1]])
     left["payload"]["truncated"] = True
     card, facts = build_compare_card(_compare(), left, _table([["X", 1], ["Y", 2]]), (None, None))
-    assert card["headline"] == "Units match NetSuite in every country in both results."
+    assert card["headline"] == "Units match in the one country compared."
     assert facts["only_in_right"] == []
 
 
@@ -632,7 +641,7 @@ def test_no_figure_is_blamed_on_keys_that_hold_none_of_it():
     card, _ = build_compare_card(
         _compare(), _table([["a", 10]]), _table([["a", 11], ["b", 100]]), (control(10), control(111))
     )
-    assert card["detail"].startswith("Metabase has more units, all in a.")
+    assert card["detail"].startswith("Metabase has more units in a.")
 
 
 def test_comparison_cells_keep_their_source_text():
@@ -737,7 +746,7 @@ def test_a_query_that_reached_its_row_limit_is_partial():
     card, facts = build_compare_card(
         _compare(), _limited([["US", 5]], query), _limited([["US", 5]], query), (None, None)
     )
-    assert facts["partial"] is True and "in both results" in card["headline"]
+    assert facts["partial"] is True and card["headline"] == "Units match in the one country compared."
     assert build_present_card(PresentResult(result_id="r1", title="t"), _limited([["US", 5]], query), None)["truncated"]
     # Fewer rows than the limit: the result is complete.
     roomy = _limited([["US", 5]], "SELECT country, SUM(u) AS units FROM t GROUP BY country FETCH FIRST 50000 ROWS ONLY")
@@ -829,3 +838,64 @@ def test_a_distinct_count_difference_is_never_blamed_on_one_key():
     card, _ = build_compare_card(spec, left, right, (control(2), control(5)))
     assert "all in" not in card["detail"] and "3 more" not in card["detail"]
     assert card["detail"].startswith("Metabase has more orders in SKU-A")
+
+
+# --- independent packet review round 3 on #369 (gpt-6-astra) ---
+
+
+def test_an_overall_difference_is_never_pinned_on_the_rows_shown():
+    # R2: HAVING SUM(u) > 100 hides CA on both sides; the overall difference (81) is mostly CA's.
+    query = "SELECT country, SUM(u) AS units FROM t GROUP BY country HAVING SUM(u) > 100"
+    left, right = _limited([["US", 200]], query), _limited([["US", 201]], query)
+    card, _ = build_compare_card(_compare(), left, right, (_control(["units"], [210]), _control(["units"], [291])))
+    assert card["detail"].startswith("Metabase has more units in US.")
+    assert "81" not in card["detail"] and "all in" not in card["detail"]
+    assert card["totals"][-1] == 81  # the overall difference stays in the totals row
+
+
+def test_a_limit_in_a_metabase_native_query_makes_the_result_partial():
+    # R3: a saved question's native SQL caps its own rows.
+    loaded = mb_country()
+    loaded["payload"] = {**loaded["payload"], "rows": loaded["payload"]["rows"][:1]}
+    loaded["payload"]["metabase_source"] = {
+        **loaded["payload"]["metabase_source"],
+        "query": {
+            "lib/type": "mbql/query",
+            "stages": [
+                {
+                    "lib/type": "mbql.stage/native",
+                    "native": "SELECT c, COUNT(DISTINCT o), SUM(q) FROM x GROUP BY c LIMIT 1",
+                }
+            ],
+        },
+    }
+    assert build_present_card(PresentResult(result_id="r1", title="t"), loaded, None)["truncated"] is True
+
+
+async def test_a_blocked_field_cannot_hide_inside_a_saved_metabase_question():
+    # R1: the saved question's SQL selects email AS contact; the output column is "contact".
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from app.mcp.tools.result_card_tool import _check_access
+
+    connector_id = "6f95665c-23cc-4d35-a3f9-eb4231099568"
+    connector = SimpleNamespace(is_enabled=True, status="active", server_url="https://mb.example")
+    db = SimpleNamespace(scalar=AsyncMock(return_value=connector))
+    payload = {
+        "columns": ["contact"],
+        "rows": [["a@b.c"]],
+        "metabase_source": {
+            "connector_id": connector_id,
+            "server_url": "https://mb.example",
+            "query": {"stages": [{"native": "SELECT email AS contact FROM customer"}]},
+            "column_names": ["contact"],
+        },
+    }
+    policy = SimpleNamespace(tool_allowlist=None, blocked_fields=["email"])
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=policy)),
+        patch("app.services.chat.metabase_tool_policy.is_read_only_metabase_tool", return_value=True),
+    ):
+        with pytest.raises(ValueError, match="blocked"):
+            await _check_access(db, "tenant", "ext__6f95665c23cc4d35a3f9eb4231099568__query", payload)

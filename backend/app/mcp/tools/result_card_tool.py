@@ -203,7 +203,10 @@ async def _check_access(db, tenant, tool: str, payload: dict) -> None:
         raise ValueError("The current policy no longer permits this result's source.")
     blocked = {str(name).casefold() for name in (policy.blocked_fields or [])}
     names = [*payload["columns"], *((source or {}).get("column_names") or [])]
-    query_words = set(re.findall(r"[A-Za-z_][\w$#]*", str(payload.get("query") or "").casefold()))
+    # The query that produced the rows -- including a saved Metabase question's own SQL --
+    # can select a blocked field under another name.
+    query_text = str(payload.get("query") or "") + " " + json.dumps((source or {}).get("query"), default=str)
+    query_words = set(re.findall(r"[A-Za-z_][\w$#]*", query_text.casefold()))
     if any(str(name).casefold() in blocked for name in names) or blocked & query_words:
         raise ValueError("This result contains fields blocked by the current policy.")
 
@@ -379,6 +382,37 @@ def _final_stage(query):
     return query
 
 
+def _sql_capped(text: str, returned: int) -> bool:
+    """True when SQL text caps its rows: a top-level limit the row count reached, or any
+    limit inside a subquery (it caps the input to everything outside it)."""
+    text = _strip_sql_comments(text)
+    for match in _SQL_LIMIT.finditer(text):
+        if _depth_at(text, match.start()) > 0:
+            return True
+        if match[4] is not None:
+            limit = int(match[5]) - (0 if match[4] else 1)
+        else:
+            limit = int(next(group for group in match.groups()[:3] if group))
+        if returned >= limit:
+            return True
+    return False
+
+
+def _native_sql(node) -> list[str]:
+    """SQL strings inside a Metabase query (a native stage or a saved native question)."""
+    found = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in {"native", "query"} and isinstance(value, str):
+                found.append(value)
+            else:
+                found += _native_sql(value)
+    elif isinstance(node, list):
+        for item in node:
+            found += _native_sql(item)
+    return found
+
+
 def _is_partial(payload: dict) -> bool:
     """A result is partial when the source says so, or when its own query capped it.
 
@@ -392,6 +426,8 @@ def _is_partial(payload: dict) -> bool:
     source = payload.get("metabase_source")
     if isinstance(source, dict):
         # A limit anywhere but the final stage caps that stage's input: always partial.
+        if any(_sql_capped(text, returned) for text in _native_sql(source.get("query"))):
+            return True
         limits = _mbql_limits(source.get("query"))
         final = _final_stage(source.get("query"))
         own = final.get("limit") if isinstance(final, dict) else None
@@ -400,17 +436,7 @@ def _is_partial(payload: dict) -> bool:
             if returned >= own:
                 return True
         return bool(limits)
-    text = _strip_sql_comments(str(payload.get("query") or ""))
-    for match in _SQL_LIMIT.finditer(text):
-        if _depth_at(text, match.start()) > 0:
-            return True
-        if match[4] is not None:
-            limit = int(match[5]) - (0 if match[4] else 1)
-        else:
-            limit = int(next(group for group in match.groups()[:3] if group))
-        if returned >= limit:
-            return True
-    return False
+    return _sql_capped(str(payload.get("query") or ""), returned)
 
 
 def sql_aggregates(query: str) -> dict[str, str]:
@@ -1103,18 +1129,10 @@ def _pair_keys(a_rows: dict, b_rows: dict) -> list[tuple[str | None, str | None,
 _QUERY_KIND = {"SuiteQL query": "SuiteQL", "BigQuery SQL": "SQL", "Metabase query (query builder)": "query builder"}
 
 
-def _detail_for(
-    measure: str,
-    right_label: str,
-    deltas: list[tuple[Decimal, str]],
-    plural: str,
-    overall: Decimal | None,
-    additive: bool = True,
-) -> str | None:
-    """Name where a measure differs, largest first. A figure is stated only from the two
-    sources' own overall totals, and only for a sum or a count: a distinct count or a ratio
-    does not add up across keys (an order can sit under several SKUs), so its overall
-    difference is neither sized nor placed "all in" the keys whose values changed."""
+def _detail_for(measure: str, right_label: str, deltas: list[tuple[Decimal, str]], plural: str) -> str | None:
+    """Name where a measure differs, largest first. No figure and no "all in": the rows shown
+    need not hold the whole overall difference (capped results, HAVING, distinct counts), so
+    the overall difference is shown only as the totals row's own figure."""
     more = sorted(((d, n) for d, n in deltas if d > 0), key=lambda item: -item[0])
     fewer = sorted(((-d, n) for d, n in deltas if d < 0), key=lambda item: -item[0])
 
@@ -1128,12 +1146,7 @@ def _detail_for(
     if not (more or fewer):
         return None
     direction, items = ("more", more) if more else ("fewer", fewer)
-    if not additive:
-        return f"{right_label} has {direction} {label} in {where(items)}."
-    scope = f"all in {where(items)}" if len(items) <= 5 else f"across {where(items)}"
-    if overall is not None and overall != 0 and (overall > 0) == bool(more):
-        return f"{right_label} has {_json_number(abs(overall))} {direction} {label}, {scope}."
-    return f"{right_label} has {direction} {label}, {scope}."
+    return f"{right_label} has {direction} {label} in {where(items)}."
 
 
 def build_compare_card(
@@ -1226,19 +1239,18 @@ def build_compare_card(
     plural = spec.key_label_plural
     key_noun = spec.key_label.lower()
     headline_parts, detail_parts = [], []
+    # A match is claimed only for the keys actually compared -- never "every": a result can
+    # be capped in ways its provenance does not show.
+    compared = sum(1 for lk, rk, _ in paired if lk is not None and rk is not None)
     for measure in spec.measures:
         names = differing[measure.label]
         if not names:
-            scope = f"every {key_noun} in both results" if partial else f"every {key_noun}"
-            headline_parts.append(f"{measure.label} match {spec.left_label} in {scope}.")
+            where = f"the one {key_noun}" if compared == 1 else f"all {compared} {plural}"
+            headline_parts.append(f"{measure.label} match in {where} compared.")
             continue
         noun = key_noun if len(names) == 1 else plural
         headline_parts.append(f"{measure.label} differ in {len(names)} {noun}.")
-        index = spec.measures.index(measure)
-        lt, rt = a["totals"][index], b["totals"][index]
-        overall = rt - lt if lt is not None and rt is not None and not (only_left or only_right or partial) else None
-        additive = all(side["kinds"][index] in {"sum", "count"} for side in (a, b))
-        detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural, overall, additive)
+        detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural)
         if detail:
             detail_parts.append(detail)
         if blank[measure.label]:
@@ -1298,6 +1310,11 @@ def build_compare_card(
         "source": f"{spec.left_label} vs {spec.right_label}",
         "subtitle": spec.subtitle or f"Matched on {key_noun}",
         "as_of": right["as_of"],
+        # Each source's own fetch time: the two results may come from different turns.
+        "as_of_sources": [
+            {"label": spec.left_label, "as_of": left["as_of"]},
+            {"label": spec.right_label, "as_of": right["as_of"]},
+        ],
         "scope": None,
         "queries": [
             {**q, "label": f"{label} query ({_QUERY_KIND.get(q['label'], 'query')})"}
