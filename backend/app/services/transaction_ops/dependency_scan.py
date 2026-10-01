@@ -11,6 +11,17 @@ from app.services.transaction_ops.netsuite_dependency_changes import STREAMS
 from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
 
 
+def _advance_page(scan, page):
+    if page["scan_complete"]:
+        scan["stream_index"] += 1
+        scan["after"] = None
+        scan.pop("owner_chunk_size", None)
+    else:
+        scan["after"] = page["next_cursor"]
+    for key in ("page", "owners", "owner_position", "owner_offset", "index_after", "index_complete"):
+        scan.pop(key, None)
+
+
 async def advance(progress, *, read_page, read_owners, indexed_owners, unobserved, staging=None):
     async def put(value):
         return await staging.put(value) if staging else value
@@ -57,6 +68,18 @@ async def advance(progress, *, read_page, read_owners, indexed_owners, unobserve
         or not 1 <= chunk_size <= 250
     ):
         raise NetSuiteEvidenceError("dependency_checkpoint_invalid")
+    if (
+        staging
+        and isinstance(scan["page"], dict)
+        and "stage_ref" in scan["page"]
+        and not page["changes"]
+        and "owners" not in scan
+    ):
+        # The fetched page is already durable. There are no candidates or old
+        # owners to consume, so no empty owner inventory/checkpoint is needed.
+        # Inline legacy pages still go through put() to reauthorize access.
+        _advance_page(scan, page)
+        return
     changes = page["changes"][offset : offset + chunk_size]
     keys = sorted({tuple(key) for change in changes for key in change["record_keys"]})
     if "owners" not in scan:
@@ -132,17 +155,19 @@ async def advance(progress, *, read_page, read_owners, indexed_owners, unobserve
         progress["pending_evidence_since"] = since
         progress["pending_refs"] = await unobserved(sorted(set(refs)), since=since)
         progress["phase"] = "destination"
-        return
+        if (
+            not staging
+            or progress["pending_refs"]
+            or scan["owner_position"] < len(owners)
+            or not scan["index_complete"]
+        ):
+            return
+        # All owners in this chunk already have sufficient observations. Fold
+        # only the local cursor transition into their checkpoint. No further
+        # provider read occurs until the outer runner commits it.
     if offset + len(changes) < len(page["changes"]):
         scan["owner_offset"] = offset + len(changes)
         for key in ("owners", "owner_position", "index_after", "index_complete"):
             scan.pop(key, None)
         return
-    if page["scan_complete"]:
-        scan["stream_index"] += 1
-        scan["after"] = None
-        scan.pop("owner_chunk_size", None)
-    else:
-        scan["after"] = page["next_cursor"]
-    for key in ("page", "owners", "owner_position", "owner_offset", "index_after", "index_complete"):
-        scan.pop(key, None)
+    _advance_page(scan, page)

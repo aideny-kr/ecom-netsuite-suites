@@ -199,3 +199,123 @@ async def test_bulk_page_timeout_saves_smaller_retry_without_cursor_change():
     assert "page" not in progress["dependency_scan"]
     assert "destination_scan_count" not in progress
     calls["read_owners"].assert_not_awaited()
+
+
+async def test_staged_empty_streams_complete_without_empty_owner_inventories():
+    calls, progress, staging = ports(), {}, Staging()
+
+    async def empty(stream, after):
+        return {**page(stream), "changes": []}
+
+    calls["read_page"].side_effect = empty
+    checkpoints = 0
+    while not progress.get("dependency_scan_complete"):
+        assert checkpoints < 16
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        progress = deepcopy(progress)  # Resume from each committed checkpoint.
+        checkpoints += 1
+    assert checkpoints == 11  # Previously 16, with the same five provider pages.
+    assert [c.args[0] for c in calls["read_page"].call_args_list] == list(dependency_scan.STREAMS)
+    assert len(staging.values) == 5
+    calls["read_owners"].assert_not_awaited()
+    calls["indexed_owners"].assert_not_awaited()
+    calls["unobserved"].assert_not_awaited()
+
+
+async def test_legacy_inline_empty_page_still_stages_owners_to_reauthorize():
+    calls, staging = ports(), Staging()
+    progress = {
+        "dependency_scan": {
+            "version": 1,
+            "stream_index": 0,
+            "after": None,
+            "page": {**page(), "changes": []},
+        }
+    }
+    await dependency_scan.advance(progress, staging=staging, **calls)
+    assert progress["dependency_scan"]["stream_index"] == 0
+    assert "owners" in progress["dependency_scan"]
+    assert list(staging.values.values()) == [{"order_references": [], "inventory": []}]
+    calls["read_page"].assert_not_awaited()
+    calls["read_owners"].assert_not_awaited()
+
+
+async def test_staged_satisfied_owners_advance_without_an_extra_cursor_checkpoint():
+    calls, progress, staging = ports(page(more=True)), {}, Staging()
+    calls["unobserved"].return_value = []
+    calls["unobserved"].side_effect = None
+    for _ in range(2):
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        progress = deepcopy(progress)
+        assert progress["dependency_scan"]["after"] is None
+    await dependency_scan.advance(progress, staging=staging, **calls)
+    assert progress["pending_refs"] == []
+    assert progress["dependency_scan"]["after"] == [17]
+    assert "page" not in progress["dependency_scan"]
+    assert progress["destination_scan_count"] == 1
+    calls["unobserved"].assert_awaited_once_with([A, B, C], since=END)
+    calls["read_page"].assert_awaited_once()
+    calls["read_owners"].assert_awaited_once()
+
+
+async def test_staged_pending_evidence_still_prevents_cursor_advance():
+    calls, progress, staging = ports(page(more=True)), {}, Staging()
+    for _ in range(3):
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        progress = deepcopy(progress)
+    assert progress["pending_refs"] == [A, B, C]
+    assert progress["dependency_scan"]["after"] is None
+    assert "page" in progress["dependency_scan"] and "owners" in progress["dependency_scan"]
+    calls["read_page"].assert_awaited_once()
+    calls["read_owners"].assert_awaited_once()
+
+
+async def test_satisfied_current_owners_do_not_skip_remaining_old_owner_pages():
+    calls, progress, staging = ports(page(more=True)), {}, Staging()
+    calls["unobserved"].side_effect = None
+    calls["unobserved"].return_value = []
+    calls["indexed_owners"].side_effect = [
+        {"order_references": [A], "has_more": True, "next_after_reference": A},
+        {"order_references": [C], "has_more": False, "next_after_reference": None},
+    ]
+    for _ in range(3):
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        progress = deepcopy(progress)
+    assert progress["pending_refs"] == []
+    assert progress["dependency_scan"]["after"] is None
+    await dependency_scan.advance(progress, staging=staging, **calls)
+    assert progress["dependency_scan"]["after"] == [17]
+    assert calls["indexed_owners"].call_args.kwargs["after_reference"] == A
+    assert [c.args[0] for c in calls["unobserved"].call_args_list] == [[A, B], [C]]
+
+
+async def test_satisfied_owners_do_not_skip_split_chunks():
+    value = page(more=True)
+    value["changes"] = [{"record_keys": [["transaction", str(i)]]} for i in range(1, 6)]
+    value["next_cursor"] = [5]
+    calls, progress, staging = ports(value), {}, Staging()
+    calls["unobserved"].side_effect = None
+    calls["unobserved"].return_value = []
+    await dependency_scan.advance(progress, staging=staging, **calls)
+    progress["dependency_scan"]["owner_chunk_size"] = 2
+    for _ in range(6):
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        progress = deepcopy(progress)
+    assert [c.kwargs["document_ids"] for c in calls["read_owners"].call_args_list] == [["1", "2"], ["3", "4"], ["5"]]
+    assert progress["dependency_scan"]["after"] == [5]
+    calls["read_page"].assert_awaited_once()
+
+
+async def test_satisfied_deletion_owners_keep_post_page_observation_floor():
+    calls, staging = ports(page("deletions")), Staging()
+    progress = {"dependency_scan": {"version": 1, "stream_index": 4, "after": None}}
+    calls["unobserved"].side_effect = None
+    calls["unobserved"].return_value = []
+    for _ in range(3):
+        await dependency_scan.advance(progress, staging=staging, **calls)
+        progress = deepcopy(progress)
+    assert progress["dependency_scan"]["stream_index"] == 5
+    calls["unobserved"].assert_awaited_once_with([B, C], since=OBSERVED)
+    calls["read_owners"].assert_not_awaited()
+    await dependency_scan.advance(progress, staging=staging, **calls)
+    assert progress["dependency_scan_complete"] and progress["destination_scan_complete"]
