@@ -379,3 +379,52 @@ async def test_legacy_pending_dispatch_is_retired_without_replay_or_blocking_new
     assert retired.result_summary["reason"] == "blocked"
     await jobs.run_schedule_now(db, sid, tenant_id=tid, actor_id=None, existing_job_id=legacy_id)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("query_state", ["pending", "complete"])
+async def test_deleted_schedule_retains_query_receipts(db, query_state):
+    from app.core.database import set_tenant_context
+    from tests.conftest import create_test_tenant
+
+    tenant = await create_test_tenant(db, name="Orphan query evidence")
+    tid = tenant.id
+    await set_tenant_context(db, str(tid))
+    sid = uuid.uuid4()
+    receipts = [{"state": query_state, "bytes_processed": 123, "query_sha256": "synthetic"}]
+    orphan = Job(
+        tenant_id=tid,
+        job_type="scheduled_job",
+        status="running",
+        parameters={"schedule_id": str(sid)},
+        result_summary={"report_queries": receipts, "outputs": {"prior": {"bytes_processed": 123}}},
+    )
+    db.add(orphan)
+    await db.commit()
+    jid = orphan.id
+    await jobs.run_schedule_now(db, sid, tenant_id=tid, actor_id=None, existing_job_id=jid)
+    await db.refresh(orphan)
+    assert orphan.result_summary["report_queries"] == receipts
+    assert orphan.result_summary["outputs"]["prior"]["bytes_processed"] == 123
+    assert orphan.result_summary["verification"] == "uncertain"
+
+
+async def test_finalizer_double_failure_preserves_report_query_receipts(db, monkeypatch):
+    receipts = [{"state": "complete", "bytes_processed": 321}, {"state": "pending"}]
+
+    async def execute(ctx, params):
+        job = await db.get(Job, ctx.run_id)
+        job.result_summary = {**(job.result_summary or {}), "report_queries": receipts}
+        await db.commit()
+        raise RuntimeError("synthetic missing receipt")
+
+    tid, sid = await seed(db, monkeypatch, execute)
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("synthetic double finalizer failure")
+
+    monkeypatch.setattr(jobs, "_finalize_run", fail)
+    result = await jobs.run_schedule_now(db, sid, tenant_id=tid, actor_id=None)
+    job = await db.get(Job, result.jobs_row_id)
+    await db.refresh(job)
+    assert job.result_summary["report_queries"] == receipts
+    assert job.result_summary["verification"] == "uncertain"

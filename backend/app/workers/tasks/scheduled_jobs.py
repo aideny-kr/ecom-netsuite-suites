@@ -834,7 +834,12 @@ def _stamp_blocked_existing_job(job: Job | None, detail: str) -> uuid.UUID | Non
         return None
     job.status = "completed"
     job.completed_at = datetime.now(timezone.utc)
-    job.result_summary = {"reason": REASON_BLOCKED, "outputs": {}, "detail": detail}
+    job.result_summary = {
+        **(job.result_summary or {}),
+        "reason": REASON_BLOCKED,
+        "outputs": (job.result_summary or {}).get("outputs", {}),
+        "detail": detail,
+    }
     job.error_message = detail
     return job.id
 
@@ -1521,7 +1526,8 @@ async def _run_schedule_now_locked(
                 await db.execute(
                     text(
                         "UPDATE jobs SET status = 'failed', "
-                        "result_summary = CAST(:result_summary AS JSON), "
+                        "result_summary = CAST(COALESCE(CAST(result_summary AS JSONB), '{}'::jsonb) "
+                        "|| CAST(:result_summary AS JSONB) AS JSON), "
                         "error_message = :error_message, "
                         "completed_at = :completed_at "
                         "WHERE id = :job_id AND tenant_id = :tenant_id"

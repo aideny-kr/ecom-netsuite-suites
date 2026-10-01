@@ -410,8 +410,8 @@ def test_watch_item_zero_sku_delta_renders_no_change_not_zero_left():
     "delta,expected",
     [
         (0, "with no change in the number of aged SKUs"),
-        (-5, "as 5 SKUs left the 90+ buckets"),
-        (3, "as 3 SKUs entered the 90+ buckets"),
+        (-5, "with 5 fewer SKUs in the 90+ buckets"),
+        (3, "with 3 more SKUs in the 90+ buckets"),
     ],
 )
 def test_sku_delta_clause_zero_negative_positive(delta, expected):
@@ -435,8 +435,8 @@ def test_highlight_ordering_largest_mover_first():
     texts = [h.text for h in report.highlights]
     # Acme's aged-value mover ($2,000 swing) must outrank Initech's
     # denominator-attribution highlight ($400 swing) in the SAME (dollar) units.
-    mover_idx = next(i for i, t in enumerate(texts) if "Acme" in t and "driven by" in t)
-    attribution_idx = next(i for i, t in enumerate(texts) if "Initech" in t and "denominator moved" in t)
+    mover_idx = next(i for i, t in enumerate(texts) if "Acme" in t and "aged value rose" in t)
+    attribution_idx = next(i for i, t in enumerate(texts) if "Initech" in t and "total on-hand value fell" in t)
     assert mover_idx < attribution_idx
 
 
@@ -688,7 +688,7 @@ def test_narrative_paragraph2_improved_clause_uses_the_aged_buckets_wording():
     report = ia.compute(payloads, params)
     p2 = report.narrative.paragraph_2
     assert "and improved the most" in p2
-    assert "2 SKUs left the aged buckets" in p2
+    assert "2 fewer SKUs in the aged buckets" in p2
     assert "the 90+ buckets" not in p2
 
 
@@ -961,3 +961,15 @@ def test_json_safe_converts_decimal_date_and_dataclasses_never_through_float():
     import json
 
     json.dumps(safe)
+
+
+def test_narrative_never_infers_sku_lineage_or_exclusive_denominator_cause():
+    payloads, params = _full_fixture()
+    report = ia.compute(payloads, params)
+    text = " ".join(
+        [*(h.text for h in report.highlights), *(w.text for w in report.watch_items), report.narrative.paragraph_2]
+    )
+    assert "driven by" not in text
+    assert "SKUs entered" not in text and "SKUs left" not in text
+    assert "denominator moved, not" not in text
+    assert "1 more SKU in the 90+ buckets" in text

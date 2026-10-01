@@ -28,6 +28,10 @@ def corrupt(data, case):
         data["r_items"][0].update(days=100, last_restock_date="2026-05-31")
     elif case == "item_count":
         data["r_items"][0]["qty_on_hand"] += 1
+    elif case == "empty_prior_bucket":
+        data["r_prior"][1]["value_180p"] = 123
+    elif case == "empty_prior_qty":
+        data["r_prior"][1].update(skus_90p=0, qty_90p=1, value_90p=0)
     elif case == "prior_total":
         data["r_prior"][0]["value"] += 1
     elif case == "trend_percentage":
@@ -68,6 +72,8 @@ def corrupt(data, case):
     "case",
     [
         "current_total",
+        "empty_prior_bucket",
+        "empty_prior_qty",
         "item_count",
         "aged_total",
         "prior_total",
@@ -106,3 +112,29 @@ def test_rebuild_gate_blocks_inconsistent_source_before_render(monkeypatch):
     monkeypatch.setattr("app.services.report.report_html.build_inventory_aging_sections", forbidden)
     with pytest.raises(RefreshError, match="prior and same-date trend totals disagree"):
         rebuild_playbook_spec("inventory_aging", params, tables, composed_at="2026-10-01T00:00:00Z")
+
+
+def test_none_locations_uses_same_defaults_as_query_builder(monkeypatch):
+    from app.services.report import inventory_aging as ia
+
+    data, params = _full_fixture()
+    monkeypatch.setattr(ia, "DEFAULT_LOCATIONS", tuple(params["locations"]))
+    validate_source_controls(data, {**params, "locations": None})
+
+
+def test_decimal_cents_reconcile_without_float_sum_drift():
+    from app.services.report import inventory_aging as ia
+
+    data, params = _full_fixture()
+    # A 0.10 item change must equal an independently aggregated 0.10 change.
+    row = data["r_items"][0]
+    row["inventory_amount"] = str(Decimal(str(row["inventory_amount"])) + Decimal("0.10"))
+    trend = next(
+        t for t in data["r_trend"] if t["location"] == row["location"] and str(t["d"]) == str(row["snapshot_date"])
+    )
+    trend["total_value"] = str(Decimal(str(trend["total_value"])) + Decimal("0.10"))
+    trend["pct_90p"] = str(Decimal(str(trend["value_90p"])) / Decimal(trend["total_value"]) * 100)
+    validate_source_controls(data, params)
+    sources = ia.build_sources(params)
+    for rid in ("r_items", "r_prior", "r_trend"):
+        assert "CAST(s.inventory_amount AS NUMERIC) AS inventory_amount" in sources[rid]["params"]["query"]

@@ -375,6 +375,14 @@ async def refresh_report(
         # never fewer — the cost guard) rather than routing through those two statement-only
         # helpers. A statement recipe (no "playbook" key) is completely untouched below.
         playbook_meta = recipe.get("playbook")
+        if (
+            isinstance(playbook_meta, dict)
+            and playbook_meta.get("key") == "inventory_aging"
+            and playbook_meta.get("source_contract_version") != 2
+        ):
+            raise RefreshError(
+                409, "This inventory report uses an older source format. Recompose it before refreshing."
+            )
         if playbook_meta is not None:
             needed_rids = list(sources)
             required_rids = set(sources)
@@ -529,7 +537,9 @@ async def refresh_report(
             await db.commit()
         except Exception:
             logger.warning("report.refresh failure-audit write failed", exc_info=True)
-        if isinstance(exc, RefreshError):
+        from app.services.jobs.report_queries import ReportQueryBudgetError, ReportQueryUnknownError
+
+        if isinstance(exc, (RefreshError, ReportQueryBudgetError, ReportQueryUnknownError)):
             raise
         logger.warning("report.refresh unexpected failure", exc_info=True)
         raise RefreshError(500, detail) from exc

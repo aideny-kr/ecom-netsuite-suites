@@ -1065,3 +1065,31 @@ async def test_refresh_inventory_aging_composed_at_stamp_advances_on_refresh(db,
     assert head_model["composed_at"] != original_captured_at
     stamped = datetime.fromisoformat(head_model["composed_at"])
     assert (datetime.now(timezone.utc) - stamped).total_seconds() < 30
+
+
+async def test_legacy_inventory_recipe_refuses_before_query_and_preserves_report(db, monkeypatch):
+    _, recipe = build_playbook_recipe("inventory_aging", {})
+    del recipe["playbook"]["source_contract_version"]
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    calls = []
+    _patch_executor(monkeypatch, calls=calls)
+    with pytest.raises(RefreshError, match="Recompose it before refreshing") as error:
+        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+    assert error.value.status_code == 409
+    assert calls == []
+    await db.refresh(report)
+    assert report.rendered_html == "<html>v1</html>"
+    assert report.version == 1
+
+
+async def test_report_refresh_preserves_budget_error_type(db, monkeypatch):
+    from app.services.jobs.report_queries import ReportQueryBudgetError
+
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+
+    async def stop(*args, **kwargs):
+        raise ReportQueryBudgetError("scan ceiling exhausted")
+
+    monkeypatch.setattr("app.services.report.refresh_service._execute_sources", stop)
+    with pytest.raises(ReportQueryBudgetError, match="scan ceiling exhausted"):
+        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)

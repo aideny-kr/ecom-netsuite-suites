@@ -330,31 +330,17 @@ def _fmt_pts(value: Decimal) -> str:
     return f"{value}"
 
 
-def _sku_delta_clause(
-    delta: int,
-    *,
-    connector: str = "as",
-    left_verb: str = "left",
-    entered_verb: str = "entered",
-    bucket_noun: str = "the 90+ buckets",
-) -> str:
-    """Zero-count-safe SKU-delta clause for the aged buckets (render-polish brief
-    item 2). A literal ``0`` had been rendering as ``"as 0 SKUs left the 90+
-    buckets"`` -- a real threshold-fixture case (a location can cross the $50K
-    aged-VALUE threshold with its aged SKU COUNT unchanged, e.g. a pure
-    price/quantity move on the same positions) -- so zero gets its own honest
-    wording instead of an arbitrarily-picked direction word. ``connector``/
-    ``left_verb``/``entered_verb`` let both call sites (watch items' "as N SKUs
-    left/entered ..." and highlights' "driven by N SKUs leaving/entering ...")
-    share this one zero-handling rule while keeping their own grammar.
-    ``bucket_noun`` lets narrative paragraph 2 use its own pre-existing "the
-    aged buckets" phrasing (matching the mock's literal reference sentence)
-    while watch items/highlights keep "the 90+ buckets" -- the two call sites
-    were never meant to share this noun, only the zero-handling rule."""
+def _sku_delta_clause(delta: int, *, bucket_noun: str = "the 90+ buckets") -> str:
+    """Describe net count movement without inferring item entry/exit or causality.
+
+    Prior sources contain aggregates, not per-SKU lineage. A net count change
+    cannot establish which items moved or what drove a monetary change.
+    """
     if delta == 0:
         return "with no change in the number of aged SKUs"
-    verb = entered_verb if delta > 0 else left_verb
-    return f"{connector} {abs(delta)} SKUs {verb} {bucket_noun}"
+    noun = "SKU" if abs(delta) == 1 else "SKUs"
+    direction = "more" if delta > 0 else "fewer"
+    return f"with {abs(delta)} {direction} {noun} in {bucket_noun}"
 
 
 def _ordinal(n: int) -> str:
@@ -465,7 +451,8 @@ def _latest_cte(locs: str, snapshot_literal: str | None) -> str:
 def _r_items_sql(locs: str, snapshot_literal: str | None) -> str:
     return f"""WITH {_last_restock_ctes(locs, snapshot_literal)},
 {_latest_cte(locs, snapshot_literal)},
-cur AS (SELECT s.location, s.sku, s.item_desc, s.category, s.qty_on_hand, s.inventory_amount, s.snapshot_date
+cur AS (SELECT s.location, s.sku, s.item_desc, s.category, s.qty_on_hand,
+               CAST(s.inventory_amount AS NUMERIC) AS inventory_amount, s.snapshot_date
         FROM {BQ_TABLE} s JOIN latest l ON l.location = s.location AND l.d = s.snapshot_date WHERE s.qty_on_hand > 0)
 SELECT c.*, r.last_restock_date, DATE_DIFF(c.snapshot_date, r.last_restock_date, DAY) AS days,
        {_bucket_case("DATE_DIFF(c.snapshot_date, r.last_restock_date, DAY)")} AS bucket
@@ -478,7 +465,7 @@ def _r_prior_sql(locs: str, compare_days: int, snapshot_literal: str | None) -> 
 prior_date AS (SELECT location, DATE_SUB(d, INTERVAL {compare_days} DAY) AS d FROM latest),
 {_last_restock_ctes(locs, None)},
 snap AS (
-  SELECT s.location, s.sku, s.qty_on_hand, s.inventory_amount, s.snapshot_date
+  SELECT s.location, s.sku, s.qty_on_hand, CAST(s.inventory_amount AS NUMERIC) AS inventory_amount, s.snapshot_date
   FROM {BQ_TABLE} s JOIN prior_date p ON p.location = s.location AND p.d = s.snapshot_date
   WHERE s.qty_on_hand > 0),
 withbucket AS (
@@ -513,7 +500,8 @@ distinct_days AS (
         JOIN latest l ON l.location = s.location
         WHERE s.qty_on_hand > 0 AND s.snapshot_date <= l.d)),
 ranked AS (
-  SELECT s.location, s.sku, s.snapshot_date, s.qty_on_hand, s.inventory_amount, dd.day_rn
+  SELECT s.location, s.sku, s.snapshot_date, s.qty_on_hand,
+         CAST(s.inventory_amount AS NUMERIC) AS inventory_amount, dd.day_rn
   FROM {BQ_TABLE} s
   JOIN distinct_days dd ON dd.location = s.location AND dd.d = s.snapshot_date
   WHERE s.qty_on_hand > 0),
@@ -603,7 +591,8 @@ def validate_source_controls(payloads: dict[str, list[dict]], params: dict[str, 
     report's one-decimal display rounding. No materiality threshold hides a
     monetary mismatch. These controls do not establish currency or valuation.
     """
-    locations = _validate_locations(params.get("locations", list(DEFAULT_LOCATIONS)))
+    raw_locations = params.get("locations")
+    locations = _validate_locations(list(DEFAULT_LOCATIONS) if raw_locations is None else raw_locations)
     compare_days = _validate_positive_int(params.get("compare_days", DEFAULT_COMPARE_DAYS), "compare_days")
 
     def fail(reason: str) -> None:
@@ -692,6 +681,18 @@ def validate_source_controls(payloads: dict[str, list[dict]], params: dict[str, 
             prior, "qty_90p"
         ) > number(prior, "qty"):
             fail("inconsistent prior counts")
+
+        for count_key, value_keys in (
+            ("skus", ("qty", "value")),
+            ("skus_90p", ("qty_90p", "value_90p")),
+            ("skus_180p", ("value_180p",)),
+        ):
+            if number(prior, count_key) == 0 and any(number(prior, key) != 0 for key in value_keys):
+                fail("nonzero value or quantity in an empty prior bucket")
+        if (number(prior, "skus") > 0 and number(prior, "qty") == 0) or (
+            number(prior, "skus_90p") > 0 and number(prior, "qty_90p") == 0
+        ):
+            fail("nonempty prior bucket has zero quantity")
 
         trend = {}
         for row in grouped["r_trend"][loc]:
@@ -1057,19 +1058,16 @@ def _highlights(
                 aged_word = "rose" if loc.aged90_value_delta > 0 else "fell"
                 text = (
                     f"{loc.location}'s aged share {share_word} {_fmt_pts(abs(loc.aged90_share_delta_pts))} pts to "
-                    f"{_fmt_pct(loc.aged90_share_pct)} because total on-hand value {total_word} "
+                    f"{_fmt_pct(loc.aged90_share_pct)}; total on-hand value {total_word} "
                     f"{_fmt_money(abs(loc.delta_value))} ({_fmt_signed_pct(loc.delta_pct)}) while aged value "
-                    f"{aged_word} {_fmt_money(abs(loc.aged90_value_delta))}: the denominator moved, not the "
-                    "aged stock."
+                    f"{aged_word} {_fmt_money(abs(loc.aged90_value_delta))}."
                 )
                 candidates.append(Highlight(text=text, impact=abs(loc.delta_value)))
 
     mover = max(locations, key=lambda loc: abs(loc.aged90_value_delta))
     if mover.aged90_value_delta != 0:
         verb = "rose" if mover.aged90_value_delta > 0 else "fell"
-        driver_clause = _sku_delta_clause(
-            mover.skus_90p_delta, connector="driven by", left_verb="leaving", entered_verb="entering"
-        )
+        driver_clause = _sku_delta_clause(mover.skus_90p_delta)
         text = (
             f"{mover.location}'s aged value {verb} {_fmt_money(abs(mover.aged90_value_delta))} "
             f"({_fmt_signed_pct(mover.aged90_value_delta_pct)}), {driver_clause}."
