@@ -60,6 +60,7 @@ REPLICA_READ_CODES = TRANSIENT_REPLICA_READ_CODES | frozenset(
     {
         "replica_evidence_incomplete",
         "replica_authentication_required",
+        "replica_query_failed",
         "replica_database_mismatch",
         "replica_schema_mismatch",
         "replica_page_incomplete",
@@ -234,9 +235,13 @@ async def _rows(db, tenant_id, binding, table, filters, limit, *, now):
             raise ReplicaReadError("replica_response_too_large")
         if "database_id" in result and result["database_id"] != binding.database_id:
             raise ReplicaReadError("replica_database_mismatch")
-        # A fixed read may be reissued within the existing retry/cost bounds,
-        # but no rows or cursor from an unfinished/failed query are consumed.
-        if result.get("status") in {"pending", "running", "failed"}:
+        # The provider's query contract does not distinguish temporary and
+        # permanent failed queries. Do not guess from its free-text error.
+        if result.get("status") == "failed":
+            raise ReplicaReadError("replica_query_failed")
+        # An unfinished fixed read may be reissued within the existing bounds;
+        # no rows or cursor from an unfinished query are consumed.
+        if result.get("status") in {"pending", "running"}:
             raise ReplicaReadError("replica_query_incomplete")
         if result.get("status") != "completed":
             raise ReplicaReadError("replica_response_invalid")
@@ -245,10 +250,10 @@ async def _rows(db, tenant_id, binding, table, filters, limit, *, now):
         started = datetime.fromisoformat(result["started_at"])
         if started.utcoffset() is None:
             raise ReplicaReadError("replica_response_invalid")
-        if not -30 <= (now - started).total_seconds() <= 120:
-            raise ReplicaReadError("replica_read_not_fresh")
         if result.get("cached") not in (False, None):
             raise ReplicaReadError("replica_cached_response")
+        if not -30 <= (now - started).total_seconds() <= 120:
+            raise ReplicaReadError("replica_read_not_fresh")
         if result.get("continuation_token") is not None:
             raise ReplicaReadError("replica_page_incomplete")
         data = result["data"]

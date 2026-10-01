@@ -69,7 +69,11 @@ class PublicHTTPTransport(httpx.AsyncBaseTransport):
             ips = [ipaddress.ip_address(row[4][0]) for row in addresses]
             if not ips or any(not address.is_global for address in ips):
                 raise UnsafeEndpointError()
-        except (OSError, ValueError, TimeoutError):
+        except (OSError, TimeoutError):
+            # Failure to resolve is a transport outage, not proof of a private
+            # destination. No credential/request is sent until DNS is validated.
+            raise httpx.ConnectError("Public endpoint DNS lookup failed.", request=request) from None
+        except ValueError:
             raise UnsafeEndpointError() from None
         headers = request.headers.copy()
         headers["Host"] = request.url.netloc.decode("ascii")

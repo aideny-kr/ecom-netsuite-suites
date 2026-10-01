@@ -84,7 +84,8 @@ def _tool_timeout_seconds(tool_name: str) -> float:
 async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) -> str | None:
     """Get a valid OAuth2 access token, auto-refreshing if expired.
 
-    Returns the access token string, or None if refresh fails.
+    Returns the access token string, or None if authorization is unavailable.
+    Temporary Metabase refresh outages raise a safe OAuthError for read recovery.
     Updates the connector's encrypted_credentials in-place if a refresh occurs.
     """
     from app.services.metabase_oauth_service import get_token, is_metabase
