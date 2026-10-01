@@ -536,3 +536,13 @@ def test_control_sentences_name_their_column_when_a_table_has_several_measures()
     statement = evidence._control_statement(grouped)
     assert "⚠ Distinct values of ID: the groups overlap" in statement
     assert "✓ Sum of Quantity: the rows add up to the overall total." in statement
+
+
+def test_headers_keep_an_alias_with_no_known_entity_and_timestamps_keep_their_offset():
+    # T2 gate round 2 on #369, findings 9 and 10.
+    from app.services.chat.metabase_evidence import _display_columns, _display_value
+
+    assert _display_columns(["o → ID", "p → ID"], {"stages": [{"joins": []}]}) == ["o → ID", "p → ID"]
+    assert _display_value("2026-03-31T23:30:00-08:00", numeric=False) == "2026-03-31T23:30:00-08:00"
+    assert _display_value("2026-09-30T00:00:00-07:00", numeric=False) == "2026-09-30"
+    assert _display_value(0.00000015, numeric=True) == "0.00000015"

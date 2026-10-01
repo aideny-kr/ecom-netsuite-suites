@@ -323,9 +323,10 @@ TOOL_REGISTRY = {
             "Show a query result to the user as a finished result card: title, readable column "
             "labels and formats, a totals row, an optional share-of-total column and summary tiles. "
             "Call it once per table the answer should show, after the query, with the result_id the "
-            "query returned. The server computes every total, share and tile -- you supply labels "
-            "only. Distinct counts get a total only from control_result_id: an ungrouped result "
-            "with the same filters and column names (for example the overall count you ran earlier). "
+            "query returned. You supply labels only. Totals, the share column and the tiles come "
+            "ONLY from control_result_id: an ungrouped result with the same filters and the same "
+            "column names (the overall total you ran earlier, or run one); the server never adds "
+            "rows up and checks the rows against that total. "
             "Use collapsed=true for a secondary breakdown, and no_total_reason when the rows must "
             "not be added together (for example amounts in different currencies)."
         ),
@@ -362,7 +363,10 @@ TOOL_REGISTRY = {
             "share_label": {"type": "string", "description": "Header for the share column, e.g. 'Share of value'."},
             "control_result_id": {
                 "type": "string",
-                "description": "Ungrouped single-row result with the same filters, used for totals and the check.",
+                "description": (
+                    "Ungrouped single-row result with the same filters and column names. The only source of "
+                    "totals, shares and tiles; the rows are checked against it."
+                ),
             },
             "totals": {"type": "boolean", "description": "Show a totals row (default true)."},
             "tiles": {"type": "boolean", "description": "Show summary tiles above the card (default false)."},

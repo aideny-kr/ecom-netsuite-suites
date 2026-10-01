@@ -78,16 +78,19 @@ def _display_value(value, *, numeric: bool) -> str:
     Only aggregate (measure) columns get number formatting: identifier columns
     such as order numbers must never gain thousands separators."""
     if isinstance(value, str):
+        # Day buckets ("Completed At: Day") arrive as local midnight; show the date.
+        # Any other timestamp keeps its full text, offset included.
         match = _ISO_DATETIME.match(value)
-        if match:
-            return match[1] if match[2] == "00:00" else f"{match[1]} {match[2]}"
+        if match and re.search(r"T00:00(?::00(?:\.0+)?)?(?:Z|[+-]\d{2}:?\d{2})?$", value):
+            return match[1]
         return value
     number = _decimal(value) if numeric else None
     if number is None:
         return str(value)
     if number == number.to_integral_value():
         return f"{int(number):,}"
-    return f"{number:,.2f}" if abs(number.as_tuple().exponent) <= 2 else f"{number:,}"
+    # Fixed-point, never scientific notation; at least two decimals.
+    return f"{number:,.{max(2, -number.as_tuple().exponent)}f}"
 
 
 def _cell(value, *, display: bool = False, numeric: bool = False) -> str:
@@ -134,8 +137,9 @@ def _display_columns(columns: list[str], query: dict) -> list[str]:
 
     def label(column: str) -> str:
         def swap(match: re.Match) -> str:
+            # Without a known entity the alias stays, so "o → ID" and "p → ID" remain distinct.
             entity = entities.get(match[1])
-            return f"{entity} " if entity else ""
+            return f"{entity} " if entity else match[0]
 
         return _ALIAS_ARROW.sub(swap, column).strip() or column
 

@@ -124,7 +124,7 @@ def test_present_card_matches_the_approved_mock():
         row_label_plural="countries",
         columns={
             "ship_country": {"label": "Country"},
-            "yucca_line_amount_usd": {"label": "Yucca line value", "format": "currency"},
+            "yucca_line_amount_usd": {"label": "Yucca line value", "format": "currency", "currency": "USD"},
         },
         sort_by="yucca_line_amount_usd",
         share_of="yucca_line_amount_usd",
@@ -158,11 +158,11 @@ def test_present_card_matches_the_approved_mock():
     assert card["queries"] == [{"label": "SuiteQL query", "text": COUNTRY_SQL}]
 
 
-def test_distinct_count_gets_no_total_without_a_control():
-    spec = PresentResult(result_id="r9", title="By country")
-    card = build_present_card(spec, ns_country(), None)
-    assert card["totals"] == [None, None, 240, 1591780.86]
-    assert card["check"] is None
+def test_without_a_control_there_is_no_total_at_all():
+    # Totals are the source's own overall figures (gate round 2 on #369): rows are never
+    # added up here, so without an ungrouped control the card shows no total row.
+    card = build_present_card(PresentResult(result_id="r9", title="By country", tiles=True), ns_country(), None)
+    assert card["totals"] is None and card["check"] is None and card["tiles"] == []
 
 
 def test_overlapping_groups_are_flagged_against_the_control():
@@ -335,7 +335,7 @@ def test_detail_rows_keep_identifiers_verbatim_and_get_no_total_row():
     assert card["totals"] is None and card["totals_label"] is None
 
 
-def test_totals_cover_every_stored_row_not_just_the_displayed_ones():
+def test_the_check_covers_every_stored_row_not_just_the_displayed_ones():
     rows = [[f"k{i}", "1", "2"] for i in range(800)]
     loaded = {
         "tool": "netsuite_suiteql",
@@ -346,18 +346,54 @@ def test_totals_cover_every_stored_row_not_just_the_displayed_ones():
             "query": "SELECT k, COUNT(*) AS n, SUM(v) AS v FROM t GROUP BY k",
         },
     }
-    card = build_present_card(PresentResult(result_id="r1", title="t", sort_by="v"), loaded, None)
+    control = {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["n", "v"], "rows": [["800", "1600"]]}}
+    card = build_present_card(
+        PresentResult(result_id="r1", title="t", sort_by="v", control_result_id="r2"), loaded, control
+    )
     assert card["totals"] == [None, 800, 1600] and card["totals_label"] == "Total · 800 rows"
+    assert card["check"]["status"] == "ok"
     assert len(card["rows"]) == 500 and card["truncated"] is True
 
 
-def test_a_partial_stored_result_gets_no_summed_total():
+def test_a_row_limited_query_never_reads_as_the_whole_population():
+    # SELECT ... FETCH FIRST 10 ROWS ONLY comes back "complete": its rows add up to less
+    # than the overall figure, and the card says so instead of showing their sum.
+    loaded = ns_country()
+    loaded["payload"] = {**loaded["payload"], "rows": NS_ROWS[:3]}
+    card = build_present_card(
+        PresentResult(result_id="r9", title="t", control_result_id="r5", share_of="yucca_line_amount_usd"),
+        loaded,
+        ns_total(),
+    )
+    assert card["totals"] == [None, 228, 240, 1591780.86]
+    assert card["check"]["status"] == "warn" and "less than the overall total" in card["check"]["text"]
+    assert card["share"]["values"][0] == 72.1  # of the real overall total, not of three rows
+
+
+def test_blank_cells_cannot_be_reconciled():
+    loaded = ns_country()
+    loaded["payload"] = {**loaded["payload"], "rows": [[*NS_ROWS[0][:3], None], *NS_ROWS[1:]]}
+    card = build_present_card(PresentResult(result_id="r9", title="t", control_result_id="r5"), loaded, ns_total())
+    assert card["check"]["status"] == "warn" and "cannot be checked" in card["check"]["text"]
+
+
+def test_a_currency_is_never_guessed():
+    loaded = ns_country()
+    card = build_present_card(
+        PresentResult(result_id="r9", title="t", columns={"yucca_line_amount_usd": {"format": "currency"}}),
+        loaded,
+        None,
+    )
+    assert card["columns"][3]["format"] == "number" and card["columns"][3]["currency"] is None
+
+
+def test_a_partial_stored_result_counts_its_real_rows():
     loaded = ns_country()
     loaded["payload"] = {**loaded["payload"], "truncated": True, "row_count": 3000}
     card = build_present_card(
         PresentResult(result_id="r9", title="t", tiles=True, row_label_plural="countries"), loaded, None
     )
-    assert card["totals"] is None and card["check"]["status"] == "warn" and "partial" in card["check"]["text"]
+    assert card["totals"] is None and card["truncated"] is True
     assert card["tiles"] == [{"label": "Countries", "value": 3000, "format": "integer"}]
 
 
@@ -408,7 +444,7 @@ def test_a_key_or_value_missing_on_one_side_is_a_difference_not_a_match():
         _compare(), _table([["X", 1], ["Y", 9], ["Z", 5]]), _table([["X", 1], ["Z", None]]), (None, None)
     )
     assert card["headline"] == "Units differ in 2 countries."
-    assert "Only in NetSuite: Y." in card["detail"] and "blank in one source for Z" in card["detail"]
+    assert "Only in NetSuite: Y." in card["detail"] and "cannot be compared for Z" in card["detail"]
     assert facts["matching"] == []
 
 
@@ -446,3 +482,53 @@ def test_duplicate_measure_labels_are_rejected():
         _compare(
             measures=[{"left": "a", "right": "a", "label": "Units"}, {"left": "b", "right": "b", "label": "units"}]
         )
+
+
+# --- T2 gate round 2 on #369 (wf_57f49e9b-30f) ---
+
+
+def test_a_blank_key_is_compared_like_any_other():
+    card, facts = build_compare_card(
+        _compare(), _table([["X", 1], [None, 4]]), _table([["X", 1], [None, 4]]), (None, None)
+    )
+    assert card["headline"] == "Units match NetSuite in every country."
+    assert sorted(r[0] for r in card["rows"]) == ["(blank)", "X"]
+    card, _ = build_compare_card(_compare(), _table([["X", 1], [None, 4]]), _table([["X", 1]]), (None, None))
+    assert card["detail"] == "Only in NetSuite: (blank)."
+
+
+def test_a_partial_comparison_never_claims_every_key_matches():
+    left = _table([["X", 1], ["Y", 2]])
+    left["payload"]["truncated"] = True
+    card, facts = build_compare_card(_compare(), left, _table([["X", 1], ["Y", 2]]), (None, None))
+    assert card["headline"] == "Units match NetSuite in every country shown."
+    assert "partial" in card["detail"] and card["truncated"] is True and facts["partial"] is True
+
+
+def test_two_qualified_names_never_pair_even_alone():
+    card, facts = build_compare_card(
+        _compare(), _table([["Congo (Kinshasa)", 3]]), _table([["Congo (Brazzaville)", 3]]), (None, None)
+    )
+    assert facts["only_in_left"] == ["Congo (Kinshasa)"] and facts["only_in_right"] == ["Congo (Brazzaville)"]
+
+
+def test_unreadable_values_are_never_a_match():
+    card, facts = build_compare_card(_compare(), _table([["X", "error"]]), _table([["X", "10x"]]), (None, None))
+    assert card["headline"] == "Units differ in 1 country." and facts["matching"] == []
+
+
+def test_comparison_rows_are_capped_with_differences_first():
+    left = _table([[f"k{i}", 1] for i in range(700)])
+    right = _table([[f"k{i}", 2 if i == 650 else 1] for i in range(700)])
+    card, _ = build_compare_card(_compare(), left, right, (None, None))
+    assert len(card["rows"]) == 500 and card["truncated"] is True
+    visible = [r[0] for r in card["rows"][: card["top_n"]]]
+    assert "k650" in visible and card["row_flags"][visible.index("k650")] == "diff"
+
+
+async def test_a_pivoted_result_is_refused():
+    from app.mcp.tools.result_card_tool import _check_access
+
+    payload = {"columns": ["a"], "rows": [[1]], "source_kind": "metabase", "pivot_provenance": {}}
+    with pytest.raises(ValueError, match="pivoted"):
+        await _check_access(None, None, "pivot_query_result", payload)

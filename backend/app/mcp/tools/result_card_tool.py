@@ -101,52 +101,66 @@ class CompareResults(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _load(context: dict, rid: str) -> dict[str, Any]:
-    """Resolve ``rid`` to ``{payload, tool, as_of}`` for this actor's conversation.
+class _Loader:
+    """Resolves result ids for one tool call: authorises once, reads history once.
 
     Same-turn results come from the full-payload sidecar; earlier turns from the
     persisted assistant messages, numbered exactly like
     ``resolve_payload_from_messages`` (explicit result_id first, then position).
     """
-    from app.mcp.tools.result_pivot import _authorize
-    from app.services.chat.result_cache import get_full_payload_entry
-    from app.services.chat.tool_call_results import load_conversation_tool_messages
 
-    db, tenant, session = await _authorize(context)
-    entry = None
-    try:
-        sidecar = get_full_payload_entry(str(session), rid)
-    except Exception:
-        sidecar = None
-    if isinstance(sidecar, dict) and isinstance(sidecar.get("payload"), dict):
-        entry = {"payload": sidecar["payload"], "tool": sidecar.get("tool") or "", "as_of": None}
-    if entry is None:
-        messages = await load_conversation_tool_messages(db, session, tenant)
-        positional, fallback = 0, None
-        for message in messages:
-            for call in message.tool_calls if isinstance(message.tool_calls, list) else []:
-                if not isinstance(call, dict) or not isinstance(call.get("result_payload"), dict):
-                    continue
-                positional += 1
-                found = {"payload": call["result_payload"], "tool": call.get("tool") or "", "as_of": message.created_at}
-                if call.get("result_id") == rid:
-                    entry = found
+    def __init__(self, context: dict):
+        self.context = context
+        self.auth = None
+        self.messages = None
+
+    async def load(self, rid: str) -> dict[str, Any]:
+        from app.mcp.tools.result_pivot import _authorize
+        from app.services.chat.result_cache import get_full_payload_entry
+        from app.services.chat.tool_call_results import load_conversation_tool_messages
+
+        if self.auth is None:
+            self.auth = await _authorize(self.context)
+        db, tenant, session = self.auth
+        entry = None
+        try:
+            sidecar = get_full_payload_entry(str(session), rid)
+        except Exception:
+            sidecar = None
+        if isinstance(sidecar, dict) and isinstance(sidecar.get("payload"), dict):
+            entry = {"payload": sidecar["payload"], "tool": sidecar.get("tool") or "", "as_of": None}
+        if entry is None:
+            if self.messages is None:
+                self.messages = await load_conversation_tool_messages(db, session, tenant)
+            positional, fallback = 0, None
+            for message in self.messages:
+                for call in message.tool_calls if isinstance(message.tool_calls, list) else []:
+                    if not isinstance(call, dict) or not isinstance(call.get("result_payload"), dict):
+                        continue
+                    positional += 1
+                    found = {
+                        "payload": call["result_payload"],
+                        "tool": call.get("tool") or "",
+                        "as_of": message.created_at,
+                    }
+                    if call.get("result_id") == rid:
+                        entry = found
+                        break
+                    if fallback is None and f"r{positional}" == rid:
+                        fallback = found
+                if entry is not None:
                     break
-                if fallback is None and f"r{positional}" == rid:
-                    fallback = found
-            if entry is not None:
-                break
-        entry = entry or fallback
-    if entry is None:
-        raise ValueError(f"Result {rid} is unavailable. Run the query again for a fresh result_id.")
-    payload = entry["payload"]
-    if not isinstance(payload.get("columns"), list) or not isinstance(payload.get("rows"), list):
-        raise ValueError(f"Result {rid} is not a table.")
-    await _check_access(db, tenant, entry["tool"], payload)
-    as_of = entry["as_of"] or datetime.now(UTC)
-    if isinstance(as_of, datetime) and as_of.tzinfo is None:
-        as_of = as_of.replace(tzinfo=UTC)
-    return {**entry, "as_of": as_of.isoformat() if isinstance(as_of, datetime) else str(as_of)}
+            entry = entry or fallback
+        if entry is None:
+            raise ValueError(f"Result {rid} is unavailable. Run the query again for a fresh result_id.")
+        payload = entry["payload"]
+        if not isinstance(payload.get("columns"), list) or not isinstance(payload.get("rows"), list):
+            raise ValueError(f"Result {rid} is not a table.")
+        await _check_access(db, tenant, entry["tool"], payload)
+        as_of = entry["as_of"] or datetime.now(UTC)
+        if isinstance(as_of, datetime) and as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=UTC)
+        return {**entry, "as_of": as_of.isoformat() if isinstance(as_of, datetime) else str(as_of)}
 
 
 async def _check_access(db, tenant, tool: str, payload: dict) -> None:
@@ -156,6 +170,10 @@ async def _check_access(db, tenant, tool: str, payload: dict) -> None:
     from app.services.policy_service import get_active_policy
 
     source = payload.get("metabase_source")
+    if payload.get("source_kind") == "metabase" and not isinstance(source, dict):
+        # A pivot of Metabase results carries no bound connector to re-check, and it
+        # is already shown as its own table.
+        raise ValueError("A pivoted result is already displayed; present the result it was pivoted from instead.")
     if isinstance(source, dict):
         from app.models.mcp_connector import McpConnector
         from app.services.chat.metabase_tool_policy import is_read_only_metabase_tool
@@ -389,9 +407,8 @@ def _readable(name: str) -> str:
 
 
 def _infer_format(payload: dict, index: int, values: list[Decimal | None]) -> str:
-    column = payload["columns"][index]
-    if column in (payload.get("currency_columns") or []):
-        return "currency"
+    # A money-looking column without a known currency code is a plain number: the
+    # card never guesses USD (a mixed-currency column would otherwise read as dollars).
     present = [value for value in values if value is not None]
     if not present:
         return "text"
@@ -498,39 +515,36 @@ def _control_values(control: dict | None, columns: list[str]) -> dict[int, Decim
 
 
 def _totals(
-    columns: list[str], numbers: list[list[Decimal | None]], kinds: list[str], control: dict[int, Decimal]
+    columns: list[str], numbers: list[list[Decimal | None]], control: dict[int, Decimal]
 ) -> tuple[list[Decimal | None], dict | None]:
-    """Per-column totals and a reconciliation check against the control, if any."""
-    totals: list[Decimal | None] = []
-    status, notes = "ok", []
-    for index, _ in enumerate(columns):
-        values = [row[index] for row in numbers]
-        if any(value is None for value in values) or not values:
-            totals.append(control.get(index))
-            continue
-        summed = sum(values, Decimal(0))
-        if index in control:
-            totals.append(control[index])
-            if summed != control[index]:
-                status = "warn"
-                notes.append("over" if summed > control[index] else "under")
-        elif kinds[index] in {"sum", "count"}:
-            totals.append(summed)
-        else:
-            totals.append(None)
+    """Totals come only from the source's own ungrouped control result, never from
+    adding the rows up here: the rows may be a capped page (FETCH FIRST n), mixed
+    currencies or a ratio, and only the source knows the real overall figure.
+
+    The check then states how the rows relate to that figure -- add up, more (groups
+    overlap), less (part of the total is outside these rows), or cannot be checked
+    (a row has no value) -- for every control column.
+    """
+    totals: list[Decimal | None] = [control.get(index) for index in range(len(columns))]
     if not control:
         return totals, None
-    if status == "ok":
-        return totals, {"status": "ok", "text": "The rows add up to the overall total."}
-    if "over" in notes:
-        return totals, {
-            "status": "warn",
-            "text": "The groups overlap, so the rows add up to more than the overall total shown.",
-        }
-    return totals, {
-        "status": "warn",
-        "text": "Some of the overall total falls outside these rows, so the rows add up to less than the total.",
+    outcomes = set()
+    for index, total in control.items():
+        values = [row[index] for row in numbers]
+        if not values or any(value is None for value in values):
+            outcomes.add("blank")
+            continue
+        summed = sum(values, Decimal(0))
+        outcomes.add("ok" if summed == total else "over" if summed > total else "under")
+    messages = {
+        "blank": "Some rows have no value, so they cannot be checked against the overall total.",
+        "over": "The rows add up to more than the overall total, so the groups overlap.",
+        "under": "The rows add up to less than the overall total; part of it falls outside these rows.",
     }
+    problems = [messages[key] for key in ("blank", "over", "under") if key in outcomes]
+    if not problems:
+        return totals, {"status": "ok", "text": "The rows add up to the overall total."}
+    return totals, {"status": "warn", "text": " ".join(problems)}
 
 
 # ---------------------------------------------------------------------------
@@ -551,21 +565,30 @@ def _range_note(values: list[Decimal | None], label: str) -> str:
 def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) -> dict:
     payload = loaded["payload"]
     columns = [str(column) for column in payload["columns"]]
-    # Every figure is computed over ALL stored rows; only the display is capped.
     rows = [list(row) for row in payload["rows"]]
     kinds = _aggregate_kinds(payload)
     for name in spec.columns:
         _column_index(payload, name, "columns")
     numbers = [[_number(value) for value in row] for row in rows]
-    # Only server aggregates are measures. Other columns keep their raw text, so an
-    # identifier such as "00123" is never reformatted as a number.
-    measure_indexes = [i for i, kind in enumerate(kinds) if kind in {"sum", "count", "distinct"}]
-    # A stored result that is itself partial cannot be summed: totals then come only
-    # from a control result.
+    control_values = _control_values(control, columns)
     partial = bool(payload.get("truncated"))
     row_count = payload.get("row_count")
     row_total = row_count if partial and isinstance(row_count, int) and row_count >= len(rows) else len(rows)
-    additive_kinds = ["other"] * len(columns) if partial else kinds
+
+    def given(column: str) -> ColumnSpec | None:
+        return next((c for name, c in spec.columns.items() if name.casefold() == column.casefold()), None)
+
+    # Measures are only formatted, never added up. A column is a measure when it is a
+    # server aggregate, has an overall total, or the model gave it a numeric format;
+    # anything else keeps its raw text (identifiers such as "00123" stay verbatim).
+    numeric_formats = {"integer", "number", "currency", "percent"}
+    measure_indexes = [
+        i
+        for i, column in enumerate(columns)
+        if kinds[i] in {"sum", "count", "distinct"}
+        or i in control_values
+        or ((g := given(column)) is not None and g.format in numeric_formats)
+    ]
 
     if spec.sort_by:
         sort_index = _column_index(payload, spec.sort_by, "sort_by")
@@ -579,32 +602,27 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
 
     column_meta = []
     for index, column in enumerate(columns):
-        given = next((s for name, s in spec.columns.items() if name.casefold() == column.casefold()), None)
-        fmt = (given.format if given and given.format else None) or (
+        g = given(column)
+        fmt = (g.format if g and g.format else None) or (
             _infer_format(payload, index, [row[index] for row in numbers]) if index in measure_indexes else "text"
         )
+        currency = g.currency if g else None
+        if fmt == "currency" and not currency:
+            fmt = "number"  # never guess a currency
         column_meta.append(
             {
                 "key": column,
-                "label": (given.label if given and given.label else None) or _readable(column),
+                "label": (g.label if g and g.label else None) or _readable(column),
                 "format": fmt,
-                "currency": (given.currency if given else None) or ("USD" if fmt == "currency" else None),
+                "currency": currency,
                 "align": "right" if index in measure_indexes else "left",
             }
         )
 
-    control_values = _control_values(control, columns)
     totals, check = (None, None)
-    if spec.totals and spec.no_total_reason is None and measure_indexes:
-        all_totals, check = _totals(columns, numbers, additive_kinds, control_values)
-        totals = [_json_number(all_totals[i]) if i in measure_indexes else None for i in range(len(columns))]
-        if all(total is None for total in totals):
-            totals = None
-        if partial and not control_values:
-            check = {
-                "status": "warn",
-                "text": "This is a partial result, so its rows cannot be added up; no total is shown.",
-            }
+    if spec.totals and spec.no_total_reason is None and control_values:
+        all_totals, check = _totals(columns, numbers, control_values)
+        totals = [_json_number(all_totals[i]) for i in range(len(columns))]
 
     shown = min(len(rows), _MAX_CARD_ROWS)
     out_rows = [
@@ -613,15 +631,15 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
     ]
 
     share = None
-    if spec.share_of:
+    if spec.share_of and totals:
         share_index = _column_index(payload, spec.share_of, "share_of")
-        total = _number(totals[share_index]) if totals else None
-        values = [numbers[r][share_index] for r in range(len(rows))]
+        total = _number(totals[share_index])
+        values = [numbers[r][share_index] for r in range(shown)]
         if total and total > 0 and all(value is not None and value >= 0 for value in values):
             share = {
                 "label": spec.share_label or f"Share of {column_meta[share_index]['label'].lower()}",
                 "of": share_index,
-                "values": [round(float(value / total * 100), 1) for value in values[:shown]],
+                "values": [round(float(value / total * 100), 1) for value in values],
             }
 
     plural = spec.row_label_plural or "rows"
@@ -722,41 +740,55 @@ def _side(loaded: dict, key: str, measures: list[str], control: dict | None) -> 
     payload = loaded["payload"]
     key_index = _column_index(payload, key, "key")
     indexes = [_column_index(payload, name, "measure") for name in measures]
-    kinds = _aggregate_kinds(payload)
-    if payload.get("truncated"):
-        kinds = ["other"] * len(kinds)
     rows: dict[str, dict] = {}
     for row in payload["rows"]:
-        full = _full_key(row[key_index])
+        raw = row[key_index]
+        full = _full_key(raw)
         if full in rows:
-            raise ValueError(f"The key {row[key_index]!r} appears more than once; group by the key first.")
-        rows[full] = {"raw": str(row[key_index]), "values": [_number(row[i]) for i in indexes]}
+            shown = "a blank value" if not full else repr(raw)
+            raise ValueError(f"The key has {shown} more than once; group by the key first.")
+        cells = [row[i] for i in indexes]
+        rows[full] = {
+            "raw": "(blank)" if raw is None or not str(raw).strip() else str(raw),
+            "values": [_number(cell) for cell in cells],
+            # A cell with content that is not a number cannot be compared.
+            "unreadable": [cell is not None and str(cell).strip() != "" and _number(cell) is None for cell in cells],
+        }
     numbers = [entry["values"] for entry in rows.values()]
     names = [payload["columns"][i] for i in indexes]
-    totals, check = _totals(names, numbers, [kinds[i] for i in indexes], _control_values(control, names))
-    return {"rows": rows, "totals": totals, "check": check, "query": _query_block(loaded["tool"], payload)}
+    totals, check = _totals(names, numbers, _control_values(control, names))
+    return {
+        "rows": rows,
+        "totals": totals,
+        "check": check,
+        "partial": bool(payload.get("truncated")),
+        "query": _query_block(loaded["tool"], payload),
+    }
 
 
 def _pair_keys(a_rows: dict, b_rows: dict) -> list[tuple[str | None, str | None, str]]:
-    """Pair keys across sources: exact (normalised) first, then by the cleaned key, but
-    only when the cleaned key is unique on BOTH sides -- "Congo (Kinshasa)" and
-    "Congo (Brazzaville)" never collapse into one country."""
+    """Pair keys across sources. Exact (normalised) keys pair first. A key then pairs with
+    its bare form only: "New Zealand" with "New Zealand/Aotearoa", "Taiwan" with "Taiwan
+    (Province of China)". Two qualified names ("Congo (Kinshasa)", "Congo (Brazzaville)")
+    never pair, whatever is on the other side."""
     pairs: dict[str, str] = {k: k for k in a_rows if k in b_rows}
-    left_clean, right_clean = {}, {}
-    for k in a_rows:
-        left_clean.setdefault(_norm_key(a_rows[k]["raw"]), []).append(k)
-    for k in b_rows:
-        right_clean.setdefault(_norm_key(b_rows[k]["raw"]), []).append(k)
     used_right = set(pairs.values())
     fallback: set[str] = set()
     for k in a_rows:
         if k in pairs:
             continue
-        clean = _norm_key(a_rows[k]["raw"])
-        lefts, rights = left_clean.get(clean, []), right_clean.get(clean, [])
-        if len(lefts) == 1 and len(rights) == 1 and rights[0] not in used_right:
-            pairs[k] = rights[0]
-            used_right.add(rights[0])
+        left_bare = _norm_key(a_rows[k]["raw"])
+        candidates = [
+            r
+            for r in b_rows
+            if r not in used_right
+            and _norm_key(b_rows[r]["raw"]) == left_bare
+            and (k == left_bare or r == left_bare)  # one side IS the bare name
+        ]
+        same_bare_left = [x for x in a_rows if _norm_key(a_rows[x]["raw"]) == left_bare]
+        if len(candidates) == 1 and len(same_bare_left) == 1:
+            pairs[k] = candidates[0]
+            used_right.add(candidates[0])
             fallback.add(k)
     out: list[tuple[str | None, str | None, str]] = []
     for k in a_rows:
@@ -810,15 +842,21 @@ def build_compare_card(
     b = _side(right, spec.key.right, [m.right for m in spec.measures], controls[1])
     paired = _pair_keys(a["rows"], b["rows"])
 
+    def entry_of(lk, rk):
+        return (
+            a["rows"].get(lk) if lk is not None else None,
+            b["rows"].get(rk) if rk is not None else None,
+        )
+
     def first_value(item):
-        entry = a["rows"].get(item[0]) if item[0] else b["rows"].get(item[1])
-        value = entry["values"][0]
+        left_row, right_row = entry_of(item[0], item[1])
+        value = (left_row or right_row)["values"][0]
         return Decimal("-Infinity") if value is None else value
 
     paired.sort(key=first_value, reverse=True)
 
-    # A value present on one side only (or a key in one source only) is a difference,
-    # never a silent match.
+    # A value present on one side only, a key in one source only, or a value that is
+    # not a number is a difference -- never a silent match.
     differing: dict[str, list[tuple[Decimal, str]]] = {m.label: [] for m in spec.measures}
     signed: dict[str, list[tuple[Decimal, str]]] = {m.label: [] for m in spec.measures}
     blank: dict[str, list[str]] = {m.label: [] for m in spec.measures}
@@ -826,46 +864,44 @@ def build_compare_card(
     only_right = [display for lk, rk, display in paired if lk is None]
     entries = []
     for lk, rk, display in paired:
-        left_row = a["rows"].get(lk) if lk else None
-        right_row = b["rows"].get(rk) if rk else None
-        values = []
+        left_row, right_row = entry_of(lk, rk)
+        both = left_row is not None and right_row is not None
+        values, row_differs = [], False
         for index, measure in enumerate(spec.measures):
             lv = left_row["values"][index] if left_row else None
             rv = right_row["values"][index] if right_row else None
-            if lv is not None and rv is not None:
-                if lv != rv:
-                    differing[measure.label].append((abs(rv - lv), display))
-                    signed[measure.label].append((rv - lv, display))
-            elif left_row and right_row and (lv is None) != (rv is None):
+            unreadable = any(side["unreadable"][index] for side in (left_row, right_row) if side)
+            if not both:
+                differing[measure.label].append((Decimal(0), display))
+            elif unreadable or (lv is None) != (rv is None):
                 differing[measure.label].append((Decimal(0), display))
                 blank[measure.label].append(display)
-            elif not (left_row and right_row):
-                differing[measure.label].append((Decimal(0), display))
+                row_differs = True
+            elif lv is not None and lv != rv:
+                differing[measure.label].append((abs(rv - lv), display))
+                signed[measure.label].append((rv - lv, display))
+                row_differs = True
             values.append((lv, rv))
-        entries.append((display, values, bool(left_row and right_row)))
+        flag = "missing" if not both else "diff" if row_differs else None
+        entries.append((display, values, flag))
 
     delta_measures = {i for i, m in enumerate(spec.measures) if signed[m.label]}
     rows, flags = [], []
-    for display, values, both in entries:
+    for display, values, flag in entries:
         row: list = [display]
-        flag = None if both else "missing"
         for index, (lv, rv) in enumerate(values):
             row += [_json_number(lv), _json_number(rv)]
             if index in delta_measures:
                 row.append(None if lv is None or rv is None else _json_number(rv - lv))
-            if both and (lv != rv):
-                flag = flag or "diff"
         rows.append(row)
         flags.append(flag)
 
     columns = [{"key": "key", "label": spec.key_label, "format": "text", "align": "left"}]
     for index, measure in enumerate(spec.measures):
         fmt = measure.format or "integer"
-        common = {
-            "currency": measure.currency or ("USD" if fmt == "currency" else None),
-            "align": "right",
-            "group": measure.label,
-        }
+        if fmt == "currency" and not measure.currency:
+            fmt = "number"
+        common = {"currency": measure.currency, "align": "right", "group": measure.label}
         columns.append({"key": f"m{index}_left", "label": spec.left_label, "format": fmt, **common})
         columns.append({"key": f"m{index}_right", "label": spec.right_label, "format": fmt, **common})
         if index in delta_measures:
@@ -878,32 +914,43 @@ def build_compare_card(
         if index in delta_measures:
             totals.append(None if lt is None or rt is None else _json_number(rt - lt))
 
+    partial = a["partial"] or b["partial"]
     plural = spec.key_label_plural
+    key_noun = spec.key_label.lower()
     headline_parts, detail_parts = [], []
     for measure in spec.measures:
         names = differing[measure.label]
         if not names:
-            headline_parts.append(f"{measure.label} match {spec.left_label} in every {spec.key_label.lower()}.")
+            scope = f"every {key_noun} shown" if partial else f"every {key_noun}"
+            headline_parts.append(f"{measure.label} match {spec.left_label} in {scope}.")
             continue
-        noun = spec.key_label.lower() if len(names) == 1 else plural
+        noun = key_noun if len(names) == 1 else plural
         headline_parts.append(f"{measure.label} differ in {len(names)} {noun}.")
         detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural)
         if detail:
             detail_parts.append(detail)
         if blank[measure.label]:
-            detail_parts.append(f"{measure.label} is blank in one source for {_join_names(blank[measure.label])}.")
+            detail_parts.append(
+                f"{measure.label} cannot be compared for {_join_names(blank[measure.label])}: "
+                "a value is blank or not a number."
+            )
     if only_left:
         detail_parts.append(f"Only in {spec.left_label}: {_join_names(only_left)}.")
     if only_right:
         detail_parts.append(f"Only in {spec.right_label}: {_join_names(only_right)}.")
+    if partial:
+        detail_parts.append(f"One of the results is partial, so {plural} beyond it were not compared.")
 
     visible = spec.top_n or (_TOP_N_DEFAULT if len(rows) > _TOP_N_THRESHOLD else len(rows))
-    # Rows that differ are always visible; the rest fill the top slots in order.
-    shown = [i for i, flag in enumerate(flags) if flag] + [i for i, flag in enumerate(flags) if not flag]
-    keep = sorted(shown[: max(visible, sum(1 for f in flags if f))])
-    order = keep + [i for i in range(len(rows)) if i not in keep]
+    # Rows that differ are always visible (up to the display cap); the rest fill in order.
+    flagged = [i for i, flag in enumerate(flags) if flag]
+    rest = [i for i, flag in enumerate(flags) if not flag]
+    keep_set = set((flagged + rest)[: min(_MAX_CARD_ROWS, max(visible, len(flagged)))])
+    order = [i for i in range(len(rows)) if i in keep_set] + [i for i in range(len(rows)) if i not in keep_set]
+    order = order[:_MAX_CARD_ROWS]
+    top_n = min(len(keep_set), len(order))
+    capped = len(rows) > _MAX_CARD_ROWS
     rows, flags = [rows[i] for i in order], [flags[i] for i in order]
-    top_n = len(keep)
     more_label = None
     if len(rows) > top_n:
         hidden = len(rows) - top_n
@@ -911,7 +958,6 @@ def build_compare_card(
         more_label = f"Show {hidden} more {plural}" + (" · identical in both sources" if identical else "")
 
     # The check names each source; one checked side never reads as both.
-    key_noun = spec.key_label.lower()
     side_checks = [(spec.left_label, a["check"]), (spec.right_label, b["check"])]
     check = None
     if any(c for _, c in side_checks):
@@ -938,7 +984,7 @@ def build_compare_card(
         "control_result_ids": [rid for rid in (spec.left_control_result_id, spec.right_control_result_id) if rid],
         "title": spec.title,
         "source": f"{spec.left_label} vs {spec.right_label}",
-        "subtitle": spec.subtitle or f"Matched on {spec.key_label.lower()}",
+        "subtitle": spec.subtitle or f"Matched on {key_noun}",
         "as_of": right["as_of"],
         "scope": None,
         "queries": [
@@ -951,7 +997,7 @@ def build_compare_card(
         "row_flags": flags,
         "share": None,
         "totals": totals,
-        "totals_label": f"Total · {len(rows)} {plural}",
+        "totals_label": f"Total · {len(paired)} {plural}",
         "check": check,
         "tiles": [],
         "top_n": top_n,
@@ -962,13 +1008,14 @@ def build_compare_card(
         "no_total_reason": None,
         "headline": " ".join(headline_parts),
         "detail": " ".join(detail_parts) or None,
-        "truncated": False,
+        "truncated": partial or capped,
     }
     facts = {
         "matching": [m.label for m in spec.measures if not differing[m.label]],
         "differing": {label: [n for _, n in items] for label, items in differing.items() if items},
         "only_in_left": only_left,
         "only_in_right": only_right,
+        "partial": partial,
     }
     return card, facts
 
@@ -992,9 +1039,10 @@ async def execute_present(params: dict, context: dict | None = None, **_kwargs) 
         spec = PresentResult.model_validate(params)
     except ValidationError as exc:
         return _error(f"Invalid present_result arguments: {exc.errors()[0]['msg']}")
+    loader = _Loader(context or {})
     try:
-        loaded = await _load(context or {}, spec.result_id)
-        control = await _load(context or {}, spec.control_result_id) if spec.control_result_id else None
+        loaded = await loader.load(spec.result_id)
+        control = await loader.load(spec.control_result_id) if spec.control_result_id else None
         card = build_present_card(spec, loaded, control)
     except ValueError as exc:
         return _error(str(exc))
@@ -1010,12 +1058,13 @@ async def execute_compare(params: dict, context: dict | None = None, **_kwargs) 
         spec = CompareResults.model_validate(params)
     except ValidationError as exc:
         return _error(f"Invalid compare_results arguments: {exc.errors()[0]['msg']}")
+    loader = _Loader(context or {})
     try:
-        left = await _load(context or {}, spec.left_result_id)
-        right = await _load(context or {}, spec.right_result_id)
+        left = await loader.load(spec.left_result_id)
+        right = await loader.load(spec.right_result_id)
         controls = (
-            await _load(context or {}, spec.left_control_result_id) if spec.left_control_result_id else None,
-            await _load(context or {}, spec.right_control_result_id) if spec.right_control_result_id else None,
+            await loader.load(spec.left_control_result_id) if spec.left_control_result_id else None,
+            await loader.load(spec.right_control_result_id) if spec.right_control_result_id else None,
         )
         card, facts = build_compare_card(spec, left, right, controls)
     except ValueError as exc:
