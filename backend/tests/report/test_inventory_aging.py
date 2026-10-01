@@ -44,6 +44,7 @@ def _item(location, sku, days, value, qty, *, desc="Widget", category="Misc"):
 def _prior_row(location, *, value, value_90p, value_180p, skus, skus_90p, skus_180p, qty, qty_90p):
     return {
         "location": location,
+        "snapshot_date": (SNAPSHOT - timedelta(days=7)).isoformat(),
         "skus": skus,
         "qty": qty,
         "value": value,
@@ -55,10 +56,12 @@ def _prior_row(location, *, value, value_90p, value_180p, skus, skus_90p, skus_1
     }
 
 
-def _trend_row(location, d, total_value, value_90p, pct_90p):
+def _trend_row(location, d, total_value, value_90p, pct_90p, *, skus=1, qty=1):
     return {
         "location": location,
         "d": d.isoformat(),
+        "skus": skus,
+        "qty": qty,
         "total_value": total_value,
         "value_90p": value_90p,
         "pct_90p": pct_90p,
@@ -102,7 +105,7 @@ def _full_fixture():
     # 3 weekly trend points per location, deliberately UNSORTED to exercise ordering.
     trend = []
     weekly_values = {
-        "Acme": [(2, 20000, 8000), (1, 22000, 9000), (0, 24000, 9000)],
+        "Acme": [(2, 20000, 8000), (1, 22000, 19000), (0, 24000, 21000)],
         "Globex": [(2, 9000, 1700), (1, 9500, 1900), (0, 10000, 2000)],
         "Initech": [(2, 9000, 3500), (1, 8400, 3800), (0, 8000, 4000)],
     }
@@ -110,7 +113,10 @@ def _full_fixture():
         for weeks_ago, total_value, value_90p in points:
             d = SNAPSHOT - timedelta(weeks=weeks_ago)
             pct_90p = round(value_90p / total_value * 100, 1)
-            trend.append(_trend_row(loc, d, total_value, value_90p, pct_90p))
+            counts = {"Acme": (9, 240), "Globex": (3, 100), "Initech": (3, 80)}
+            prior_counts = {"Acme": (8, 220), "Globex": (3, 95), "Initech": (3, 84)}
+            skus, qty = (prior_counts if weeks_ago == 1 else counts)[loc]
+            trend.append(_trend_row(loc, d, total_value, value_90p, pct_90p, skus=skus, qty=qty))
     # shuffle deterministically (reverse) so "oldest -> newest" is a real assertion
     trend = list(reversed(trend))
 

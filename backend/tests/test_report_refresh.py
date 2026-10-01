@@ -1009,6 +1009,8 @@ async def test_refresh_inventory_aging_r_items_over_5000_rows_not_truncated(db, 
     survive extraction -- a silent truncation at 5000 would drop 1000 SKUs from every
     KPI/bucket/top-positions total with no truncation indicator anywhere in the
     inventory_aging render (unlike statement_builder's own row-cap warn chip)."""
+    from datetime import timedelta
+
     from tests.report.test_inventory_aging import SNAPSHOT, _item, _prior_row, _trend_row
 
     location = "Acme"
@@ -1016,13 +1018,13 @@ async def test_refresh_inventory_aging_r_items_over_5000_rows_not_truncated(db, 
     prior = [
         _prior_row(location, value=0, value_90p=0, value_180p=0, skus=0, skus_90p=0, skus_180p=0, qty=0, qty_90p=0)
     ]
-    trend = [_trend_row(location, SNAPSHOT, 60000, 0, 0.0)]
+    trend = [_trend_row(location, SNAPSHOT, 60000, 0, 0.0, skus=6000, qty=6000)]
     meta = [
         {
             "location": location,
-            "first_snapshot_date": SNAPSHOT.isoformat(),
+            "first_snapshot_date": (SNAPSHOT - timedelta(days=7)).isoformat(),
             "last_snapshot_date": SNAPSHOT.isoformat(),
-            "snapshot_count": 1,
+            "snapshot_count": 8,
         }
     ]
     payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}

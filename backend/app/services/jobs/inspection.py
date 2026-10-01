@@ -50,6 +50,10 @@ def inspect_plan(schedule, *, use_pending=False):
                 from app.services.report.playbooks import PLAYBOOKS, build_playbook_recipe
 
                 key = step.params["playbook_key"]
+                if key == "inventory_aging" and (schedule.budget_json or {}).get("usd") is not None:
+                    blockers.append(
+                        f"Step {step.id}: report USD ceilings need an account pricing contract; use scan/time limits"
+                    )
                 if key not in PLAYBOOKS:
                     blockers.append(f"Step {step.id}: unknown report playbook")
                 elif set(step.params["params"]) - {p["key"] for p in PLAYBOOKS[key]["params"]}:

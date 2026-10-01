@@ -555,6 +555,7 @@ async def _run_steps(
     control_version: int | None = None,
 ) -> tuple[str, dict[str, Any], str | None]:
     """Replay `steps` in order. Returns (reason, outputs, detail)."""
+    from app.services.jobs.report_queries import ReportQueryBudgetError, ReportQueryUnknownError
     from app.services.report.report_delivery import DeliveryUnavailable
 
     outputs: dict[str, Any] = {}
@@ -668,6 +669,12 @@ async def _run_steps(
                     readiness_hash = (run.parameters or {}).get("readiness_hash")
                 with reviewed_sources(ctx, control_version, readiness_hash):
                     artifact = await spec.executor(ctx, params)
+        except ReportQueryBudgetError as exc:
+            await db.rollback()
+            return REASON_BUDGET, outputs, str(exc)
+        except ReportQueryUnknownError as exc:
+            await db.rollback()
+            return REASON_BLOCKED, outputs, str(exc)
         except SourceScopeChangedError as exc:
             await db.rollback()
             if ctx.execution_mode != "test":
@@ -857,6 +864,12 @@ async def run_schedule_now(db: AsyncSession, schedule_id: uuid.UUID, **kwargs) -
 
 async def _effect_started(db, tenant_id, job_id) -> bool:
     """Durable write intent or paid-model reservation; never infer absence from a timeout."""
+    from app.services.jobs.report_queries import queries_uncertain
+
+    await set_tenant_context(db, str(tenant_id))
+    query_job = await db.get(Job, job_id, populate_existing=True)
+    if query_job is not None and queries_uncertain(query_job.result_summary):
+        return True
     await set_tenant_context(db, str(tenant_id))
     return bool(
         await db.scalar(
@@ -1390,9 +1403,26 @@ async def _run_schedule_now_locked(
         actor_type=actor_type,
     )
 
+    from app.services.jobs.report_queries import queries_uncertain, query_bytes
+
+    await set_tenant_context(db, str(tenant_id))
+    query_job = await db.get(Job, job_id_value, populate_existing=True)
+    query_summary = query_job.result_summary or {}
     elapsed = time.monotonic() - execution_started
     used_bytes = sum(int(out.get("bytes_processed") or 0) for out in outputs.values())
+    used_bytes += max(
+        0, query_bytes(query_summary) - sum(int(out.get("report_query_bytes") or 0) for out in outputs.values())
+    )
     used = {"seconds": elapsed, "bytes_scanned": used_bytes, "usd": used_bytes * _BIGQUERY_USD_PER_BYTE}
+    if query_summary.get("report_queries"):
+        complete_usage = not queries_uncertain(query_summary)
+        used.update(
+            usd=None,
+            known_bytes_scanned=used_bytes,
+            bytes_scanned=used_bytes if complete_usage else None,
+            query_usage_complete=complete_usage,
+            cost_status="unpriced",
+        )
     effect_started = await _effect_started(db, tenant_id, job_id_value)
     effect_uncertain = reason != REASON_DONE and effect_started
     if effect_uncertain:

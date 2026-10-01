@@ -127,6 +127,8 @@ async def execute_query(
             "rows": rows,
             "row_count": len(rows),
             "bytes_processed": job.total_bytes_processed,
+            "bytes_billed": job.total_bytes_billed,
+            "job_id": job.job_id,
             "truncated": truncated,
             "cache_hit": job.cache_hit,
             "query": query,

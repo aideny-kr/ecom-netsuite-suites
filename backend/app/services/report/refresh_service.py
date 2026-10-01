@@ -300,6 +300,11 @@ async def _execute_sources(
             # Optional comparison outages may degrade; lost authorization or a
             # changed reviewed source must abort before any report is persisted.
             raise_if_source_changed()
+            from app.services.jobs.report_queries import current_report_queries
+
+            query_usage = current_report_queries()
+            if query_usage is not None:
+                query_usage.check()
     return payloads
 
 

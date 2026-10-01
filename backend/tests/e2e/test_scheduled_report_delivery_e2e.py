@@ -33,12 +33,6 @@ from tests.report.test_report_pdf import _skip_unless_weasyprint_native_libs
 
 def delivery_fixture():
     payloads, params = _full_fixture()
-    # The older unit fixture exercises components independently;
-    # its Acme trend disagrees with its current/prior inventory. Delivery needs
-    # one coherent source snapshot, with independently stated control values.
-    for row in payloads["r_trend"]:
-        if row["location"] == "Acme" and row["d"] in {"2026-09-01", "2026-09-08"}:
-            row["value_90p"], row["pct_90p"] = (19000, 86.4) if row["d"] == "2026-09-01" else (21000, 87.5)
     return payloads, params
 
 
@@ -61,8 +55,12 @@ class ArtifactDrive(EvidenceDrive):
         return result
 
 
-async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failure=None, with_delivery=True):
+async def setup_report_workflow(
+    db, client, user, headers, monkeypatch, *, failure=None, with_delivery=True, budget=None
+):
     payloads, params = delivery_fixture()
+    if failure == "numeric_mismatch":
+        payloads["r_items"][0]["inventory_amount"] += 1
     sources = ia.build_sources(params)
     queries = {s["params"]["query"]: rid for rid, s in sources.items()}
     calls = []
@@ -76,6 +74,8 @@ async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failu
         calls.append(rid)
         if failure == "missing" and rid == "r_items":
             raise RuntimeError("synthetic source unavailable")
+        if failure == "late_error" and rid == "r_prior":
+            raise RuntimeError("synthetic lost query receipt")
         rows = payloads[rid]
         columns = list(rows[0])
         return {
@@ -83,7 +83,9 @@ async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failu
             "rows": [[r[c] for c in columns] for r in rows],
             "row_count": len(rows),
             "truncated": failure == "partial" and rid == "r_items",
-            "bytes_processed": 1024,
+            "bytes_processed": None if failure == "unknown_usage" else 1024,
+            "bytes_billed": 1024,
+            "job_id": f"synthetic-{rid}",
             "cache_hit": False,
         }
 
@@ -117,7 +119,7 @@ async def setup_report_workflow(db, client, user, headers, monkeypatch, *, failu
     row.name = "Synthetic inventory delivery"
     row.parameters = {"workflow_review_required": True}
     row.cron_expression = "0 6 * * 1"
-    row.budget_json = {"seconds": 120}
+    row.budget_json = budget or {"seconds": 120}
     await db.flush()
     review = (await client.post(f"/api/v1/schedules/{row.id}/validate", json={}, headers=headers)).json()
     assert review["ready"], review
@@ -230,7 +232,9 @@ async def test_approved_due_report_delivers_real_artifacts_once_and_stays_frozen
     assert job.result_summary["usage"]["seconds"] > 0
 
 
-@pytest.mark.parametrize("failure", ["missing", "partial", "source_changed"])
+@pytest.mark.parametrize(
+    "failure", ["missing", "partial", "source_changed", "numeric_mismatch", "late_error", "unknown_usage"]
+)
 async def test_bad_source_never_reaches_report_delivery(client, db, admin_user, monkeypatch, failure):
     user, headers = admin_user
     row, source, drive, calls = await setup_report_workflow(db, client, user, headers, monkeypatch, failure=failure)
@@ -247,3 +251,94 @@ async def test_bad_source_never_reaches_report_delivery(client, db, admin_user, 
     assert job.result_summary.get("detail")
     if failure == "source_changed":
         assert calls == []
+
+
+@pytest.mark.parametrize("scan_budget,expected_queries,expected_reason", [(4096, 4, "done"), (2048, 2, "budget")])
+async def test_report_subqueries_consume_shared_scan_budget(
+    client, db, admin_user, monkeypatch, scan_budget, expected_queries, expected_reason
+):
+    user, headers = admin_user
+    row, _, drive, calls = await setup_report_workflow(
+        db,
+        client,
+        user,
+        headers,
+        monkeypatch,
+        with_delivery=False,
+        budget={"seconds": 120, "bytes_scanned": scan_budget},
+    )
+    tid = user.tenant_id
+    await jobs.run_due_jobs(db, tid)
+    job = (await db.scalars(select(Job).where(Job.tenant_id == tid))).one()
+    assert job.result_summary["reason"] == expected_reason
+    assert len(calls) == expected_queries
+    assert job.result_summary["usage"]["bytes_scanned"] == expected_queries * 1024
+    assert job.result_summary["usage"]["query_usage_complete"] is True
+    assert job.result_summary["usage"]["usd"] is None
+    assert job.result_summary["usage"]["cost_status"] == "unpriced"
+    receipts = job.result_summary["report_queries"]
+    assert [q["maximum_bytes_billed"] for q in receipts] == [scan_budget - 1024 * n for n in range(expected_queries)]
+    assert all(q["state"] == "complete" and q["bytes_billed"] == 1024 for q in receipts)
+    assert all(q["source_id"] and len(q["query_sha256"]) == 64 and q["provider_job_id"] for q in receipts)
+    assert drive.calls == []
+
+
+async def test_failed_later_query_preserves_spend_and_fences_retry(client, db, admin_user, monkeypatch):
+    user, headers = admin_user
+    row, _, drive, calls = await setup_report_workflow(
+        db, client, user, headers, monkeypatch, with_delivery=False, failure="late_error"
+    )
+    tid, sid, uid = user.tenant_id, row.id, user.id
+    await jobs.run_due_jobs(db, tid)
+    job = (await db.scalars(select(Job).where(Job.tenant_id == tid))).one()
+    assert job.result_summary["usage"]["known_bytes_scanned"] == 1024
+    assert job.result_summary["usage"]["bytes_scanned"] is None
+    assert job.result_summary["usage"]["query_usage_complete"] is False
+    assert job.result_summary["verification"] == "uncertain"
+    assert [q["state"] for q in job.result_summary["report_queries"]] == ["complete", "pending"]
+    before = list(calls)
+    outcome = await jobs.run_schedule_now(db, sid, tenant_id=tid, actor_id=uid, existing_job_id=job.id)
+    assert outcome.reason == "blocked"
+    assert calls == before
+    assert drive.calls == []
+    assert len((await db.scalars(select(Job).where(Job.tenant_id == tid))).all()) == 1
+
+
+async def test_report_usd_ceiling_blocks_validation_without_querying(client, db, admin_user, monkeypatch):
+    user, headers = admin_user
+    row, _, drive, calls = await setup_report_workflow(db, client, user, headers, monkeypatch, with_delivery=False)
+    row.budget_json = {"usd": 1, "seconds": 120}
+    await db.flush()
+    response = await client.post(f"/api/v1/schedules/{row.id}/validate", json={}, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["ready"] is False
+    assert "pricing contract" in str(response.json())
+    assert calls == [] and drive.calls == []
+
+
+async def test_report_query_runtime_refuses_usd_budget_before_spend(db, admin_user):
+    from app.services.jobs.registry import StepContext
+    from app.services.jobs.report_queries import ReportQueryBudgetError, report_queries
+
+    user, _ = admin_user
+    ctx = StepContext(job_id=uuid4(), run_id=uuid4(), tenant_id=user.tenant_id, db=db, budget={"usd": 1})
+    with pytest.raises(ReportQueryBudgetError, match="pricing contract"):
+        with report_queries(ctx) as usage:
+            await usage.begin()
+    assert (await db.scalars(select(Job).where(Job.tenant_id == user.tenant_id))).all() == []
+
+
+async def test_report_query_receipt_cannot_borrow_another_tenants_job(db, admin_user):
+    from app.services.jobs.registry import StepContext
+    from app.services.jobs.report_queries import ReportQueryUnknownError, report_queries
+
+    user, _ = admin_user
+    job = Job(tenant_id=user.tenant_id, job_type="scheduled_job", status="running", parameters={})
+    db.add(job)
+    await db.flush()
+    ctx = StepContext(job_id=uuid4(), run_id=job.id, tenant_id=uuid4(), db=db)
+    with pytest.raises(ReportQueryUnknownError, match="running job"):
+        with report_queries(ctx) as usage:
+            await usage.begin()
+    await db.refresh(job)
+    assert not job.result_summary

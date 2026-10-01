@@ -19,6 +19,7 @@ class TestExecuteQuery:
 
         mock_job = MagicMock()
         mock_job.total_bytes_processed = 5000
+        mock_job.total_bytes_billed = 10000
         mock_job.cache_hit = False
 
         mock_result = MagicMock()
@@ -42,12 +43,15 @@ class TestExecuteQuery:
                 credentials={"type": "service_account"},
                 project_id="test-project",
                 query="SELECT name, amount FROM users",
+                max_bytes_billed=12345,
             )
 
         assert result["columns"] == ["name", "amount"]
         assert result["rows"] == [["Alice", 100], ["Bob", 200], ["Charlie", 300]]
         assert result["row_count"] == 3
         assert result["bytes_processed"] == 5000
+        assert result["bytes_billed"] == 10000
+        assert mock_client.query.call_args.kwargs["job_config"].maximum_bytes_billed == 12345
         assert result["truncated"] is False
 
     @pytest.mark.asyncio

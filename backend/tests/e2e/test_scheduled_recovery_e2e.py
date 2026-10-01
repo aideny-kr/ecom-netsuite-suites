@@ -22,7 +22,9 @@ from tests.conftest import create_test_tenant
 from tests.jobs.test_executor import _fake_spec, _seed_job_schedule
 
 
-@pytest.mark.parametrize("phase", ["remote_accepted", "receipt_committed", "concurrent"])
+@pytest.mark.parametrize(
+    "phase", ["remote_accepted", "receipt_committed", "concurrent", "query_pending", "query_complete"]
+)
 async def test_crash_and_duplicate_delivery_use_durable_job_boundary(tmp_path, monkeypatch, phase):
     url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
     parsed = make_url(url)
@@ -57,6 +59,15 @@ from app.core.config import settings
 from app.services.jobs.registry import STEP_REGISTRY, StepSpec
 from app.workers.tasks import scheduled_jobs as worker
 async def effect(ctx, params):
+    if os.environ['CRASH_PHASE'].startswith('query_'):
+        from app.services.jobs.report_queries import report_queries
+        with report_queries(ctx) as usage:
+            await usage.begin()
+            with Path(os.environ['SYNTHETIC_SINK']).open('a') as f:
+                f.write('accepted\\n'); f.flush(); os.fsync(f.fileno())
+            if os.environ['CRASH_PHASE'] == 'query_pending': os.kill(os.getpid(), signal.SIGKILL)
+            await usage.complete({'bytes_processed':1024, 'bytes_billed':1024, 'cache_hit':False})
+        return {'bytes_processed':1024, 'report_query_bytes':1024}
     with Path(os.environ['SYNTHETIC_SINK']).open('a') as f:
         f.write('accepted\\n'); f.flush(); os.fsync(f.fileno())
     if os.environ['CRASH_PHASE'] == 'remote_accepted': os.kill(os.getpid(), signal.SIGKILL)
@@ -64,7 +75,9 @@ async def effect(ctx, params):
     return {'ok': True}
 async def finalize(*args, **kwargs): os.kill(os.getpid(), signal.SIGKILL)
 STEP_REGISTRY['fake.step'] = StepSpec('fake.step','synthetic','write',{},effect,lambda c,p: str(c.run_id))
-if os.environ['CRASH_PHASE'] == 'receipt_committed': worker._finalize_run = finalize
+if os.environ['CRASH_PHASE'].startswith('query_'):
+    STEP_REGISTRY['fake.step'] = StepSpec('fake.step','synthetic query','read',{},effect)
+if os.environ['CRASH_PHASE'] in {'receipt_committed','query_complete'}: worker._finalize_run = finalize
 async def main():
     e = create_async_engine(settings.DATABASE_URL_DIRECT or settings.DATABASE_URL)
     async with AsyncSession(e, expire_on_commit=False) as db:
@@ -102,9 +115,17 @@ asyncio.run(main())
         async with AsyncSession(engine, expire_on_commit=False) as recovery:
             await run_due_jobs(recovery, tid)
             saved = await recovery.get(Job, jid)
-            assert saved.result_summary["reason"] == ("blocked" if phase == "remote_accepted" else "done")
-            if phase == "remote_accepted":
+            assert saved.result_summary["reason"] == (
+                "blocked" if phase in {"remote_accepted", "query_pending"} else "done"
+            )
+            if phase in {"remote_accepted", "query_pending"}:
                 assert saved.result_summary["verification"] == "uncertain"
+            if phase.startswith("query_"):
+                query = saved.result_summary["report_queries"][0]
+                assert query["state"] == ("pending" if phase == "query_pending" else "complete")
+                if phase == "query_complete":
+                    assert saved.result_summary["usage"]["bytes_scanned"] == 1024
+                    assert saved.result_summary["usage"]["usd"] is None
             await run_schedule_now(recovery, sid, tenant_id=tid, actor_id=None, existing_job_id=jid)
         assert sink.read_text() == "accepted\n"
     finally:

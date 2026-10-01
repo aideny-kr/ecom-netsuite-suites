@@ -8,6 +8,7 @@ Three tools:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -68,6 +69,18 @@ async def bigquery_sql_execute(params: dict, context: dict, **kwargs: Any) -> di
     query = params.get("query", "")
     max_rows = params.get("max_rows", 1000)
 
+    from app.services.jobs.report_queries import current_report_queries
+
+    usage = current_report_queries()
+    query_options = (
+        {
+            "max_bytes_billed": await usage.begin(
+                source_id=str(connector.id), query_sha256=hashlib.sha256(query.encode()).hexdigest()
+            )
+        }
+        if usage is not None
+        else {}
+    )
     logger.debug("BigQuery SQL query: %.500s", query)  # Truncate at 500 chars
     try:
         result = await execute_query(
@@ -76,7 +89,10 @@ async def bigquery_sql_execute(params: dict, context: dict, **kwargs: Any) -> di
             query=query,
             max_rows=max_rows,
             location=location,
+            **query_options,
         )
+        if usage is not None:
+            await usage.complete(result)
         return result
     except Exception as exc:
         logger.warning("BigQuery SQL execution failed | query=%.500s", query, exc_info=True)

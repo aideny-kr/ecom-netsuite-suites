@@ -180,6 +180,10 @@ async def reconcile_run(db, *, tenant_id, schedule_id, job_id, actor_id):
             if (job.result_summary or {}).get("verification") != "uncertain" or job.status == "running":
                 raise EvidenceUnavailableError("run is not awaiting reconciliation")
             summary = dict(job.result_summary or {})
+            from app.services.jobs.report_queries import queries_uncertain
+
+            if queries_uncertain(summary):
+                raise EvidenceUnavailableError("Report query usage is unknown; provider-specific recovery required")
             parameters = job.parameters or {}
             steps = (parameters.get("plan") or {}).get("steps") or []
             receipts = summary.get("step_receipts", {})
