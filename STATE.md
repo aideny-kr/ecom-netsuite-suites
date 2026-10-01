@@ -32,6 +32,7 @@ on staging. #364 (a reconciled order stays reconciled) is ready to merge.
 | #364 `feat/reconciled-stays-reconciled` → release | T2 | verify.sh PASS c7a5d6c6; packet review round 5 PASS, receipt in body; CI green | Aiden merges; migration 117 must run on deploy |
 | #360 `feat/group-breakdown-staging-ui` → `release/frontend-preserved` | T2 | #356's card on the staging UI line (56156d96, deployed); needs #364's "Reconciled" label ported too | codex / Aiden merge |
 | local `feat/changed-after-reconciliation` (79b62dc4, unpushed) | T2 | the "changed after reconciliation" flag, split out of #364 after 4 review rounds | rebuild with the narrow rule (NEXT 4) |
+| local `fix/verify-log-session-tag` (5a546b11, unpushed) → release | T2 | verify.sh tags its evidence line `session=$CLAUDE_CODE_SESSION_ID`, which the global loop budget hook (`~/.claude` 67e184a) counts | Aiden: push + PR, then the T2 gate |
 | #357 `fix/records-status-query` → release | T2 | Records order-status filter timeout | review |
 | #333 `release/recon-excel-group-reliability` → main | T2 | the release integration PR; codex merges into the release branch daily (#358–#363 on 09-29/30) | release owner |
 | codex line `codex/framework-launch-integration` (#365, #275) | — | codex's Framework-launch work | codex |
@@ -91,6 +92,9 @@ archive).
   hand-picked content fields or a generic *_complete gate** · because field lists missed a
   variant every round (F1, F5-F8, F10), and `tax_complete` is False on every real report, so a
   generic completeness gate hid real changes.
+- **2026-09-30 · Hooks attribute verify runs by a session tag that verify.sh writes, and settle
+  ticket debts by a deliberate no-op command, over parsing commands or prose** · because four
+  review rounds kept finding shell and markdown edge cases; the shape was "parse text".
 - 2026-09-29 · Thinking level floor is `med`, never `low` (#355).
 - 2026-09-28 · Sonnet 5.5: forced tool calls run on Sonnet 5 (`_FORCEABLE_MODEL`); blocking
   calls are text-only (#353).
@@ -134,7 +138,8 @@ archive).
 - **Merge #364** (Aiden). Migration 117 runs on deploy; port the "Reconciled" label to the
   preserved UI line with #360.
 - **ClickUp tickets for #355, #356, #364** (Aiden is creating them; the MCP daily limit blocks
-  the session). The ticket hook keeps asking for 86bc7eebh, which is already closed by hand.
+  the session). Once 86bc7eebh is confirmed closed, settle the hook's debt by RUNNING
+  `: 'TICKET 86bc7eebh: closed by hand in ClickUp (PR #341, #353, #355)'`; prose does not count.
 - **The staging write-agent journey** needs Aiden to start it (Framework PRODUCTION NetSuite).
 - **Unverified since 2026-08-28:** the leaked `gh` OAuth token rotation, and three test
   customers in PRODUCTION NetSuite (5803124, 5800803, 5795008) to inactivate.
