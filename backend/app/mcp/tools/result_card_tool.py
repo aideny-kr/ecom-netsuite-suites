@@ -367,6 +367,18 @@ def _mbql_limits(node) -> list[int]:
     return found
 
 
+def _final_stage(query):
+    """The stage that produced the rows: the last pMBQL stage, or legacy MBQL's inner query."""
+    if not isinstance(query, dict):
+        return None
+    stages = query.get("stages")
+    if isinstance(stages, list) and stages and isinstance(stages[-1], dict):
+        return stages[-1]
+    if isinstance(query.get("query"), dict):
+        return query["query"]
+    return query
+
+
 def _is_partial(payload: dict) -> bool:
     """A result is partial when the source says so, or when its own query capped it.
 
@@ -379,7 +391,15 @@ def _is_partial(payload: dict) -> bool:
     returned = len(payload.get("rows") or [])
     source = payload.get("metabase_source")
     if isinstance(source, dict):
-        return any(returned >= limit for limit in _mbql_limits(source.get("query")))
+        # A limit anywhere but the final stage caps that stage's input: always partial.
+        limits = _mbql_limits(source.get("query"))
+        final = _final_stage(source.get("query"))
+        own = final.get("limit") if isinstance(final, dict) else None
+        if isinstance(own, int) and not isinstance(own, bool):
+            limits.remove(own)
+            if returned >= own:
+                return True
+        return bool(limits)
     text = _strip_sql_comments(str(payload.get("query") or ""))
     for match in _SQL_LIMIT.finditer(text):
         if _depth_at(text, match.start()) > 0:
@@ -601,15 +621,135 @@ def _is_overall(control: dict, tool: str) -> bool:
     return all(re.search(r"\b(?:SUM|COUNT|AVG|MIN|MAX)\s*\(", item, re.I) for item in _split_top_level(selected))
 
 
-def _control_values(control: dict | None, columns: list[str], tool: str) -> dict[int, Decimal]:
+def _canon(text: str) -> str:
+    """SQL text compared for meaning, not layout: case and spacing folded outside quotes."""
+    parts = re.split(r"('(?:[^']|'')*')", text)
+    out = []
+    for index, part in enumerate(parts):
+        if index % 2:
+            out.append(part)
+            continue
+        part = re.sub(r"\s+", " ", part.casefold())
+        out.append(re.sub(r"\s*([(),=<>+*/-])\s*", r"\1", part))
+    return "".join(out).strip()
+
+
+def _canon_measure(expression: str) -> str:
+    """An aggregate's expression without wrappers that do not change what it counts:
+    ROUND(x, n), NVL/COALESCE(x, 0), TO_NUMBER(x)."""
+    expr = _canon(expression)
+    while True:
+        args = _call_args(expr, "round|nvl|coalesce|to_number")
+        if args is None:
+            return expr
+        parts = _split_top_level(args)
+        if not parts or any(not re.fullmatch(r"-?\d+", part) for part in parts[1:]):
+            return expr
+        expr = parts[0]
+
+
+def _top_level_tokens(text: str) -> list[tuple[int, str]]:
+    tokens, depth, quote, start = [], 0, None, None
+    for index, char in enumerate(text + " "):
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        word = depth == 0 and (char.isalnum() or char == "_")
+        if word and start is None:
+            start = index
+        elif not word and start is not None:
+            tokens.append((start, text[start:index].upper()))
+            start = None
+        if char in "'\"`":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+    return tokens
+
+
+def _sql_shape(query: str) -> tuple[str, dict[str, str]] | None:
+    """(population, alias -> aggregate) of a plain SELECT. The population is the FROM clause
+    up to GROUP BY / HAVING / ORDER BY / a row limit: the tables, joins and filters that
+    decide which rows are counted."""
+    text = _strip_sql_comments(query or "").strip()
+    if (
+        not text
+        or re.match(r"^WITH\b", text, re.I)
+        or _top_level_words(text) & {"UNION", "INTERSECT", "MINUS", "EXCEPT"}
+    ):
+        return None
+    tokens = _top_level_tokens(text)
+    starts = [start for start, word in tokens if word == "FROM"]
+    if not starts:
+        return None
+    ends = [s for s, w in tokens if s > starts[0] and w in {"GROUP", "HAVING", "ORDER", "FETCH", "LIMIT", "OFFSET"}]
+    population = _canon(text[starts[0] : ends[0] if ends else len(text)])
+    selected = _select_list(text)
+    if selected is None:
+        return None
+    measures = {}
+    for item in _split_top_level(selected):
+        match = re.match(r"^(.*?)(?:\s+AS)?\s+\"?([A-Za-z_][\w$#]*)\"?\s*$", item, re.I | re.S)
+        if match and not match[1].rstrip().endswith("."):
+            measures[match[2].casefold()] = _canon_measure(match[1])
+        else:
+            measures[item.rsplit(".", 1)[-1].strip('"').casefold()] = _canon_measure(item)
+    return population, measures
+
+
+def _mbql_population(query) -> str | None:
+    """The query with only the final stage's grouping, ordering and limit removed."""
+    import copy
+    import json
+
+    if not isinstance(query, dict):
+        return None
+    query = copy.deepcopy(query)
+    final = _final_stage(query)
+    if isinstance(final, dict):
+        for key in ("breakout", "order-by", "limit", "fields", "page"):
+            final.pop(key, None)
+    return json.dumps(query, sort_keys=True, default=str)
+
+
+def _counts_the_same_rows(control: dict, shown: dict, names: list[str]) -> bool:
+    """True when the control is the shown query without its grouping: same tables, joins
+    and filters, and the same aggregate for every column it totals."""
+    control_source, shown_source = control.get("metabase_source"), shown.get("metabase_source")
+    if isinstance(control_source, dict) or isinstance(shown_source, dict):
+        return (
+            isinstance(control_source, dict)
+            and isinstance(shown_source, dict)
+            and control_source.get("connector_id") == shown_source.get("connector_id")
+            and _mbql_population(control_source.get("query")) is not None
+            and _mbql_population(control_source.get("query")) == _mbql_population(shown_source.get("query"))
+        )
+    control_shape = _sql_shape(str(control.get("query") or ""))
+    shown_shape = _sql_shape(str(shown.get("query") or ""))
+    if control_shape is None or shown_shape is None or control_shape[0] != shown_shape[0]:
+        return False
+    shared = [name.casefold() for name in names if name.casefold() in control_shape[1]]
+    return all(shown_shape[1].get(name) == control_shape[1][name] for name in shared)
+
+
+def _control_values(control: dict | None, loaded: dict, columns: list[str]) -> dict[int, Decimal]:
     """Values of an overall control, matched to ``columns`` by name."""
     if control is None:
         return {}
     payload = control["payload"]
-    if not _is_overall(control, tool):
+    if not _is_overall(control, loaded["tool"]):
         raise ValueError(
             "A control result must be an overall figure from the same source: one row from an "
             "ungrouped, uncapped query whose columns are all aggregates (no GROUP BY or breakout)."
+        )
+    if not _counts_the_same_rows(payload, loaded["payload"], columns):
+        raise ValueError(
+            "A control result must count the same rows as the result it totals: run the same "
+            "query without its grouping (same FROM, joins and WHERE, and the same aggregate for "
+            "each column)."
         )
     names = [str(column).casefold() for column in payload["columns"]]
     values = {}
@@ -701,7 +841,7 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
     for name in spec.columns:
         _column_index(payload, name, "columns")
     numbers = [[_number(value) for value in row] for row in rows]
-    control_values = _control_values(control, columns, loaded["tool"])
+    control_values = _control_values(control, loaded, columns)
     partial = _is_partial(payload)
     row_count = payload.get("row_count")
     row_total = row_count if partial and isinstance(row_count, int) and row_count >= len(rows) else len(rows)
@@ -915,11 +1055,10 @@ def _side(loaded: dict, key: str, measures: list[str], control: dict | None) -> 
     numbers = [entry["values"] for entry in rows.values()]
     names = [payload["columns"][i] for i in indexes]
     kinds = _aggregate_kinds(payload)
-    totals, check = _totals(
-        names, numbers, _control_values(control, names, loaded["tool"]), [kinds[i] for i in indexes]
-    )
+    totals, check = _totals(names, numbers, _control_values(control, loaded, names), [kinds[i] for i in indexes])
     return {
         "rows": rows,
+        "kinds": [kinds[i] for i in indexes],
         "totals": totals,
         "check": check,
         "partial": _is_partial(payload),
@@ -965,11 +1104,17 @@ _QUERY_KIND = {"SuiteQL query": "SuiteQL", "BigQuery SQL": "SQL", "Metabase quer
 
 
 def _detail_for(
-    measure: str, right_label: str, deltas: list[tuple[Decimal, str]], plural: str, overall: Decimal | None
+    measure: str,
+    right_label: str,
+    deltas: list[tuple[Decimal, str]],
+    plural: str,
+    overall: Decimal | None,
+    additive: bool = True,
 ) -> str | None:
     """Name where a measure differs, largest first. A figure is stated only from the two
-    sources' own overall totals: per-key differences of a distinct count or a ratio do not
-    add up, so they are never summed here."""
+    sources' own overall totals, and only for a sum or a count: a distinct count or a ratio
+    does not add up across keys (an order can sit under several SKUs), so its overall
+    difference is neither sized nor placed "all in" the keys whose values changed."""
     more = sorted(((d, n) for d, n in deltas if d > 0), key=lambda item: -item[0])
     fewer = sorted(((-d, n) for d, n in deltas if d < 0), key=lambda item: -item[0])
 
@@ -983,6 +1128,8 @@ def _detail_for(
     if not (more or fewer):
         return None
     direction, items = ("more", more) if more else ("fewer", fewer)
+    if not additive:
+        return f"{right_label} has {direction} {label} in {where(items)}."
     scope = f"all in {where(items)}" if len(items) <= 5 else f"across {where(items)}"
     if overall is not None and overall != 0 and (overall > 0) == bool(more):
         return f"{right_label} has {_json_number(abs(overall))} {direction} {label}, {scope}."
@@ -1090,7 +1237,8 @@ def build_compare_card(
         index = spec.measures.index(measure)
         lt, rt = a["totals"][index], b["totals"][index]
         overall = rt - lt if lt is not None and rt is not None and not (only_left or only_right or partial) else None
-        detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural, overall)
+        additive = all(side["kinds"][index] in {"sum", "count"} for side in (a, b))
+        detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural, overall, additive)
         if detail:
             detail_parts.append(detail)
         if blank[measure.label]:

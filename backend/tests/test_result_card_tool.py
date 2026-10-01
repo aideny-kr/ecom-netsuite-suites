@@ -19,7 +19,8 @@ COUNTRY_SQL = (
 )
 TOTAL_SQL = (
     "SELECT COUNT(DISTINCT t.id) AS orders, SUM(ABS(tl.quantity)) AS units, "
-    "SUM(tl.amount * -1) AS yucca_line_amount_usd FROM transaction t"
+    "ROUND(SUM(tl.amount * -1), 2) AS yucca_line_amount_usd "
+    "FROM transaction t JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress"
 )
 NS_ROWS = [
     ["United States", "162", "170", "1147128"],
@@ -698,13 +699,15 @@ def test_only_a_provably_overall_query_can_total_a_card():
 def test_rows_that_exceed_a_sum_total_get_no_total_or_share():
     # R1: the rows of a SUM or COUNT partition its total; rows adding up to more than the
     # "total" mean it does not cover them, so neither it nor shares of it are shown.
-    control = _control(["units", "yucca_line_amount_usd"], ["100", "1000"])
+    control = ns_total()
+    control["payload"]["rows"] = [["228", "100", "1000"]]
     card = build_present_card(
         PresentResult(result_id="r9", title="t", control_result_id="r5", share_of="yucca_line_amount_usd", tiles=True),
         ns_country(),
         control,
     )
-    assert card["totals"] is None and card["share"] is None and card["tiles"] == []
+    assert card["totals"] == [None, 228, None, None] and card["share"] is None
+    assert [tile["label"] for tile in card["tiles"]] == ["Orders"]
     assert card["check"]["status"] == "warn" and "does not cover these rows" in card["check"]["text"]
 
 
@@ -756,3 +759,73 @@ def test_a_key_missing_from_a_complete_side_is_a_difference_even_if_the_other_is
     card, facts = build_compare_card(_compare(), left, _table([["US", 3]]), (None, None))
     assert card["headline"] == "Units differ in 2 countries."
     assert sorted(facts["differing"]["Units"]) == ["CA", "US"] and facts["only_in_left"] == ["CA"]
+
+
+# --- independent packet review round 2 on #369 (gpt-6-astra) ---
+
+
+def test_a_total_from_another_population_is_refused():
+    # R1: same tool and an ungrouped shape are not enough; the total must be the displayed
+    # query without its grouping -- same FROM, joins and WHERE.
+    spec = PresentResult(result_id="r9", title="t", control_result_id="r5")
+    other_year = _control(["units"], ["200"], "SELECT SUM(u) AS units FROM t WHERE year = 2025")
+    with pytest.raises(ValueError, match="same rows"):
+        build_present_card(spec, _table([["US", 100]]), other_year)
+    no_join = ns_total()
+    no_join["payload"]["query"] = TOTAL_SQL.split(" JOIN ")[0]
+    with pytest.raises(ValueError, match="same rows"):
+        build_present_card(spec, ns_country(), no_join)
+
+
+def test_a_total_of_a_different_measure_is_refused():
+    spec = PresentResult(result_id="r9", title="t", control_result_id="r5")
+    other_measure = _control(["units"], ["200"], "SELECT SUM(w) AS units FROM t")
+    with pytest.raises(ValueError, match="same rows"):
+        build_present_card(spec, _table([["US", 100]]), other_measure)
+
+
+def test_the_overall_query_may_differ_only_in_layout_and_ordering():
+    # Spacing, case and an ORDER BY / row limit on the grouped query are not population changes.
+    loaded = _table([["US", 100], ["CA", 50]])
+    loaded["payload"]["query"] = (
+        "select country,  sum(u) as units\nfrom t group by country order by units desc fetch first 500 rows only"
+    )
+    control = _control(["units"], ["150"], "SELECT SUM(u) AS units FROM t")
+    card = build_present_card(PresentResult(result_id="r1", title="t", control_result_id="r2"), loaded, control)
+    assert card["totals"] == [None, 150] and card["check"]["status"] == "ok"
+
+
+def test_a_metabase_total_must_share_the_grouped_querys_stages():
+    spec = PresentResult(result_id="r9", title="t", control_result_id="r5")
+    other = mb_total()
+    stage = other["payload"]["metabase_source"]["query"]["stages"][0]
+    stage["filters"] = [["=", {}, ["field", {}, "year"], 2025]]
+    with pytest.raises(ValueError, match="same rows"):
+        build_present_card(spec, mb_country(), other)
+    assert build_present_card(spec, mb_country(), mb_total())["totals"] == [None, 228, 232]
+
+
+def test_a_limit_in_an_earlier_metabase_stage_makes_the_result_partial():
+    # R2: stage 1 caps the input at 1000 orders; the final stage groups what is left.
+    loaded = mb_country()
+    source = loaded["payload"]["metabase_source"]
+    source["query"] = {
+        "stages": [{"source-table": ["db", "public", "spree_orders"], "limit": 1000}, source["query"]["stages"][0]]
+    }
+    card = build_present_card(PresentResult(result_id="r1", title="t"), loaded, None)
+    assert card["truncated"] is True
+
+
+def test_a_distinct_count_difference_is_never_blamed_on_one_key():
+    # R3: distinct orders do not add up across keys; an order can sit under several SKUs.
+    left = _table([["SKU-A", 2], ["SKU-B", 2]], columns=("sku", "orders"))
+    right = _table([["SKU-A", 3], ["SKU-B", 2]], columns=("sku", "orders"))
+    for side in (left, right):
+        side["payload"]["query"] = "SELECT sku, COUNT(DISTINCT o) AS orders FROM t GROUP BY sku"
+    control = lambda v: _control(["orders"], [v], "SELECT COUNT(DISTINCT o) AS orders FROM t")  # noqa: E731
+    spec = _compare(
+        key={"left": "sku", "right": "sku"}, measures=[{"left": "orders", "right": "orders", "label": "Orders"}]
+    )
+    card, _ = build_compare_card(spec, left, right, (control(2), control(5)))
+    assert "all in" not in card["detail"] and "3 more" not in card["detail"]
+    assert card["detail"].startswith("Metabase has more orders in SKU-A")

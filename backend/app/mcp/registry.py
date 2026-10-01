@@ -324,9 +324,9 @@ TOOL_REGISTRY = {
             "labels and formats, a totals row, an optional share-of-total column and summary tiles. "
             "Call it once per table the answer should show, after the query, with the result_id the "
             "query returned. You supply labels only. Totals, the share column and the tiles come "
-            "ONLY from control_result_id: an overall query on the same source with the same filters "
-            "and column names -- one row, every column an aggregate, no GROUP BY and no row limit "
-            "(the overall total you ran earlier, or run one); the server never adds "
+            "ONLY from control_result_id: the same query without its grouping -- same FROM, joins "
+            "and WHERE, the same aggregate expressions and column names, no GROUP BY and no row "
+            "limit (the overall total you ran earlier, or run one); the server never adds "
             "rows up and checks the rows against that total. "
             "Use collapsed=true for a secondary breakdown, and no_total_reason when the rows must "
             "not be added together (for example amounts in different currencies)."
@@ -365,8 +365,8 @@ TOOL_REGISTRY = {
             "control_result_id": {
                 "type": "string",
                 "description": (
-                    "Overall query on the same source with the same filters and column names: one row, "
-                    "every column an aggregate, no GROUP BY or row limit. The only source of "
+                    "The same query without its grouping: same FROM, joins and WHERE, the same aggregate "
+                    "expressions and column names, no GROUP BY or row limit. The only source of "
                     "totals, shares and tiles; the rows are checked against it."
                 ),
             },
@@ -412,11 +412,11 @@ TOOL_REGISTRY = {
             "subtitle": {"type": "string", "description": "Short note on how keys were matched."},
             "left_control_result_id": {
                 "type": "string",
-                "description": "Ungrouped control for the left result (needed to total distinct counts).",
+                "description": "The left query without its grouping (same FROM, joins, WHERE and aggregates).",
             },
             "right_control_result_id": {
                 "type": "string",
-                "description": "Ungrouped control for the right result (needed to total distinct counts).",
+                "description": "The right query without its grouping (same FROM, joins, WHERE and aggregates).",
             },
             "top_n": {"type": "integer", "description": "Rows shown before 'Show more' (default 7 for long tables)."},
         },
