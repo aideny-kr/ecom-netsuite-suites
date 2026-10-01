@@ -351,12 +351,16 @@ function CardTable({ card }: { card: ResultCardData }) {
               )}
             >
               {index === 0 ? (
-                <span className="inline-flex items-center gap-2">
+                <span className="inline-flex flex-wrap items-center gap-2">
                   {card.totals_label || "Total"}
                   {inlineCheck && (
                     <span title={card.check!.text} aria-label={card.check!.text} data-testid="result-card-total-check">
                       <CheckIcon className="text-teal-500 dark:text-teal-400" />
                     </span>
+                  )}
+                  {/* A measure can be the first column; its total is never dropped for the label. */}
+                  {card.totals![0] !== null && card.totals![0] !== undefined && (
+                    <span>{formatCardValue(card.totals![0], column)}</span>
                   )}
                 </span>
               ) : (
@@ -375,12 +379,26 @@ function CardTable({ card }: { card: ResultCardData }) {
 // Card
 // ---------------------------------------------------------------------------
 
+/** "both as of …" only when both sources were fetched within a few minutes of each other;
+ *  otherwise each source's own time. A card without per-source times says just "as of". */
+function comparisonAsOf(card: ResultCardData, asOf: string | null): string | null {
+  const sources = card.as_of_sources ?? [];
+  if (sources.length === 2) {
+    const [a, b] = sources.map((s) => new Date(s.as_of).getTime());
+    if (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 15 * 60_000) {
+      return asOf ? `both as of ${asOf}` : null;
+    }
+    return sources.map((s) => `${s.label} as of ${formatAsOf(s.as_of) ?? s.as_of}`).join(" · ");
+  }
+  return asOf ? `as of ${asOf}` : null;
+}
+
 export function ResultCard({ card }: { card: ResultCardData }) {
   const [open, setOpen] = useState(!card.collapsed);
   const asOf = formatAsOf(card.as_of);
   const subtitle = (
     card.kind === "comparison"
-      ? [card.subtitle, asOf ? `both as of ${asOf}` : null]
+      ? [card.subtitle, comparisonAsOf(card, asOf)]
       : [card.source, card.subtitle, asOf ? `as of ${asOf}` : null]
   )
     .filter(Boolean)
@@ -402,11 +420,6 @@ export function ResultCard({ card }: { card: ResultCardData }) {
         {open && (
           <div className="border-t border-border">
             <CardTable card={card} />
-            {card.no_total_reason && (
-              <div className="px-[18px] py-2.5 text-[13px] text-muted-foreground">
-                No total: {card.no_total_reason}.
-              </div>
-            )}
             <CardFooter card={card} />
           </div>
         )}
@@ -434,6 +447,11 @@ export function ResultCard({ card }: { card: ResultCardData }) {
 function CardFooter({ card }: { card: ResultCardData }) {
   return (
     <>
+      {card.no_total_reason && (
+        <div className="border-t border-border px-[18px] py-2.5 text-[13px] text-muted-foreground">
+          No total: {card.no_total_reason}.
+        </div>
+      )}
       {card.check && !(card.kind !== "comparison" && card.check.status === "ok" && card.totals) && (
         <div
           data-testid="result-card-check"

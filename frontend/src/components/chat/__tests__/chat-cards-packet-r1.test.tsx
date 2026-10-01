@@ -86,13 +86,13 @@ describe("packet review round 1 on #370", () => {
     const step = (summary: string, error?: boolean) =>
       ({ tool: "netsuite_suiteql", params: {}, result_summary: summary, duration_ms: 5, error }) as unknown as ToolCallStep;
     const [flagged, legacy, ok] = activityStepsFromCalls([
-      step("NetSuite request failed: timeout", true),
+      step("Rows could not be read", true),
       step("Error: access denied"),
-      step("NetSuite request failed: timeout"),
+      step("Found 3 docs about failed logins"),
     ]);
-    expect(flagged.status).toBe("error");
+    expect(flagged.status).toBe("error"); // the flag wins over any wording
     expect(legacy.status).toBe("error"); // old messages without the flag
-    expect(ok.status).toBe("complete"); // without the flag the wording alone is not trusted beyond the prefix
+    expect(ok.status).toBe("complete");
   });
 
   it("R3: a tab, newline or carriage return inside a cell can never start a new cell or record", async () => {
@@ -157,6 +157,78 @@ describe("packet review round 2 on #370", () => {
       { tool_name: "present_result", tool_input: {}, step: 3, status: "complete" },
     ]);
     expect(steps.map((s) => s.status)).toEqual(["error"]);
+  });
+
+  it("R3 (round 3): column metadata of the wrong type cannot crash rendering", () => {
+    const card = coerceResultCard({
+      ...base,
+      columns: [{ key: { toString: "source data" } }, { key: "units", label: { x: 1 }, currency: {}, group: [] }],
+    }) as ResultCardData;
+    expect(card.columns.map((c) => [c.key, c.label])).toEqual([
+      ["c0", ""],
+      ["units", "units"],
+    ]);
+    expect(() => render(<ResultCard card={card} />)).not.toThrow();
+  });
+
+  it("R1 (round 3): a total in the first column is shown, with the label kept", () => {
+    const card = coerceResultCard({
+      ...base,
+      columns: [
+        { key: "orders", label: "Orders", format: "integer", align: "right" },
+        { key: "country", label: "Country", format: "text", align: "left" },
+      ],
+      rows: [[12, "US"]],
+      totals: [12, null],
+      totals_label: "Total · 1 country",
+    }) as ResultCardData;
+    render(<ResultCard card={card} />);
+    const total = screen.getByTestId("result-card-total");
+    expect(total).toHaveTextContent("Total · 1 country");
+    expect(total).toHaveTextContent("12");
+  });
+
+  it("R2 (round 3): saved failures without the flag are read from the backend's own wording", () => {
+    const step = (summary: string) =>
+      ({ tool: "netsuite_suiteql", params: {}, result_summary: summary, duration_ms: 5 }) as unknown as ToolCallStep;
+    const statuses = activityStepsFromCalls(
+      [
+        "NetSuite request failed: timeout",
+        "NetSuite API error 403: role lacks permission",
+        "Query failed",
+        "Permission denied: workspace.manage required",
+        "connection_unavailable",
+        "Found 3 docs about failed logins",
+        "20 rows returned",
+      ].map(step),
+    ).map((s) => s.status);
+    expect(statuses).toEqual(["error", "error", "error", "error", "error", "complete", "complete"]);
+  });
+
+  it("R4 (round 3): an open card shows why its rows have no total", () => {
+    const card = coerceResultCard({ ...base, no_total_reason: "orders can sit in more than one country" }) as ResultCardData;
+    render(<ResultCard card={card} />);
+    expect(screen.getByText(/No total: orders can sit in more than one country/)).toBeInTheDocument();
+  });
+
+  it("R5 (round 3): a comparison never calls an older result 'as of' the newer one", () => {
+    const comparison = {
+      ...base,
+      kind: "comparison",
+      subtitle: "Matched on country",
+      as_of: "2026-10-01T05:07:03+00:00",
+      as_of_sources: [
+        { label: "NetSuite", as_of: "2026-09-30T08:00:00+00:00" },
+        { label: "Metabase", as_of: "2026-10-01T05:07:03+00:00" },
+      ],
+    };
+    const { unmount } = render(<ResultCard card={coerceResultCard(comparison) as ResultCardData} />);
+    expect(screen.queryByText(/both as of/)).not.toBeInTheDocument();
+    expect(screen.getByText(/NetSuite as of .* · Metabase as of/)).toBeInTheDocument();
+    unmount();
+    const same = { ...comparison, as_of_sources: [comparison.as_of_sources[1], { label: "NetSuite", as_of: "2026-10-01T05:02:38+00:00" }] };
+    render(<ResultCard card={coerceResultCard(same) as ResultCardData} />);
+    expect(screen.getByText(/both as of/)).toBeInTheDocument();
   });
 
   it("R3: an array cell holding a formula is exported as quoted text", async () => {

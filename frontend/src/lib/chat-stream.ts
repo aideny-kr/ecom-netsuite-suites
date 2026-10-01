@@ -202,6 +202,8 @@ export interface ResultCardData {
   source: string;
   subtitle?: string | null;
   as_of?: string | null;
+  /** A comparison's per-source fetch times: the two results may come from different turns. */
+  as_of_sources?: { label: string; as_of: string }[];
   scope?: string | null;
   queries: { label: string; text: string }[];
   columns: ResultCardColumn[];
@@ -234,7 +236,7 @@ export function coerceResultCard(raw: unknown): ResultCardData | null {
     const c = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
     return {
       key: typeof c.key === "string" ? c.key : `c${index}`,
-      label: typeof c.label === "string" ? c.label : String(c.key ?? ""),
+      label: typeof c.label === "string" ? c.label : typeof c.key === "string" ? c.key : "",
       format: (formats.includes(c.format as string) ? c.format : "text") as ResultCardColumn["format"],
       currency: typeof c.currency === "string" ? c.currency : null,
       align: c.align === "right" ? "right" : "left",
@@ -286,6 +288,12 @@ export function coerceResultCard(raw: unknown): ResultCardData | null {
     source: text(d.source) ?? "",
     subtitle: text(d.subtitle),
     as_of: text(d.as_of),
+    as_of_sources: Array.isArray(d.as_of_sources)
+      ? (d.as_of_sources as unknown[]).flatMap((raw) => {
+          const s = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+          return typeof s.label === "string" && typeof s.as_of === "string" ? [{ label: s.label, as_of: s.as_of }] : [];
+        })
+      : [],
     scope: text(d.scope),
     queries: Array.isArray(d.queries)
       ? (d.queries as unknown[]).filter(

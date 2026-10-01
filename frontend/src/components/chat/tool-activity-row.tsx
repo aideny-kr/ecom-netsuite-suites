@@ -29,6 +29,13 @@ export interface ActivityStep {
 /** Tools that are presentation, not work: they never appear as steps. */
 const PRESENTATION_TOOLS = new Set(["present_result", "compare_results"]);
 
+/** How the backend words a failure, for messages saved before it recorded error=true:
+ *  "Error: …", "Query failed", "NetSuite request failed: …", "API error 403: …",
+ *  "Permission denied: …", "connection_unavailable". A failure word inside a sentence
+ *  ("3 docs about failed logins", "0 errors") is not one. */
+const LEGACY_FAILURE =
+  /^\s*(?:error|failed|tool error|exception)\b|^[^:\n]{0,60}?\b(?:failed|error \d{3}|denied|timed out)\s*(?::|$|\bin\b)|^[a-z]+(?:_[a-z]+)*_(?:failed|unavailable|denied)$/i;
+
 function rawName(tool: string): string {
   return tool.replace(/^ext__[a-f0-9]+__/, "");
 }
@@ -166,12 +173,8 @@ export function activityStepsFromCalls(
       summary: call.result_summary,
       durationMs: call.duration_ms,
       // The backend records a failed call as error=true. Messages saved before that flag fall
-      // back to a summary that states a failure up front ("0 errors" or a column named
-      // "failed" does not).
-      status:
-        call.error === true || /^\s*(?:error|failed|tool error|exception)\b/i.test(call.result_summary ?? "")
-          ? "error"
-          : "complete",
+      // back to the backend's own error wording.
+      status: call.error === true || LEGACY_FAILURE.test(call.result_summary ?? "") ? "error" : "complete",
       source: call,
     }))
     // A card that was shown is not a step of its own; a card that failed is.
