@@ -25,6 +25,8 @@ export interface DataTableData {
    *  unchecked-error flags, stall verdicts, etc. Absent when the backend result
    *  carried none; the card renders nothing in that case. */
   caveats?: string[];
+  /** Conversation-wide result id (rN); a result card names the ids it presents. */
+  result_id?: string;
 }
 
 /**
@@ -61,7 +63,17 @@ export function coerceDataTableData(d: Record<string, unknown>): DataTableData {
     truncated: Boolean(d.truncated),
     isMetric: deriveDataTableIsMetric(d),
     ...(Array.isArray(d.caveats) && d.caveats.length > 0 ? { caveats: d.caveats as string[] } : {}),
+    ...(typeof d.result_id === "string" ? { result_id: d.result_id } : {}),
   };
+}
+
+/** True when a result card presents this table (by result id), so the raw table is redundant. */
+export function tableCoveredByCards(table: { result_id?: string } | null | undefined, cards: ResultCardData[]): boolean {
+  if (!table?.result_id || cards.length === 0) return false;
+  if (Array.isArray((table as { caveats?: unknown }).caveats) && (table as { caveats: unknown[] }).caveats.length > 0) {
+    return false;
+  }
+  return cards.some((card) => card.result_ids.includes(table.result_id!));
 }
 
 export interface TaskOutputData {
@@ -168,8 +180,170 @@ export function isGroupBreakdown(value: unknown): value is GroupBreakdownData {
   );
 }
 
+/** One column of a server-built result card (present_result / compare_results). */
+export interface ResultCardColumn {
+  key: string;
+  label: string;
+  format: "text" | "integer" | "number" | "currency" | "percent" | "date" | "delta";
+  currency?: string | null;
+  align: "left" | "right";
+  /** Comparison cards group a measure's columns under one header (e.g. "Units"). */
+  group?: string | null;
+}
+
+/** A result card. Every figure on it is computed by the server, never by the model. */
+export interface ResultCardData {
+  card_id: string;
+  kind: "table" | "comparison";
+  result_ids: string[];
+  /** Ungrouped results used only to total and check the card. */
+  control_result_ids?: string[];
+  title: string;
+  source: string;
+  subtitle?: string | null;
+  as_of?: string | null;
+  /** A comparison's per-source fetch times: the two results may come from different turns. */
+  as_of_sources?: { label: string; as_of: string }[];
+  scope?: string | null;
+  queries: { label: string; text: string }[];
+  columns: ResultCardColumn[];
+  rows: unknown[][];
+  row_flags?: ("diff" | "missing" | null)[] | null;
+  share?: { label: string; of: number; values: number[] } | null;
+  totals?: (number | null)[] | null;
+  totals_label?: string | null;
+  check?: { status: "ok" | "warn"; text: string } | null;
+  tiles: { label: string; value: number; format: string; currency?: string | null }[];
+  top_n: number;
+  more_label?: string | null;
+  less_label?: string | null;
+  collapsed: boolean;
+  collapsed_note?: string | null;
+  no_total_reason?: string | null;
+  headline?: string | null;
+  detail?: string | null;
+  truncated?: boolean;
+}
+
+/** Validate a persisted or streamed card; malformed payloads render nothing. */
+export function coerceResultCard(raw: unknown): ResultCardData | null {
+  if (!raw || typeof raw !== "object") return null;
+  const d = raw as Record<string, unknown>;
+  if (typeof d.card_id !== "string" || typeof d.title !== "string") return null;
+  if (!Array.isArray(d.columns) || !Array.isArray(d.rows)) return null;
+  const formats = ["text", "integer", "number", "currency", "percent", "date", "delta"];
+  const columns = (d.columns as unknown[]).map((raw, index): ResultCardColumn => {
+    const c = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    return {
+      key: typeof c.key === "string" ? c.key : `c${index}`,
+      label: typeof c.label === "string" ? c.label : typeof c.key === "string" ? c.key : "",
+      format: (formats.includes(c.format as string) ? c.format : "text") as ResultCardColumn["format"],
+      currency: typeof c.currency === "string" ? c.currency : null,
+      align: c.align === "right" ? "right" : "left",
+      group: typeof c.group === "string" ? c.group : null,
+    };
+  });
+  const width = columns.length;
+  const kept = (d.rows as unknown[]).map((row, index) => [row, index] as const).filter(([row]) => Array.isArray(row));
+  // A cell is text, a number, a boolean or blank -- never an object or array, which can
+  // neither render nor export safely. Anything else becomes its JSON text.
+  const plain = (value: unknown): string | number | boolean | null => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    try {
+      return JSON.stringify(value) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const fit = (row: unknown[]) =>
+    (row.length >= width ? row : [...row, ...Array(width - row.length).fill(null)]).map(plain);
+  // Every field is rebuilt from a checked value: nothing from the payload reaches React unchecked.
+  const text = (value: unknown) => (typeof value === "string" ? value : null);
+  const strings = (value: unknown) => (Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []);
+  const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+  const rawShare = d.share && typeof d.share === "object" ? (d.share as Record<string, unknown>) : null;
+  const shareValues = rawShare && Array.isArray(rawShare.values) ? (rawShare.values as unknown[]) : null;
+  const shareValid =
+    !!rawShare &&
+    typeof rawShare.label === "string" &&
+    finite(rawShare.of) &&
+    !!shareValues &&
+    shareValues.length >= (d.rows as unknown[]).length &&
+    shareValues.every(finite);
+  const totals =
+    Array.isArray(d.totals) && d.totals.length >= width && d.totals.every((v) => v === null || finite(v))
+      ? (d.totals as (number | null)[])
+      : null;
+  const flags = Array.isArray(d.row_flags) ? (d.row_flags as unknown[]) : null;
+  const flagOf = (value: unknown) => (value === "diff" || value === "missing" ? value : null);
+  const rawCheck = d.check && typeof d.check === "object" ? (d.check as Record<string, unknown>) : null;
+  return {
+    card_id: d.card_id,
+    kind: d.kind === "comparison" ? "comparison" : "table",
+    result_ids: strings(d.result_ids),
+    control_result_ids: strings(d.control_result_ids),
+    title: d.title,
+    source: text(d.source) ?? "",
+    subtitle: text(d.subtitle),
+    as_of: text(d.as_of),
+    as_of_sources: Array.isArray(d.as_of_sources)
+      ? (d.as_of_sources as unknown[]).flatMap((raw) => {
+          const s = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+          return typeof s.label === "string" && typeof s.as_of === "string" ? [{ label: s.label, as_of: s.as_of }] : [];
+        })
+      : [],
+    scope: text(d.scope),
+    queries: Array.isArray(d.queries)
+      ? (d.queries as unknown[]).filter(
+          (q): q is { label: string; text: string } =>
+            !!q && typeof (q as { label?: unknown }).label === "string" && typeof (q as { text?: unknown }).text === "string",
+        ).map((q) => ({ label: q.label, text: q.text }))
+      : [],
+    columns,
+    rows: kept.map(([row]) => fit(row as unknown[])),
+    row_flags: flags ? kept.map(([, index]) => flagOf(flags[index])) : null,
+    share: shareValid
+      ? { label: rawShare!.label as string, of: rawShare!.of as number, values: kept.map(([, index]) => shareValues![index] as number) }
+      : null,
+    totals,
+    totals_label: text(d.totals_label),
+    check:
+      rawCheck && (rawCheck.status === "ok" || rawCheck.status === "warn") && typeof rawCheck.text === "string"
+        ? { status: rawCheck.status, text: rawCheck.text }
+        : null,
+    tiles: Array.isArray(d.tiles)
+      ? (d.tiles as unknown[]).flatMap((raw) => {
+          const t = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+          if (typeof t.label !== "string" || !finite(t.value)) return [];
+          const format = formats.includes(t.format as string) ? (t.format as string) : "integer";
+          return [{ label: t.label, value: t.value, format, currency: text(t.currency) }];
+        })
+      : [],
+    top_n: finite(d.top_n) ? d.top_n : (d.rows as unknown[]).length,
+    more_label: text(d.more_label),
+    less_label: text(d.less_label),
+    collapsed: d.collapsed === true,
+    collapsed_note: text(d.collapsed_note),
+    no_total_reason: text(d.no_total_reason),
+    headline: text(d.headline),
+    detail: text(d.detail),
+    truncated: d.truncated === true,
+  };
+}
+
+/** Cards persisted on a message's structured_output (``result_cards``). */
+export function resultCardsOf(structuredOutput: unknown): ResultCardData[] {
+  if (!structuredOutput || typeof structuredOutput !== "object") return [];
+  const cards = (structuredOutput as Record<string, unknown>).result_cards;
+  if (!Array.isArray(cards)) return [];
+  return cards.map(coerceResultCard).filter((c): c is ResultCardData => c !== null);
+}
+
 export type StreamBlock =
   | { type: "text"; content: string; id: string }
+  | { type: "result_card"; data: ResultCardData; id: string }
   | { type: "tool"; tool: StreamingToolCall; id: string }
   | { type: "data_table"; data: DataTableData; id: string }
   | { type: "chart"; data: ChartData; id: string }
@@ -194,6 +368,7 @@ export type ChatStreamEvent =
   | { type: "sheets_link"; data: SheetsLinkData }
   | { type: "docs_link"; data: DocsLinkData }
   | { type: "report_ready"; data: ReportReadyData }
+  | { type: "result_card"; data: ResultCardData }
   | { type: "drive_sources"; sources: Record<string, string> }
   | { type: "chart"; data: ChartData }
   | { type: "clarification_required"; data: ClarificationData }
@@ -221,6 +396,7 @@ type StreamHandlers = {
   onSheetsLink?: (data: SheetsLinkData) => void;
   onDocsLink?: (data: DocsLinkData) => void;
   onReportReady?: (data: ReportReadyData) => void;
+  onResultCard?: (data: ResultCardData) => void;
   onDriveSources?: (sources: Record<string, string>) => void;
   // Codex round 10 P2 Bug 2: Plan Mode mid-stream clarification gate.
   // Without this, the card only appears via the terminal `message` event's
@@ -347,6 +523,8 @@ export async function consumeChatStream(
           handlers.onDocsLink?.(event.data);
         } else if (event.type === "report_ready") {
           handlers.onReportReady?.(event.data);
+        } else if (event.type === "result_card") {
+          handlers.onResultCard?.(event.data);
         } else if (event.type === "drive_sources") {
           handlers.onDriveSources?.(event.sources);
         } else if (event.type === "clarification_required") {
@@ -429,6 +607,7 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
         // The honesty channel (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
         // §8) — absent for every data_table tool that doesn't set it.
         ...(Array.isArray(d.caveats) && d.caveats.length > 0 ? { caveats: d.caveats as string[] } : {}),
+        ...(typeof d.result_id === "string" ? { result_id: d.result_id } : {}),
       },
     };
   }
@@ -492,6 +671,10 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
       url: String(d.url || ""),
       section_count: typeof d.section_count === "number" ? d.section_count : undefined,
     } };
+  }
+  if (type === "result_card") {
+    const card = coerceResultCard(data.data);
+    if (card) return { type, data: card };
   }
   if (type === "drive_sources" && data.sources && typeof data.sources === "object") {
     return { type, sources: data.sources as Record<string, string> };

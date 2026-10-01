@@ -330,7 +330,11 @@ export interface ToolCallStep {
   params: Record<string, unknown>;
   result_summary: string;
   result_payload?: ToolCallResultPayload | null;
+  /** Conversation-wide id (r1, r2, …) a result card can reference. */
+  result_id?: string | null;
   duration_ms: number;
+  /** Set by the backend when the call failed; older messages may lack it. */
+  error?: boolean;
 }
 
 export interface ToolCallTableResultPayload {
