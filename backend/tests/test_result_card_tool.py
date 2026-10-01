@@ -211,7 +211,7 @@ def test_compare_card_matches_the_approved_mock():
     card, facts = build_compare_card(spec, ns_country(), mb_country(), (ns_total(), mb_total()))
     assert card["headline"] == "Orders match NetSuite in every country. Units differ in 4 countries."
     assert card["detail"] == (
-        "Metabase has 8 fewer units, all in United States, Germany, Switzerland and United Kingdom."
+        "Metabase has 8 fewer units, all in United States, Switzerland, Germany and United Kingdom."
     )
     assert [c["label"] for c in card["columns"]] == [
         "Country",
@@ -241,6 +241,7 @@ def test_compare_card_matches_the_approved_mock():
         "status": "ok",
         "text": "In each source, the country rows add up to that source's overall total.",
     }
+    assert [q["label"] for q in card["queries"]] == ["NetSuite query (SuiteQL)", "Metabase query (query builder)"]
     assert facts["matching"] == ["Orders"] and len(facts["differing"]["Units"]) == 4
 
 

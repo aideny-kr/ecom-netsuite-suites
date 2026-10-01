@@ -582,6 +582,7 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
         "card_id": f"card-{uuid.uuid4().hex[:10]}",
         "kind": "table",
         "result_ids": [spec.result_id],
+        "control_result_ids": [spec.control_result_id] if spec.control_result_id else [],
         "title": spec.title,
         "source": _source_label(loaded["tool"], payload),
         "subtitle": spec.subtitle,
@@ -645,6 +646,9 @@ def _side(loaded: dict, key: str, measures: list[str], control: dict | None) -> 
     return {"rows": rows, "totals": totals, "check": check, "query": _query_block(loaded["tool"], payload)}
 
 
+_QUERY_KIND = {"SuiteQL query": "SuiteQL", "BigQuery SQL": "SQL", "Metabase query (query builder)": "query builder"}
+
+
 def build_compare_card(
     spec: CompareResults, left: dict, right: dict, controls: tuple[dict | None, dict | None]
 ) -> tuple[dict, dict]:
@@ -667,11 +671,15 @@ def build_compare_card(
             lv = left_row["values"][index] if left_row else None
             rv = right_row["values"][index] if right_row else None
             if lv is not None and rv is not None and lv != rv:
-                differing[measure.label].append(display)
+                differing[measure.label].append((abs(rv - lv), display))
                 deltas[measure.label] += rv - lv
             values.append((lv, rv))
         pairs.append((display, values, bool(left_row and right_row)))
 
+    # Largest difference first; ties keep the row order.
+    differing = {
+        label: [name for _, name in sorted(pairs_, key=lambda pair: -pair[0])] for label, pairs_ in differing.items()
+    }
     delta_measures = {i for i, m in enumerate(spec.measures) if differing[m.label]}
     rows, flags = [], []
     for display, values, both in pairs:
@@ -755,13 +763,14 @@ def build_compare_card(
         "card_id": f"card-{uuid.uuid4().hex[:10]}",
         "kind": "comparison",
         "result_ids": [spec.left_result_id, spec.right_result_id],
+        "control_result_ids": [rid for rid in (spec.left_control_result_id, spec.right_control_result_id) if rid],
         "title": spec.title,
         "source": f"{spec.left_label} vs {spec.right_label}",
         "subtitle": spec.subtitle or f"Matched on {spec.key_label.lower()}",
         "as_of": right["as_of"],
         "scope": None,
         "queries": [
-            {**q, "label": f"{label} query" + (" (SuiteQL)" if q["label"] == "SuiteQL query" else "")}
+            {**q, "label": f"{label} query ({_QUERY_KIND.get(q['label'], 'query')})"}
             for q, label in ((a["query"], spec.left_label), (b["query"], spec.right_label))
             if q
         ],
