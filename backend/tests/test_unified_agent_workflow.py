@@ -6,6 +6,8 @@ anti-enrichment rules, correct RMA status codes, and investigation mode.
 
 import uuid
 
+import pytest
+
 from app.services.chat.agents.unified_agent import UnifiedAgent
 
 
@@ -279,6 +281,24 @@ class TestInvestigationMode:
         agent._context_need = "data"
         prompt = agent.system_prompt
         assert "lead with one or two plain sentences that answer the question" in prompt
+
+    @pytest.mark.parametrize("context_need", ["full", "data", None])
+    def test_every_prompt_path_carries_the_result_card_rules(self, context_need):
+        # Live check on staging (2026-10-01): "break them down by country" ran with context
+        # need "full", whose investigation block replaced the card rules, so no card was
+        # shown and the model restated the figures. Every path must carry the same rules.
+        agent = _make_agent()
+        if context_need:
+            agent._context_need = context_need
+        prompt = agent.system_prompt
+        for rule in (
+            "Do not restate figures a tool returned",
+            "Present the answer's tables with present_result",
+            "control_result_id: the same query without its grouping",
+            "call compare_results with both result_ids",
+            "```followups",
+        ):
+            assert prompt.count(rule) == 1, (context_need, rule)
 
     def test_investigation_has_systemnote_expertise(self):
         agent = _make_agent()
