@@ -26,6 +26,10 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+class McpAuthenticationError(RuntimeError):
+    """Credentials were unavailable before an external tool was sent."""
+
+
 def _transport_options(connector):
     if connector.provider not in ("custom", "shopify_mcp", "stripe_mcp", "netsuite_mcp"):
         return {}
@@ -80,7 +84,8 @@ def _tool_timeout_seconds(tool_name: str) -> float:
 async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) -> str | None:
     """Get a valid OAuth2 access token, auto-refreshing if expired.
 
-    Returns the access token string, or None if refresh fails.
+    Returns the access token string, or None if authorization is unavailable.
+    Temporary Metabase refresh outages raise a safe OAuthError for read recovery.
     Updates the connector's encrypted_credentials in-place if a refresh occurs.
     """
     from app.services.metabase_oauth_service import get_token, is_metabase
@@ -173,7 +178,7 @@ async def _build_headers(connector: McpConnector, db: AsyncSession | None = None
             from app.services.metabase_oauth_service import is_metabase
 
             provider_name = "Metabase" if is_metabase(connector) else "NetSuite"
-            raise RuntimeError(
+            raise McpAuthenticationError(
                 f"MCP connector {connector.id}: OAuth 2.0 token expired and refresh failed. "
                 f"User must re-authorize the {provider_name} connection."
             )

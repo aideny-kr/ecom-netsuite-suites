@@ -337,3 +337,49 @@ async def test_oauth_http_rejects_redirects_errors_oversized_and_invalid_json(mo
     with pytest.raises(oauth.OAuthError) as exc:
         await oauth.request_json(ORIGIN + "/oauth/token")
     assert "secret-provider-error" not in str(exc.value)
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+async def test_temporary_oauth_http_failure_is_distinct_from_reauthorization(monkeypatch, status):
+    import httpx
+
+    monkeypatch.setattr(
+        oauth,
+        "PublicHTTPTransport",
+        lambda endpoint: httpx.MockTransport(lambda request: httpx.Response(status, content=b"private-provider-body")),
+    )
+    with pytest.raises(oauth.OAuthError) as caught:
+        await oauth.request_json(ORIGIN + "/oauth/token", method="POST", data={"grant_type": "refresh_token"})
+    assert caught.value.transient is True
+    assert "private" not in str(caught.value)
+    assert "connecting again" not in str(caught.value)
+
+
+async def test_refresh_outage_retains_rotating_credentials_then_recovers(db, connector, provider):
+    connector.encrypted_credentials = encrypt_credentials(
+        {
+            "oauth_provider": "metabase",
+            "client_id": "client",
+            "resource": URL,
+            "token_endpoint": ORIGIN + "/oauth/token",
+            "expires_at": 0,
+            "access_token": "expired-secret",
+            "refresh_token": "refresh-secret",
+        }
+    )
+    await db.flush()
+    before = connector.encrypted_credentials
+    original = provider[1].side_effect
+    provider[1].side_effect = oauth.OAuthError(
+        "Metabase temporarily unavailable.", code="metabase_upstream_unavailable"
+    )
+    from app.services.mcp_client_service import _build_headers
+
+    with pytest.raises(oauth.OAuthError) as caught:
+        await _build_headers(connector, db)
+    assert caught.value.transient
+    assert connector.encrypted_credentials == before
+    provider[1].side_effect = original
+    headers = await _build_headers(connector, db)
+    assert headers["Authorization"] == "Bearer secret-access"
+    assert decrypt_credentials(connector.encrypted_credentials)["refresh_token"] == "secret-refresh"

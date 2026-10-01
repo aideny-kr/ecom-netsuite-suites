@@ -32,6 +32,14 @@ READ_SCOPES = (
 class OAuthError(ValueError):
     """Safe operator-facing error; never includes provider response bodies."""
 
+    def __init__(self, message, *, code="metabase_oauth_failed"):
+        self.code = code
+        super().__init__(message)
+
+    @property
+    def transient(self):
+        return self.code in {"metabase_transport_failed", "metabase_rate_limited", "metabase_upstream_unavailable"}
+
 
 def is_metabase(connector):
     return (
@@ -96,6 +104,13 @@ async def request_json(url, *, method="GET", **kwargs):
             ) as client:
                 async with client.stream(method, url, headers={"Accept": "application/json"}, **kwargs) as response:
                     if not 200 <= response.status_code < 300:
+                        if response.status_code == 429 or 500 <= response.status_code < 600:
+                            raise OAuthError(
+                                "Metabase is temporarily unavailable. Try again shortly.",
+                                code="metabase_rate_limited"
+                                if response.status_code == 429
+                                else "metabase_upstream_unavailable",
+                            )
                         raise OAuthError("Metabase could not complete sign-in. Try connecting again.")
                     body = bytearray()
                     async for chunk in response.aiter_bytes():
@@ -110,7 +125,11 @@ async def request_json(url, *, method="GET", **kwargs):
                     return result
     except OAuthError:
         raise
-    except (httpx.HTTPError, ValueError, TimeoutError):
+    except (httpx.HTTPError, TimeoutError):
+        raise OAuthError(
+            "Could not reach Metabase securely. Try again shortly.", code="metabase_transport_failed"
+        ) from None
+    except ValueError:
         raise OAuthError("Could not reach Metabase securely. Try connecting again.") from None
 
 
@@ -337,7 +356,11 @@ async def get_token(connector, db):
             },
         )
         credentials = token_credentials(data, credentials)
-    except OAuthError:
+    except OAuthError as exc:
+        # An outage is not a revoked grant. Let fixed read callers apply their
+        # bounded retry policy; leave the existing rotating credential intact.
+        if exc.transient:
+            raise
         return None
     connector.encrypted_credentials = encrypt_credentials(credentials)
     connector.encryption_key_version = get_current_key_version()

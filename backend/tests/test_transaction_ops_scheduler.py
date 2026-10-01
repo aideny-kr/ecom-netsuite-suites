@@ -597,7 +597,10 @@ def test_daily_routing_preserves_manual_bulk_and_one_order_recovery(monkeypatch)
     assert mod.investigation_queue("recovery", 2) == "recon"
 
 
-async def test_real_interval_candidate_recovers_transient_stop_without_daily_policy(db, admin_user, monkeypatch):
+@pytest.mark.parametrize(
+    "code", ["source_transport_failed", "replica_query_incomplete", "replica_read_not_fresh", "replica_cached_response"]
+)
+async def test_real_interval_candidate_recovers_transient_stop_without_daily_policy(db, admin_user, monkeypatch, code):
     from app.schemas.transaction_runs import ConfigControl, RunCreate
     from app.services.transaction_ops import state_service as state
     from tests.conftest import enable_feature_flag
@@ -634,7 +637,7 @@ async def test_real_interval_candidate_recovers_transient_stop_without_daily_pol
         "read_retry_count": 3,
         "read_stop_reason": "retry_limit",
         "read_stop_run_id": str(prior.id),
-        "last_read_failure": {"code": "source_transport_failed", "retryable": True, "resolved": False},
+        "last_read_failure": {"code": code, "retryable": True, "resolved": False},
     }
     await db.flush()
     assert conf.id in await mod._candidate_ids(db, actor.tenant_id, now)
