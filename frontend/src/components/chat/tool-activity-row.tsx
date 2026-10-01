@@ -159,8 +159,7 @@ export function activityStepsFromCalls(
   const shown = new Set(cards.flatMap((card) => card.result_ids));
   const checks = new Set(cards.flatMap((card) => card.control_result_ids ?? []));
   return (calls ?? [])
-    .filter((call) => !PRESENTATION_TOOLS.has(call.tool))
-    .map((call) => ({
+    .map((call): ActivityStep => ({
       role: call.result_id && shown.has(call.result_id) ? "answer" : call.result_id && checks.has(call.result_id) ? "check" : null,
       tool: call.tool,
       params: call.params ?? {},
@@ -174,12 +173,14 @@ export function activityStepsFromCalls(
           ? "error"
           : "complete",
       source: call,
-    }));
+    }))
+    // A card that was shown is not a step of its own; a card that failed is.
+    .filter((step) => !PRESENTATION_TOOLS.has(step.tool) || step.status === "error");
 }
 
 export function activityStepsFromStream(tools: StreamingToolCall[]): ActivityStep[] {
   return tools
-    .filter((tool) => !PRESENTATION_TOOLS.has(tool.tool_name))
+    .filter((tool) => !PRESENTATION_TOOLS.has(tool.tool_name) || tool.status === "error")
     .map((tool) => ({
       tool: tool.tool_name,
       params: tool.tool_input ?? {},

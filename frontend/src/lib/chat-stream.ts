@@ -243,7 +243,20 @@ export function coerceResultCard(raw: unknown): ResultCardData | null {
   });
   const width = columns.length;
   const kept = (d.rows as unknown[]).map((row, index) => [row, index] as const).filter(([row]) => Array.isArray(row));
-  const fit = (row: unknown[]) => (row.length >= width ? row : [...row, ...Array(width - row.length).fill(null)]);
+  // A cell is text, a number, a boolean or blank -- never an object or array, which can
+  // neither render nor export safely. Anything else becomes its JSON text.
+  const plain = (value: unknown): string | number | boolean | null => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    try {
+      return JSON.stringify(value) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const fit = (row: unknown[]) =>
+    (row.length >= width ? row : [...row, ...Array(width - row.length).fill(null)]).map(plain);
   // Every field is rebuilt from a checked value: nothing from the payload reaches React unchecked.
   const text = (value: unknown) => (typeof value === "string" ? value : null);
   const strings = (value: unknown) => (Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []);

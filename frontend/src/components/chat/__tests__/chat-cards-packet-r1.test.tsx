@@ -5,7 +5,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import React from "react";
 import { MessageList } from "../message-list";
 import { ResultCard } from "../result-card";
-import { activityStepsFromCalls } from "../tool-activity-row";
+import { activityStepsFromCalls, activityStepsFromStream } from "../tool-activity-row";
 import { coerceResultCard } from "@/lib/chat-stream";
 import type { ResultCardData, StreamBlock } from "@/lib/chat-stream";
 import type { ToolCallStep } from "@/lib/types";
@@ -124,5 +124,49 @@ describe("packet review round 1 on #370", () => {
     );
     expect(screen.getByTestId("collapsed-sql")).toBeInTheDocument();
     expect(screen.queryByText(/SELECT country FROM transaction/)).not.toBeInTheDocument();
+  });
+});
+
+describe("packet review round 2 on #370", () => {
+  it("R1: a cell that is an object or array is turned into text before anything renders it", () => {
+    const card = coerceResultCard({
+      ...base,
+      rows: [[{ toString: "source data" }, 5], [["a", "b"], { n: 1 }]],
+    }) as ResultCardData;
+    for (const row of card.rows) {
+      for (const cell of row) expect(["string", "number", "boolean"].includes(typeof cell) || cell === null).toBe(true);
+    }
+    expect(() => render(<ResultCard card={card} />)).not.toThrow();
+  });
+
+  it("R2: a failed presentation step stays in the row and is counted as failed", () => {
+    const steps = activityStepsFromCalls([
+      { tool: "netsuite_suiteql", params: {}, result_summary: "20 rows", duration_ms: 5 },
+      { tool: "compare_results", params: {}, result_summary: "Result r4 is unavailable.", duration_ms: 1, error: true },
+      { tool: "present_result", params: {}, result_summary: "Card shown", duration_ms: 1 },
+    ] as unknown as ToolCallStep[]);
+    expect(steps.map((s) => [s.tool, s.status])).toEqual([
+      ["netsuite_suiteql", "complete"],
+      ["compare_results", "error"],
+    ]);
+  });
+
+  it("R2: a presentation step that fails while streaming stays in the row", () => {
+    const steps = activityStepsFromStream([
+      { tool_name: "present_result", tool_input: {}, step: 2, status: "error" },
+      { tool_name: "present_result", tool_input: {}, step: 3, status: "complete" },
+    ]);
+    expect(steps.map((s) => s.status)).toEqual(["error"]);
+  });
+
+  it("R3: an array cell holding a formula is exported as quoted text", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const card = coerceResultCard({ ...base, rows: [[['=HYPERLINK("https://example.com","Open")'], 5]] }) as ResultCardData;
+    render(<ResultCard card={card} />);
+    fireEvent.click(screen.getByRole("button", { name: /copy/i }));
+    const text = (writeText.mock.calls[0] as unknown as [string])[0];
+    const cells = text.split("\n").flatMap((line) => line.split("\t"));
+    expect(cells.some((cell) => /^[=+\-@]/.test(cell.trimStart()))).toBe(false);
   });
 });

@@ -123,8 +123,10 @@ function gridTemplate(card: ResultCardData, withShare: boolean): string {
  *  line breaks inside it become spaces, then text a spreadsheet would run (=, +, -, @) gets a
  *  leading quote. Numbers that arrive as text stay numbers. */
 function safeCell(value: unknown): unknown {
-  if (typeof value !== "string") return value;
-  const flat = value.replace(/[\t\r\n]+/g, " ");
+  if (value === null || value === undefined || typeof value === "number" || typeof value === "boolean") return value;
+  // Whatever else arrives is checked as the exact text it will be exported as.
+  const text = typeof value === "string" ? value : JSON.stringify(value) ?? "";
+  const flat = text.replace(/[\t\r\n]+/g, " ");
   return /^[=+\-@]/.test(flat.trimStart()) && toNumber(flat) === null ? `'${flat}` : flat;
 }
 
