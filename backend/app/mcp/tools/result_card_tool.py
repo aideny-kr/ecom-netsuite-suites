@@ -129,7 +129,11 @@ class _Loader:
         except Exception:
             sidecar = None
         if isinstance(sidecar, dict) and isinstance(sidecar.get("payload"), dict):
-            entry = {"payload": sidecar["payload"], "tool": sidecar.get("tool") or "", "as_of": None}
+            seq = sidecar.get("seq")
+            fetched = (
+                datetime.fromtimestamp(seq, UTC) if isinstance(seq, int | float) and not isinstance(seq, bool) else None
+            )
+            entry = {"payload": sidecar["payload"], "tool": sidecar.get("tool") or "", "as_of": fetched}
         if entry is None:
             if self.messages is None:
                 self.messages = await load_conversation_tool_messages(db, session, tenant)
@@ -310,8 +314,12 @@ def _classify(expression: str) -> str:
     return "other"
 
 
+_SQL_TOKENS = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|--[^\n]*|/\*.*?\*/", re.S)
+
+
 def _strip_sql_comments(query: str) -> str:
-    return re.sub(r"/\*.*?\*/", " ", re.sub(r"--[^\n]*", " ", query), flags=re.S)
+    """Remove -- and /* */ comments, never text inside quotes ('A--red' is a value)."""
+    return _SQL_TOKENS.sub(lambda m: m[0] if m[0][0] in "'\"" else " ", query)
 
 
 def _top_level_words(query: str) -> set[str]:
@@ -426,7 +434,15 @@ def _is_partial(payload: dict) -> bool:
     source = payload.get("metabase_source")
     if isinstance(source, dict):
         # A limit anywhere but the final stage caps that stage's input: always partial.
-        if any(_sql_capped(text, returned) for text in _native_sql(source.get("query"))):
+        natives = _native_sql(source.get("query"))
+        final_stage = _final_stage(source.get("query"))
+        own_native = final_stage.get("native") if isinstance(final_stage, dict) else None
+        if isinstance(own_native, str) and own_native in natives:
+            natives.remove(own_native)
+            if _sql_capped(own_native, returned):
+                return True
+        # Native SQL in an earlier stage or a saved source question feeds the final stage.
+        if any(_SQL_LIMIT.search(_strip_sql_comments(text)) for text in natives):
             return True
         limits = _mbql_limits(source.get("query"))
         final = _final_stage(source.get("query"))
@@ -738,7 +754,15 @@ def _mbql_population(query) -> str | None:
     if isinstance(final, dict):
         for key in ("breakout", "order-by", "limit", "fields", "page"):
             final.pop(key, None)
-    return json.dumps(query, sort_keys=True, default=str)
+
+    def without_ids(node):
+        if isinstance(node, dict):
+            return {k: without_ids(v) for k, v in node.items() if k != "lib/uuid"}
+        if isinstance(node, list):
+            return [without_ids(item) for item in node]
+        return node
+
+    return json.dumps(without_ids(query), sort_keys=True, default=str)
 
 
 def _counts_the_same_rows(control: dict, shown: dict, names: list[str]) -> bool:
@@ -823,22 +847,15 @@ def _totals(
         places = max([-v.as_tuple().exponent for v in values if v.as_tuple().exponent < 0] or [0])
         tolerance = Decimal(len(values)) * Decimal(5).scaleb(-(places + 1)) if places else Decimal(0)
         delta = summed - total
-        if delta > tolerance and kinds is not None and kinds[index] in {"sum", "count"}:
-            # Groups of a sum or a count cannot overlap: this figure is not their total.
-            totals[index] = None
-            outcomes.add("uncovered")
-            continue
         outcomes.add("ok" if abs(delta) <= tolerance else "over" if delta > 0 else "under")
     messages = {
         "blank": "Some rows have no value, so they cannot be checked against the overall total.",
-        "uncovered": (
-            "The rows add up to more than the overall figure given, so it does not cover these rows; "
-            "no total is shown for them."
+        "over": (
+            "The rows add up to more than the overall total: the groups overlap, or rows left out of them offset it."
         ),
-        "over": "The rows add up to more than the overall total, so the groups overlap.",
         "under": "The rows add up to less than the overall total; part of it falls outside these rows.",
     }
-    problems = [messages[key] for key in ("blank", "uncovered", "over", "under") if key in outcomes]
+    problems = [messages[key] for key in ("blank", "over", "under") if key in outcomes]
     if not problems:
         return totals, {"status": "ok", "text": "The rows add up to the overall total."}
     return totals, {"status": "warn", "text": " ".join(problems)}
@@ -951,7 +968,14 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
     if share_index is not None and totals and kinds[share_index] in {"sum", "count"}:
         total = _number(totals[share_index])
         values = [numbers[r][share_index] for r in range(shown)]
-        if total and total > 0 and all(value is not None and value >= 0 for value in values):
+        every = [numbers[r][share_index] for r in range(len(rows))]
+        # Shares only of a total the rows fit inside: rows above it would show over 100%.
+        if (
+            total
+            and total > 0
+            and all(value is not None and value >= 0 for value in every)
+            and sum(every, Decimal(0)) <= total * Decimal("1.000001")
+        ):
             share = {
                 "label": spec.share_label or f"Share of {column_meta[share_index]['label'].lower()}",
                 "of": share_index,

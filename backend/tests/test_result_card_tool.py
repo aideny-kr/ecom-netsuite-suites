@@ -705,9 +705,9 @@ def test_only_a_provably_overall_query_can_total_a_card():
             build_present_card(spec, ns_country(), control)
 
 
-def test_rows_that_exceed_a_sum_total_get_no_total_or_share():
-    # R1: the rows of a SUM or COUNT partition its total; rows adding up to more than the
-    # "total" mean it does not cover them, so neither it nor shares of it are shown.
+def test_rows_that_exceed_the_total_keep_it_but_get_no_share():
+    # Round 4 R2 replaced the round-1 rule: a total that counts the same rows is kept even
+    # when the rows add up to more (groups left out by HAVING can be negative).
     control = ns_total()
     control["payload"]["rows"] = [["228", "100", "1000"]]
     card = build_present_card(
@@ -715,9 +715,8 @@ def test_rows_that_exceed_a_sum_total_get_no_total_or_share():
         ns_country(),
         control,
     )
-    assert card["totals"] == [None, 228, None, None] and card["share"] is None
-    assert [tile["label"] for tile in card["tiles"]] == ["Orders"]
-    assert card["check"]["status"] == "warn" and "does not cover these rows" in card["check"]["text"]
+    assert card["totals"] == [None, 228, 100, 1000] and card["share"] is None
+    assert card["check"]["status"] == "warn" and "more than the overall total" in card["check"]["text"]
 
 
 def test_two_blank_values_are_not_a_match():
@@ -899,3 +898,78 @@ async def test_a_blocked_field_cannot_hide_inside_a_saved_metabase_question():
     ):
         with pytest.raises(ValueError, match="blocked"):
             await _check_access(db, "tenant", "ext__6f95665c23cc4d35a3f9eb4231099568__query", payload)
+
+
+# --- independent packet review round 4 on #369 (gpt-6-astra) ---
+
+
+def test_comment_markers_inside_quoted_values_are_not_comments():
+    # R1: 'A--red' and 'A--blue' are different filters, not a comment.
+    loaded = _limited([["A--red", 100]], "SELECT sku, SUM(u) AS units FROM t WHERE sku = 'A--red' GROUP BY sku")
+    control = _control(["units"], [200], "SELECT SUM(u) AS units FROM t WHERE sku = 'A--blue'")
+    with pytest.raises(ValueError, match="same rows"):
+        build_present_card(PresentResult(result_id="r1", title="t", control_result_id="r2"), loaded, control)
+
+
+def test_a_signed_total_is_kept_when_left_out_groups_are_negative():
+    # R2: sales 100, credits -20; HAVING SUM > 0 shows only sales; the true total is 80.
+    loaded = _table([["Sales", 100]], columns=("kind", "amount"))
+    loaded["payload"]["query"] = "SELECT kind, SUM(amount) AS amount FROM t GROUP BY kind HAVING SUM(amount) > 0"
+    control = _control(["amount"], [80], "SELECT SUM(amount) AS amount FROM t")
+    card = build_present_card(
+        PresentResult(result_id="r1", title="t", control_result_id="r2", share_of="amount"), loaded, control
+    )
+    assert card["totals"] == [None, 80] and card["share"] is None
+    assert card["check"]["status"] == "warn"
+
+
+def test_a_native_limit_before_the_final_metabase_stage_is_partial():
+    # R3: stage 1 is native SQL capped at 1000 orders; the final stage groups them.
+    loaded = mb_country()
+    loaded["payload"] = {**loaded["payload"], "rows": loaded["payload"]["rows"][:1]}
+    source = loaded["payload"]["metabase_source"]
+    source["query"] = {
+        "stages": [
+            {"lib/type": "mbql.stage/native", "native": "SELECT * FROM orders LIMIT 1000"},
+            source["query"]["stages"][0],
+        ]
+    }
+    assert build_present_card(PresentResult(result_id="r1", title="t"), loaded, None)["truncated"] is True
+
+
+def test_a_final_native_stage_under_its_limit_is_complete():
+    loaded = mb_country()
+    source = loaded["payload"]["metabase_source"]
+    source["query"] = {"stages": [{"lib/type": "mbql.stage/native", "native": "SELECT c, n, q FROM x LIMIT 1000"}]}
+    assert build_present_card(PresentResult(result_id="r1", title="t"), loaded, None)["truncated"] is False
+
+
+def test_metabase_internal_ids_do_not_make_a_different_population():
+    # R4: independently built aggregation clauses carry different lib/uuid values.
+    def tag(card, uid):
+        stage = card["payload"]["metabase_source"]["query"]["stages"][0]
+        stage["aggregation"] = [
+            [op, {"lib/uuid": f"{uid}-{i}"}, *rest] for i, (op, _, *rest) in enumerate(stage["aggregation"])
+        ]
+        return card
+
+    card = build_present_card(
+        PresentResult(result_id="r9", title="t", control_result_id="r5"), tag(mb_country(), "a"), tag(mb_total(), "b")
+    )
+    assert card["totals"] == [None, 228, 232]
+
+
+async def test_a_cached_result_keeps_the_time_it_was_fetched():
+    # R5: a result fetched earlier in the conversation is not labelled with the current time.
+    from unittest.mock import AsyncMock, patch
+
+    from app.mcp.tools.result_card_tool import _Loader
+
+    envelope = {"payload": {"columns": ["a"], "rows": [[1]]}, "seq": 1759294800.0, "tool": "netsuite_suiteql"}
+    with (
+        patch("app.mcp.tools.result_pivot._authorize", AsyncMock(return_value=(None, "tenant", "session"))),
+        patch("app.services.chat.result_cache.get_full_payload_entry", return_value=envelope),
+        patch("app.mcp.tools.result_card_tool._check_access", AsyncMock(return_value=None)),
+    ):
+        loaded = await _Loader({}).load("r1")
+    assert loaded["as_of"] == "2025-10-01T05:00:00+00:00"
