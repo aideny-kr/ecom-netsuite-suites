@@ -199,10 +199,11 @@ class RefundGraphBatch:
                 for prefix in ("previous", "next")
                 if row.get(prefix + "type") in {"CashRfnd", "CustRfnd"}
             }
-            # One batched totals read when the order has a credit memo linked from its
-            # invoice (netsuite_refunds.read_invoice_credits).
+            # One batched totals read when a credit memo touching this order has an
+            # incoming invoice link, whoever owns that invoice; the reader reads it
+            # either way (netsuite_refunds.invoice_credit_candidates).
             invoice_credit = any(
-                row["previousdoc"] in reachable
+                {row["previousdoc"], row["nextdoc"]} & reachable
                 and row.get("previoustype") == "CustInvc"
                 and row.get("nexttype") == "CustCred"
                 for row in self.edges

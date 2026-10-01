@@ -35,11 +35,13 @@ def _refund(evidence, reference, currency, precision):
     return _amount(evidence.get("amount"), precision)
 
 
-def _invoice_credits(evidence, order_id, reference, currency, precision):
+def _invoice_credits(evidence, order_id, reference, currency, precision, *, exclude=frozenset()):
     """Credit memos created from this order's invoice, from the same NetSuite refund read.
 
     Only a complete read of the same order, reference and currency counts, and the
     stated sums must equal their credits. Anything else is unknown, never zero.
+    `exclude` names credit memos another adjustment already accounts for (a verified
+    refund tax adjustment); they are never subtracted twice.
     """
     if _refund(evidence, reference, currency, precision) is None:
         return None
@@ -57,7 +59,14 @@ def _invoice_credits(evidence, order_id, reference, currency, precision):
     total, tax = sum((t for t, _ in amounts), Decimal(0)), sum((x for _, x in amounts), Decimal(0))
     if _amount(credits.get("total"), precision) != total or _amount(credits.get("tax"), precision) != tax:
         return None
-    return {"rows": rows, "total": total, "tax": tax}
+    kept = [(row, amount) for row, amount in zip(rows, amounts) if str(row.get("id")) not in exclude]
+    if not kept:
+        return None
+    return {
+        "rows": [row for row, _ in kept],
+        "total": sum((t for _, (t, _) in kept), Decimal(0)),
+        "tax": sum((x for _, (_, x) in kept), Decimal(0)),
+    }
 
 
 def reconcile_order(source_evidence, target_evidence, config, *, refunds=None):
@@ -192,12 +201,20 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     # count only when they explain the difference exactly, total and tax together.
     # An order that already matches keeps its plain comparison, so return credits
     # booked against the invoice never create a difference.
-    invoice = _invoice_credits(refunds.get("target"), header.get("id"), reference, currency, precision)
+    invoice = _invoice_credits(
+        refunds.get("target"),
+        header.get("id"),
+        reference,
+        currency,
+        precision,
+        exclude=frozenset(str(proof.get("credit_memo_id")) for proof in credits),
+    )
     (source_total, target_total), (source_tax, target_tax) = values["order_total"], values["tax"]
-    if invoice and source_total is not None and target_total is not None and source_total != target_total:
+    known = None not in (source_total, target_total, source_tax, target_tax)
+    if invoice and known and source_total != target_total:
         credited_total = target_total - invoice["total"]
-        credited_tax = target_tax - invoice["tax"] if target_tax is not None else None
-        if credited_total == source_total and (source_tax is None or credited_tax == source_tax):
+        credited_tax = target_tax - invoice["tax"]
+        if credited_total == source_total and credited_tax == source_tax:
             values["order_total"] = (source_total, credited_total)
             values["tax"] = (source_tax, credited_tax)
             adjustments.append(

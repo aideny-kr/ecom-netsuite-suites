@@ -250,3 +250,12 @@ def test_unproven_invoice_credits_never_explain_a_difference(change):
     result = reconcile_order(source, target, config, refunds=refunds)
     assert result["amounts"]["order_total"]["target"] == "120.00"
     assert result["status"] != "matched"
+
+
+def test_unknown_source_tax_never_lets_credits_erase_a_known_total_difference():
+    # Packet review F2: the credits must explain total and tax together.
+    source, target, config, refunds = credited(evidence(), "115.18", [("4.82", "0")])
+    del source["orders"][0]["included_tax_total"]
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["amounts"]["order_total"] == {"source": "115.18", "target": "120.00", "delta": "-4.82"}
+    assert "adjustments" not in result
