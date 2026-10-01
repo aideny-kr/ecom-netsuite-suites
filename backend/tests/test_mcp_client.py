@@ -55,6 +55,8 @@ EXPECTED_TOOLS = {
     "workspace.run_suiteql_assertions",
     "pivot.query_result",
     "cross_source.query",
+    "present.result",
+    "compare.results",
     "suitescript.sync",
     "tenant.save_learned_rule",
     "bigquery.sql",
