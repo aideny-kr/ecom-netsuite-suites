@@ -510,3 +510,29 @@ def test_rendered_table_humanizes_join_aliases_and_formats_measures_only():
     ]
     table = _table(["id", "day", "value"], [[1001, "2026-09-30T00:00:00-07:00", 44828.0]], frozenset({2}))
     assert "| 1001 | 2026-09-30 | 44,828 |" in table
+
+
+def test_control_sentences_name_their_column_when_a_table_has_several_measures():
+    # T2 gate #369, finding 14: an overlapping distinct count and a reconciling sum must
+    # not read as one self-contradicting claim.
+    from app.services.chat.metabase_evidence import EvidenceTable
+
+    evidence = MetabaseEvidence({TOOL})
+    grouped = EvidenceTable(
+        ["c → Name", "Distinct values of o → ID", "Sum of Quantity"],
+        [["US", 5, 7], ["CA", 4, 3]],
+        True,
+        True,
+        {1: ("orders", "distinct"), 2: ("units", "sum")},
+    )
+    control = EvidenceTable(
+        ["Distinct values of o → ID", "Sum of Quantity"],
+        [[8, 10]],
+        False,
+        True,
+        {0: ("orders", "distinct"), 1: ("units", "sum")},
+    )
+    evidence.tables = [grouped, control]
+    statement = evidence._control_statement(grouped)
+    assert "⚠ Distinct values of ID: the groups overlap" in statement
+    assert "✓ Sum of Quantity: the rows add up to the overall total." in statement

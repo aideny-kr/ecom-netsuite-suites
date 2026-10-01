@@ -280,3 +280,169 @@ def test_intercept_sends_the_card_to_the_ui_and_only_a_note_to_the_model():
     assert event == "result_card" and data["card_id"] == card["card_id"]
     assert "228" not in condensed and json.loads(condensed)["card_shown"] is True
     assert _intercept_tool_result("present_result", json.dumps({"error": "x"}))[0] is None
+
+
+# --- T2 gate round 1 on #369 (wf_4744bc2f-d95): one regression per confirmed finding ---
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "SUM(amount)/SUM(qty)",
+        "ROUND(SUM(a)/COUNT(b), 2)",
+        "SUM(x) * 1.0 / COUNT(*)",
+        "SUM(DISTINCT v)",
+        "ABS(SUM(v))",
+        "NVL(SUM(v), 1)",
+    ],
+)
+def test_arithmetic_over_aggregates_is_never_additive(expression):
+    assert sql_aggregates(f"SELECT c, {expression} AS m FROM t GROUP BY c")["m"] == "other"
+
+
+def test_plain_aggregates_keep_their_kind_through_safe_wrappers():
+    kinds = sql_aggregates(
+        "SELECT c, ROUND(SUM(t.amount * -1), 2) AS a, NVL(SUM(q), 0) AS b, COUNT(*) AS n, "
+        "COUNT(DISTINCT t.id) AS d FROM t GROUP BY c"
+    )
+    assert kinds == {"c": "other", "a": "sum", "b": "sum", "n": "count", "d": "distinct"}
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "WITH t AS (SELECT region, COUNT(*) AS n FROM x GROUP BY region) SELECT region, n FROM t",
+        "SELECT region, COUNT(*) AS n FROM a GROUP BY region UNION ALL SELECT region, COUNT(*) AS n FROM b GROUP BY region",
+    ],
+)
+def test_ctes_and_set_operations_fail_closed(query):
+    assert sql_aggregates(query) == {}
+
+
+def test_detail_rows_keep_identifiers_verbatim_and_get_no_total_row():
+    loaded = {
+        "tool": "netsuite_suiteql",
+        "as_of": "x",
+        "payload": {
+            "columns": ["customer", "tranid", "zip"],
+            "rows": [["Acme", "00123", "02139"], ["Beta", "1E5", None]],
+            "query": "SELECT customer, tranid, zip FROM transaction",
+        },
+    }
+    card = build_present_card(PresentResult(result_id="r1", title="Orders"), loaded, None)
+    assert card["rows"] == [["Acme", "00123", "02139"], ["Beta", "1E5", None]]
+    assert {c["format"] for c in card["columns"]} == {"text"}
+    assert card["totals"] is None and card["totals_label"] is None
+
+
+def test_totals_cover_every_stored_row_not_just_the_displayed_ones():
+    rows = [[f"k{i}", "1", "2"] for i in range(800)]
+    loaded = {
+        "tool": "netsuite_suiteql",
+        "as_of": "x",
+        "payload": {
+            "columns": ["k", "n", "v"],
+            "rows": rows,
+            "query": "SELECT k, COUNT(*) AS n, SUM(v) AS v FROM t GROUP BY k",
+        },
+    }
+    card = build_present_card(PresentResult(result_id="r1", title="t", sort_by="v"), loaded, None)
+    assert card["totals"] == [None, 800, 1600] and card["totals_label"] == "Total · 800 rows"
+    assert len(card["rows"]) == 500 and card["truncated"] is True
+
+
+def test_a_partial_stored_result_gets_no_summed_total():
+    loaded = ns_country()
+    loaded["payload"] = {**loaded["payload"], "truncated": True, "row_count": 3000}
+    card = build_present_card(
+        PresentResult(result_id="r9", title="t", tiles=True, row_label_plural="countries"), loaded, None
+    )
+    assert card["totals"] is None and card["check"]["status"] == "warn" and "partial" in card["check"]["text"]
+    assert card["tiles"] == [{"label": "Countries", "value": 3000, "format": "integer"}]
+
+
+def test_sort_by_keeps_zero_above_negative_values():
+    loaded = {
+        "tool": "netsuite_suiteql",
+        "as_of": "x",
+        "payload": {
+            "columns": ["k", "v"],
+            "rows": [["neg", "-5"], ["zero", "0"], ["pos", "3"]],
+            "query": "SELECT k, SUM(v) AS v FROM t GROUP BY k",
+        },
+    }
+    card = build_present_card(PresentResult(result_id="r1", title="t", sort_by="v"), loaded, None)
+    assert [r[0] for r in card["rows"]] == ["pos", "zero", "neg"]
+
+
+def _table(rows, columns=("country", "units")):
+    return {
+        "tool": "netsuite_suiteql",
+        "as_of": "x",
+        "payload": {
+            "columns": list(columns),
+            "rows": rows,
+            "query": f"SELECT {columns[0]}, SUM(u) AS {columns[1]} FROM t GROUP BY {columns[0]}",
+        },
+    }
+
+
+def _compare(**overrides):
+    spec = {
+        "left_result_id": "r1",
+        "right_result_id": "r2",
+        "left_label": "NetSuite",
+        "right_label": "Metabase",
+        "key": {"left": "country", "right": "country"},
+        "key_label": "Country",
+        "key_label_plural": "countries",
+        "measures": [{"left": "units", "right": "units", "label": "Units"}],
+        "title": "t",
+        **overrides,
+    }
+    return CompareResults(**spec)
+
+
+def test_a_key_or_value_missing_on_one_side_is_a_difference_not_a_match():
+    card, facts = build_compare_card(
+        _compare(), _table([["X", 1], ["Y", 9], ["Z", 5]]), _table([["X", 1], ["Z", None]]), (None, None)
+    )
+    assert card["headline"] == "Units differ in 2 countries."
+    assert "Only in NetSuite: Y." in card["detail"] and "blank in one source for Z" in card["detail"]
+    assert facts["matching"] == []
+
+
+def test_opposite_differences_are_not_netted_away():
+    card, _ = build_compare_card(
+        _compare(),
+        _table([["Germany", 10], ["Switzerland", 10]]),
+        _table([["Germany", 15], ["Switzerland", 5]]),
+        (None, None),
+    )
+    assert card["detail"] == "Metabase has 5 more units in Germany and 5 fewer in Switzerland."
+
+
+def test_a_one_sided_check_names_the_unchecked_source():
+    control = {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["units"], "rows": [[10]]}}
+    card, _ = build_compare_card(
+        _compare(), _table([["X", 4], ["Y", 6]]), _table([["X", 4], ["Y", 6]]), (control, None)
+    )
+    assert card["check"]["status"] == "warn"
+    assert card["check"]["text"] == (
+        "NetSuite: the country rows add up to the overall total. Metabase: no overall total to check the rows against."
+    )
+
+
+def test_keys_that_differ_only_in_brackets_are_never_merged():
+    left = _table([["Congo (Kinshasa)", 3], ["Congo (Brazzaville)", 2], ["New Zealand", 1]])
+    right = _table([["Congo (Kinshasa)", 3], ["Congo (Brazzaville)", 2], ["New Zealand/Aotearoa", 1]])
+    card, facts = build_compare_card(_compare(), left, right, (None, None))
+    assert sorted(r[0] for r in card["rows"]) == ["Congo (Brazzaville)", "Congo (Kinshasa)", "New Zealand"]
+    assert facts["only_in_left"] == [] and facts["only_in_right"] == []
+
+
+def test_duplicate_measure_labels_are_rejected():
+    with pytest.raises(ValueError, match="own label"):
+        _compare(
+            measures=[{"left": "a", "right": "a", "label": "Units"}, {"left": "b", "right": "b", "label": "units"}]
+        )

@@ -494,14 +494,19 @@ These reference requirements apply to the final answer, not tool arguments.
             values = [_decimal(row[column]) for row in table.rows]
             if total is None or any(value is None for value in values):
                 continue
+            # With several measures each sentence names its column, so an overlapping
+            # distinct count and a reconciling sum never read as one claim.
+            name = _ALIAS_ARROW.sub("", str(table.columns[column])).strip() if len(table.measures) > 1 else ""
+            subject = f"{name}: the rows" if name else "The rows"
             if operation == "distinct":
                 statements.append(
-                    "✓ The rows add up to the overall total."
+                    f"✓ {subject} add up to the overall total."
                     if sum(values, Decimal(0)) == total
-                    else "⚠ The groups overlap, so adding the rows would overstate the overall total."
+                    else f"⚠ {name + ': the' if name else 'The'} groups overlap, so adding the rows would overstate "
+                    "the overall total."
                 )
             elif operation in {"count", "count-where", "sum", "sum-where"}:
-                statements.append("✓ The rows add up to the overall total.")
+                statements.append(f"✓ {subject} add up to the overall total.")
         return " ".join(dict.fromkeys(statements)) or "✓ A matching overall total was returned."
 
     def feedback(self, text: str) -> str | None:

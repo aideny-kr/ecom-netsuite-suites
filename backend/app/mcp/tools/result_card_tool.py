@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 _RESULT_ID = r"^r[1-9][0-9]{0,7}$"
 _TOP_N_DEFAULT = 7
@@ -87,6 +87,13 @@ class CompareResults(BaseModel):
     left_control_result_id: str | None = Field(default=None, pattern=_RESULT_ID)
     right_control_result_id: str | None = Field(default=None, pattern=_RESULT_ID)
     top_n: int | None = Field(default=None, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _unique_labels(self):
+        labels = [m.label.casefold() for m in self.measures]
+        if len(set(labels)) != len(labels):
+            raise ValueError("Each measure needs its own label.")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -230,28 +237,92 @@ def _select_list(query: str) -> str | None:
     return None
 
 
+def _call_args(expr: str, names: str) -> str | None:
+    """The argument text when ``expr`` is exactly one call to ``names`` (nothing outside it)."""
+    match = re.match(rf"^(?:{names})\s*\(", expr)
+    if not match:
+        return None
+    depth, quote = 0, None
+    for index in range(match.end() - 1, len(expr)):
+        char = expr[index]
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return expr[match.end() : index] if index == len(expr) - 1 else None
+    return None
+
+
 def _classify(expression: str) -> str:
+    """Fail closed: only a lone SUM(...) / COUNT(...) is additive across groups.
+
+    Arithmetic over aggregates (ratios, margins), SUM(DISTINCT ...) and anything
+    unrecognised is "other" and is totalled only from an ungrouped control result.
+    Wrappers that keep a sum additive are peeled: ROUND(x, n), NVL/COALESCE(x, 0),
+    TO_NUMBER(x). ABS is not: the absolute values of group sums do not add up.
+    """
     expr = re.sub(r"\s+", " ", expression.strip()).upper()
     while True:
-        wrapped = re.match(r"^(?:ROUND|ABS|NVL|COALESCE|CAST|TO_NUMBER)\s*\((.*)\)$", expr)
-        if not wrapped:
+        args = _call_args(expr, "ROUND|NVL|COALESCE|TO_NUMBER")
+        if args is None:
             break
-        inner = _split_top_level(wrapped[1])
-        if not inner:
-            break
-        expr = inner[0]
-    if expr.startswith("SUM(") or expr.startswith("SUM ("):
-        return "sum"
-    if re.match(r"^COUNT\s*\(\s*DISTINCT\b", expr):
-        return "distinct"
-    if re.match(r"^COUNT\s*\(", expr):
-        return "count"
+        parts = _split_top_level(args)
+        if not parts or any(not re.fullmatch(r"-?\d+", part) for part in parts[1:]):
+            return "other"
+        if expr.startswith(("NVL", "COALESCE")) and any(part != "0" for part in parts[1:]):
+            return "other"
+        expr = parts[0]
+    args = _call_args(expr, "SUM")
+    if args is not None:
+        return "other" if re.match(r"^\s*DISTINCT\b", args) else "sum"
+    args = _call_args(expr, "COUNT")
+    if args is not None:
+        return "distinct" if re.match(r"^\s*DISTINCT\b", args) else "count"
     return "other"
 
 
+def _strip_sql_comments(query: str) -> str:
+    return re.sub(r"/\*.*?\*/", " ", re.sub(r"--[^\n]*", " ", query), flags=re.S)
+
+
+def _top_level_words(query: str) -> set[str]:
+    words, depth, quote, token = set(), 0, None, []
+    for char in query + " ":
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in "'\"`":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if depth == 0 and (char.isalnum() or char == "_"):
+            token.append(char)
+        elif token:
+            words.add("".join(token).upper())
+            token = []
+    return words
+
+
 def sql_aggregates(query: str) -> dict[str, str]:
-    """Map each selected column alias (casefolded) to sum / count / distinct / other."""
-    selected = _select_list(query or "")
+    """Map each selected column alias (casefolded) to sum / count / distinct / other.
+
+    Only a plain single SELECT is read. CTEs and set operations (UNION, INTERSECT,
+    MINUS, EXCEPT) return {} -- every column "other" -- because the first SELECT in
+    the text is then not the one that produced the result.
+    """
+    text = _strip_sql_comments(query or "").strip()
+    if re.match(r"^WITH\b", text, re.I) or _top_level_words(text) & {"UNION", "INTERSECT", "MINUS", "EXCEPT"}:
+        return {}
+    selected = _select_list(text)
     if selected is None:
         return {}
     kinds: dict[str, str] = {}
@@ -480,23 +551,30 @@ def _range_note(values: list[Decimal | None], label: str) -> str:
 def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) -> dict:
     payload = loaded["payload"]
     columns = [str(column) for column in payload["columns"]]
-    rows = [list(row) for row in payload["rows"]][:_MAX_CARD_ROWS]
+    # Every figure is computed over ALL stored rows; only the display is capped.
+    rows = [list(row) for row in payload["rows"]]
     kinds = _aggregate_kinds(payload)
     for name in spec.columns:
         _column_index(payload, name, "columns")
     numbers = [[_number(value) for value in row] for row in rows]
+    # Only server aggregates are measures. Other columns keep their raw text, so an
+    # identifier such as "00123" is never reformatted as a number.
     measure_indexes = [i for i, kind in enumerate(kinds) if kind in {"sum", "count", "distinct"}]
-    if not measure_indexes:
-        # Detail rows (no aggregates): format numeric columns after the first, never total them.
-        measure_indexes = [
-            i
-            for i in range(1, len(columns))
-            if rows and all(row[i] is None or numbers[r][i] is not None for r, row in enumerate(rows))
-        ]
+    # A stored result that is itself partial cannot be summed: totals then come only
+    # from a control result.
+    partial = bool(payload.get("truncated"))
+    row_count = payload.get("row_count")
+    row_total = row_count if partial and isinstance(row_count, int) and row_count >= len(rows) else len(rows)
+    additive_kinds = ["other"] * len(columns) if partial else kinds
 
     if spec.sort_by:
         sort_index = _column_index(payload, spec.sort_by, "sort_by")
-        order = sorted(range(len(rows)), key=lambda r: numbers[r][sort_index] or Decimal("-Infinity"), reverse=True)
+
+        def sort_key(r: int) -> Decimal:
+            value = numbers[r][sort_index]
+            return Decimal("-Infinity") if value is None else value
+
+        order = sorted(range(len(rows)), key=sort_key, reverse=True)
         rows, numbers = [rows[r] for r in order], [numbers[r] for r in order]
 
     column_meta = []
@@ -518,45 +596,51 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
     control_values = _control_values(control, columns)
     totals, check = (None, None)
     if spec.totals and spec.no_total_reason is None and measure_indexes:
-        all_totals, check = _totals(columns, numbers, kinds, control_values)
+        all_totals, check = _totals(columns, numbers, additive_kinds, control_values)
         totals = [_json_number(all_totals[i]) if i in measure_indexes else None for i in range(len(columns))]
+        if all(total is None for total in totals):
+            totals = None
+        if partial and not control_values:
+            check = {
+                "status": "warn",
+                "text": "This is a partial result, so its rows cannot be added up; no total is shown.",
+            }
 
+    shown = min(len(rows), _MAX_CARD_ROWS)
     out_rows = [
         [_json_number(numbers[r][i]) if i in measure_indexes else rows[r][i] for i in range(len(columns))]
-        for r in range(len(rows))
+        for r in range(shown)
     ]
 
     share = None
     if spec.share_of:
         share_index = _column_index(payload, spec.share_of, "share_of")
-        total = totals[share_index] if totals else None
+        total = _number(totals[share_index]) if totals else None
         values = [numbers[r][share_index] for r in range(len(rows))]
         if total and total > 0 and all(value is not None and value >= 0 for value in values):
             share = {
                 "label": spec.share_label or f"Share of {column_meta[share_index]['label'].lower()}",
                 "of": share_index,
-                "values": [round(float(value / Decimal(str(total)) * 100), 1) for value in values],
+                "values": [round(float(value / total * 100), 1) for value in values[:shown]],
             }
 
     plural = spec.row_label_plural or "rows"
-    top_n = spec.top_n or (_TOP_N_DEFAULT if len(rows) > _TOP_N_THRESHOLD else len(rows))
+    top_n = min(spec.top_n or (_TOP_N_DEFAULT if shown > _TOP_N_THRESHOLD else shown), shown)
     more_label = None
-    if len(rows) > top_n:
-        hidden = len(rows) - top_n
+    if shown > top_n:
+        hidden = shown - top_n
         first_measure = measure_indexes[0] if measure_indexes else None
         note = (
-            _range_note(
-                [numbers[r][first_measure] for r in range(top_n, len(rows))], column_meta[first_measure]["label"]
-            )
+            _range_note([numbers[r][first_measure] for r in range(top_n, shown)], column_meta[first_measure]["label"])
             if first_measure is not None
             else ""
         )
         more_label = f"Show {hidden} more {plural}" + (f" · {note}" if note else "")
 
     tiles = []
-    if spec.tiles and totals:
+    if spec.tiles:
         for index in measure_indexes:
-            if totals[index] is not None:
+            if totals and totals[index] is not None:
                 tiles.append(
                     {
                         "label": column_meta[index]["label"],
@@ -569,14 +653,14 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
             tiles.append(
                 {
                     "label": spec.row_label_plural[:1].upper() + spec.row_label_plural[1:],
-                    "value": len(rows),
+                    "value": row_total,
                     "format": "integer",
                 }
             )
 
     collapsed_note = None
     if spec.collapsed or spec.no_total_reason:
-        collapsed_note = f"{len(rows)} {plural}" + (", not added together" if spec.no_total_reason else "")
+        collapsed_note = f"{row_total} {plural}" + (", not added together" if spec.no_total_reason else "")
 
     return {
         "card_id": f"card-{uuid.uuid4().hex[:10]}",
@@ -594,7 +678,7 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
         "row_flags": None,
         "share": share,
         "totals": totals,
-        "totals_label": f"Total · {len(rows)} {plural}" if totals else None,
+        "totals_label": f"Total · {row_total} {plural}" if totals else None,
         "check": check,
         "tiles": tiles,
         "top_n": top_n,
@@ -605,7 +689,7 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
         "no_total_reason": spec.no_total_reason,
         "headline": None,
         "detail": None,
-        "truncated": bool(payload.get("truncated")) or len(payload["rows"]) > _MAX_CARD_ROWS,
+        "truncated": partial or len(rows) > _MAX_CARD_ROWS,
     }
 
 
@@ -615,12 +699,17 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
 
 
 def _clean_key(value) -> str:
+    """A key without its parenthetical or "/" suffix: "New Zealand/Aotearoa" -> "New Zealand"."""
     text = re.sub(r"\s*\([^)]*\)", "", str(value if value is not None else "")).strip()
     return text.split("/")[0].strip() or str(value)
 
 
+def _full_key(value) -> str:
+    return re.sub(r"[^\w]+", " ", str(value if value is not None else "").casefold()).strip()
+
+
 def _norm_key(value) -> str:
-    return re.sub(r"[^\w]+", " ", _clean_key(value).casefold()).strip()
+    return _full_key(_clean_key(value))
 
 
 def _join_names(names: list[str]) -> str:
@@ -634,19 +723,84 @@ def _side(loaded: dict, key: str, measures: list[str], control: dict | None) -> 
     key_index = _column_index(payload, key, "key")
     indexes = [_column_index(payload, name, "measure") for name in measures]
     kinds = _aggregate_kinds(payload)
+    if payload.get("truncated"):
+        kinds = ["other"] * len(kinds)
     rows: dict[str, dict] = {}
     for row in payload["rows"]:
-        norm = _norm_key(row[key_index])
-        if norm in rows:
+        full = _full_key(row[key_index])
+        if full in rows:
             raise ValueError(f"The key {row[key_index]!r} appears more than once; group by the key first.")
-        rows[norm] = {"display": _clean_key(row[key_index]), "values": [_number(row[i]) for i in indexes]}
+        rows[full] = {"raw": str(row[key_index]), "values": [_number(row[i]) for i in indexes]}
     numbers = [entry["values"] for entry in rows.values()]
     names = [payload["columns"][i] for i in indexes]
     totals, check = _totals(names, numbers, [kinds[i] for i in indexes], _control_values(control, names))
     return {"rows": rows, "totals": totals, "check": check, "query": _query_block(loaded["tool"], payload)}
 
 
+def _pair_keys(a_rows: dict, b_rows: dict) -> list[tuple[str | None, str | None, str]]:
+    """Pair keys across sources: exact (normalised) first, then by the cleaned key, but
+    only when the cleaned key is unique on BOTH sides -- "Congo (Kinshasa)" and
+    "Congo (Brazzaville)" never collapse into one country."""
+    pairs: dict[str, str] = {k: k for k in a_rows if k in b_rows}
+    left_clean, right_clean = {}, {}
+    for k in a_rows:
+        left_clean.setdefault(_norm_key(a_rows[k]["raw"]), []).append(k)
+    for k in b_rows:
+        right_clean.setdefault(_norm_key(b_rows[k]["raw"]), []).append(k)
+    used_right = set(pairs.values())
+    fallback: set[str] = set()
+    for k in a_rows:
+        if k in pairs:
+            continue
+        clean = _norm_key(a_rows[k]["raw"])
+        lefts, rights = left_clean.get(clean, []), right_clean.get(clean, [])
+        if len(lefts) == 1 and len(rights) == 1 and rights[0] not in used_right:
+            pairs[k] = rights[0]
+            used_right.add(rights[0])
+            fallback.add(k)
+    out: list[tuple[str | None, str | None, str]] = []
+    for k in a_rows:
+        raw = a_rows[k]["raw"]
+        out.append((k, pairs.get(k), _clean_key(raw) if k in fallback else raw))
+    for k in b_rows:
+        if k not in used_right:
+            out.append((None, k, b_rows[k]["raw"]))
+    return out
+
+
 _QUERY_KIND = {"SuiteQL query": "SuiteQL", "BigQuery SQL": "SQL", "Metabase query (query builder)": "query builder"}
+
+
+def _detail_for(measure: str, right_label: str, deltas: list[tuple[Decimal, str]], plural: str) -> str | None:
+    """Describe signed differences honestly: opposite directions are never netted."""
+    more = [(d, n) for d, n in deltas if d > 0]
+    fewer = [(-d, n) for d, n in deltas if d < 0]
+
+    def where(items: list[tuple[Decimal, str]]) -> str:
+        names = [n for _, n in sorted(items, key=lambda item: -item[0])]
+        return _join_names(names) if len(names) <= 5 else f"{len(names)} {plural}"
+
+    label = measure.lower()
+    if more and fewer:
+        return (
+            f"{right_label} has {_json_number(sum((d for d, _ in more), Decimal(0)))} more {label} in {where(more)} "
+            f"and {_json_number(sum((d for d, _ in fewer), Decimal(0)))} fewer in {where(fewer)}."
+        )
+    if fewer:
+        total = _json_number(sum((d for d, _ in fewer), Decimal(0)))
+        return (
+            f"{right_label} has {total} fewer {label}, all in {where(fewer)}."
+            if len(fewer) <= 5
+            else (f"{right_label} has {total} fewer {label}, across {where(fewer)}.")
+        )
+    if more:
+        total = _json_number(sum((d for d, _ in more), Decimal(0)))
+        return (
+            f"{right_label} has {total} more {label}, all in {where(more)}."
+            if len(more) <= 5
+            else (f"{right_label} has {total} more {label}, across {where(more)}.")
+        )
+    return None
 
 
 def build_compare_card(
@@ -654,42 +808,52 @@ def build_compare_card(
 ) -> tuple[dict, dict]:
     a = _side(left, spec.key.left, [m.left for m in spec.measures], controls[0])
     b = _side(right, spec.key.right, [m.right for m in spec.measures], controls[1])
-    keys = list(a["rows"]) + [key for key in b["rows"] if key not in a["rows"]]
-    first = 0
-    keys.sort(key=lambda k: (a["rows"].get(k) or b["rows"].get(k))["values"][first] or Decimal(0), reverse=True)
+    paired = _pair_keys(a["rows"], b["rows"])
 
-    differing: dict[str, list[str]] = {m.label: [] for m in spec.measures}
-    deltas: dict[str, Decimal] = {m.label: Decimal(0) for m in spec.measures}
-    only_left = [a["rows"][k]["display"] for k in keys if k not in b["rows"]]
-    only_right = [b["rows"][k]["display"] for k in keys if k not in a["rows"]]
-    pairs = []
-    for key in keys:
-        left_row, right_row = a["rows"].get(key), b["rows"].get(key)
-        display = (left_row or right_row)["display"]
+    def first_value(item):
+        entry = a["rows"].get(item[0]) if item[0] else b["rows"].get(item[1])
+        value = entry["values"][0]
+        return Decimal("-Infinity") if value is None else value
+
+    paired.sort(key=first_value, reverse=True)
+
+    # A value present on one side only (or a key in one source only) is a difference,
+    # never a silent match.
+    differing: dict[str, list[tuple[Decimal, str]]] = {m.label: [] for m in spec.measures}
+    signed: dict[str, list[tuple[Decimal, str]]] = {m.label: [] for m in spec.measures}
+    blank: dict[str, list[str]] = {m.label: [] for m in spec.measures}
+    only_left = [display for lk, rk, display in paired if rk is None]
+    only_right = [display for lk, rk, display in paired if lk is None]
+    entries = []
+    for lk, rk, display in paired:
+        left_row = a["rows"].get(lk) if lk else None
+        right_row = b["rows"].get(rk) if rk else None
         values = []
         for index, measure in enumerate(spec.measures):
             lv = left_row["values"][index] if left_row else None
             rv = right_row["values"][index] if right_row else None
-            if lv is not None and rv is not None and lv != rv:
-                differing[measure.label].append((abs(rv - lv), display))
-                deltas[measure.label] += rv - lv
+            if lv is not None and rv is not None:
+                if lv != rv:
+                    differing[measure.label].append((abs(rv - lv), display))
+                    signed[measure.label].append((rv - lv, display))
+            elif left_row and right_row and (lv is None) != (rv is None):
+                differing[measure.label].append((Decimal(0), display))
+                blank[measure.label].append(display)
+            elif not (left_row and right_row):
+                differing[measure.label].append((Decimal(0), display))
             values.append((lv, rv))
-        pairs.append((display, values, bool(left_row and right_row)))
+        entries.append((display, values, bool(left_row and right_row)))
 
-    # Largest difference first; ties keep the row order.
-    differing = {
-        label: [name for _, name in sorted(pairs_, key=lambda pair: -pair[0])] for label, pairs_ in differing.items()
-    }
-    delta_measures = {i for i, m in enumerate(spec.measures) if differing[m.label]}
+    delta_measures = {i for i, m in enumerate(spec.measures) if signed[m.label]}
     rows, flags = [], []
-    for display, values, both in pairs:
+    for display, values, both in entries:
         row: list = [display]
         flag = None if both else "missing"
         for index, (lv, rv) in enumerate(values):
             row += [_json_number(lv), _json_number(rv)]
             if index in delta_measures:
                 row.append(None if lv is None or rv is None else _json_number(rv - lv))
-            if lv is not None and rv is not None and lv != rv:
+            if both and (lv != rv):
                 flag = flag or "diff"
         rows.append(row)
         flags.append(flag)
@@ -720,16 +884,14 @@ def build_compare_card(
         names = differing[measure.label]
         if not names:
             headline_parts.append(f"{measure.label} match {spec.left_label} in every {spec.key_label.lower()}.")
-        else:
-            noun = spec.key_label.lower() if len(names) == 1 else plural
-            headline_parts.append(f"{measure.label} differ in {len(names)} {noun}.")
-            delta = deltas[measure.label]
-            direction = "more" if delta > 0 else "fewer"
-            where = f"all in {_join_names(names)}" if len(names) <= 5 else f"across {len(names)} {plural}"
-            if delta != 0:
-                detail_parts.append(
-                    f"{spec.right_label} has {_json_number(abs(delta))} {direction} {measure.label.lower()}, {where}."
-                )
+            continue
+        noun = spec.key_label.lower() if len(names) == 1 else plural
+        headline_parts.append(f"{measure.label} differ in {len(names)} {noun}.")
+        detail = _detail_for(measure.label, spec.right_label, signed[measure.label], plural)
+        if detail:
+            detail_parts.append(detail)
+        if blank[measure.label]:
+            detail_parts.append(f"{measure.label} is blank in one source for {_join_names(blank[measure.label])}.")
     if only_left:
         detail_parts.append(f"Only in {spec.left_label}: {_join_names(only_left)}.")
     if only_right:
@@ -748,16 +910,26 @@ def build_compare_card(
         identical = all(flag is None for flag in flags[top_n:])
         more_label = f"Show {hidden} more {plural}" + (" · identical in both sources" if identical else "")
 
-    checks = [side["check"] for side in (a, b) if side["check"]]
+    # The check names each source; one checked side never reads as both.
+    key_noun = spec.key_label.lower()
+    side_checks = [(spec.left_label, a["check"]), (spec.right_label, b["check"])]
     check = None
-    if checks:
-        ok = all(c["status"] == "ok" for c in checks) and len(checks) == 2
-        check = {
-            "status": "ok" if ok else "warn",
-            "text": f"In each source, the {spec.key_label.lower()} rows add up to that source's overall total."
-            if ok
-            else " ".join(c["text"] for c in checks if c["status"] != "ok") or checks[0]["text"],
-        }
+    if any(c for _, c in side_checks):
+        if all(c and c["status"] == "ok" for _, c in side_checks):
+            check = {
+                "status": "ok",
+                "text": f"In each source, the {key_noun} rows add up to that source's overall total.",
+            }
+        else:
+            parts = []
+            for label, c in side_checks:
+                if c is None:
+                    parts.append(f"{label}: no overall total to check the rows against.")
+                elif c["status"] == "ok":
+                    parts.append(f"{label}: the {key_noun} rows add up to the overall total.")
+                else:
+                    parts.append(f"{label}: {c['text']}")
+            check = {"status": "warn", "text": " ".join(parts)}
 
     card = {
         "card_id": f"card-{uuid.uuid4().hex[:10]}",
@@ -794,7 +966,7 @@ def build_compare_card(
     }
     facts = {
         "matching": [m.label for m in spec.measures if not differing[m.label]],
-        "differing": {label: names for label, names in differing.items() if names},
+        "differing": {label: [n for _, n in items] for label, items in differing.items() if items},
         "only_in_left": only_left,
         "only_in_right": only_right,
     }
