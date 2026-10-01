@@ -295,17 +295,25 @@ describe("live check on staging, 2026-10-01", () => {
   const card = (overrides: Record<string, unknown>) =>
     coerceResultCard({ ...base, result_ids: ["r2"], control_result_ids: ["r3"], ...overrides }) as ResultCardData;
 
-  it("hides the total query's raw table when the card shows its totals", () => {
-    expect(tableCoveredByCards({ result_id: "r3" }, [card({ totals: [null, 28] })])).toBe(true);
+  it("hides the total query's raw table when the card shows every one of its figures", () => {
+    expect(tableCoveredByCards({ result_id: "r3", columns: ["UNITS"] }, [card({ totals: [null, 28] })])).toBe(true);
   });
 
   it("keeps the total query's raw table when the card has no totals", () => {
-    expect(tableCoveredByCards({ result_id: "r3" }, [card({ totals: null })])).toBe(false);
+    expect(tableCoveredByCards({ result_id: "r3", columns: ["units"] }, [card({ totals: null })])).toBe(false);
+  });
+
+  it("keeps the total query's raw table when it holds a figure the card does not show", () => {
+    // Packet review round 1 on #374 (R1): the card totals only the columns it shares with
+    // the grouped query; a revenue column in the total query would otherwise vanish.
+    const table = { result_id: "r3", columns: ["units", "revenue"] };
+    expect(tableCoveredByCards(table, [card({ totals: [null, 28] })])).toBe(false);
+    expect(tableCoveredByCards({ result_id: "r3" }, [card({ totals: [null, 28] })])).toBe(false);
   });
 
   it("still keeps an unrelated table and any table with caveats", () => {
-    expect(tableCoveredByCards({ result_id: "r7" }, [card({ totals: [null, 28] })])).toBe(false);
-    const withCaveats = { result_id: "r3", caveats: ["stale"] } as { result_id: string };
+    expect(tableCoveredByCards({ result_id: "r7", columns: ["units"] }, [card({ totals: [null, 28] })])).toBe(false);
+    const withCaveats = { result_id: "r3", columns: ["units"], caveats: ["stale"] } as { result_id: string };
     expect(tableCoveredByCards(withCaveats, [card({ totals: [null, 28] })])).toBe(false);
   });
 });
