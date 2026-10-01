@@ -21,18 +21,21 @@ Measured starting point (Framework staging, 09-29/30): 0 of 6 real resolve-it co
 ended with an approval card; median reply 366 words; median 147k input tokens per turn
 (831k for one order); every turn carries 70 tools and ~57k tokens of fixed context.
 
-**Where we are (2026-09-30).** The write kernel (transaction_ops ledger) is the single write
-path. #355 (SuiteQL local first, thinking floor med) and #356 (issue-group breakdown) are live
-on staging. #364 (a reconciled order stays reconciled) is ready to merge.
+**Where we are (2026-10-01).** The write kernel (transaction_ops ledger) is the write path for
+accounting cards; other approved MCP writes still go straight to `execute_tool_call`
+(orchestrator `_via_kernel = _accounting`). #355 (SuiteQL local first, thinking floor med) and
+#356 (issue-group breakdown) are live on staging. #364 (a reconciled order stays reconciled) and
+#367 merged into the release branch on 10-01; neither is deployed yet.
 
 ## NOW — in flight
 
-| PR / branch | tier | state (2026-09-30) | blocked on |
+| PR / branch | tier | state (as of 2026-10-01) | blocked on |
 |---|---|---|---|
-| #364 `feat/reconciled-stays-reconciled` → release | T2 | verify.sh PASS c7a5d6c6; packet review round 5 PASS, receipt in body; CI green | Aiden merges; migration 117 must run on deploy |
-| #360 `feat/group-breakdown-staging-ui` → `release/frontend-preserved` | T2 | #356's card on the staging UI line (56156d96, deployed); needs #364's "Reconciled" label ported too | codex / Aiden merge |
-| local `feat/changed-after-reconciliation` (79b62dc4, unpushed) | T2 | the "changed after reconciliation" flag, split out of #364 after 4 review rounds | rebuild with the narrow rule (NEXT 4) |
-| #367 `fix/verify-log-session-tag` → release | T2 | verify.sh tags its evidence line `session=$CLAUDE_CODE_SESSION_ID`, counted by the global loop budget hook (claude-config 67e184a, pushed); packet review pass (gpt-6-astra, 1 minor deferred), receipt in body | Aiden merges |
+| #364 → release | T2 | MERGED 10-01 (72dd11c9); not deployed | the next staging deploy runs migration 117 (codex deploys); port the "Reconciled" label to the preserved UI line |
+| #367 → release | T2 | MERGED 10-01 (08b39f59): verify.sh tags its evidence line `session=$CLAUDE_CODE_SESSION_ID` for the global loop budget hook (claude-config 67e184a) | — |
+| #360 `feat/group-breakdown-staging-ui` → `release/frontend-preserved` | T2 | #356's card on the staging UI line; packet review found the saved card vanished when a turn ended on an approval card or a clarification, fixed in c61f7020 (staging still runs 56156d96). Backend Tests fail on that line for a base reason: it lacks the `sqlalchemy<2.1` pin | re-review c61f7020, then merge; codex adds the pin |
+| release line: the same saved-card gap in `message-list.tsx` (#356's original) | T1 | not started | port c61f7020 |
+| `feat/changed-after-reconciliation` (79b62dc4, on origin through #364's history) | T2 | the "changed after reconciliation" flag, split out of #364 after 4 review rounds | rebuild with the narrow rule (NEXT 4) |
 | #357 `fix/records-status-query` → release | T2 | Records order-status filter timeout | review |
 | #333 `release/recon-excel-group-reliability` → main | T2 | the release integration PR; codex merges into the release branch daily (#358–#363 on 09-29/30) | release owner |
 | codex line `codex/framework-launch-integration` (#365, #275) | — | codex's Framework-launch work | codex |
@@ -68,8 +71,8 @@ auth outage.
    transaction ids); detail omitted by a fallback read is never a change. Start from branch
    79b62dc4 and its four rounds of findings (PR #364 comment 5920747940).
 5. Carried from before: the staging write-agent journey (Aiden starts it: staging's NetSuite
-   is Framework PRODUCTION), the vs-MCP benchmark baseline is still toolless on main (#205
-   closed unmerged), and the Track O decision.
+   is Framework PRODUCTION) and the Track O decision. (The vs-MCP benchmark baseline got its
+   tools in #307, on main; the old "still toolless" note is retired.)
 
 ## DECIDED — date · chose X over Y · because
 
@@ -105,7 +108,9 @@ archive).
 - 2026-09-16 · The kill switch runs BEFORE the ledger claim for chat cards.
 - 2026-08-27 · The HITL guard lives at the DISPATCHER, default-denied.
 - 2026-08-27 · NetSuite tools are ALLOW-listed; `_BLOCKED_RECORD_TYPES` stays a deny-list.
-- 2026-08-27 · Sandbox environment binding is enforced server-side from the account id.
+- 2026-08-27 · Sandbox environment binding is to be enforced server-side at the dispatcher, from
+  the account id. **Not built:** `tools.netsuite_environment_of` is a display label only, so
+  nothing yet refuses a write to the environment the session did not choose.
 - 2026-08-27 · A repeating gate shape gets a sibling audit / an unrepresentable fix, not a patch.
 - 2026-08-25 · Required NetSuite fields are curated in code (`required_field_registry.py`).
 - 2026-08-25 · A resolved `ask_user` slot delegates the field to the human.
@@ -135,8 +140,7 @@ archive).
 
 ## OPEN — needs a human, blocking something
 
-- **Merge #364** (Aiden). Migration 117 runs on deploy; port the "Reconciled" label to the
-  preserved UI line with #360.
+- **Deploy the release line** (codex): migration 117 (#364) runs on that deploy.
 - **ClickUp tickets for #355, #356, #364** (Aiden is creating them; the MCP daily limit blocks
   the session). 86bc7eebh was closed by hand and acknowledged to the hook on 09-30. The model runs
   `: 'TICKET <id>: closed ... (PR #n)'` itself; a user's `!` command never reaches hooks.
