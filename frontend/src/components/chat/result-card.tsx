@@ -34,7 +34,7 @@ export function formatCardValue(value: unknown, column: Pick<ResultCardColumn, "
   const n = toNumber(value);
   switch (column.format) {
     case "integer":
-      return n === null ? String(value) : Math.round(n).toLocaleString("en-US");
+      return n === null ? String(value) : (Math.round(n) || 0).toLocaleString("en-US");
     case "number":
       return n === null ? String(value) : n.toLocaleString("en-US", { maximumFractionDigits: 2 });
     case "currency":
@@ -43,7 +43,8 @@ export function formatCardValue(value: unknown, column: Pick<ResultCardColumn, "
       return n === null ? String(value) : `${n.toFixed(1)}%`;
     case "delta":
       if (n === null) return String(value);
-      if (n === 0) return "—";
+      // A difference that rounds to zero at display precision is no difference.
+      if (Math.abs(n) < 0.005) return "—";
       return `${n > 0 ? "+" : "−"}${Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
     default:
       return String(value);
@@ -120,7 +121,7 @@ function gridTemplate(card: ResultCardData, withShare: boolean): string {
 
 /** Text that a spreadsheet would run as a formula (=, +, -, @, tab, CR) gets a leading quote. */
 function safeCell(value: unknown): unknown {
-  return typeof value === "string" && /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return typeof value === "string" && /^[=+\-@\t\r]/.test(value) && toNumber(value) === null ? `'${value}` : value;
 }
 
 function exportRows(card: ResultCardData): { columns: string[]; rows: unknown[][] } {
@@ -284,7 +285,7 @@ function CardTable({ card }: { card: ResultCardData }) {
               const value = row[columnIndex];
               const isDelta = column.format === "delta";
               const numeric = toNumber(value);
-              const nonZero = isDelta && numeric !== null && numeric !== 0;
+              const nonZero = isDelta && numeric !== null && Math.abs(numeric) >= 0.005;
               return (
                 <div
                   key={column.key}

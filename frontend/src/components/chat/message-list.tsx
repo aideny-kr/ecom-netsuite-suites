@@ -1645,7 +1645,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
                 )}
               </span>
             )}
-            {/* Only a low score is worth the user's attention; it is never hidden. */}
+            {/* A low score (under LOW_CONFIDENCE) is always shown; ordinary scores stay out of the footer. */}
             {message.confidence_score != null && message.confidence_score < LOW_CONFIDENCE && (
               <ConfidenceBadge score={message.confidence_score} />
             )}

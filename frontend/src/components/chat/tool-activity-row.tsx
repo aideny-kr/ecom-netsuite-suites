@@ -99,11 +99,11 @@ export function describeStep(step: ActivityStep): { kind: string; label: string;
   const rows = rowsOutput(step.summary);
   if (isMetabaseStep(step)) {
     if (name === "search") {
-      const terms = (step.params.term_queries as string[] | undefined) ?? [];
+      const terms = Array.isArray(step.params.term_queries) ? step.params.term_queries.map(String) : [];
       return { kind: "Search", label: terms.length ? `Searched for ${terms.slice(0, 3).join(", ")}` : "Searched tables", output: "" };
     }
     if (name === "read_resource") {
-      const uris = (step.params.uris as string[] | undefined) ?? [];
+      const uris = Array.isArray(step.params.uris) ? step.params.uris.map(String) : [];
       if (uris.length === 1 && /databases$/.test(uris[0])) return { kind: "Read", label: "Listed databases", output: "" };
       const tables = uris.filter((u) => /\/table\//.test(u)).length;
       return {
@@ -133,10 +133,10 @@ function rowsOutput(summary: string | null | undefined): string {
 
 export function formatElapsed(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "";
-  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
-  return `${minutes} min ${seconds} s`;
+  if (ms < 9_950) return `${(ms / 1000).toFixed(1)} s`;
+  const total = Math.round(ms / 1000);
+  if (total < 60) return `${total} s`;
+  return `${Math.floor(total / 60)} min ${total % 60} s`;
 }
 
 function summaryTitle(steps: ActivityStep[]): string {
@@ -312,7 +312,8 @@ export function ToolActivityRow({
     );
   }
 
-  const elapsed = formatElapsed(elapsedMs ?? steps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0));
+  const wall = elapsedMs != null && Number.isFinite(elapsedMs) && elapsedMs >= 0 ? elapsedMs : null;
+  const elapsed = formatElapsed(wall ?? steps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0));
   const failed = steps.filter((s) => s.status === "error").length;
   return (
     <div className="flex flex-col gap-2.5">
