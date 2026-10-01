@@ -67,15 +67,79 @@ def _decimal(value) -> Decimal | None:
         return None
 
 
-def _cell(value) -> str:
-    text = "—" if value is None else str(value)
+_ISO_DATETIME = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$")
+_ALIAS_ARROW = re.compile(r"(?<!\w)([A-Za-z_]\w*) → ")
+_BLOCK_OPEN, _BLOCK_CLOSE = "\x00mb-block-open\x00", "\x00mb-block-close\x00"
+
+
+def _display_value(value, *, numeric: bool) -> str:
+    """Human formatting for a rendered table cell; the bound value itself is unchanged.
+
+    Only aggregate (measure) columns get number formatting: identifier columns
+    such as order numbers must never gain thousands separators."""
+    if isinstance(value, str):
+        match = _ISO_DATETIME.match(value)
+        if match:
+            return match[1] if match[2] == "00:00" else f"{match[1]} {match[2]}"
+        return value
+    number = _decimal(value) if numeric else None
+    if number is None:
+        return str(value)
+    if number == number.to_integral_value():
+        return f"{int(number):,}"
+    return f"{number:,.2f}" if abs(number.as_tuple().exponent) <= 2 else f"{number:,}"
+
+
+def _cell(value, *, display: bool = False, numeric: bool = False) -> str:
+    text = "—" if value is None else (_display_value(value, numeric=numeric) if display else str(value))
     return html.escape(text).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
 
 
-def _table(columns: list[str], rows: list[list]) -> str:
+def _table(columns: list[str], rows: list[list], numeric_columns: frozenset[int] = frozenset()) -> str:
     lines = ["| " + " | ".join(_cell(c) for c in columns) + " |", "| " + " | ".join("---" for _ in columns) + " |"]
-    lines.extend("| " + " | ".join(_cell(v) for v in row) + " |" for row in rows)
+    lines.extend(
+        "| " + " | ".join(_cell(v, display=True, numeric=i in numeric_columns) for i, v in enumerate(row)) + " |"
+        for row in rows
+    )
     return "\n".join(lines)
+
+
+def _join_entities(query: dict) -> dict[str, str]:
+    """Map MBQL join aliases (``o``) to a readable entity (``Order``) from the joined table."""
+    entities: dict[str, str] = {}
+    stages = query.get("stages") if isinstance(query, dict) else None
+    stage = stages[-1] if isinstance(stages, list) and stages and isinstance(stages[-1], dict) else {}
+    for join in stage.get("joins") or []:
+        if not isinstance(join, dict) or not isinstance(join.get("alias"), str):
+            continue
+        source = None
+        for join_stage in join.get("stages") or []:
+            if isinstance(join_stage, dict) and join_stage.get("source-table"):
+                source = join_stage["source-table"]
+        table = source[-1] if isinstance(source, list) and source else source
+        if isinstance(table, str) and not table.isdigit():
+            name = re.sub(r"^spree_", "", table.rsplit(".", 1)[-1]).replace("_", " ").strip()
+            if name.endswith("ies"):
+                name = name[:-3] + "y"
+            elif name.endswith("s") and not name.endswith("ss"):
+                name = name[:-1]
+            if name:
+                entities[join["alias"]] = name[:1].upper() + name[1:]
+    return entities
+
+
+def _display_columns(columns: list[str], query: dict) -> list[str]:
+    """Readable headers: ``Distinct values of o → ID`` becomes ``Distinct values of Order ID``."""
+    entities = _join_entities(query)
+
+    def label(column: str) -> str:
+        def swap(match: re.Match) -> str:
+            entity = entities.get(match[1])
+            return f"{entity} " if entity else ""
+
+        return _ALIAS_ARROW.sub(swap, column).strip() or column
+
+    return [label(column) for column in columns]
 
 
 def _without_presentation(value):
@@ -151,7 +215,9 @@ Do not surround a control reference with your own statements about sums,
 overlap, reconciliation, or orders containing multiple matching SKUs. These
 mathematical claims must appear only in the application-rendered control text.
 Use returned value references for headline figures and table_reference for
-tables. Chart JSON may use unquoted numeric references: they resolve before
+tables. A result shown with present_result or compare_results is already on
+screen with server-computed totals; do not also paste its table_reference.
+Chart JSON may use unquoted numeric references: they resolve before
 chart parsing. Saved native SQL results can be shown via table_reference; if
 scalar aggregate references are unavailable, reconstruct a verified MBQL
 aggregate instead of calculating a headline from those rows.
@@ -337,7 +403,7 @@ These reference requirements apply to the final answer, not tool arguments.
                 control_query["stages"][-1].pop(key, None)
         table = EvidenceTable(columns, copy.deepcopy(rows), grouped, complete, measures, control_query)
         self.tables.append(table)
-        rendered_table = _table(columns, rows[:100])
+        rendered_table = _table(_display_columns(columns, query), rows[:100], frozenset(measures))
         if len(rows) > 100 or not complete:
             rendered_table += "\n\nPartial result; additional rows may not be shown."
         table_ref = self._reference(table_id, "table", rendered_table)
@@ -430,13 +496,13 @@ These reference requirements apply to the final answer, not tool arguments.
                 continue
             if operation == "distinct":
                 statements.append(
-                    "The grouped distinct counts sum to the overall distinct count for this result."
+                    "✓ The rows add up to the overall total."
                     if sum(values, Decimal(0)) == total
-                    else "The distinct groups overlap; adding their counts would overstate the overall population."
+                    else "⚠ The groups overlap, so adding the rows would overstate the overall total."
                 )
             elif operation in {"count", "count-where", "sum", "sum-where"}:
-                statements.append("The grouped totals reconcile with the overall control.")
-        return " ".join(dict.fromkeys(statements)) or "A matching ungrouped control was returned."
+                statements.append("✓ The rows add up to the overall total.")
+        return " ".join(dict.fromkeys(statements)) or "✓ A matching overall total was returned."
 
     def feedback(self, text: str) -> str | None:
         references = _REFERENCE.findall(text)
@@ -485,7 +551,16 @@ These reference requirements apply to the final answer, not tool arguments.
                 return match[0]
             table_id, value = self.bindings[match[0]]
             if match[0].endswith(":control}}"):
-                return self._control_statement(self.tables[table_id])
+                return _BLOCK_OPEN + self._control_statement(self.tables[table_id]) + _BLOCK_CLOSE
+            if match[0].endswith((":table}}", ":pivot}}")):
+                # A markdown table only renders when it starts on its own line;
+                # the model often places the reference mid-sentence.
+                return _BLOCK_OPEN + str(value) + _BLOCK_CLOSE
             return str(value)
 
-        return _REFERENCE.sub(render, text)
+        resolved = _REFERENCE.sub(render, text)
+        if _BLOCK_OPEN not in resolved:
+            return resolved
+        resolved = re.sub(r"[ \t]*" + _BLOCK_OPEN, "\n\n", resolved)
+        resolved = re.sub(_BLOCK_CLOSE + r"[ \t]*", "\n\n", resolved)
+        return re.sub(r"\n{3,}", "\n\n", resolved).strip()

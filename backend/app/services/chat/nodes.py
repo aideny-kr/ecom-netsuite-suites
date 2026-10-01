@@ -51,6 +51,8 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "netsuite.suiteql",
         "pivot.query_result",
         "cross_source.query",
+        "present.result",
+        "compare.results",
         "netsuite.financial_report",
         "netsuite.connectivity",
         "netsuite.refresh_metadata",

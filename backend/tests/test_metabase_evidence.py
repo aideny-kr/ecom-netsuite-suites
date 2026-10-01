@@ -132,7 +132,7 @@ def test_distinct_groups_may_overlap_but_cannot_exceed_total():
     assert evidence.feedback(impossible["table_reference"])
 
 
-@pytest.mark.parametrize("second, expected", [(24, "sum to"), (30, "overlap")])
+@pytest.mark.parametrize("second, expected", [(24, "add up to the overall total"), (30, "overlap")])
 def test_reconciliation_narrative_comes_from_actual_control(second, expected):
     evidence = MetabaseEvidence({TOOL})
     grouped = observed(evidence, [["SKU-A", 41], ["SKU-B", second]], grouped=True)
@@ -157,7 +157,7 @@ def test_model_cannot_append_contradictory_membership_claim_to_verified_control(
         assert evidence.feedback(reference + " " + claim)
     answer = grouped["table_reference"] + "\n\n" + reference
     assert evidence.feedback(answer) is None
-    assert "sum to the overall distinct count" in evidence.resolve(answer)
+    assert "add up to the overall total" in evidence.resolve(answer)
 
 
 def test_additive_counts_must_reconcile_exactly():
@@ -473,3 +473,40 @@ async def test_calculator_runs_inside_the_agent_without_external_dispatch(stream
     assert bool(agent._metabase_evidence.calculation_dependencies) is policy_allowed
     agent._reset_source_routing()
     assert "analytics_calculate" not in [t["name"] for t in agent.tool_definitions]
+
+
+def test_table_reference_placed_mid_sentence_renders_as_a_markdown_table():
+    # Regression (Yucca thread, 2026-10-01): "**By shipping country:** {{ref}}" rendered
+    # as one line of raw pipes because a markdown table must start on its own line.
+    evidence = MetabaseEvidence({TOOL})
+    status = observed(evidence, [["complete", 41], ["canceled", 24]], grouped=True)
+    observed(evidence, [[65]])
+    rendered = evidence.resolve("**By state:** " + status["table_reference"] + " More text.")
+    lines = rendered.split("\n")
+    header = next(i for i, line in enumerate(lines) if line.startswith("| state"))
+    assert lines[0] == "**By state:**" and lines[header - 1] == ""
+    assert lines[header + 1].startswith("| ---")
+    assert lines[-1] == "More text." and lines[-2] == ""
+
+
+def test_rendered_table_humanizes_join_aliases_and_formats_measures_only():
+    from app.services.chat.metabase_evidence import _display_columns, _table
+
+    q = {
+        "stages": [
+            {
+                "source-table": ["db", "public", "spree_line_items"],
+                "joins": [
+                    {"alias": "o", "stages": [{"source-table": ["db", "public", "spree_orders"]}]},
+                    {"alias": "c", "stages": [{"source-table": ["db", "public", "spree_countries"]}]},
+                ],
+            }
+        ]
+    }
+    assert _display_columns(["c → Name", "Distinct values of o → ID", "Sum of Quantity"], q) == [
+        "Country Name",
+        "Distinct values of Order ID",
+        "Sum of Quantity",
+    ]
+    table = _table(["id", "day", "value"], [[1001, "2026-09-30T00:00:00-07:00", 44828.0]], frozenset({2}))
+    assert "| 1001 | 2026-09-30 | 44,828 |" in table

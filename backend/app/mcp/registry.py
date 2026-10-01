@@ -23,6 +23,7 @@ from app.mcp.tools import (
     recon_resolution_summary,
     recon_run,
     report_export,
+    result_card_tool,
     save_learned_rule,
     schedule_ops,
     sheets_tools,
@@ -314,6 +315,101 @@ TOOL_REGISTRY = {
                 "type": "string",
                 "required": False,
                 "description": "SQL query mode only: 'suiteql' (default) or 'bigquery'. Omit when using result_id.",
+            },
+        },
+    },
+    "present.result": {
+        "description": (
+            "Show a query result to the user as a finished result card: title, readable column "
+            "labels and formats, a totals row, an optional share-of-total column and summary tiles. "
+            "Call it once per table the answer should show, after the query, with the result_id the "
+            "query returned. The server computes every total, share and tile -- you supply labels "
+            "only. Distinct counts get a total only from control_result_id: an ungrouped result "
+            "with the same filters and column names (for example the overall count you ran earlier). "
+            "Use collapsed=true for a secondary breakdown, and no_total_reason when the rows must "
+            "not be added together (for example amounts in different currencies)."
+        ),
+        "execute": result_card_tool.execute_present,
+        "params_schema": {
+            "result_id": {"type": "string", "required": True, "description": "Result to show (rN)."},
+            "title": {
+                "type": "string",
+                "required": True,
+                "description": "What the table shows, e.g. 'Yucca orders by ship country'.",
+            },
+            "subtitle": {
+                "type": "string",
+                "description": "Short population phrase, e.g. 'open sales orders'. Source and time are added.",
+            },
+            "scope": {
+                "type": "string",
+                "description": (
+                    "One line on what the figures include and exclude (filters, exclusions, currency). "
+                    "Replaces a caveat list in your text."
+                ),
+            },
+            "row_label": {"type": "string", "description": "Singular noun for one row, e.g. 'country'."},
+            "row_label_plural": {"type": "string", "description": "Plural noun for the rows, e.g. 'countries'."},
+            "columns": {
+                "type": "object",
+                "description": (
+                    'Per-column display: {"<column>": {"label": "Country", "format": '
+                    '"text|integer|number|currency|percent|date", "currency": "USD"}}. Omit to use defaults.'
+                ),
+            },
+            "sort_by": {"type": "string", "description": "Numeric column to sort rows by, descending."},
+            "share_of": {"type": "string", "description": "Add a share-of-total column computed from this column."},
+            "share_label": {"type": "string", "description": "Header for the share column, e.g. 'Share of value'."},
+            "control_result_id": {
+                "type": "string",
+                "description": "Ungrouped single-row result with the same filters, used for totals and the check.",
+            },
+            "totals": {"type": "boolean", "description": "Show a totals row (default true)."},
+            "tiles": {"type": "boolean", "description": "Show summary tiles above the card (default false)."},
+            "collapsed": {"type": "boolean", "description": "Show the card collapsed under its title."},
+            "no_total_reason": {
+                "type": "string",
+                "description": "Why the rows must not be added together; disables totals and collapses the card.",
+            },
+        },
+    },
+    "compare.results": {
+        "description": (
+            "Compare two query results row by row on a shared key -- for example the same breakdown "
+            "from NetSuite and from Metabase -- and show one side-by-side card with the differences. "
+            "Use it whenever the user asks for the same figures from a second source. The server "
+            "matches keys, computes every difference and writes the headline; you supply labels only."
+        ),
+        "execute": result_card_tool.execute_compare,
+        "params_schema": {
+            "left_result_id": {"type": "string", "required": True, "description": "First result (rN)."},
+            "right_result_id": {"type": "string", "required": True, "description": "Second result (rN)."},
+            "left_label": {"type": "string", "required": True, "description": "Source name, e.g. 'NetSuite'."},
+            "right_label": {"type": "string", "required": True, "description": "Source name, e.g. 'Metabase'."},
+            "key": {
+                "type": "object",
+                "required": True,
+                "description": 'Key columns: {"left": "ship_country", "right": "<column in right result>"}.',
+            },
+            "key_label": {"type": "string", "required": True, "description": "Key noun, e.g. 'Country'."},
+            "key_label_plural": {"type": "string", "required": True, "description": "Plural, e.g. 'countries'."},
+            "measures": {
+                "type": "array",
+                "required": True,
+                "description": (
+                    'Measures to compare: [{"left": "orders", "right": "<column>", "label": "Orders", '
+                    '"format": "integer"}].'
+                ),
+            },
+            "title": {"type": "string", "required": True, "description": "Card title."},
+            "subtitle": {"type": "string", "description": "Short note, e.g. 'Matched on country name'."},
+            "left_control_result_id": {
+                "type": "string",
+                "description": "Ungrouped control for the left result (needed to total distinct counts).",
+            },
+            "right_control_result_id": {
+                "type": "string",
+                "description": "Ungrouped control for the right result (needed to total distinct counts).",
             },
         },
     },
