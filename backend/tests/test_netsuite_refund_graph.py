@@ -200,3 +200,145 @@ async def test_refund_entry_requires_the_exact_proven_target_scope(monkeypatch, 
         result = await service.read_netsuite_refunds(None, tenant, connection, "6738075", "1", "R123456789", target)
         assert result["amount"] == "100.00" and result["complete"] is True
         assert result["currency"] == "USD" and result["order_reference"] == "R123456789"
+
+
+# --- Credit memos created from the order's invoice (2026-10-01) -----------------------
+# Framework books a Solidus order adjustment as a credit memo created from the invoice.
+# The reader reports those credits with their amounts so the comparison can count them;
+# they are never returned money, and a return credit (from a return authorization) is
+# not one of them.
+
+
+def credit_row(identifier, number, total, tax="0", createdfrom="2", **changes):
+    row = {
+        "id": identifier,
+        "createdfrom": createdfrom,
+        "tranid": number,
+        "type": "CustCred",
+        "foreigntotal": "-" + total,
+        "taxtotal": "-" + tax if tax != "0" else "0",
+        "currency": "1",
+        "posting": "T",
+        "voided": "F",
+    }
+    row.update(changes)
+    return row
+
+
+class CreditReader(Reader):
+    def __init__(self, credit_rows=()):
+        super().__init__()
+        self.credit_rows = list(credit_rows)
+        self.credit_queries = 0
+
+    async def request(self, method, path, **kwargs):
+        if method == "POST" and "t.foreigntotal" in kwargs.get("body", {}).get("q", ""):
+            self.calls += 1
+            self.credit_queries += 1
+            asked = set(re.search(r"t.id IN \(([^)]+)\)", kwargs["body"]["q"])[1].split(","))
+            rows = [row for row in self.credit_rows if row["id"] in asked]
+            return {"items": deepcopy(rows), "count": len(rows), "totalResults": len(rows), "hasMore": False}
+        return await super().request(method, path, **kwargs)
+
+
+async def test_credit_memo_created_from_the_orders_invoice_is_reported_but_never_counted_as_refund():
+    reader = CreditReader([credit_row("3", "CM11788", "4.82")])
+    reader.edges = [edge("1", "2", "SalesOrd", "CustInvc"), edge("2", "3", "CustInvc", "CustCred")]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["amount"] == 0 and result["refund_count"] == 0
+    assert result["invoice_credits"] == {
+        "complete": True,
+        "credits": [{"id": "3", "number": "CM11788", "invoice_id": "2", "total": "4.82", "tax": "0"}],
+        "total": "4.82",
+        "tax": "0",
+    }
+    assert reader.credit_queries == 1
+    assert "3" in result["dependency_manifest"]["transaction_ids"]
+
+
+async def test_refunded_invoice_credit_is_both_a_refund_and_an_invoice_credit():
+    # A post-payment price adjustment: Solidus lowers the order and refunds the
+    # difference; NetSuite credits the invoice and refunds the credit memo.
+    reader = CreditReader([credit_row("3", "CM1", "100.00", tax="10.00")])
+    reader.edges = [
+        edge("1", "2", "SalesOrd", "CustInvc"),
+        edge("2", "3", "CustInvc", "CustCred"),
+        edge("4", "3", "CustRfnd", "CustCred"),
+    ]
+    reader.record["apply"]["items"] = [{"apply": True, "doc": {"id": "3"}, "line": 1, "amount": "100.00"}]
+    reader.record["total"] = "100.00"
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["amount"] == Decimal("100.00")
+    assert result["invoice_credits"]["total"] == "100.00" and result["invoice_credits"]["tax"] == "10.00"
+
+
+async def test_return_credits_and_voided_credits_are_not_invoice_credits():
+    reader = CreditReader([credit_row("6", "CM2", "9.00")])
+    reader.edges = [
+        edge("1", "2", "SalesOrd", "CustInvc"),
+        edge("2", "5", "CustInvc", "RtnAuth"),
+        edge("5", "6", "RtnAuth", "CustCred"),
+        edge("2", "7", "CustInvc", "CustCred"),
+    ]
+    reader.edges[-1]["nextvoided"] = "T"
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    assert reader.credit_queries == 0
+
+
+async def test_no_invoice_credit_means_no_extra_provider_call():
+    reader = CreditReader()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    assert reader.calls == 5 and reader.credit_queries == 0
+
+
+async def test_credit_on_an_invoice_shared_with_another_order_is_unknown_not_zero():
+    reader = CreditReader([credit_row("3", "CM1", "4.82")])
+    reader.edges = [
+        edge("1", "2", "SalesOrd", "CustInvc"),
+        edge("900", "2", "SalesOrd", "CustInvc"),
+        edge("2", "3", "CustInvc", "CustCred"),
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["amount"] == 0
+    assert result["invoice_credits"] == {"complete": False, "reason": "invoice_credit_ownership_ambiguous"}
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [],  # the credit vanished between the graph and the totals read
+        [credit_row("3", "CM1", "4.82", foreigntotal="4.82")],  # a credit cannot be positive
+        [credit_row("3", "CM1", "4.82", currency="2")],
+        [credit_row("3", "CM1", "4.82", voided="T")],
+        [credit_row("3", "CM1", "4.82", type="CustInvc")],
+        [credit_row("3", "CM1", "4.82", foreigntotal="abc")],
+        [credit_row("3", "CM1", "4.82"), credit_row("3", "CM1", "4.82")],  # duplicated row
+    ],
+)
+async def test_an_unproven_credit_read_is_unknown_and_never_breaks_the_refund_proof(rows):
+    reader = CreditReader(rows)
+    reader.edges = [
+        edge("1", "2", "SalesOrd", "CustInvc"),
+        edge("2", "3", "CustInvc", "CustCred"),
+        edge("4", "3", "CustRfnd", "CustCred"),
+    ]
+    reader.record["apply"]["items"] = [{"apply": True, "doc": {"id": "3"}, "line": 1, "amount": "150.00"}]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["amount"] == Decimal("150.00")
+    assert result["invoice_credits"]["complete"] is False
+
+
+async def test_a_return_credit_applied_to_the_invoice_is_not_an_invoice_credit():
+    # The graph links an invoice to a credit memo both when the credit was created from
+    # it and when it was only applied to it. Only "created from" makes it an invoice credit.
+    reader = CreditReader([credit_row("6", "CM2", "9.00", createdfrom="5")])
+    reader.edges = [
+        edge("1", "2", "SalesOrd", "CustInvc"),
+        edge("2", "5", "CustInvc", "RtnAuth"),
+        edge("5", "6", "RtnAuth", "CustCred"),
+        edge("2", "6", "CustInvc", "CustCred"),
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}

@@ -1,4 +1,10 @@
-"""Bounded native refund allocation graph; credits are never counted as returned money."""
+"""Bounded native refund allocation graph; credits are never counted as returned money.
+
+Credit memos created from the order's invoice are reported separately, as
+`invoice_credits`, so the order comparison can count them (decided 2026-09-30:
+Framework books a Solidus order adjustment as a credit memo created from the
+invoice). They stay out of the refund amount: a credit is not returned money.
+"""
 
 import asyncio
 import re
@@ -11,7 +17,8 @@ from app.services.transaction_ops.netsuite_reader import _account, _collection, 
 from app.services.transaction_ops.netsuite_refund_requests import read_request_links, verify_request_allocations
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile, read_tax_adjustments
 
-MAX_REFUND_CALLS = 25  # +1 for the single batched credit-memo ledger read
+MAX_REFUND_CALLS = 26  # +1 for the batched credit-memo ledger read, +1 for the invoice-credit totals read
+MAX_INVOICE_CREDITS = 10
 MAX_DOCUMENTS = 100
 MAX_EDGES = 200
 MAX_DEPTH = 6
@@ -135,6 +142,86 @@ def _positive(value):
     if amount is None or amount <= 0:
         raise ValueError("invalid_refund_amount")
     return amount
+
+
+def invoice_credit_candidates(nodes, parents):
+    """Non-voided credit memos linked from an invoice: created from it, or only applied to it.
+
+    The graph cannot tell those two apart; the totals read checks `createdfrom`.
+    """
+    return sorted(
+        (
+            identifier
+            for identifier, metadata in nodes.items()
+            if metadata.get("type") == "CustCred"
+            and metadata.get("voided") != "T"
+            and any((nodes.get(p) or {}).get("type") == "CustInvc" for p in parents.get(identifier, ()))
+        ),
+        key=int,
+    )
+
+
+async def read_invoice_credits(request, candidates, nodes, owned, currency_id):
+    """Credit memos created from one of this order's invoices, with their amounts.
+
+    `complete: False` means unknown, never zero. A credit on an invoice shared with
+    another order cannot be attributed to this one.
+    """
+    if not candidates:
+        return {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    try:
+        if len(candidates) > MAX_INVOICE_CREDITS:
+            raise ValueError("invoice_credit_budget")
+        result = await request(
+            "POST",
+            "/query/v1/suiteql",
+            params={"limit": MAX_INVOICE_CREDITS + 1},
+            body={
+                "q": "SELECT t.id, t.tranid, t.type, t.foreigntotal, t.taxtotal, t.currency, t.posting, "
+                "t.voided, tl.createdfrom FROM transaction t "
+                "JOIN transactionline tl ON tl.transaction=t.id AND tl.mainline='T' "
+                f"WHERE t.id IN ({','.join(candidates)})"
+            },
+        )
+        rows, complete = _collection(result)
+        if not complete or sorted((_id(r.get("id")) or "" for r in rows), key=str) != sorted(candidates, key=str):
+            raise ValueError("invoice_credit_read_incomplete")
+        credits = []
+        for row in sorted(rows, key=lambda r: int(r["id"])):
+            identifier, origin = _id(row["id"]), _id(row.get("createdfrom"))
+            if (
+                row.get("type") != "CustCred"
+                or str(row.get("currency")) != str(currency_id)
+                or row.get("posting") != "T"
+                or row.get("voided") != "F"
+            ):
+                raise ValueError("invoice_credit_unproven")
+            total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
+            if total is None or tax is None or total >= 0 or tax > 0:
+                raise ValueError("invoice_credit_amount_unproven")
+            if (nodes.get(origin) or {}).get("type") != "CustInvc":
+                continue  # created from a return authorization, or standalone: applied, not an invoice credit
+            if origin not in owned or identifier not in owned:
+                return {"complete": False, "reason": "invoice_credit_ownership_ambiguous"}
+            credits.append(
+                {
+                    "id": identifier,
+                    "number": row.get("tranid"),
+                    "invoice_id": origin,
+                    "total": str(Decimal(0) - total),
+                    "tax": str(Decimal(0) - tax),
+                }
+            )
+        return {
+            "complete": True,
+            "credits": credits,
+            "total": str(sum((Decimal(c["total"]) for c in credits), Decimal(0))),
+            "tax": str(sum((Decimal(c["tax"]) for c in credits), Decimal(0))),
+        }
+    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+        # NetSuiteEvidenceError is a ValueError. The refund proof above stands; the
+        # credits are unknown for this observation and the next scan reads them again.
+        return {"complete": False, "reason": str(exc) if isinstance(exc, ValueError) else "invoice_credit_unproven"}
 
 
 async def collect_refunds(
@@ -286,6 +373,9 @@ async def collect_refunds(
         if adjustment_profile
         else []
     )
+    invoice_credits = await read_invoice_credits(
+        request, invoice_credit_candidates(nodes, parents), nodes, owned, currency_id
+    )
     await recheck_links()
     request_ids = sorted((link["request_id"] for link in request_links), key=int)
     transaction_ids = [order_id, *sorted(({*nodes, *application_documents} - {order_id}), key=int)]
@@ -296,6 +386,7 @@ async def collect_refunds(
         "record_ids": included,
         "request_links": request_links,
         "tax_adjustments": adjustments,
+        "invoice_credits": invoice_credits,
         # Retain every observed participant, including voided refunds and
         # parents outside the owned set. They can invalidate the proof later.
         # This inventories this read's inputs; it is not a change-feed watermark.
