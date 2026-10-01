@@ -127,8 +127,21 @@ function safeCell(value: unknown): unknown {
   // Whatever else arrives is checked as the exact text it will be exported as.
   const text = typeof value === "string" ? value : JSON.stringify(value) ?? "";
   const flat = text.replace(/[\t\r\n]+/g, " ");
-  return /^[=+\-@]/.test(flat.trimStart()) && toNumber(flat) === null ? `'${flat}` : flat;
+  // Checked as a spreadsheet would read the pasted cell: leading spaces and quotes stripped.
+  const decoded = flat.replace(/^[\s"']+/, "");
+  return /^[=+\-@]/.test(decoded) && toNumber(decoded) === null ? `'${flat}` : flat;
 }
+
+/** The exporter's own type for each card format, so it never guesses from a label. */
+const EXPORT_TYPE: Record<string, string> = {
+  text: "text",
+  integer: "number",
+  number: "number",
+  currency: "currency",
+  percent: "percent",
+  date: "date",
+  delta: "number",
+};
 
 function exportRows(card: ResultCardData): { columns: string[]; rows: unknown[][] } {
   const columns = card.columns.map((c) =>
@@ -185,7 +198,10 @@ function CardActions({ card }: { card: ResultCardData }) {
         disabled={isExporting}
         onClick={() => {
           const { columns, rows } = exportRows(card);
-          exportToExcel({ columns, rows: rows as unknown[][], title: fileTitle });
+          const columnTypes = Object.fromEntries(
+            columns.map((name, index) => [name, EXPORT_TYPE[card.columns[index]?.format] ?? "text"]),
+          );
+          exportToExcel({ columns, rows: rows as unknown[][], title: fileTitle, columnTypes });
         }}
         className={cn(buttonClass, "disabled:opacity-50")}
         title="Export as Excel"

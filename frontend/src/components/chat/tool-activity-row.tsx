@@ -70,15 +70,20 @@ function entityName(table: string): string {
   return name;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
 function mbqlLabel(query: unknown): string {
-  const stages = (query as { stages?: unknown[] } | null)?.stages;
-  const stage = Array.isArray(stages) ? (stages[stages.length - 1] as Record<string, unknown>) : null;
+  // Tool input is an untrusted shape (shown before execution and kept for failed calls).
+  const stages = isRecord(query) && Array.isArray(query.stages) ? query.stages : null;
+  const stage = stages && isRecord(stages[stages.length - 1]) ? (stages[stages.length - 1] as Record<string, unknown>) : null;
   if (!stage) return "Query";
   const table = tableName(stage["source-table"]).replace(/^spree_/, "").replace(/_/g, " ");
   // Join aliases ("o", "c") name the joined table, so "c.name" reads "country name".
   const joined: Record<string, string> = {};
-  for (const join of Array.isArray(stage.joins) ? (stage.joins as Record<string, unknown>[]) : []) {
-    const joinStages = Array.isArray(join.stages) ? (join.stages as Record<string, unknown>[]) : [];
+  for (const join of Array.isArray(stage.joins) ? stage.joins.filter(isRecord) : []) {
+    const joinStages = Array.isArray(join.stages) ? join.stages.filter(isRecord) : [];
     const source = joinStages.map((s) => s["source-table"]).find(Boolean);
     if (typeof join.alias === "string" && source) joined[join.alias] = entityName(tableName(source));
   }

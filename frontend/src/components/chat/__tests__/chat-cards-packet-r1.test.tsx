@@ -5,7 +5,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import React from "react";
 import { MessageList } from "../message-list";
 import { ResultCard } from "../result-card";
-import { activityStepsFromCalls, activityStepsFromStream } from "../tool-activity-row";
+import { ToolActivityRow, activityStepsFromCalls, activityStepsFromStream } from "../tool-activity-row";
 import { coerceResultCard } from "@/lib/chat-stream";
 import type { ResultCardData, StreamBlock } from "@/lib/chat-stream";
 import type { ToolCallStep } from "@/lib/types";
@@ -14,8 +14,9 @@ vi.mock("@/lib/api-client", () => ({
   apiClient: { get: vi.fn(async () => ({})), post: vi.fn(async () => ({})) },
 }));
 vi.mock("@/providers/auth-provider", () => ({ useAuth: () => ({ user: null }) }));
+const exportToExcel = vi.fn();
 vi.mock("@/hooks/use-excel-export", () => ({
-  useExcelExport: () => ({ exportToExcel: vi.fn(), exportFromQuery: vi.fn(), isExporting: false }),
+  useExcelExport: () => ({ exportToExcel, exportFromQuery: vi.fn(), isExporting: false }),
 }));
 
 beforeAll(() => {
@@ -229,6 +230,51 @@ describe("packet review round 2 on #370", () => {
     const same = { ...comparison, as_of_sources: [comparison.as_of_sources[1], { label: "NetSuite", as_of: "2026-10-01T05:02:38+00:00" }] };
     render(<ResultCard card={coerceResultCard(same) as ResultCardData} />);
     expect(screen.getByText(/both as of/)).toBeInTheDocument();
+  });
+
+  it("R1 (round 4): a malformed Metabase join cannot crash the progress row", () => {
+    const steps = activityStepsFromCalls([
+      {
+        tool: "ext__6f95665c23cc4d35a3f9eb4231099568__query",
+        params: { query: { "lib/type": "mbql/query", stages: [{ "source-table": ["db", "public", "orders"], joins: [null, 5, { stages: [null] }] }] } },
+        result_summary: "Query failed",
+        duration_ms: 5,
+      },
+    ] as unknown as ToolCallStep[]);
+    expect(() => render(<ToolActivityRow steps={steps} elapsedMs={1000} />)).not.toThrow();
+    fireEvent.click(screen.getByTestId("tool-activity-done"));
+    expect(screen.getByTestId("tool-activity-steps")).toBeInTheDocument();
+  });
+
+  it("R2 (round 4): a formula wrapped in quotes is neutralised on Copy", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const card = coerceResultCard({ ...base, rows: [['"=1+1"', 5], [" '=2+2", 6]] }) as ResultCardData;
+    render(<ResultCard card={card} />);
+    fireEvent.click(screen.getByRole("button", { name: /copy/i }));
+    const text = (writeText.mock.calls[0] as unknown as [string])[0];
+    const cells = text.split("\n").slice(1).map((line) => line.split("\t")[0]);
+    expect(cells.every((cell) => cell.startsWith("'"))).toBe(true);
+  });
+
+  it("R3 (round 4): Excel export keeps each column's own format", () => {
+    exportToExcel.mockClear();
+    const card = coerceResultCard({
+      ...base,
+      columns: [
+        { key: "country", label: "Country", format: "text", align: "left" },
+        { key: "rate", label: "Shipping rate", format: "currency", currency: "USD", align: "right" },
+        { key: "share", label: "Share", format: "percent", align: "right" },
+      ],
+      rows: [["US", 25, 72.1]],
+    }) as ResultCardData;
+    render(<ResultCard card={card} />);
+    fireEvent.click(screen.getByRole("button", { name: /excel/i }));
+    expect(exportToExcel.mock.calls[0][0].columnTypes).toEqual({
+      Country: "text",
+      "Shipping rate": "currency",
+      Share: "percent",
+    });
   });
 
   it("R3: an array cell holding a formula is exported as quoted text", async () => {
