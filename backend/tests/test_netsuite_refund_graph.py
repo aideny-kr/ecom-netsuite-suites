@@ -342,3 +342,23 @@ async def test_a_return_credit_applied_to_the_invoice_is_not_an_invoice_credit()
     ]
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
     assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}
+
+
+async def test_a_credit_whose_origin_is_not_in_the_graph_makes_the_read_unknown():
+    # Packet review round 2, F4: an unresolved createdfrom is not "not an invoice credit";
+    # skipping it would certify a partial sum.
+    reader = CreditReader([credit_row("3", "CM1", "4.82"), credit_row("8", "CM2", "20.00", createdfrom="999")])
+    reader.edges = [
+        edge("1", "2", "SalesOrd", "CustInvc"),
+        edge("2", "3", "CustInvc", "CustCred"),
+        edge("2", "8", "CustInvc", "CustCred"),
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"]["complete"] is False
+
+
+async def test_a_standalone_credit_applied_to_the_invoice_is_not_an_invoice_credit():
+    reader = CreditReader([credit_row("3", "CM1", "4.82", createdfrom=None)])
+    reader.edges = [edge("1", "2", "SalesOrd", "CustInvc"), edge("2", "3", "CustInvc", "CustCred")]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}

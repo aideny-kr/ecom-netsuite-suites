@@ -199,6 +199,10 @@ async def read_invoice_credits(request, candidates, nodes, owned, currency_id):
             total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
             if total is None or tax is None or total >= 0 or tax > 0:
                 raise ValueError("invoice_credit_amount_unproven")
+            if origin is not None and origin not in nodes:
+                # An origin the graph never saw is unresolved, not "not an invoice":
+                # skipping it would certify a partial sum.
+                raise ValueError("invoice_credit_origin_unproven")
             if (nodes.get(origin) or {}).get("type") != "CustInvc":
                 continue  # created from a return authorization, or standalone: applied, not an invoice credit
             if origin not in owned or identifier not in owned:

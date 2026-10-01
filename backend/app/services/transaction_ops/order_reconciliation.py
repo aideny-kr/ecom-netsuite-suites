@@ -217,6 +217,9 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
         if credited_total == source_total and credited_tax == source_tax:
             values["order_total"] = (source_total, credited_total)
             values["tax"] = (source_tax, credited_tax)
+            # The order itself is matched: the 2026-09-13 note that the sales order
+            # still needs a source-backed amendment no longer applies (decided 10-01).
+            result.pop("posting_reconciliation", None)
             adjustments.append(
                 {
                     "kind": "invoice_credit_memos",
