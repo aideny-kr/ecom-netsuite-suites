@@ -185,6 +185,15 @@ export function activityStepsFromStream(tools: StreamingToolCall[]): ActivitySte
     }));
 }
 
+/** The query card renders params.query as text; an MBQL object query is dropped, not rendered. */
+function tableSafeStep(step: ToolCallStep): ToolCallStep {
+  const query = step.params?.query;
+  if (query === undefined || typeof query === "string") return step;
+  const { query: _omitted, ...params } = step.params;
+  void _omitted;
+  return { ...step, params };
+}
+
 function useElapsed(running: boolean): number {
   const [start] = useState(() => Date.now());
   const [now, setNow] = useState(() => Date.now());
@@ -249,8 +258,8 @@ function StepList({ steps, userQuestion }: { steps: ActivityStep[]; userQuestion
             </button>
             {open === index && step.source && (
               <div className="border-t border-border/60 p-2">
-                {typeof step.source.params?.query === "string" && step.source.result_payload?.kind === "table" ? (
-                  <SuiteQLToolCard step={step.source} userQuestion={userQuestion} />
+                {step.source.result_payload?.kind === "table" || step.source.tool === "netsuite_suiteql" ? (
+                  <SuiteQLToolCard step={tableSafeStep(step.source)} userQuestion={userQuestion} />
                 ) : step.source.tool.startsWith("workspace_") ? (
                   <WorkspaceToolCard step={step.source} />
                 ) : (
@@ -304,6 +313,7 @@ export function ToolActivityRow({
   }
 
   const elapsed = formatElapsed(elapsedMs ?? steps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0));
+  const failed = steps.filter((s) => s.status === "error").length;
   return (
     <div className="flex flex-col gap-2.5">
       <button
@@ -313,12 +323,17 @@ export function ToolActivityRow({
         onClick={() => setExpanded((v) => !v)}
         className="flex min-h-9 items-center gap-2.5 self-start rounded-lg border border-border px-3 py-1.5 text-[13px] text-foreground/85 transition-colors hover:bg-muted/40"
       >
-        <Tick />
+        {failed ? <span className="shrink-0 text-amber-500">⚠</span> : <Tick />}
         <span className="font-medium">{summaryTitle(steps)}</span>
         <span className="text-muted-foreground">
           {countLabel(steps)}
           {elapsed ? ` · ${elapsed}` : ""}
         </span>
+        {failed > 0 && (
+          <span className="text-amber-600 dark:text-amber-400">
+            · {failed} failed
+          </span>
+        )}
         {expanded ? <ChevronDown className="h-3 w-3 text-muted-foreground" /> : <ChevronRight className="h-3 w-3 text-muted-foreground" />}
       </button>
       {expanded && <StepList steps={steps} userQuestion={userQuestion} />}

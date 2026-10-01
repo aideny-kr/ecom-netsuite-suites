@@ -24,7 +24,7 @@ export function extractFollowups(content: string): { text: string; followups: st
 }
 
 const RAN_QUERY_LABEL =
-  /^[ \t]*(?:\*\*|__)?[ \t]*(?:the[ \t]+)?(?:quer(?:y|ies)|sql|suiteql)(?:[ \t]+(?:i[ \t]+)?(?:ran|run|used|executed))?[^\n]{0,30}?:?[ \t]*(?:\*\*|__)?[ \t]*:?[ \t]*\n+(?=[ \t]*```(?:sql|suiteql))/gim;
+  /^[ \t]*(?:\*\*|__)?[ \t]*(?:the[ \t]+)?(?:quer(?:y|ies)|sql|suiteql)[ \t]+(?:i[ \t]+)?(?:ran|run|used|executed)\b[ \t]*(?:\([^)\n]{0,20}\))?[ \t]*:?[ \t]*(?:\*\*|__)?[ \t]*:?[ \t]*\n+(?=[ \t]*```(?:sql|suiteql))/gim;
 
 /** Drop a "Query I ran (SuiteQL):" label that only introduces a SQL block. */
 export function stripRanQueryLabels(content: string): string {

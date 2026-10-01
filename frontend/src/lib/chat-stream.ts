@@ -70,6 +70,9 @@ export function coerceDataTableData(d: Record<string, unknown>): DataTableData {
 /** True when a result card presents this table (by result id), so the raw table is redundant. */
 export function tableCoveredByCards(table: { result_id?: string } | null | undefined, cards: ResultCardData[]): boolean {
   if (!table?.result_id || cards.length === 0) return false;
+  if (Array.isArray((table as { caveats?: unknown }).caveats) && (table as { caveats: unknown[] }).caveats.length > 0) {
+    return false;
+  }
   return cards.some((card) => card.result_ids.includes(table.result_id!));
 }
 
@@ -226,25 +229,51 @@ export function coerceResultCard(raw: unknown): ResultCardData | null {
   const d = raw as Record<string, unknown>;
   if (typeof d.card_id !== "string" || typeof d.title !== "string") return null;
   if (!Array.isArray(d.columns) || !Array.isArray(d.rows)) return null;
-  const width = (d.columns as unknown[]).length;
-  const rows = (d.rows as unknown[]).filter((row): row is unknown[] => Array.isArray(row));
+  const formats = ["text", "integer", "number", "currency", "percent", "date", "delta"];
+  const columns = (d.columns as unknown[]).map((raw, index): ResultCardColumn => {
+    const c = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    return {
+      key: typeof c.key === "string" ? c.key : `c${index}`,
+      label: typeof c.label === "string" ? c.label : String(c.key ?? ""),
+      format: (formats.includes(c.format as string) ? c.format : "text") as ResultCardColumn["format"],
+      currency: typeof c.currency === "string" ? c.currency : null,
+      align: c.align === "right" ? "right" : "left",
+      group: typeof c.group === "string" ? c.group : null,
+    };
+  });
+  const width = columns.length;
+  const kept = (d.rows as unknown[]).map((row, index) => [row, index] as const).filter(([row]) => Array.isArray(row));
   const fit = (row: unknown[]) => (row.length >= width ? row : [...row, ...Array(width - row.length).fill(null)]);
   const share = d.share as ResultCardData["share"];
   const shareValid =
     !!share &&
     Array.isArray(share.values) &&
-    share.values.length >= rows.length &&
+    share.values.length >= (d.rows as unknown[]).length &&
     share.values.every((v) => typeof v === "number" && Number.isFinite(v));
   const totals = Array.isArray(d.totals) ? (d.totals as (number | null)[]) : null;
+  const flags = Array.isArray(d.row_flags) ? (d.row_flags as ResultCardData["row_flags"])! : null;
   return {
     ...(d as unknown as ResultCardData),
+    columns,
     result_ids: Array.isArray(d.result_ids) ? (d.result_ids as string[]) : [],
-    rows: rows.map(fit),
-    row_flags: Array.isArray(d.row_flags) ? (d.row_flags as ResultCardData["row_flags"]) : null,
-    share: shareValid ? share : null,
+    rows: kept.map(([row]) => fit(row as unknown[])),
+    row_flags: flags ? kept.map(([, index]) => flags[index] ?? null) : null,
+    share: shareValid ? { ...share!, values: kept.map(([, index]) => share!.values[index]) } : null,
     totals: totals && totals.length >= width ? totals : null,
-    queries: Array.isArray(d.queries) ? (d.queries as ResultCardData["queries"]) : [],
-    tiles: Array.isArray(d.tiles) ? (d.tiles as ResultCardData["tiles"]) : [],
+    scope: typeof d.scope === "string" ? d.scope : null,
+    subtitle: typeof d.subtitle === "string" ? d.subtitle : null,
+    queries: Array.isArray(d.queries)
+      ? (d.queries as unknown[]).filter(
+          (q): q is { label: string; text: string } =>
+            !!q && typeof (q as { label?: unknown }).label === "string" && typeof (q as { text?: unknown }).text === "string",
+        )
+      : [],
+    tiles: Array.isArray(d.tiles)
+      ? (d.tiles as unknown[]).filter(
+          (t): t is ResultCardData["tiles"][number] =>
+            !!t && typeof (t as { label?: unknown }).label === "string" && typeof (t as { value?: unknown }).value === "number",
+        )
+      : [],
     top_n: typeof d.top_n === "number" ? d.top_n : (d.rows as unknown[]).length,
     collapsed: d.collapsed === true,
   };

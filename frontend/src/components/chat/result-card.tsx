@@ -118,9 +118,16 @@ function gridTemplate(card: ResultCardData, withShare: boolean): string {
   return parts.join(" ");
 }
 
+/** Text that a spreadsheet would run as a formula (=, +, -, @, tab, CR) gets a leading quote. */
+function safeCell(value: unknown): unknown {
+  return typeof value === "string" && /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+}
+
 function exportRows(card: ResultCardData): { columns: string[]; rows: unknown[][] } {
-  const columns = card.columns.map((c) => (c.group && card.kind === "comparison" ? `${c.group} · ${c.label}` : c.label));
-  return { columns, rows: card.rows };
+  const columns = card.columns.map((c) =>
+    String(safeCell(c.group && card.kind === "comparison" ? `${c.group} · ${c.label}` : c.label)),
+  );
+  return { columns, rows: card.rows.map((row) => row.map(safeCell)) };
 }
 
 function CardActions({ card }: { card: ResultCardData }) {

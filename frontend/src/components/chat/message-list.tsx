@@ -53,6 +53,7 @@ import { TemplateSlot } from "@/components/chat/template-slot";
 import { useAgentInstructions, useUpdateAgentInstructions } from "@/hooks/use-agent-instructions";
 import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Zap, Orbit } from "lucide-react";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
+import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { useChatFeedback } from "@/hooks/use-chat-feedback";
 
 const CodeHighlight = lazy(() => import("./code-highlight"));
@@ -590,6 +591,9 @@ function CardAnswerProse({ content, lead = false }: { content: string; lead?: bo
     </>
   );
 }
+
+/** Below this judge score (1-5) the answer shows its confidence badge. */
+const LOW_CONFIDENCE = 2.5;
 
 /** Agent display config for indicator badges */
 const AGENT_TAGS: Record<string, { label: string; color: string }> = {
@@ -1448,7 +1452,6 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   const hasCards = resultCards.length > 0;
   const openCards = resultCards.filter((card) => !card.collapsed);
   const collapsedCards = resultCards.filter((card) => card.collapsed);
-  const tileCard = openCards.find((card) => card.tiles.length > 0) ?? null;
   // A comparison's computed detail sentence opens the model's lead paragraph.
   const detailCard = resultCards.find((card) => card.headline && card.detail) ?? null;
 
@@ -1575,9 +1578,11 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
                 <ResultCardHeadline key={`headline-${card.card_id}`} card={card} mergeDetail={!!lead && card === detailCard} />
               ))}
               {lead && <CardAnswerProse content={detailCard?.detail ? `${detailCard.detail} ${lead}` : lead} lead={!detailCard} />}
-              {tileCard && <ResultCardTiles card={tileCard} />}
               {openCards.map((card) => (
-                <ResultCard key={card.card_id} card={card} />
+                <React.Fragment key={card.card_id}>
+                  <ResultCardTiles card={card} />
+                  <ResultCard card={card} />
+                </React.Fragment>
               ))}
               {rest && <CardAnswerProse content={rest} />}
               {collapsedCards.map((card) => (
@@ -1639,6 +1644,10 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
                   </>
                 )}
               </span>
+            )}
+            {/* Only a low score is worth the user's attention; it is never hidden. */}
+            {message.confidence_score != null && message.confidence_score < LOW_CONFIDENCE && (
+              <ConfidenceBadge score={message.confidence_score} />
             )}
           </div>
         )}
