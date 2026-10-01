@@ -100,8 +100,11 @@ def mb_country():
 def mb_total():
     card = mb_country()
     card["payload"] = {**card["payload"], "columns": card["payload"]["columns"][1:], "rows": [[228, 232]]}
+    source = card["payload"]["metabase_source"]
+    stage = {k: v for k, v in source["query"]["stages"][0].items() if k != "breakout"}
     card["payload"]["metabase_source"] = {
-        **card["payload"]["metabase_source"],
+        **source,
+        "query": {"stages": [stage]},
         "column_sources": ["aggregation", "aggregation"],
     }
     return card
@@ -346,7 +349,7 @@ def test_the_check_covers_every_stored_row_not_just_the_displayed_ones():
             "query": "SELECT k, COUNT(*) AS n, SUM(v) AS v FROM t GROUP BY k",
         },
     }
-    control = {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["n", "v"], "rows": [["800", "1600"]]}}
+    control = _control(["n", "v"], ["800", "1600"], "SELECT COUNT(*) AS n, SUM(v) AS v FROM t")
     card = build_present_card(
         PresentResult(result_id="r1", title="t", sort_by="v", control_result_id="r2"), loaded, control
     )
@@ -423,6 +426,12 @@ def _table(rows, columns=("country", "units")):
     }
 
 
+def _control(columns, row, query=None, tool="netsuite_suiteql"):
+    """An ungrouped overall query: one row, every column an aggregate, no GROUP BY."""
+    query = query or "SELECT " + ", ".join(f"SUM(u) AS {c}" for c in columns) + " FROM t"
+    return {"tool": tool, "as_of": "x", "payload": {"columns": list(columns), "rows": [list(row)], "query": query}}
+
+
 def _compare(**overrides):
     spec = {
         "left_result_id": "r1",
@@ -459,7 +468,7 @@ def test_opposite_differences_are_not_netted_away():
 
 
 def test_a_one_sided_check_names_the_unchecked_source():
-    control = {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["units"], "rows": [[10]]}}
+    control = _control(["units"], [10])
     card, _ = build_compare_card(
         _compare(), _table([["X", 4], ["Y", 6]]), _table([["X", 4], ["Y", 6]]), (control, None)
     )
@@ -595,7 +604,7 @@ def test_an_average_gets_its_overall_value_but_no_share_or_reconciliation():
             "query": "SELECT k, SUM(v)/COUNT(*) AS avg_price FROM t GROUP BY k",
         },
     }
-    control = {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["avg_price"], "rows": [["15"]]}}
+    control = _control(["avg_price"], ["15"], "SELECT SUM(v)/COUNT(*) AS avg_price FROM t")
     card = build_present_card(
         PresentResult(result_id="r1", title="t", control_result_id="r2", share_of="avg_price"), loaded, control
     )
@@ -604,7 +613,7 @@ def test_an_average_gets_its_overall_value_but_no_share_or_reconciliation():
 
 def test_rounded_rows_reconcile_within_their_precision():
     loaded = _table([["a", "333.33"], ["b", "333.33"], ["c", "333.34"]])
-    control = {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["units"], "rows": [["1000.01"]]}}
+    control = _control(["units"], ["1000.01"])
     card = build_present_card(PresentResult(result_id="r1", title="t", control_result_id="r2"), loaded, control)
     assert card["check"]["status"] == "ok"
 
@@ -618,7 +627,7 @@ def test_keys_beyond_a_partial_result_are_not_differences():
 
 
 def test_no_figure_is_blamed_on_keys_that_hold_none_of_it():
-    control = lambda v: {"tool": "netsuite_suiteql", "as_of": "x", "payload": {"columns": ["units"], "rows": [[v]]}}  # noqa: E731
+    control = lambda v: _control(["units"], [v])  # noqa: E731
     card, _ = build_compare_card(
         _compare(), _table([["a", 10]]), _table([["a", 11], ["b", 100]]), (control(10), control(111))
     )
@@ -662,3 +671,88 @@ def test_a_malformed_stored_result_is_an_error_not_a_crash():
     loaded["payload"] = {**loaded["payload"], "rows": [["United States", "162"]]}
     with pytest.raises(IndexError):
         build(PresentResult(result_id="r9", title="t"), loaded, None)
+
+
+# --- independent packet review round 1 on #369 (gpt-6-astra) ---
+
+
+def test_only_a_provably_overall_query_can_total_a_card():
+    # R1: a one-row result is not a total because it has one row. A grouped query, a
+    # capped one, a non-aggregate lookup or another source's figure is refused.
+    spec = PresentResult(result_id="r9", title="t", control_result_id="r5")
+    grouped = _control(
+        ["orders", "units"],
+        ["162", "170"],
+        "SELECT country, COUNT(*) AS orders, SUM(u) AS units FROM t GROUP BY country",
+    )
+    capped = _control(["units"], ["170"], "SELECT SUM(u) AS units FROM t FETCH FIRST 1 ROWS ONLY")
+    lookup = _control(["units"], ["170"], "SELECT units FROM t WHERE id = 5")
+    other_source = _control(["units"], ["240"], tool="bigquery_sql")
+    metabase_grouped = mb_country()
+    metabase_grouped["payload"] = {**metabase_grouped["payload"], "rows": [["United States", 162, 166]]}
+    for control in (grouped, capped, lookup, other_source, metabase_grouped):
+        with pytest.raises(ValueError, match="overall"):
+            build_present_card(spec, ns_country(), control)
+
+
+def test_rows_that_exceed_a_sum_total_get_no_total_or_share():
+    # R1: the rows of a SUM or COUNT partition its total; rows adding up to more than the
+    # "total" mean it does not cover them, so neither it nor shares of it are shown.
+    control = _control(["units", "yucca_line_amount_usd"], ["100", "1000"])
+    card = build_present_card(
+        PresentResult(result_id="r9", title="t", control_result_id="r5", share_of="yucca_line_amount_usd", tiles=True),
+        ns_country(),
+        control,
+    )
+    assert card["totals"] is None and card["share"] is None and card["tiles"] == []
+    assert card["check"]["status"] == "warn" and "does not cover these rows" in card["check"]["text"]
+
+
+def test_two_blank_values_are_not_a_match():
+    # R2: SUM over no values is NULL on both sides; nothing was compared.
+    card, facts = build_compare_card(_compare(), _table([["US", None]]), _table([["US", None]]), (None, None))
+    assert card["headline"] == "Units differ in 1 country." and facts["matching"] == []
+    assert "cannot be compared for US" in card["detail"]
+
+
+def test_punctuation_never_merges_distinct_keys():
+    # R3: SKU A-1 and SKU A/1 are different keys.
+    card, facts = build_compare_card(_compare(), _table([["A-1", 10]]), _table([["A/1", 10]]), (None, None))
+    assert facts["only_in_left"] == ["A-1"] and facts["only_in_right"] == ["A/1"]
+    assert card["headline"] == "Units differ in 2 countries."
+
+
+def _limited(rows, query):
+    table = _table(rows)
+    table["payload"]["query"] = query
+    return table
+
+
+def test_a_query_that_reached_its_row_limit_is_partial():
+    # R4: NetSuite reports a FETCH FIRST n result as complete; n rows back means more may exist.
+    query = "SELECT country, SUM(u) AS units FROM t GROUP BY country ORDER BY units DESC FETCH FIRST 1 ROWS ONLY"
+    card, facts = build_compare_card(
+        _compare(), _limited([["US", 5]], query), _limited([["US", 5]], query), (None, None)
+    )
+    assert facts["partial"] is True and "in both results" in card["headline"]
+    assert build_present_card(PresentResult(result_id="r1", title="t"), _limited([["US", 5]], query), None)["truncated"]
+    # Fewer rows than the limit: the result is complete.
+    roomy = _limited([["US", 5]], "SELECT country, SUM(u) AS units FROM t GROUP BY country FETCH FIRST 50000 ROWS ONLY")
+    assert build_present_card(PresentResult(result_id="r1", title="t"), roomy, None)["truncated"] is False
+
+
+def test_a_limit_inside_a_subquery_always_makes_the_result_partial():
+    nested = _limited(
+        [["US", 5]],
+        "SELECT country, SUM(u) AS units FROM (SELECT * FROM t FETCH FIRST 1000 ROWS ONLY) GROUP BY country",
+    )
+    assert build_present_card(PresentResult(result_id="r1", title="t"), nested, None)["truncated"] is True
+
+
+def test_a_key_missing_from_a_complete_side_is_a_difference_even_if_the_other_is_partial():
+    # R5: CA is definitely absent from the complete right result.
+    left = _table([["US", 1], ["CA", 2]])
+    left["payload"]["truncated"] = True
+    card, facts = build_compare_card(_compare(), left, _table([["US", 3]]), (None, None))
+    assert card["headline"] == "Units differ in 2 countries."
+    assert sorted(facts["differing"]["Units"]) == ["CA", "US"] and facts["only_in_left"] == ["CA"]

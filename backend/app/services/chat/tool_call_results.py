@@ -820,6 +820,12 @@ def build_tool_call_log_entry(
     }
     if agent_name:
         entry["agent"] = agent_name
+    # The failure is recorded as a flag, so history never has to guess it from wording.
+    parsed_result = parse_tool_result_value(result_str)
+    if isinstance(parsed_result, dict) and (
+        _extract_error_message(parsed_result) is not None or parsed_result.get("isError") is True
+    ):
+        entry["error"] = True
     if tool_name in {"transaction_ops_accounting_evidence", "transaction_ops.accounting_evidence"}:
         try:
             parsed = json.loads(result_str)

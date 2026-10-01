@@ -332,6 +332,67 @@ def _top_level_words(query: str) -> set[str]:
     return words
 
 
+_SQL_LIMIT = re.compile(
+    r"\bFETCH\s+(?:FIRST|NEXT)\s+(\d+)\s+ROWS?\s+ONLY\b|\bLIMIT\s+(\d+)\b|\bTOP\s+(\d+)\b|\bROWNUM\s*<\s*(=?)\s*(\d+)",
+    re.I,
+)
+
+
+def _depth_at(text: str, position: int) -> int:
+    depth, quote = 0, None
+    for char in text[:position]:
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+    return depth
+
+
+def _mbql_limits(node) -> list[int]:
+    found = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "limit" and isinstance(value, int) and not isinstance(value, bool):
+                found.append(value)
+            else:
+                found += _mbql_limits(value)
+    elif isinstance(node, list):
+        for item in node:
+            found += _mbql_limits(item)
+    return found
+
+
+def _is_partial(payload: dict) -> bool:
+    """A result is partial when the source says so, or when its own query capped it.
+
+    NetSuite reports a ``FETCH FIRST n`` result as complete, so n rows back means more
+    may exist. A limit inside a subquery caps the input to everything outside it, so it
+    always makes the result partial.
+    """
+    if payload.get("truncated"):
+        return True
+    returned = len(payload.get("rows") or [])
+    source = payload.get("metabase_source")
+    if isinstance(source, dict):
+        return any(returned >= limit for limit in _mbql_limits(source.get("query")))
+    text = _strip_sql_comments(str(payload.get("query") or ""))
+    for match in _SQL_LIMIT.finditer(text):
+        if _depth_at(text, match.start()) > 0:
+            return True
+        if match[4] is not None:
+            limit = int(match[5]) - (0 if match[4] else 1)
+        else:
+            limit = int(next(group for group in match.groups()[:3] if group))
+        if returned >= limit:
+            return True
+    return False
+
+
 def sql_aggregates(query: str) -> dict[str, str]:
     """Map each selected column alias (casefolded) to sum / count / distinct / other.
 
@@ -506,13 +567,50 @@ def _column_index(payload: dict, name: str, what: str) -> int:
     raise ValueError(f"Unknown {what} column {name!r}. Available columns: {columns}")
 
 
-def _control_values(control: dict | None, columns: list[str]) -> dict[int, Decimal]:
-    """Values of an ungrouped (single-row) control, matched to ``columns`` by name."""
+def _has_breakout(node) -> bool:
+    if isinstance(node, dict):
+        return any((key == "breakout" and value) or _has_breakout(value) for key, value in node.items())
+    if isinstance(node, list):
+        return any(_has_breakout(item) for item in node)
+    return False
+
+
+def _is_overall(control: dict, tool: str) -> bool:
+    """True only when the control provably is one overall figure for the same source:
+    one row, not partial, and an ungrouped query whose every column is an aggregate."""
+    payload = control["payload"]
+    if control.get("tool") != tool or len(payload["rows"]) != 1 or _is_partial(payload):
+        return False
+    source = payload.get("metabase_source")
+    if isinstance(source, dict):
+        sources = source.get("column_sources") or []
+        return (
+            isinstance(source.get("query"), dict)
+            and not _has_breakout(source["query"])
+            and len(sources) == len(payload["columns"])
+            and all(kind == "aggregation" for kind in sources)
+        )
+    text = _strip_sql_comments(str(payload.get("query") or "")).strip()
+    if not text or re.match(r"^WITH\b", text, re.I):
+        return False
+    if _top_level_words(text) & {"GROUP", "UNION", "INTERSECT", "MINUS", "EXCEPT"}:
+        return False
+    selected = _select_list(text)
+    if selected is None:
+        return False
+    return all(re.search(r"\b(?:SUM|COUNT|AVG|MIN|MAX)\s*\(", item, re.I) for item in _split_top_level(selected))
+
+
+def _control_values(control: dict | None, columns: list[str], tool: str) -> dict[int, Decimal]:
+    """Values of an overall control, matched to ``columns`` by name."""
     if control is None:
         return {}
     payload = control["payload"]
-    if len(payload["rows"]) != 1:
-        raise ValueError("A control result must be a single ungrouped row.")
+    if not _is_overall(control, tool):
+        raise ValueError(
+            "A control result must be an overall figure from the same source: one row from an "
+            "ungrouped, uncapped query whose columns are all aggregates (no GROUP BY or breakout)."
+        )
     names = [str(column).casefold() for column in payload["columns"]]
     values = {}
     for index, column in enumerate(columns):
@@ -548,6 +646,7 @@ def _totals(
     if not checkable:
         return totals, None
     outcomes = set()
+    totals = list(totals)
     for index in checkable:
         total = control[index]
         values = [row[index] for row in numbers]
@@ -558,13 +657,22 @@ def _totals(
         places = max([-v.as_tuple().exponent for v in values if v.as_tuple().exponent < 0] or [0])
         tolerance = Decimal(len(values)) * Decimal(5).scaleb(-(places + 1)) if places else Decimal(0)
         delta = summed - total
+        if delta > tolerance and kinds is not None and kinds[index] in {"sum", "count"}:
+            # Groups of a sum or a count cannot overlap: this figure is not their total.
+            totals[index] = None
+            outcomes.add("uncovered")
+            continue
         outcomes.add("ok" if abs(delta) <= tolerance else "over" if delta > 0 else "under")
     messages = {
         "blank": "Some rows have no value, so they cannot be checked against the overall total.",
+        "uncovered": (
+            "The rows add up to more than the overall figure given, so it does not cover these rows; "
+            "no total is shown for them."
+        ),
         "over": "The rows add up to more than the overall total, so the groups overlap.",
         "under": "The rows add up to less than the overall total; part of it falls outside these rows.",
     }
-    problems = [messages[key] for key in ("blank", "over", "under") if key in outcomes]
+    problems = [messages[key] for key in ("blank", "uncovered", "over", "under") if key in outcomes]
     if not problems:
         return totals, {"status": "ok", "text": "The rows add up to the overall total."}
     return totals, {"status": "warn", "text": " ".join(problems)}
@@ -593,8 +701,8 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
     for name in spec.columns:
         _column_index(payload, name, "columns")
     numbers = [[_number(value) for value in row] for row in rows]
-    control_values = _control_values(control, columns)
-    partial = bool(payload.get("truncated"))
+    control_values = _control_values(control, columns, loaded["tool"])
+    partial = _is_partial(payload)
     row_count = payload.get("row_count")
     row_total = row_count if partial and isinstance(row_count, int) and row_count >= len(rows) else len(rows)
 
@@ -646,6 +754,8 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
     if spec.totals and spec.no_total_reason is None and control_values:
         all_totals, check = _totals(columns, numbers, control_values, kinds)
         totals = [_json_number(all_totals[i]) for i in range(len(columns))]
+        if all(value is None for value in totals):
+            totals = None
 
     shown = min(len(rows), _MAX_CARD_ROWS)
 
@@ -757,13 +867,20 @@ def build_present_card(spec: PresentResult, loaded: dict, control: dict | None) 
 
 
 def _clean_key(value) -> str:
-    """A key without its parenthetical or "/" suffix: "New Zealand/Aotearoa" -> "New Zealand"."""
-    text = re.sub(r"\s*\([^)]*\)", "", str(value if value is not None else "")).strip()
-    return text.split("/")[0].strip() or str(value)
+    """A key without a worded qualifier: "New Zealand/Aotearoa" -> "New Zealand", "Taiwan
+    (Province of China)" -> "Taiwan". A suffix with a digit is part of an identifier ("A/1",
+    "Line (2)") and is kept."""
+    text = str(value if value is not None else "")
+    text = re.sub(r"\s*\((?=[^)]*[A-Za-z])[^)\d]*\)", "", text).strip()
+    head, slash, tail = text.partition("/")
+    if slash and tail.strip() and not re.search(r"\d", tail) and re.search(r"[A-Za-z]", head):
+        text = head
+    return text.strip() or str(value)
 
 
 def _full_key(value) -> str:
-    return re.sub(r"[^\w]+", " ", str(value if value is not None else "").casefold()).strip()
+    """Exact key: case and spacing are folded; punctuation is kept ("A-1" is not "A/1")."""
+    return re.sub(r"\s+", " ", str(value if value is not None else "").casefold()).strip()
 
 
 def _norm_key(value) -> str:
@@ -798,12 +915,14 @@ def _side(loaded: dict, key: str, measures: list[str], control: dict | None) -> 
     numbers = [entry["values"] for entry in rows.values()]
     names = [payload["columns"][i] for i in indexes]
     kinds = _aggregate_kinds(payload)
-    totals, check = _totals(names, numbers, _control_values(control, names), [kinds[i] for i in indexes])
+    totals, check = _totals(
+        names, numbers, _control_values(control, names, loaded["tool"]), [kinds[i] for i in indexes]
+    )
     return {
         "rows": rows,
         "totals": totals,
         "check": check,
-        "partial": bool(payload.get("truncated")),
+        "partial": _is_partial(payload),
         "query": _query_block(loaded["tool"], payload),
     }
 
@@ -909,9 +1028,11 @@ def build_compare_card(
             rv = right_row["values"][index] if right_row else None
             unreadable = any(side["unreadable"][index] for side in (left_row, right_row) if side)
             if not both:
-                if not partial:
+                # Absent from a complete result is definite; absent from a partial one was
+                # never fetched.
+                if not (b["partial"] if left_row is not None else a["partial"]):
                     differing[measure.label].append((Decimal(0), display))
-            elif unreadable or (lv is None) != (rv is None):
+            elif unreadable or lv is None or rv is None:
                 differing[measure.label].append((Decimal(0), display))
                 blank[measure.label].append(display)
                 row_differs = True

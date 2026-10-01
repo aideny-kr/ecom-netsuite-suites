@@ -324,8 +324,9 @@ TOOL_REGISTRY = {
             "labels and formats, a totals row, an optional share-of-total column and summary tiles. "
             "Call it once per table the answer should show, after the query, with the result_id the "
             "query returned. You supply labels only. Totals, the share column and the tiles come "
-            "ONLY from control_result_id: an ungrouped result with the same filters and the same "
-            "column names (the overall total you ran earlier, or run one); the server never adds "
+            "ONLY from control_result_id: an overall query on the same source with the same filters "
+            "and column names -- one row, every column an aggregate, no GROUP BY and no row limit "
+            "(the overall total you ran earlier, or run one); the server never adds "
             "rows up and checks the rows against that total. "
             "Use collapsed=true for a secondary breakdown, and no_total_reason when the rows must "
             "not be added together (for example amounts in different currencies)."
@@ -364,7 +365,8 @@ TOOL_REGISTRY = {
             "control_result_id": {
                 "type": "string",
                 "description": (
-                    "Ungrouped single-row result with the same filters and column names. The only source of "
+                    "Overall query on the same source with the same filters and column names: one row, "
+                    "every column an aggregate, no GROUP BY or row limit. The only source of "
                     "totals, shares and tiles; the rows are checked against it."
                 ),
             },
