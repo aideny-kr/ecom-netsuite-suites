@@ -306,6 +306,10 @@ export default function ChatPage() {
             setReportReady(data);
             setStreamBlocks(prev => [...prev, { type: "report_ready" as const, data, id: `rr-${Date.now()}` }]);
           },
+          onResultCard: (data) => {
+            // The persisted message carries the same cards in structured_output.result_cards.
+            setStreamBlocks(prev => [...prev, { type: "result_card" as const, data, id: `rc-${data.card_id}` }]);
+          },
           onClarificationRequired: (data) => {
             // Plan Mode mid-stream gate: render ClarificationCard immediately
             // by stamping the structured_output onto the in-flight assistant
@@ -792,6 +796,7 @@ export default function ChatPage() {
           <MessageList
             emptyState={<ChatWelcome />}
             variant="default"
+            onFollowUp={(text) => { void handleSend(text); }}
             messages={sessionDetail?.messages || []}
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}

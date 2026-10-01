@@ -11,7 +11,26 @@ import { tokenUsageSummary } from "@/lib/token-usage";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage, ClarificationData, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
-import { isGroupBreakdown } from "@/lib/chat-stream";
+import { isGroupBreakdown, resultCardsOf } from "@/lib/chat-stream";
+import type { ResultCardData } from "@/lib/chat-stream";
+import { ResultCard, ResultCardHeadline, ResultCardTiles } from "@/components/chat/result-card";
+import {
+  ToolActivityRow,
+  activityStepsFromCalls,
+  activityStepsFromStream,
+} from "@/components/chat/tool-activity-row";
+import {
+  CollapseSqlContext,
+  CollapsedSqlBlock,
+  FollowUpChips,
+  SourcesList,
+  SourcesToggle,
+  extractFollowups,
+  proseSegments,
+  splitLead,
+  stripRanQueryLabels,
+  useCollapseSql,
+} from "@/components/chat/answer-layout";
 import { PreparationProgress } from "./preparation-progress";
 import { GroupBreakdownCard } from "./group-breakdown-card";
 import type { AgentSummary } from "@/hooks/use-agents";
@@ -21,10 +40,7 @@ import { ClarificationCard } from "@/components/chat/clarification-card";
 import { FinancialReport } from "@/components/chat/financial-report";
 import { DataFrameTable } from "@/components/chat/data-frame-table";
 import { ChartRenderer } from "@/components/chat/chart-renderer";
-import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
-import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
-import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
 import { TaskOutputCard } from "@/components/chat/task-output-card";
 import { SheetsLinkCard } from "@/components/chat/sheets-link-card";
 import { DocsLinkCard } from "@/components/chat/docs-link-card";
@@ -36,10 +52,8 @@ import { InstructionPanel } from "@/components/chat/instruction-panel";
 import { TemplateSlot } from "@/components/chat/template-slot";
 import { useAgentInstructions, useUpdateAgentInstructions } from "@/hooks/use-agent-instructions";
 import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Zap, Orbit } from "lucide-react";
-import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
 import { useChatFeedback } from "@/hooks/use-chat-feedback";
-import { StreamingToolCard } from "@/components/chat/streaming-tool-card";
 
 const CodeHighlight = lazy(() => import("./code-highlight"));
 
@@ -69,6 +83,10 @@ function makeMdComponents(isTerminal: boolean): Components {
       }
 
       const language = match?.[1] || "text";
+
+      if (language === "sql" || language === "suiteql") {
+        return <SqlCodeBlock code={codeString} language={language} isTerminal={isTerminal} />;
+      }
 
       return (
         <div className={cn(
@@ -113,6 +131,31 @@ function makeMdComponents(isTerminal: boolean): Components {
       );
     },
   };
+}
+
+/** SQL the answer already ran (and its result card shows) stays collapsed. */
+function SqlCodeBlock({ code, language, isTerminal }: { code: string; language: string; isTerminal: boolean }) {
+  const collapse = useCollapseSql();
+  if (collapse) return <CollapsedSqlBlock code={code} language={language} />;
+  return (
+    <div className={cn("group relative my-0 overflow-hidden border border-border/50", isTerminal ? "rounded-sm" : "rounded-xl")}>
+      <div className="flex items-center justify-between bg-muted/80 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
+        <span>{language}</span>
+        <button
+          onClick={() => navigator.clipboard.writeText(code)}
+          className="opacity-70 hover:opacity-100 focus-visible:opacity-100 transition-opacity flex items-center gap-1 hover:text-foreground"
+        >
+          <Copy className="h-3 w-3" />
+          Copy
+        </button>
+      </div>
+      <div className="overflow-x-auto scrollbar-thin">
+        <Suspense fallback={<pre className="m-0 whitespace-pre p-4 text-[13px] leading-normal"><code>{code}</code></pre>}>
+          <CodeHighlight content={code} language={language} />
+        </Suspense>
+      </div>
+    </div>
+  );
 }
 
 /** Static default markdown components (no terminal styling).
@@ -488,6 +531,66 @@ function AssistantTextBlocks({ content, isTerminal = false }: { content: string;
   );
 }
 
+/** Markdown tables beside result cards read as cards: titled, muted headers, wrapped cells. */
+const cardTableComponents: Components = {
+  ...mdComponents,
+  table({ children }) {
+    return <table className="w-full table-fixed border-collapse text-[14px]">{children}</table>;
+  },
+  thead({ children }) {
+    return <thead className="border-b border-border">{children}</thead>;
+  },
+  tr({ children }) {
+    return <tr className="border-b border-border/60 last:border-b-0">{children}</tr>;
+  },
+  th({ children }) {
+    return (
+      <th className="px-[18px] py-2.5 text-left text-[12px] font-normal uppercase tracking-[0.04em] text-muted-foreground first:w-[22%]">
+        {children}
+      </th>
+    );
+  },
+  td({ children }) {
+    return <td className="whitespace-normal px-[18px] py-3 align-top text-foreground/85 first:font-medium first:text-foreground/90">{children}</td>;
+  },
+};
+
+/** Answer text around result cards: plain prose (no bubble) and card-styled tables. */
+function CardAnswerProse({ content, lead = false }: { content: string; lead?: boolean }) {
+  return (
+    <>
+      {proseSegments(content).map((segment, index) =>
+        segment.kind === "table" ? (
+          <div key={index} data-testid="answer-table-card" className="overflow-hidden rounded-xl border border-border bg-card">
+            {segment.title && (
+              <div className="border-b border-border px-[18px] py-3.5 text-[15px] font-semibold text-foreground">
+                {segment.title}
+              </div>
+            )}
+            <div className="overflow-x-auto">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={cardTableComponents}>
+                {segment.markdown}
+              </ReactMarkdown>
+            </div>
+          </div>
+        ) : (
+          <div
+            key={index}
+            className={cn(
+              "chat-markdown max-w-[780px] leading-relaxed text-foreground",
+              lead ? "text-[16px]" : "text-[15px] text-foreground/90",
+            )}
+          >
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+              {segment.markdown}
+            </ReactMarkdown>
+          </div>
+        ),
+      )}
+    </>
+  );
+}
+
 /** Agent display config for indicator badges */
 const AGENT_TAGS: Record<string, { label: string; color: string }> = {
   "bi-agent": { label: "BI Analyst", color: "text-violet-500 bg-violet-500/10" },
@@ -666,6 +769,8 @@ interface MessageListProps {
   // Returns a Promise so the card can await it and clear/preserve text.
   onClarificationManual?: (messageId: string, manualText: string) => Promise<void>;
   variant?: "default" | "terminal";
+  /** Sends a follow-up suggestion as the user's next message. */
+  onFollowUp?: (text: string) => void;
 }
 
 export function MessageList({
@@ -699,6 +804,7 @@ export function MessageList({
   onClarificationChoose,
   onClarificationManual,
   variant,
+  onFollowUp,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -959,6 +1065,8 @@ export function MessageList({
             docsLinkData={docsLinks?.get(message.id) ?? null}
             reportReadyData={reportReady?.get(message.id) ?? null}
             isTerminal={isTerminal}
+            onFollowUp={onFollowUp}
+            followUpDisabled={!!isWaitingForReply}
           />
         ) : isTerminal ? (
           <div key={message.id} className="flex max-w-full justify-end gap-4">
@@ -1046,7 +1154,7 @@ export function MessageList({
               <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
             {/* Render blocks in chronological order */}
             {streamBlocks.length > 0 ? (
-              streamBlocks.map((block) => {
+              streamBlocks.map((block, blockIndex) => {
                 switch (block.type) {
                   case "thinking":
                     return (
@@ -1074,9 +1182,30 @@ export function MessageList({
                       </React.Fragment>
                     );
                   }
-                  case "tool":
-                    return <StreamingToolCard key={block.id} tool={block.tool} isTerminal={isTerminal} />;
+                  case "tool": {
+                    // Every tool step shares ONE row, placed at the first step; each new
+                    // step replaces its text instead of stacking another card.
+                    const firstTool = streamBlocks.findIndex((b) => b.type === "tool");
+                    if (blockIndex !== firstTool) return null;
+                    const tools = streamBlocks.flatMap((b) => (b.type === "tool" ? [b.tool] : []));
+                    const steps = activityStepsFromStream(tools);
+                    const answering = streamBlocks
+                      .slice(streamBlocks.findLastIndex((b) => b.type === "tool") + 1)
+                      .some((b) => b.type === "text" && b.content.trim().length > 0);
+                    const running = tools.some((t) => t.status === "running") || !answering;
+                    return <ToolActivityRow key="tool-activity" steps={steps} running={running} />;
+                  }
+                  case "result_card":
+                    return (
+                      <div key={block.id} className="animate-table-appear flex flex-col gap-3">
+                        <ResultCardHeadline card={block.data} />
+                        <ResultCardTiles card={block.data} />
+                        <ResultCard card={block.data} />
+                      </div>
+                    );
                   case "data_table":
+                    // A presented card supersedes the raw table it was built from.
+                    if (streamBlocks.some((b) => b.type === "result_card")) return null;
                     return (
                       <div key={block.id} className="animate-table-appear">
                         <DataFrameTable data={block.data} queryText={block.data.query} />
@@ -1178,6 +1307,8 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   docsLinkData = null,
   reportReadyData = null,
   isTerminal = false,
+  onFollowUp,
+  followUpDisabled = false,
 }: {
   message: ChatMessage;
   messages: ChatMessage[];
@@ -1198,8 +1329,11 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   docsLinkData?: DocsLinkData | null;
   reportReadyData?: ReportReadyData | null;
   isTerminal?: boolean;
+  onFollowUp?: (text: string) => void;
+  followUpDisabled?: boolean;
 }) {
   const { brandName: agentName } = useBranding();
+  const [sourcesOpen, setSourcesOpen] = useState(false);
 
   const structuredOutput = message.structured_output as
     | { type?: string; [key: string]: unknown }
@@ -1305,6 +1439,70 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
     );
   }
 
+  // Result cards (present_result / compare_results) carry every figure; the answer text
+  // leads, the cards follow, secondary (collapsed) cards close the answer.
+  const resultCards: ResultCardData[] = resultCardsOf(structuredOutput);
+  const hasCards = resultCards.length > 0;
+  const openCards = resultCards.filter((card) => !card.collapsed);
+  const collapsedCards = resultCards.filter((card) => card.collapsed);
+  const tileCard = openCards.find((card) => card.tiles.length > 0) ?? null;
+  // A comparison's computed detail sentence opens the model's lead paragraph.
+  const detailCard = resultCards.find((card) => card.headline && card.detail) ?? null;
+
+  const { text: answerTextWithFollowups, followups } = extractFollowups(displayContent);
+  const ranQueries = (message.tool_calls ?? []).some((tc) => /suiteql|bigquery_sql|__query$|execute_query/i.test(tc.tool));
+  const collapseSql = ranQueries || hasCards;
+  const answerText = collapseSql ? stripRanQueryLabels(answerTextWithFollowups) : answerTextWithFollowups;
+  const answerParts = parseThinkingBlocks(answerText);
+  const thinkingParts = answerParts.filter((part) => part.type === "thinking").map((part) => part.content);
+  const { lead, rest } = splitLead(
+    answerParts
+      .filter((part) => part.type !== "thinking")
+      .map((part) => part.content)
+      .join("\n\n"),
+  );
+
+  // Data-gathering steps share one activity row; cards with their own UI stay separate.
+  const msgIndex = messages.indexOf(message);
+  const prevUserMsg = messages
+    .slice(0, msgIndex)
+    .reverse()
+    .find((m) => m.role === "user");
+  const turnElapsedMs =
+    prevUserMsg && message.created_at
+      ? new Date(message.created_at).getTime() - new Date(prevUserMsg.created_at).getTime()
+      : null;
+  const specialCalls = (message.tool_calls ?? []).filter(
+    (tc) =>
+      (tc.tool === "workspace_propose_patch" && workspaceId && onViewDiff) ||
+      (tc.tool === "schedule.create" && parseScheduleCreated(tc.result_summary)),
+  );
+  const activitySteps = activityStepsFromCalls(
+    (message.tool_calls ?? []).filter((tc) => !specialCalls.includes(tc)),
+    resultCards,
+  );
+  const specialToolCards =
+    specialCalls.length > 0 ? (
+      <div className="space-y-1.5">
+        {specialCalls.map((tc, idx) => {
+          if (tc.tool === "workspace_propose_patch" && workspaceId && onViewDiff) {
+            return (
+              <ChangeProposalCard
+                key={idx}
+                step={tc}
+                workspaceId={workspaceId}
+                onViewDiff={onViewDiff}
+                onChangesetAction={onChangesetAction}
+              />
+            );
+          }
+          const scheduleCreated = parseScheduleCreated(tc.result_summary);
+          return scheduleCreated ? <ScheduleCreatedCard key={idx} data={scheduleCreated} /> : null;
+        })}
+      </div>
+    ) : null;
+  const sources = (message.citations ?? []).map((citation) => ({ title: citation.title, snippet: citation.snippet }));
+
   return (
     <div className="flex min-w-0 justify-start gap-3">
       {isTerminal ? (
@@ -1328,62 +1526,17 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           </div>
         )}
 
-        {message.tool_calls && message.tool_calls.length > 0 && (
-          <div className="space-y-1.5">
-            {message.tool_calls.map((tc, idx) => {
-              if (
-                tc.tool === "workspace_propose_patch" &&
-                workspaceId &&
-                onViewDiff
-              ) {
-                return (
-                  <ChangeProposalCard
-                    key={idx}
-                    step={tc}
-                    workspaceId={workspaceId}
-                    onViewDiff={onViewDiff}
-                    onChangesetAction={onChangesetAction}
-                  />
-                );
-              }
-              if (tc.tool === "schedule.create") {
-                const scheduleCreated = parseScheduleCreated(tc.result_summary);
-                if (scheduleCreated) {
-                  return <ScheduleCreatedCard key={idx} data={scheduleCreated} />;
-                }
-                // No schedule_id (a clarification, or any other failure) —
-                // nothing was created; fall through to the generic card so
-                // the tool call is still visible if it errored oddly.
-              }
-              if (tc.tool === "netsuite_suiteql" || tc.result_payload?.kind === "table") {
-                // Skip SuiteQLToolCard when DataFrameTable is handling the display
-                if (dataTableData) return null;
-                const msgIndex = messages.indexOf(message);
-                const prevUserMsg = messages
-                  .slice(0, msgIndex)
-                  .reverse()
-                  .find((m) => m.role === "user");
-                return (
-                  <SuiteQLToolCard
-                    key={idx}
-                    step={tc}
-                    userQuestion={prevUserMsg?.content}
-                  />
-                );
-              }
-              if (tc.tool.startsWith("workspace_")) {
-                return <WorkspaceToolCard key={idx} step={tc} />;
-              }
-              return <ToolCallStepCard key={idx} step={tc} />;
-            })}
-          </div>
+        {specialToolCards}
+
+        {activitySteps.length > 0 && (
+          <ToolActivityRow steps={activitySteps} elapsedMs={turnElapsedMs} userQuestion={prevUserMsg?.content} />
         )}
 
         {financialReportData && (
           <FinancialReport data={financialReportData} />
         )}
 
-        {dataTableData && (
+        {!hasCards && dataTableData && (
           <DataFrameTable data={dataTableData} queryText={dataTableData.query} />
         )}
 
@@ -1409,36 +1562,43 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           <ReportReadyCard data={reportReadyData} />
         )}
 
-        <div className="flex min-w-0 flex-col gap-2">
-          {parseThinkingBlocks(displayContent).map((part, index) =>
-            part.type === "thinking" ? (
-              <ThinkingBlock key={index} content={part.content} isTerminal={isTerminal} />
-            ) : (
-              <AssistantTextBlocks key={index} content={part.content} isTerminal={isTerminal} />
-            ),
+        <CollapseSqlContext.Provider value={collapseSql}>
+          {hasCards ? (
+            <div className="flex min-w-0 flex-col gap-4" data-testid="answer-with-cards">
+              {thinkingParts.map((part, index) => (
+                <ThinkingBlock key={index} content={part} isTerminal={isTerminal} />
+              ))}
+              {resultCards.map((card) => (
+                <ResultCardHeadline key={`headline-${card.card_id}`} card={card} mergeDetail={!!lead && card === detailCard} />
+              ))}
+              {lead && <CardAnswerProse content={detailCard?.detail ? `${detailCard.detail} ${lead}` : lead} lead={!detailCard} />}
+              {tileCard && <ResultCardTiles card={tileCard} />}
+              {openCards.map((card) => (
+                <ResultCard key={card.card_id} card={card} />
+              ))}
+              {rest && <CardAnswerProse content={rest} />}
+              {collapsedCards.map((card) => (
+                <ResultCard key={card.card_id} card={card} />
+              ))}
+            </div>
+          ) : (
+            <div className="flex min-w-0 flex-col gap-2">
+              {parseThinkingBlocks(answerText).map((part, index) =>
+                part.type === "thinking" ? (
+                  <ThinkingBlock key={index} content={part.content} isTerminal={isTerminal} />
+                ) : (
+                  <AssistantTextBlocks key={index} content={part.content} isTerminal={isTerminal} />
+                ),
+              )}
+            </div>
           )}
-        </div>
+        </CollapseSqlContext.Provider>
 
-        {message.citations && message.citations.length > 0 && (
-          <div className="mt-0.5 flex flex-wrap gap-1.5">
-            {message.citations.map((citation, idx) => (
-              <span
-                key={idx}
-                className={cn(
-                  "inline-flex items-center px-2.5 py-1 text-[11px] font-medium",
-                  isTerminal
-                    ? "rounded-sm bg-[var(--chat-surface)]"
-                    : "rounded-full bg-background/60",
-                )}
-                title={citation.snippet}
-              >
-                {citation.type === "doc" ? "\u{1F4C4}" : "\u{1F4CA}"} {citation.title}
-              </span>
-            ))}
-          </div>
+        {!isStreamingPreview && (
+          <FollowUpChips items={followups} onPick={onFollowUp} disabled={followUpDisabled} />
         )}
 
-        {message.tool_calls?.some((tc) => tc.tool === "netsuite_suiteql") && (
+        {!hasCards && message.tool_calls?.some((tc) => tc.tool === "netsuite_suiteql") && (
           <InlineSaveLink
             message={message}
             messages={messages}
@@ -1453,43 +1613,33 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           />
         )}
 
-        {!isStreamingPreview && message.tool_calls && message.tool_calls.length > 0 && (
-          <FeedbackButtons message={message} />
-        )}
-
-        {!isStreamingPreview && message.model_used && (
-          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
-            {message.agent_id && AGENT_TAGS[message.agent_id] && (
-              <span className={cn("rounded px-1.5 py-0.5 font-medium", AGENT_TAGS[message.agent_id].color)}>
-                {AGENT_TAGS[message.agent_id].label}
+        {!isStreamingPreview && (message.model_used || sources.length > 0) && (
+          <div data-testid="answer-footer" className="mt-1 flex flex-wrap items-center gap-2.5 text-[12px] text-muted-foreground">
+            {message.tool_calls && message.tool_calls.length > 0 && <FeedbackButtons message={message} />}
+            <SourcesToggle sources={sources} open={sourcesOpen} onToggle={() => setSourcesOpen((v) => !v)} />
+            {message.model_used && (
+              <span className="flex items-center gap-1.5 text-muted-foreground/80">
+                {message.agent_id && AGENT_TAGS[message.agent_id] && (
+                  <span className={cn("rounded px-1.5 py-0.5 font-medium", AGENT_TAGS[message.agent_id].color)}>
+                    {AGENT_TAGS[message.agent_id].label}
+                  </span>
+                )}
+                <span>{message.is_byok ? "BYOK" : "Platform"}</span>
+                <span>·</span>
+                <span>
+                  {message.provider_used} / {message.model_used}
+                </span>
+                {tokenUsage && (
+                  <>
+                    <span>·</span>
+                    <span title={tokenUsage.detail}>{tokenUsage.label}</span>
+                  </>
+                )}
               </span>
-            )}
-            {message.is_byok ? (
-              <span className="rounded bg-blue-500/10 px-1.5 py-0.5 font-medium text-blue-600 dark:text-blue-400">
-                BYOK
-              </span>
-            ) : (
-              <span className="rounded bg-muted px-1.5 py-0.5 font-medium">
-                Platform
-              </span>
-            )}
-            <span>{message.provider_used}</span>
-            <span>/</span>
-            <span>{message.model_used}</span>
-            {tokenUsage && (
-              <>
-                <span className="ml-1">·</span>
-                <span title={tokenUsage.detail}>{tokenUsage.label}</span>
-              </>
-            )}
-            {message.confidence_score != null && (
-              <>
-                <span className="ml-1">·</span>
-                <ConfidenceBadge score={message.confidence_score} />
-              </>
             )}
           </div>
         )}
+        {sourcesOpen && <SourcesList sources={sources} />}
       </div>
     </div>
   );
