@@ -73,7 +73,13 @@ export function tableCoveredByCards(table: { result_id?: string } | null | undef
   if (Array.isArray((table as { caveats?: unknown }).caveats) && (table as { caveats: unknown[] }).caveats.length > 0) {
     return false;
   }
-  return cards.some((card) => card.result_ids.includes(table.result_id!));
+  return cards.some(
+    (card) =>
+      card.result_ids.includes(table.result_id!) ||
+      // A card's overall-total query is shown as its tiles and Total row; without totals
+      // on the card, that table is the only place its figures appear, so it stays.
+      (!!card.totals && (card.control_result_ids ?? []).includes(table.result_id!)),
+  );
 }
 
 export interface TaskOutputData {
