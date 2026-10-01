@@ -163,6 +163,9 @@ function SqlCodeBlock({ code, language, isTerminal }: { code: string; language: 
  *  Exported so tests assert against the SAME map production renders with — a
  *  test that rebuilds its own component config proves nothing about the app. */
 export const mdComponents: Components = makeMdComponents(false);
+
+/** Tools that run a query; once one has run, SQL in the answer is shown collapsed. */
+const RAN_QUERY_TOOL = /suiteql|bigquery_sql|__query$|execute_query/i;
 const mdComponentsTerminal: Components = makeMdComponents(true);
 
 /**
@@ -1156,6 +1159,10 @@ export function MessageList({
                 : "rounded-2xl border border-border/50 bg-muted/40",
             )}>
               <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
+            {/* SQL the agent ran stays collapsed while streaming too, not only once the turn ends. */}
+            <CollapseSqlContext.Provider
+              value={streamBlocks.some((b) => b.type === "tool" && RAN_QUERY_TOOL.test(b.tool.tool_name))}
+            >
             {/* Render blocks in chronological order */}
             {streamBlocks.length > 0 ? (
               streamBlocks.map((block, blockIndex) => {
@@ -1283,6 +1290,7 @@ export function MessageList({
                 )
               )
             )}
+            </CollapseSqlContext.Provider>
               </div>
             </div>
           </div>
@@ -1456,7 +1464,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   const detailCard = resultCards.find((card) => card.headline && card.detail) ?? null;
 
   const { text: answerTextWithFollowups, followups } = extractFollowups(displayContent);
-  const ranQueries = (message.tool_calls ?? []).some((tc) => /suiteql|bigquery_sql|__query$|execute_query/i.test(tc.tool));
+  const ranQueries = (message.tool_calls ?? []).some((tc) => RAN_QUERY_TOOL.test(tc.tool));
   const collapseSql = ranQueries || hasCards;
   const answerText = collapseSql ? stripRanQueryLabels(answerTextWithFollowups) : answerTextWithFollowups;
   const answerParts = parseThinkingBlocks(answerText);

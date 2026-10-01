@@ -244,38 +244,71 @@ export function coerceResultCard(raw: unknown): ResultCardData | null {
   const width = columns.length;
   const kept = (d.rows as unknown[]).map((row, index) => [row, index] as const).filter(([row]) => Array.isArray(row));
   const fit = (row: unknown[]) => (row.length >= width ? row : [...row, ...Array(width - row.length).fill(null)]);
-  const share = d.share as ResultCardData["share"];
+  // Every field is rebuilt from a checked value: nothing from the payload reaches React unchecked.
+  const text = (value: unknown) => (typeof value === "string" ? value : null);
+  const strings = (value: unknown) => (Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []);
+  const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+  const rawShare = d.share && typeof d.share === "object" ? (d.share as Record<string, unknown>) : null;
+  const shareValues = rawShare && Array.isArray(rawShare.values) ? (rawShare.values as unknown[]) : null;
   const shareValid =
-    !!share &&
-    Array.isArray(share.values) &&
-    share.values.length >= (d.rows as unknown[]).length &&
-    share.values.every((v) => typeof v === "number" && Number.isFinite(v));
-  const totals = Array.isArray(d.totals) ? (d.totals as (number | null)[]) : null;
-  const flags = Array.isArray(d.row_flags) ? (d.row_flags as ResultCardData["row_flags"])! : null;
+    !!rawShare &&
+    typeof rawShare.label === "string" &&
+    finite(rawShare.of) &&
+    !!shareValues &&
+    shareValues.length >= (d.rows as unknown[]).length &&
+    shareValues.every(finite);
+  const totals =
+    Array.isArray(d.totals) && d.totals.length >= width && d.totals.every((v) => v === null || finite(v))
+      ? (d.totals as (number | null)[])
+      : null;
+  const flags = Array.isArray(d.row_flags) ? (d.row_flags as unknown[]) : null;
+  const flagOf = (value: unknown) => (value === "diff" || value === "missing" ? value : null);
+  const rawCheck = d.check && typeof d.check === "object" ? (d.check as Record<string, unknown>) : null;
   return {
-    ...(d as unknown as ResultCardData),
-    columns,
-    result_ids: Array.isArray(d.result_ids) ? (d.result_ids as string[]) : [],
-    rows: kept.map(([row]) => fit(row as unknown[])),
-    row_flags: flags ? kept.map(([, index]) => flags[index] ?? null) : null,
-    share: shareValid ? { ...share!, values: kept.map(([, index]) => share!.values[index]) } : null,
-    totals: totals && totals.length >= width ? totals : null,
-    scope: typeof d.scope === "string" ? d.scope : null,
-    subtitle: typeof d.subtitle === "string" ? d.subtitle : null,
+    card_id: d.card_id,
+    kind: d.kind === "comparison" ? "comparison" : "table",
+    result_ids: strings(d.result_ids),
+    control_result_ids: strings(d.control_result_ids),
+    title: d.title,
+    source: text(d.source) ?? "",
+    subtitle: text(d.subtitle),
+    as_of: text(d.as_of),
+    scope: text(d.scope),
     queries: Array.isArray(d.queries)
       ? (d.queries as unknown[]).filter(
           (q): q is { label: string; text: string } =>
             !!q && typeof (q as { label?: unknown }).label === "string" && typeof (q as { text?: unknown }).text === "string",
-        )
+        ).map((q) => ({ label: q.label, text: q.text }))
       : [],
+    columns,
+    rows: kept.map(([row]) => fit(row as unknown[])),
+    row_flags: flags ? kept.map(([, index]) => flagOf(flags[index])) : null,
+    share: shareValid
+      ? { label: rawShare!.label as string, of: rawShare!.of as number, values: kept.map(([, index]) => shareValues![index] as number) }
+      : null,
+    totals,
+    totals_label: text(d.totals_label),
+    check:
+      rawCheck && (rawCheck.status === "ok" || rawCheck.status === "warn") && typeof rawCheck.text === "string"
+        ? { status: rawCheck.status, text: rawCheck.text }
+        : null,
     tiles: Array.isArray(d.tiles)
-      ? (d.tiles as unknown[]).filter(
-          (t): t is ResultCardData["tiles"][number] =>
-            !!t && typeof (t as { label?: unknown }).label === "string" && typeof (t as { value?: unknown }).value === "number",
-        )
+      ? (d.tiles as unknown[]).flatMap((raw) => {
+          const t = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+          if (typeof t.label !== "string" || !finite(t.value)) return [];
+          const format = formats.includes(t.format as string) ? (t.format as string) : "integer";
+          return [{ label: t.label, value: t.value, format, currency: text(t.currency) }];
+        })
       : [],
-    top_n: typeof d.top_n === "number" ? d.top_n : (d.rows as unknown[]).length,
+    top_n: finite(d.top_n) ? d.top_n : (d.rows as unknown[]).length,
+    more_label: text(d.more_label),
+    less_label: text(d.less_label),
     collapsed: d.collapsed === true,
+    collapsed_note: text(d.collapsed_note),
+    no_total_reason: text(d.no_total_reason),
+    headline: text(d.headline),
+    detail: text(d.detail),
+    truncated: d.truncated === true,
   };
 }
 

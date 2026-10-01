@@ -119,9 +119,13 @@ function gridTemplate(card: ResultCardData, withShare: boolean): string {
   return parts.join(" ");
 }
 
-/** Text that a spreadsheet would run as a formula (=, +, -, @, tab, CR) gets a leading quote. */
+/** A cell that can neither split into more cells or records nor run as a formula: tabs and
+ *  line breaks inside it become spaces, then text a spreadsheet would run (=, +, -, @) gets a
+ *  leading quote. Numbers that arrive as text stay numbers. */
 function safeCell(value: unknown): unknown {
-  return typeof value === "string" && /^[=+\-@\t\r]/.test(value) && toNumber(value) === null ? `'${value}` : value;
+  if (typeof value !== "string") return value;
+  const flat = value.replace(/[\t\r\n]+/g, " ");
+  return /^[=+\-@]/.test(flat.trimStart()) && toNumber(flat) === null ? `'${flat}` : flat;
 }
 
 function exportRows(card: ResultCardData): { columns: string[]; rows: unknown[][] } {
@@ -139,16 +143,20 @@ function CardActions({ card }: { card: ResultCardData }) {
   const handleCopy = useCallback(() => {
     const { columns, rows } = exportRows(card);
     const body = rows.map((row) => row.map((v) => v ?? "").join("\t")).join("\n");
-    navigator.clipboard.writeText(`${columns.join("\t")}\n${body}`);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    navigator.clipboard
+      .writeText(`${columns.join("\t")}\n${body}`)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => setCopied(false));
   }, [card]);
 
   const handleCsv = useCallback(() => {
     const { columns, rows } = exportRows(card);
     const escape = (v: unknown) => {
       const s = String(v ?? "");
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     const csv = [columns.map(escape).join(","), ...rows.map((row) => row.map(escape).join(","))].join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));

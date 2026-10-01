@@ -166,9 +166,13 @@ export function activityStepsFromCalls(
       params: call.params ?? {},
       summary: call.result_summary,
       durationMs: call.duration_ms,
-      // Only a summary that states a failure up front marks the step failed; "0 errors" or a
-      // column named "failed" does not.
-      status: /^\s*(?:error|failed|tool error|exception)\b/i.test(call.result_summary ?? "") ? "error" : "complete",
+      // The backend records a failed call as error=true. Messages saved before that flag fall
+      // back to a summary that states a failure up front ("0 errors" or a column named
+      // "failed" does not).
+      status:
+        call.error === true || /^\s*(?:error|failed|tool error|exception)\b/i.test(call.result_summary ?? "")
+          ? "error"
+          : "complete",
       source: call,
     }));
 }
