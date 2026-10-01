@@ -32,7 +32,7 @@ on staging. #364 (a reconciled order stays reconciled) is ready to merge.
 | #364 `feat/reconciled-stays-reconciled` → release | T2 | verify.sh PASS c7a5d6c6; packet review round 5 PASS, receipt in body; CI green | Aiden merges; migration 117 must run on deploy |
 | #360 `feat/group-breakdown-staging-ui` → `release/frontend-preserved` | T2 | #356's card on the staging UI line (56156d96, deployed); needs #364's "Reconciled" label ported too | codex / Aiden merge |
 | local `feat/changed-after-reconciliation` (79b62dc4, unpushed) | T2 | the "changed after reconciliation" flag, split out of #364 after 4 review rounds | rebuild with the narrow rule (NEXT 4) |
-| local `fix/verify-log-session-tag` (5a546b11, unpushed) → release | T2 | verify.sh tags its evidence line `session=$CLAUDE_CODE_SESSION_ID`, which the global loop budget hook (`~/.claude` 67e184a) counts | Aiden: push + PR, then the T2 gate |
+| #367 `fix/verify-log-session-tag` → release | T2 | verify.sh tags its evidence line `session=$CLAUDE_CODE_SESSION_ID`, counted by the global loop budget hook (claude-config 67e184a, pushed); packet review pass (gpt-6-astra, 1 minor deferred), receipt in body | Aiden merges |
 | #357 `fix/records-status-query` → release | T2 | Records order-status filter timeout | review |
 | #333 `release/recon-excel-group-reliability` → main | T2 | the release integration PR; codex merges into the release branch daily (#358–#363 on 09-29/30) | release owner |
 | codex line `codex/framework-launch-integration` (#365, #275) | — | codex's Framework-launch work | codex |
@@ -138,8 +138,8 @@ archive).
 - **Merge #364** (Aiden). Migration 117 runs on deploy; port the "Reconciled" label to the
   preserved UI line with #360.
 - **ClickUp tickets for #355, #356, #364** (Aiden is creating them; the MCP daily limit blocks
-  the session). Once 86bc7eebh is confirmed closed, settle the hook's debt by RUNNING
-  `: 'TICKET 86bc7eebh: closed by hand in ClickUp (PR #341, #353, #355)'`; prose does not count.
+  the session). 86bc7eebh was closed by hand and acknowledged to the hook on 09-30. The model runs
+  `: 'TICKET <id>: closed ... (PR #n)'` itself; a user's `!` command never reaches hooks.
 - **The staging write-agent journey** needs Aiden to start it (Framework PRODUCTION NetSuite).
 - **Unverified since 2026-08-28:** the leaked `gh` OAuth token rotation, and three test
   customers in PRODUCTION NetSuite (5803124, 5800803, 5795008) to inactivate.
