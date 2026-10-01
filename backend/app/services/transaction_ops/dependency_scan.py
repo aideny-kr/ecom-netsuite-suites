@@ -68,9 +68,16 @@ async def advance(progress, *, read_page, read_owners, indexed_owners, unobserve
         or not 1 <= chunk_size <= 250
     ):
         raise NetSuiteEvidenceError("dependency_checkpoint_invalid")
-    if staging and not page["changes"] and "owners" not in scan:
+    if (
+        staging
+        and isinstance(scan["page"], dict)
+        and "stage_ref" in scan["page"]
+        and not page["changes"]
+        and "owners" not in scan
+    ):
         # The fetched page is already durable. There are no candidates or old
         # owners to consume, so no empty owner inventory/checkpoint is needed.
+        # Inline legacy pages still go through put() to reauthorize access.
         _advance_page(scan, page)
         return
     changes = page["changes"][offset : offset + chunk_size]

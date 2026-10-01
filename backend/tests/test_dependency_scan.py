@@ -222,6 +222,24 @@ async def test_staged_empty_streams_complete_without_empty_owner_inventories():
     calls["unobserved"].assert_not_awaited()
 
 
+async def test_legacy_inline_empty_page_still_stages_owners_to_reauthorize():
+    calls, staging = ports(), Staging()
+    progress = {
+        "dependency_scan": {
+            "version": 1,
+            "stream_index": 0,
+            "after": None,
+            "page": {**page(), "changes": []},
+        }
+    }
+    await dependency_scan.advance(progress, staging=staging, **calls)
+    assert progress["dependency_scan"]["stream_index"] == 0
+    assert "owners" in progress["dependency_scan"]
+    assert list(staging.values.values()) == [{"order_references": [], "inventory": []}]
+    calls["read_page"].assert_not_awaited()
+    calls["read_owners"].assert_not_awaited()
+
+
 async def test_staged_satisfied_owners_advance_without_an_extra_cursor_checkpoint():
     calls, progress, staging = ports(page(more=True)), {}, Staging()
     calls["unobserved"].return_value = []
