@@ -1218,6 +1218,13 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   // Exact child cards are displayed inside their signed group review.
   if (structuredOutput?.accounting_group_child) return null;
 
+  // Saved as the turn's output, or under its own key when a later tool in the turn took that
+  // slot. That includes an approval card or a clarification, whose branches return early below:
+  // "Prepare fixes" asks for the breakdown and then the fix, so the card must survive both.
+  const savedBreakdown =
+    structuredOutput?.type === "group_breakdown" ? structuredOutput.data : structuredOutput?.group_breakdown;
+  const breakdownCard = isGroupBreakdown(savedBreakdown) ? <GroupBreakdownCard data={savedBreakdown} /> : null;
+
   if (structuredOutput?.type === "write_confirmation") {
     return (
       <div className="flex min-w-0 justify-start gap-3">
@@ -1236,6 +1243,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
               <MarkdownRenderer content={message.content} isTerminal={isTerminal} />
             </div>
           )}
+          {breakdownCard && <div className="mb-2">{breakdownCard}</div>}
           <WriteConfirmationCard
             disabled={writeDisabled}
             data={structuredOutput as unknown as WriteConfirmationData}
@@ -1281,6 +1289,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
               {message.content}
             </div>
           )}
+          {breakdownCard && <div className="mb-2">{breakdownCard}</div>}
           <ClarificationCard
             data={clarification}
             expired={expired}
@@ -1378,12 +1387,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           <DataFrameTable data={dataTableData} queryText={dataTableData.query} />
         )}
 
-        {(() => {
-          // Saved as the turn's output, or under its own key when a later tool in the turn took that slot.
-          const saved =
-            structuredOutput?.type === "group_breakdown" ? structuredOutput.data : structuredOutput?.group_breakdown;
-          return isGroupBreakdown(saved) ? <GroupBreakdownCard data={saved} /> : null;
-        })()}
+        {breakdownCard}
 
         {chartDataList && chartDataList.length > 0 && chartDataList.map((chart, idx) => (
           <ChartRenderer key={idx} data={chart} />
