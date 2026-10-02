@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useState } from "react";
-import { ChevronDown, ChevronRight, Copy } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronRight, Copy, Database } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -12,15 +12,33 @@ import { cn } from "@/lib/utils";
 const FOLLOWUPS_FENCE = /```followups[^\n]*\n([\s\S]*?)```/;
 
 /** Remove the model's ```followups block and return its lines as suggestions. */
-export function extractFollowups(content: string): { text: string; followups: string[] } {
-  const match = content.match(FOLLOWUPS_FENCE);
-  if (!match) return { text: content, followups: [] };
-  const followups = match[1]
+/** The server's source question lists the connected sources it is asking about. */
+const SOURCES_FENCE = /```sources[^\n]*\n([\s\S]*?)```/;
+
+function fenceItems(body: string, limit: number): string[] {
+  return body
     .split("\n")
     .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
     .filter((line) => line.length > 0 && line.length <= 80)
-    .slice(0, 4);
-  return { text: content.replace(match[0], "").replace(/\n{3,}/g, "\n\n").trim(), followups };
+    .slice(0, limit);
+}
+
+/** The model is asked for two or three follow-ups; the server lists every connected source. */
+const MAX_FOLLOWUPS = 4;
+const MAX_SOURCES = 12;
+
+/** Lift the clickable choices out of an answer: the model's follow-ups and the server's
+ *  source choices. The text keeps everything else. */
+export function extractFollowups(content: string): { text: string; followups: string[]; sources: string[] } {
+  let text = content;
+  const followMatch = text.match(FOLLOWUPS_FENCE);
+  const followups = followMatch ? fenceItems(followMatch[1], MAX_FOLLOWUPS) : [];
+  if (followMatch) text = text.replace(followMatch[0], "");
+  const sourceMatch = text.match(SOURCES_FENCE);
+  const sources = sourceMatch ? fenceItems(sourceMatch[1], MAX_SOURCES) : [];
+  if (sourceMatch) text = text.replace(sourceMatch[0], "");
+  if (!followMatch && !sourceMatch) return { text: content, followups, sources };
+  return { text: text.replace(/\n{3,}/g, "\n\n").trim(), followups, sources };
 }
 
 const RAN_QUERY_LABEL =
@@ -135,26 +153,32 @@ export function CollapsedSqlBlock({ code, language }: { code: string; language: 
   );
 }
 
+/** Clickable choices under an answer: follow-up questions (arrow) or the server's source
+ *  choices (database). Tinted in the tenant's accent so they read as buttons, not text. */
 export function FollowUpChips({
   items,
   onPick,
   disabled = false,
+  kind = "followup",
 }: {
   items: string[];
   onPick?: (text: string) => void;
   disabled?: boolean;
+  kind?: "followup" | "source";
 }) {
   if (items.length === 0 || !onPick) return null;
+  const Icon = kind === "source" ? Database : ArrowRight;
   return (
-    <div data-testid="follow-up-chips" className="flex flex-wrap gap-2">
+    <div data-testid={kind === "source" ? "source-picks" : "follow-up-chips"} className="flex flex-wrap gap-2.5">
       {items.map((item) => (
         <button
           key={item}
           type="button"
           disabled={disabled}
           onClick={() => onPick(item)}
-          className="min-h-9 rounded-full border border-border bg-card px-3.5 py-1.5 text-[13px] text-foreground/85 transition-colors hover:bg-muted disabled:opacity-50"
+          className="inline-flex min-h-11 items-center gap-2 rounded-full border border-primary/60 bg-primary/10 px-4 py-2 text-[14px] font-medium text-foreground transition-colors hover:border-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 disabled:opacity-50"
         >
+          <Icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-primary" />
           {item}
         </button>
       ))}

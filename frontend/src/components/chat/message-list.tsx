@@ -1463,7 +1463,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   // A comparison's computed detail sentence opens the model's lead paragraph.
   const detailCard = resultCards.find((card) => card.headline && card.detail) ?? null;
 
-  const { text: answerTextWithFollowups, followups } = extractFollowups(displayContent);
+  const { text: answerTextWithFollowups, followups, sources: sourceChoices } = extractFollowups(displayContent);
   const ranQueries = (message.tool_calls ?? []).some((tc) => RAN_QUERY_TOOL.test(tc.tool));
   const collapseSql = ranQueries || hasCards;
   const answerText = collapseSql ? stripRanQueryLabels(answerTextWithFollowups) : answerTextWithFollowups;
@@ -1610,6 +1610,9 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           )}
         </CollapseSqlContext.Provider>
 
+        {!isStreamingPreview && (
+          <FollowUpChips items={sourceChoices} onPick={onFollowUp} disabled={followUpDisabled} kind="source" />
+        )}
         {!isStreamingPreview && (
           <FollowUpChips items={followups} onPick={onFollowUp} disabled={followUpDisabled} />
         )}

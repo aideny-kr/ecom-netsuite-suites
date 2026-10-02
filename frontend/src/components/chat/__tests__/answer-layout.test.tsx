@@ -10,6 +10,24 @@ describe("answer layout helpers", () => {
     expect(followups).toEqual(["Compare with Metabase", "Break down by SKU"]);
   });
 
+  it("lifts the server's source choices out of the source question", () => {
+    // The server appends the connected sources it is asking about (2026-10-01).
+    const { text, followups, sources } = extractFollowups(
+      "Which data source should I use for this question: BigQuery, Metabase or NetSuite?\n\n```sources\nBigQuery\nMetabase\nNetSuite\n```",
+    );
+    expect(text).toBe("Which data source should I use for this question: BigQuery, Metabase or NetSuite?");
+    expect(sources).toEqual(["BigQuery", "Metabase", "NetSuite"]);
+    expect(followups).toEqual([]);
+  });
+
+  it("offers every source the server lists, beyond the follow-up limit of four", () => {
+    // Packet review on #378 (R1): five connected sources must give five buttons.
+    const { sources } = extractFollowups(
+      "Which data source should I use?\n\n```sources\nBigQuery\nMetabase\nNetSuite\nShopify\nStripe\n```",
+    );
+    expect(sources).toEqual(["BigQuery", "Metabase", "NetSuite", "Shopify", "Stripe"]);
+  });
+
   it("drops the 'Query I ran' label that only introduces the SQL block", () => {
     // Verbatim shape from the Yucca thread (2026-10-01).
     const text = "Yes. NetSuite shows sales orders.\n\n**Query I ran (SuiteQL):**\n```sql\nSELECT 1\n```\n\n**Caveats:**\n- x";
