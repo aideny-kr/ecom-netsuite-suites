@@ -15,23 +15,27 @@ const FOLLOWUPS_FENCE = /```followups[^\n]*\n([\s\S]*?)```/;
 /** The server's source question lists the connected sources it is asking about. */
 const SOURCES_FENCE = /```sources[^\n]*\n([\s\S]*?)```/;
 
-function fenceItems(body: string): string[] {
+function fenceItems(body: string, limit: number): string[] {
   return body
     .split("\n")
     .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
     .filter((line) => line.length > 0 && line.length <= 80)
-    .slice(0, 4);
+    .slice(0, limit);
 }
+
+/** The model is asked for two or three follow-ups; the server lists every connected source. */
+const MAX_FOLLOWUPS = 4;
+const MAX_SOURCES = 12;
 
 /** Lift the clickable choices out of an answer: the model's follow-ups and the server's
  *  source choices. The text keeps everything else. */
 export function extractFollowups(content: string): { text: string; followups: string[]; sources: string[] } {
   let text = content;
   const followMatch = text.match(FOLLOWUPS_FENCE);
-  const followups = followMatch ? fenceItems(followMatch[1]) : [];
+  const followups = followMatch ? fenceItems(followMatch[1], MAX_FOLLOWUPS) : [];
   if (followMatch) text = text.replace(followMatch[0], "");
   const sourceMatch = text.match(SOURCES_FENCE);
-  const sources = sourceMatch ? fenceItems(sourceMatch[1]) : [];
+  const sources = sourceMatch ? fenceItems(sourceMatch[1], MAX_SOURCES) : [];
   if (sourceMatch) text = text.replace(sourceMatch[0], "");
   if (!followMatch && !sourceMatch) return { text: content, followups, sources };
   return { text: text.replace(/\n{3,}/g, "\n\n").trim(), followups, sources };
