@@ -1,6 +1,6 @@
 # Reconciliation scope-first speed specification
 
-Status: implementation verified locally; final release gates and live speed measurement pending.
+Status: iteration4 verified locally; independent review, CI, release and real speed acceptance pending.
 Owner: Codex, GPT-6.1 Sol xhigh, standard processing. Date: 2026-10-02.
 Base: c37d96a2fd51f4a7ffd3fce094c24a4ee72175c0. Infrastructure unchanged.
 
@@ -117,3 +117,55 @@ Current source hashes, test selections and actual completed results are recorded
 in the private iteration3 test receipt; final exact-head CI remains authoritative.
 Post-deploy measurement and final evaluation will be linked from STATE/handoff.
 Targets will not be weakened to manufacture a pass.
+
+## Iteration4: bounded owned-candidate batch filling
+
+Iteration3 shipped reviewed2f85ead3/merge6d5c55a0. Full CI12,496 PASS/2skipped,
+all9seeded lifecycle cases; guarded live smoke PASS/zero residue, allsix services
+verified and frontend/schema/queues/Env preserved. Real AU continuous orders-phase
+measurement18:49:09–18:54:34UTC (325.131s):480 candidates,26 AU completed,456 foreign
+header rejections,19 full details,6 body validations,0 header fallbacks.
+**88.58 candidates/min,4.80 AU/min: candidate target FAIL.** Targets stay unchanged.
+Timing identifies database/budget round trips and tiny in-scope financial batches.
+Replica discovery pages contain20 candidates, usually only1–2 AU orders.
+
+Next design fills at most10 owned candidates across pages only for measured
+foreign-dominated automatic/current-evidence orders scans on the replica path.
+The buffer never exceeds29 references (9 old+20 new). Only authenticated qualified
+headers or explicit matching replica entities permit buffering; ambiguous headers
+retain immediate detail fallback. Headers remain routing hints, never financial
+observations. The existing full source/scope/version checks still precede finance.
+Mostly-owned, legacy, saved-review, non-replica and later-phase behavior stays on
+the existing path. Existing isolated four-source/seven-NetSuite limits remain.
+
+Append each strictly validated keyset page atomically with the existing pending
+references, discovery versions and unscoped markers. Save the combined checkpoint
+before any further page; preserve old pending work even on the final empty page.
+Never advance phase while owned references remain. Finite prepaid page/header
+reads, order/call headroom, deadline/enablement/lease checks apply. Cancellation,
+invalid pages, checkpoint failure and budget continuation must retain the exact
+remaining candidate set; no persisted routing hint can bypass full scope checks.
+
+Required new acceptance: paginated95%-foreign fixture delivers fuller owned target
+batches without foreign sends and retains identical monetary reports; bounded
+checkpoint/budget continuation/cancellation/invalid-version/disablement tests.
+Re-run changed-path checks plus seeded lifecycle, required independent T2 review
+on actual new base/head, fullCI, pinnedrollout/UAT and real≥5min same114/min target.
+
+Iteration4 local acceptance: **135 PASS in47.19s**, including all9seeded lifecycle
+cases. Paginated190foreign/10owned uses one financial targetbatch; bounds≤29,
+finalempty-page ownership retained; budget continuation has no duplicate/lost
+financial orders; cancel/disable/checkpoint/provider/page/lease failures are fenced.
+100→5 full-detail monetary parity retains100.00 totals and incomplete refund proof.
+Fixtures now use valid nine-digit numbers and matching discovery/detail timestamps.
+Exact tested file hashes are captured before commit and verified against the
+reviewed candidate; actual base for this iteration6d5c55a013bff6af68928eb442a092f0d64bd8f0.
+
+Pre-release review of7c678642 foundF1major/F2minor: retained owned prefix
+shrinks routing batches to one unknown row, and tests lacked a call-count limit.
+Self-review and native Opus5.5High independently found the same issue. Fixed before
+merge/deploy: select up to10 unchecked unknown references from the bounded whole
+buffer, independently of the<=10 financial slice. A200candidate paginated cohort
+now asserts<=21 headercalls (two per20 plus initial cold boundary). All135checks
+PASS46.17s on corrected source; new exact-head review/CI stillrequired.7c image
+never deployed; its completed failed review retained as evidence, not authority.

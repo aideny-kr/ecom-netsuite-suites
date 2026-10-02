@@ -189,6 +189,28 @@ def _replica_page_progress(page, progress, params, config):
     }
 
 
+def _append_replica_page_progress(page, progress, params, config):
+    """Validate a bounded page before extending a durable owned-candidate buffer."""
+    pending = list(progress["pending_refs"])
+    if not 0 < len(pending) < 10 or len(set(pending)) != len(pending):
+        raise ScanChangedError("invalid_source_buffer")
+    next_progress = deepcopy(progress)
+    _replica_page_progress(page, next_progress, params, config)
+    new_refs = next_progress["pending_refs"]
+    if len(set(new_refs)) != len(new_refs) or set(pending) & set(new_refs):
+        raise ScanChangedError("duplicate_source_reference")
+    next_progress["pending_refs"] = pending + new_refs  # At most9+20; never financial evidence.
+    next_progress["unscoped_replica_refs"] = [
+        ref for ref in progress.get("unscoped_replica_refs", []) if ref in pending
+    ] + next_progress["unscoped_replica_refs"]
+    next_progress["pending_source_versions"] = {
+        ref: version for ref, version in progress.get("pending_source_versions", {}).items() if ref in pending
+    } | next_progress["pending_source_versions"]
+    next_progress["source_owned_fill_pages"] = progress.get("source_owned_fill_pages", 0) + 1
+    progress.clear()
+    progress.update(next_progress)
+
+
 def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
     if len(source_evidence.get("orders") or []) == 1 and payment_failed(source_evidence["orders"][0]):
         return exclusion_report(source_evidence)
@@ -412,6 +434,7 @@ async def run_investigation(
     batch_baseline = None
     staged_source = {}
     scope_checked = set()
+    scope_owned = set()
     scope_batch_disabled = False
     scope_probe_preferred = None
 
@@ -617,6 +640,34 @@ async def run_investigation(
         if outside + owned >= 10:
             return outside > owned
         return scope_probe_preferred is not False  # One bounded cold-start probe.
+
+    async def replica_page(*, append=False):
+        if not await reserve(6):
+            return False
+        page = await bounded_read(
+            "source_page",
+            lambda: metabase_reader.read_order_page(
+                db,
+                tenant_id,
+                mapping.metabase_replica,
+                _time(run.params_json["window_start"]),
+                _time(run.params_json["window_end"]),
+                after_id=progress["last_source_id"],
+                page_size=20,
+                basis=run.params_json.get("window_basis", "updated_at"),
+                entity_keys=tuple(
+                    key
+                    for key, subsidiary in mapping.business_entity_subsidiaries.items()
+                    if subsidiary == config["subsidiary_id"]
+                ),
+                now=clock(),
+            ),
+            retry_calls=6,
+        )
+        update = _append_replica_page_progress if append else _replica_page_progress
+        update(page, progress, run.params_json, config)
+        await save()
+        return True
 
     async def prepare_concurrently(refs, workers):
         from app.services.transaction_ops import source_preparation
@@ -1003,30 +1054,8 @@ async def run_investigation(
                         continue
                     return await finish("done")
                 if mapping.metabase_replica:
-                    if not await reserve(6):
+                    if not await replica_page():
                         return await finish("budget")
-                    page = await bounded_read(
-                        "source_page",
-                        lambda: metabase_reader.read_order_page(
-                            db,
-                            tenant_id,
-                            mapping.metabase_replica,
-                            _time(run.params_json["window_start"]),
-                            _time(run.params_json["window_end"]),
-                            after_id=progress["last_source_id"],
-                            page_size=20,
-                            basis=run.params_json.get("window_basis", "updated_at"),
-                            entity_keys=tuple(
-                                key
-                                for key, subsidiary in mapping.business_entity_subsidiaries.items()
-                                if subsidiary == config["subsidiary_id"]
-                            ),
-                            now=clock(),
-                        ),
-                        retry_calls=6,
-                    )
-                    _replica_page_progress(page, progress, run.params_json, config)
-                    await save()
                     continue
                 keyset = progress.get("scan_mode") == "keyset"
                 if progress["next_page"] is not None and not keyset:
@@ -1099,6 +1128,26 @@ async def run_investigation(
             )
             if chunk_path and reference not in staged_source:
                 await flush_findings()
+                pending = progress["pending_refs"]
+                unknown = set(progress.get("unscoped_replica_refs", []))
+                if (
+                    mapping.metabase_replica
+                    and progress.get("phase") == "orders"
+                    and not progress["scan_complete"]
+                    and not cached_review.saved(run)
+                    and not staged_source
+                    and scope_first()
+                    and (progress.get("outside_scope", 0) >= 10 or scope_probe_preferred is True)
+                    and not scope_batch_disabled
+                    and 0 < len(pending) < 10
+                    and all(ref in scope_owned or ref not in unknown for ref in pending)
+                    and run.max_orders - run.orders_used >= len(pending) + 20
+                    and run.max_api_calls - run.api_calls_used - (run.api_calls_held or 0)
+                    >= 97 + 2 * (len(pending) + 20)
+                ):
+                    if not await replica_page(append=True):
+                        return await finish("budget")
+                    continue
                 count = min(10, len(progress["pending_refs"]), run.max_orders - run.orders_used)
                 if cached_review.saved(run):
                     count = min(count, saved_cache.fresh_prefix_size(progress["pending_refs"]))
@@ -1114,7 +1163,11 @@ async def run_investigation(
                     # retain the exact existing individual-read fallback.
                     if scope_first() and not scope_batch_disabled and progress.get("phase") == "orders":
                         unknown = set(progress.get("unscoped_replica_refs", []))
-                        scope_refs = [ref for ref in refs if ref in unknown and ref not in scope_checked]
+                        # Retained owned candidates must not shrink routing
+                        # batches to one unknown row. The entire buffer is
+                        # bounded29; this paid header read remains max10.
+                        candidates = progress["pending_refs"] if progress.get("source_owned_fill_pages") else refs
+                        scope_refs = [ref for ref in candidates if ref in unknown and ref not in scope_checked][:count]
                         if scope_refs:
                             from app.services.transaction_ops import source_scope
 
@@ -1160,6 +1213,7 @@ async def run_investigation(
                             if foreign and not await reserve(0, len(foreign)):
                                 return await finish("budget")
                             scope_checked.update(scope_refs)
+                            scope_owned.update(set(scopes) - foreign)
                             progress["source_scope_batches"] = progress.get("source_scope_batches", 0) + 1
                             progress["source_scope_candidates"] = progress.get("source_scope_candidates", 0) + len(
                                 scope_refs
