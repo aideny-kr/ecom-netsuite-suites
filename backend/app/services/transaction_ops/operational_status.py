@@ -21,6 +21,7 @@ from app.services.transaction_ops.continuation import (
     scheduled_part_resume_candidate,
     scheduled_read_stop,
 )
+from app.services.transaction_ops.freshness import freshness
 from app.services.transaction_ops.periods import ReconciliationPolicy
 
 _ACTIVE_LIMIT = 5
@@ -235,13 +236,19 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
     return _action("catch_up" if latest else "initial_scan", "scheduler_scope_due", _iso(now))
 
 
-async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=0, now=None):
+async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=0, daily_only=False, now=None):
     if type(limit) is not int or not 1 <= limit <= 50 or type(offset) is not int or offset < 0:
         raise ValueError("invalid_status_scope")
     now = await state_service.run_clock(db, now)
     await set_tenant_context(db, str(tenant_id))
     c, r = TransactionConfig, TransactionRun
     query = select(c).where(c.tenant_id == tenant_id, state_service.current_config_clause())
+    if daily_only:
+        query = query.where(
+            c.enabled.is_(True),
+            c.schedule_enabled.is_(True),
+            c.mapping_json["reconciliation_policy"].astext.is_not(None),
+        )
     if config_id is not None:
         query = query.where(c.id == UUID(str(config_id)))
     configs = list(await db.scalars(query.order_by(c.created_at, c.id).offset(offset).limit(limit + 1)))
@@ -355,20 +362,21 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
                 if child
                 else continuation_status(last, now, blocked=blocked)
             )
-        result["entities"].append(
-            {
-                "config_id": str(config.id),
-                "name": config.name,
-                "subsidiary_id": config.subsidiary_id,
-                "coverage": cover,
-                "schedule": planned,
-                "latest_schedule": run_snapshot(last, now) if last else None,
-                "active_runs": snapshots,
-                "active_runs_truncated": len(running) > _ACTIVE_LIMIT,
-                "continuation": recovery,
-                "next_action": _next_action(config, last, snapshots, cover, planned, recovery, now),
-            }
-        )
+        entity = {
+            "config_id": str(config.id),
+            "name": config.name,
+            "subsidiary_id": config.subsidiary_id,
+            "coverage": cover,
+            "schedule": planned,
+            "latest_schedule": run_snapshot(last, now) if last else None,
+            "active_runs": snapshots,
+            "active_runs_truncated": len(running) > _ACTIVE_LIMIT,
+            "continuation": recovery,
+            "next_action": _next_action(config, last, snapshots, cover, planned, recovery, now),
+        }
+        policy = ReconciliationPolicy.model_validate((config.mapping_json or {}).get("reconciliation_policy") or {})
+        entity["freshness"] = freshness(entity, daily_check_hour=policy.daily_check_hour, now=now)
+        result["entities"].append(entity)
     return result
 
 

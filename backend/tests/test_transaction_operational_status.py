@@ -395,8 +395,27 @@ async def test_api_is_gated_and_uses_shared_service(client, db, admin_user, monk
     response = await client.get(url, headers=headers)
     assert response.status_code == 200, response.text
     assert read.await_args.args[1] == actor.tenant_id
+    assert (await client.get(url + "?daily_only=true", headers=headers)).status_code == 200
+    assert read.await_args.kwargs["daily_only"] is True
     assert (await client.get(url + "?limit=51", headers=headers)).status_code == 422
     assert (await client.get(url + "?config_id=not-a-uuid", headers=headers)).status_code == 422
+
+
+async def test_daily_alert_scope_filters_before_pagination_and_preserves_tenant_and_no_write_contract(
+    db, admin_user, admin_user_b
+):
+    actor = admin_user[0]
+    paused, _ = await seed(db, actor)
+    paused.schedule_enabled = False
+    interval = await seed_config(db, actor.tenant_id, actor)
+    interval.enabled = interval.schedule_enabled = True
+    daily, _ = await seed(db, actor)
+    await seed(db, admin_user_b[0])
+    await db.flush()
+    result = await status.operational_status(db, actor.tenant_id, limit=1, daily_only=True, now=NOW)
+    assert [e["config_id"] for e in result["entities"]] == [str(daily.id)]
+    assert result["truncated"] is False
+    assert result["entities"][0]["freshness"]["state"] == "healthy"
 
 
 async def test_config_pagination_scope_and_active_rows_are_bounded(db, admin_user):
