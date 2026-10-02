@@ -1,6 +1,6 @@
 # Accounting Resolver Agent — Architecture and Spec
 
-**Date:** 2026-10-01 · **Status:** draft for decision · **Tier:** T2 (proposes NetSuite writes, closes cases)
+**Date:** 2026-10-01 · **Status:** decisions recorded 2026-10-01 (§9) · **Tier:** T2 (proposes NetSuite writes, closes cases)
 **Owner:** Aiden · **Builds on:** `2026-08-19-agentic-netsuite-write-loop-design.md`,
 `plans/2026-09-15-self-correcting-write-agent-codex-prompts.md`, mock
 https://claude.ai/artifact/HPjd5nua1a9p151k1hgkEm (approved 2026-09-30)
@@ -99,8 +99,14 @@ prompt. The in-app orchestrator stays the product's brain.
 - Runs inside `chat/orchestrator.py` as an **accounting-turn profile**, not a new agent.
 - **The loop is model-driven, with phases shown as checklist state, not as a router:**
   investigate → diagnose → act (explain, propose, or escalate) → verify.
-- **Model:** a frontier model per task, chosen by the benchmark (§9 D2). Thinking is never
-  below `med`. Forced tool calls keep the `_FORCEABLE_MODEL` rule (#353).
+- **Model: the strongest Claude model for resolve turns (decided §9 D2).** Today that is
+  Claude Fable 5.1 (`claude-fable-5-1`); our model-tiering policy ranks Fable above Opus.
+  - Thinking is never below `med`.
+  - **Check in S3 before relying on it:**
+    - the forced-tool and text-block contracts (Sonnet 5.5 broke them, #353;
+      `_FORCEABLE_MODEL`);
+    - that Framework's own key (BYOK) has access to it;
+    - the cost per resolved case against G5.
 - **Budgets live in run state:** steps ≤ 40 (existing), tokens per case ≤ 300k (hard), and
   stall detection (the same failing call or empty result twice ends the loop).
 - **Exit reasons:** `resolved | explained | escalated | budget | stall | blocked | error`.
@@ -200,6 +206,9 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
   - Tax-only refunds blocked by refund_audit (34).
   - Reopened-then-locked cases.
   - Sandbox (SB1) write tasks with a gold payload.
+- **Gold labels:** Aiden labels every task (decided §9 D4). The builder prepares a labelling
+  sheet per task: the saved evidence, the NetSuite chain and the breakdown cause. It carries
+  **no suggested answer**, so the labels stay independent of the agent being measured.
 - **Gold label per task:**
   - the diagnosis category;
   - the expected action: explain/close, change (record type, op, key fields, accounts,
@@ -222,28 +231,21 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
 | Slice | Builds | Exit criterion |
 |---|---|---|
 | S0 | Environment binding at the dispatcher; risk ratings | Tests prove a write to the unchosen environment is refused |
-| S1 | Resolve benchmark: tasks, gold labels, graders, runner; baseline runs of today's agent and the Claude+MCP reference | Numbers for both on the held-in set |
+| S1 | Resolve benchmark on "Order differences" first: tasks, labelling sheet, Aiden's gold labels, graders, runner; baseline runs of today's agent and the Claude+MCP reference | Numbers for both on the held-in set |
 | S2 | Ops MCP server: read tools first (`case_open`, `evidence_read`, `chain_read`, `netsuite_query/schema`, `precedent_find`) | Reference agent on the new tools ≥ reference on raw tools |
 | S3 | Resolver profile in the orchestrator: ≤10 tools + tool search, skills, output contract, case file log, budgets | Our agent's G1 on held-in ≥ reference; G4, G5 met |
 | S4 | `propose_change` + `close_as_explained` cards through validator/kernel; `verify_after` | SB1 end state matches gold; G3 = 0 |
 | S5 | Precedent capture and review | Repeat situations resolve with fewer tool calls |
 | S6 | Group mode: one approval card per proven situation over a group, intermediate math in code | Only if S3–S5 data show per-case work is the bottleneck |
 
-## 9. Open decisions
+## 9. Decisions (Aiden, 2026-10-01)
 
-- **D1, runtime.**
-  - (a) Evolve our orchestrator with the Ops MCP server. *Recommended:* it keeps multi-provider
-    support, our HITL cards and tenant scoping.
-  - (b) Host the resolver on the Claude Agent SDK harness.
-  - (c) Anthropic Managed Agents.
-
-  Option (a) still lets (b) and (c) drive the same MCP later.
-- **D2, model.** The benchmark picks the default resolver model (Claude Opus/Sonnet 5.x,
-  GPT-6.x) on G1 per dollar. The likely start is the strongest Claude model for resolve turns.
-- **D3, first task family.** Inc "Order differences" plus the 20 adjustment orders.
-  *Recommended:* the answers are mostly known already.
-- **D4, gold labelling.** The builder labels from saved evidence and NetSuite reads; Aiden
-  spot-checks 10.
+| # | Chose | Over | Because |
+|---|---|---|---|
+| D1 | **Our orchestrator** as the brain, with our capabilities built as an **Ops MCP server** | Claude Agent SDK harness; Anthropic Managed Agents | It keeps multi-provider models, our approval cards and tenant scoping. Claude Code or Codex can drive the same MCP later, and it is the benchmark's reference. |
+| D2 | **The strongest Claude model** for resolve turns (today Claude Fable 5.1) | Benchmark-picked model; staying on Sonnet 5 | Correctness first; cost is measured by G5, not used to pick the model. |
+| D3 | **"Order differences" first**: the Inc group (46 orders, four situations) and the 20 "adjustment never reached NetSuite" orders | Tax-only refunds first; a mix | The answers are mostly known, so gold labels are cheap and trustworthy. |
+| D4 | **Aiden labels every task** | The builder labels and Aiden spot-checks; agent labels | Independent gold labels; the labelling sheet carries no suggested answer. |
 
 ## 10. Not building
 
