@@ -94,3 +94,4 @@ it("reacts when an open desktop viewport becomes narrow", () => {
     "true",
   );
 });
+vi.mock("@/components/transaction-ops/freshness-alert-banner", () => ({ FreshnessAlertBanner: () => null }));

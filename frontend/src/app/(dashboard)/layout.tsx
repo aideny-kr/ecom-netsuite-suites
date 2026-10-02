@@ -13,6 +13,7 @@ import { AlertTriangle, Plug, X, Menu, ChevronRight } from "lucide-react";
 import { NAV_ITEMS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { ConnectionAlertBanner } from "@/components/connection-alert-banner";
+import { FreshnessAlertBanner } from "@/components/transaction-ops/freshness-alert-banner";
 import { SuiteStudioWebMcp } from "@/components/suite-studio-webmcp";
 
 export default function DashboardLayout({
@@ -182,6 +183,7 @@ export default function DashboardLayout({
           <span className="hidden truncate text-[11px] text-muted-foreground sm:block">{user.tenant_name}</span>
         </header>
         <ConnectionAlertBanner />
+        <FreshnessAlertBanner />
         {/* Connection warning banner — missing */}
         {connectionHealth.state === "missing" && showNetSuiteSetup && !bannerDismissed && (
           <div className="orbital-notice mx-4 mt-4 shrink-0 md:mx-8" role="status">
