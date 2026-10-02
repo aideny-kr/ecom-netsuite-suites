@@ -1122,8 +1122,7 @@ async def run_investigation(
                             foreign = {
                                 ref
                                 for ref, entity in scopes.items()
-                                if mapping.business_entity_subsidiaries.get(entity) is not None
-                                and mapping.business_entity_subsidiaries[entity] != config["subsidiary_id"]
+                                if mapping.business_entity_subsidiaries.get(entity) != config["subsidiary_id"]
                             }
                             if foreign and not await reserve(0, len(foreign)):
                                 return await finish("budget")
@@ -1133,8 +1132,7 @@ async def run_investigation(
                                 scope_refs
                             )
                             progress["source_scope_fallbacks"] = progress.get("source_scope_fallbacks", 0) + sum(
-                                ref not in scopes or scopes[ref] not in mapping.business_entity_subsidiaries
-                                for ref in scope_refs
+                                ref not in scopes for ref in scope_refs
                             )
                             progress["source_scope_rejected"] = progress.get("source_scope_rejected", 0) + len(foreign)
                             progress["outside_scope"] = progress.get("outside_scope", 0) + len(foreign)

@@ -44,7 +44,9 @@ workers; keep run budgets, cursors and finding commits coordinator-owned.
 2. For up to ten unknown-entity order candidates, fetch one authenticated exact
    Solidus header batch. Validate every requested/returned identity, pagination,
    explicit entity field and source version against the discovered candidate.
-3. Reject only candidates whose authoritative header proves a different entity.
+3. Reject only candidates whose authoritative header proves an entity outside this config’s exact
+   allowed entity keys. This is the existing full-detail scope decision; the
+   live AU mapping contains only AU’s key, not a catalog of foreign entities.
    Persist a bounded aggregate scope checkpoint. Missing, stale, ambiguous or
    incomplete headers fall back to the existing authoritative detail path.
 4. Fetch full details for remaining candidates with the existing bounded source
@@ -73,7 +75,7 @@ Jev classification remains downstream of deterministic evidence collection.
   unsupported full-window completion time.
 - Recovery: bounded prepaid reads; checkpoint resumes without missing candidates;
   cancellation, disablement, wrong tenant/connection, credential rotation,
-  unknown/malformed entity, ignored filter, duplicate/extra rows, stale version
+  missing/malformed entity, ignored filter, duplicate/extra rows, stale version
   and incomplete pagination cannot create false foreign exclusions.
 - Release: focused regression checks, seeded lifecycle CI, full required CI,
   independent exact-base/head T2 review, pinned backend rollout preserving current
@@ -97,3 +99,17 @@ full CI, independent review and deployed throughput measurement remain pending.
 Iteration 2+: respond to measured failures or unmet targets, repeating the affected
 checks. Do not weaken evidence/freshness or move targets to manufacture a pass.
 Final evaluation and observed limitations will be appended before completion.
+
+Iteration 2, actual-configuration correction: the first fixture included foreign
+entity mappings absent from live AU. Before release, the live config check
+exposed that valid foreign identities would not be rejected by that version.
+The gate now uses the identical full-detail allowed-scope rule, and the fixture
+contains only its own entity mapping. Valid explicit different IDs (including
+explicit legacy null) are outside scope; missing/malformed ownership remains
+unproven and falls back. Numeric targets are unchanged. Iteration 1 candidate
+3c695f43 was built for review preparation but never merged/deployed.
+
+Iteration 2 checks:97 routing/runner/concurrency/seeded-lifecycle checks pass
+with own-entity-only mappings. An additional live eight-order sample includes
+two each from subsidiaries1,2,4,5: all8 list/detail scope identities and versions
+match. Headers0.429s vs details1.997s. No customer observations were written.

@@ -24,7 +24,7 @@ async def mixed(committed, monkeypatch, *, size=100, unknown=False, max_orders=1
         monkeypatch,
         size=size,
         max_orders=max_orders,
-        mapping={"metabase_replica": BINDING, "business_entity_subsidiaries": {"legacy": "1", "other": "4"}},
+        mapping={"metabase_replica": BINDING, "business_entity_subsidiaries": {"legacy": "1"}},
     )
     run.progress_json = {**run.progress_json, "unscoped_replica_refs": refs}
     await db.commit()
