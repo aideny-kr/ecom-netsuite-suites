@@ -6,7 +6,7 @@ import React from "react";
 import { MessageList } from "../message-list";
 import { ResultCard } from "../result-card";
 import { ToolActivityRow, activityStepsFromCalls, activityStepsFromStream } from "../tool-activity-row";
-import { coerceResultCard } from "@/lib/chat-stream";
+import { coerceResultCard, tableCoveredByCards } from "@/lib/chat-stream";
 import type { ResultCardData, StreamBlock } from "@/lib/chat-stream";
 import type { ToolCallStep } from "@/lib/types";
 
@@ -286,5 +286,34 @@ describe("packet review round 2 on #370", () => {
     const text = (writeText.mock.calls[0] as unknown as [string])[0];
     const cells = text.split("\n").flatMap((line) => line.split("\t"));
     expect(cells.some((cell) => /^[=+\-@]/.test(cell.trimStart()))).toBe(false);
+  });
+});
+
+describe("live check on staging, 2026-10-01", () => {
+  // "break them down by country": the card showed the grouped rows (r2) and took its totals
+  // from the ungrouped query (r3), but r3 still rendered above it as a raw Query Results table.
+  const card = (overrides: Record<string, unknown>) =>
+    coerceResultCard({ ...base, result_ids: ["r2"], control_result_ids: ["r3"], ...overrides }) as ResultCardData;
+
+  it("hides the total query's raw table when the card shows every one of its figures", () => {
+    expect(tableCoveredByCards({ result_id: "r3", columns: ["UNITS"] }, [card({ totals: [null, 28] })])).toBe(true);
+  });
+
+  it("keeps the total query's raw table when the card has no totals", () => {
+    expect(tableCoveredByCards({ result_id: "r3", columns: ["units"] }, [card({ totals: null })])).toBe(false);
+  });
+
+  it("keeps the total query's raw table when it holds a figure the card does not show", () => {
+    // Packet review round 1 on #374 (R1): the card totals only the columns it shares with
+    // the grouped query; a revenue column in the total query would otherwise vanish.
+    const table = { result_id: "r3", columns: ["units", "revenue"] };
+    expect(tableCoveredByCards(table, [card({ totals: [null, 28] })])).toBe(false);
+    expect(tableCoveredByCards({ result_id: "r3" }, [card({ totals: [null, 28] })])).toBe(false);
+  });
+
+  it("still keeps an unrelated table and any table with caveats", () => {
+    expect(tableCoveredByCards({ result_id: "r7", columns: ["units"] }, [card({ totals: [null, 28] })])).toBe(false);
+    const withCaveats = { result_id: "r3", columns: ["units"], caveats: ["stale"] } as { result_id: string };
+    expect(tableCoveredByCards(withCaveats, [card({ totals: [null, 28] })])).toBe(false);
   });
 });

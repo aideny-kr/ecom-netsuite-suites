@@ -68,12 +68,32 @@ export function coerceDataTableData(d: Record<string, unknown>): DataTableData {
 }
 
 /** True when a result card presents this table (by result id), so the raw table is redundant. */
-export function tableCoveredByCards(table: { result_id?: string } | null | undefined, cards: ResultCardData[]): boolean {
+export function tableCoveredByCards(
+  table: { result_id?: string; columns?: string[] } | null | undefined,
+  cards: ResultCardData[],
+): boolean {
   if (!table?.result_id || cards.length === 0) return false;
   if (Array.isArray((table as { caveats?: unknown }).caveats) && (table as { caveats: unknown[] }).caveats.length > 0) {
     return false;
   }
-  return cards.some((card) => card.result_ids.includes(table.result_id!));
+  return cards.some(
+    (card) =>
+      card.result_ids.includes(table.result_id!) ||
+      ((card.control_result_ids ?? []).includes(table.result_id!) && showsEveryFigure(card, table.columns)),
+  );
+}
+
+/** A card's overall-total query is covered only when every one of its columns is on the
+ *  card with a total: the card totals just the columns it shares with the grouped query,
+ *  so any other figure would appear nowhere if its table were hidden. */
+function showsEveryFigure(card: ResultCardData, columns: string[] | undefined): boolean {
+  if (!card.totals || !Array.isArray(columns) || columns.length === 0) return false;
+  const totalled = new Set(
+    card.columns
+      .map((column, index) => (card.totals![index] != null ? column.key.toLowerCase() : null))
+      .filter((key): key is string => key !== null),
+  );
+  return columns.every((name) => totalled.has(String(name).toLowerCase()));
 }
 
 export interface TaskOutputData {
