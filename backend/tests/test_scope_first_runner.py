@@ -24,7 +24,7 @@ async def mixed(committed, monkeypatch, *, size=100, unknown=False, max_orders=1
         monkeypatch,
         size=size,
         max_orders=max_orders,
-        mapping={"metabase_replica": BINDING, "business_entity_subsidiaries": {"legacy": "1"}},
+        mapping={"metabase_replica": BINDING, "business_entity_subsidiaries": {"au": "1"}},
     )
     run.progress_json = {**run.progress_json, "unscoped_replica_refs": refs}
     await db.commit()
@@ -33,13 +33,12 @@ async def mixed(committed, monkeypatch, *, size=100, unknown=False, max_orders=1
 
     async def read(*args, **kwargs):
         body = await original(*args, **kwargs)
-        if args[3] not in own:
-            body["orders"][0]["business_entity"] = {"id": "other"}
+        body["orders"][0]["business_entity"] = {"id": "au" if args[3] in own else "other"}
         return body
 
     async def scopes(*args, **kwargs):
         events.append(("scope", list(args[3])))
-        return {} if unknown else {ref: "legacy" if ref in own else "other" for ref in args[3]}
+        return {} if unknown else {ref: "au" if ref in own else "other" for ref in args[3]}
 
     reader.side_effect = read
     batch = AsyncMock(side_effect=scopes)
@@ -226,3 +225,92 @@ async def test_cancelled_scope_read_retains_cursor_and_does_not_prepare_targets(
     reader.assert_not_awaited()
     writer.assert_not_awaited()
     assert not any(kind == "target_prefetch" for kind, _ in events)
+
+
+async def test_legacy_owning_inc_profile_keeps_provider_overlap_and_has_no_header_overhead(committed, monkeypatch):
+    db, actor, _ = committed
+    run, refs, reader, _, events, target = await pipeline_tests.parallel_setup(
+        committed, monkeypatch, mapping={"metabase_replica": BINDING}
+    )
+    run.progress_json = {**run.progress_json, "unscoped_replica_refs": refs}
+    await db.commit()
+    original = reader.side_effect
+
+    async def source(*args, **kwargs):
+        assert target.is_set(), "Legacy source and NetSuite must retain overlap"
+        return await original(*args, **kwargs)
+
+    reader.side_effect = source
+    header = AsyncMock(return_value={})
+    monkeypatch.setattr(source_scope, "read_order_scopes", header)
+    result = await run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done" and result["processed"] == 10
+    header.assert_not_awaited()
+    current = await state.get_run(db, actor.tenant_id, run.id)
+    assert current.api_calls_used == 20
+    assert not current.progress_json.get("source_scope_batches")
+    assert ("target_prefetch", [refs[0]]) in events
+
+
+@pytest.mark.parametrize("code", ["source_transport_failed", "source_http_error", "invalid_source_response"])
+async def test_optional_list_failure_falls_back_once_without_stopping_daily_work(committed, monkeypatch, code):
+    from app.services.transaction_ops.source_reader import SourceReadError
+
+    db, actor, _ = committed
+    run, refs, reader, _, events, batch, own = await mixed(committed, monkeypatch)
+    batch.side_effect = SourceReadError(code)
+    result = await run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done" and result["processed"] == len(own)
+    batch.assert_awaited_once()
+    assert reader.await_count == len(refs)
+    current = await state.get_run(db, actor.tenant_id, run.id)
+    assert current.progress_json["source_scope_read_fallbacks"] == 1
+    assert current.progress_json.get("read_retry_count", 0) == 0
+    assert not current.progress_json.get("last_read_failure")
+    assert {ref for kind, values in events if kind == "target_prefetch" for ref in values} <= own
+
+
+async def test_scope_authentication_failure_cannot_be_downgraded_to_optimization_fallback(committed, monkeypatch):
+    from app.services.transaction_ops.source_reader import SourceReadError
+
+    db, actor, _ = committed
+    run, refs, reader, writer, _, batch, _ = await mixed(committed, monkeypatch, size=10)
+    tenant, run_id = actor.tenant_id, run.id
+    batch.side_effect = SourceReadError("source_authentication_failed")
+    result = await run_investigation(db, tenant, run_id)
+    assert result["termination_reason"] == "error"
+    current = await state.get_run(db, tenant, run_id)
+    assert current.progress_json["pending_refs"] == refs
+    assert current.progress_json["last_read_failure"]["stage"] == "source_scope_batch"
+    assert not current.progress_json.get("source_scope_read_fallbacks")
+    reader.assert_not_awaited()
+    writer.assert_not_awaited()
+
+
+@pytest.mark.parametrize("prior_owned", [0, 20])
+async def test_explicit_inc_profile_uses_scope_mix_without_losing_overlap(committed, monkeypatch, prior_owned):
+    db, actor, _ = committed
+    run, refs, reader, _, events, target = await pipeline_tests.parallel_setup(
+        committed,
+        monkeypatch,
+        size=20,
+        mapping={"metabase_replica": BINDING, "business_entity_subsidiaries": {"inc": "1"}},
+    )
+    run.progress_json = {**run.progress_json, "unscoped_replica_refs": refs, "processed": prior_owned}
+    await db.commit()
+    original = reader.side_effect
+
+    async def source(*args, **kwargs):
+        assert target.is_set(), "Mostly in-scope profiles retain provider overlap"
+        body = await original(*args, **kwargs)
+        body["orders"][0]["business_entity"] = {"id": "inc"}
+        return body
+
+    reader.side_effect = source
+    header = AsyncMock(side_effect=lambda *args, **kwargs: dict.fromkeys(args[3], "inc"))
+    monkeypatch.setattr(source_scope, "read_order_scopes", header)
+    result = await run_investigation(db, actor.tenant_id, run.id)
+    assert result["termination_reason"] == "done" and result["processed"] == prior_owned + 20
+    assert header.await_count == (0 if prior_owned else 1)
+    current = await state.get_run(db, actor.tenant_id, run.id)
+    assert current.api_calls_used == 40 + (0 if prior_owned else 2)

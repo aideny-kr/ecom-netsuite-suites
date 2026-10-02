@@ -1,115 +1,119 @@
 # Reconciliation scope-first speed specification
 
-Status: implementation in progress. Owner: Codex, GPT-6.1 Sol xhigh. Date: 2026-10-02.
+Status: implementation verified locally; final release gates and live speed measurement pending.
+Owner: Codex, GPT-6.1 Sol xhigh, standard processing. Date: 2026-10-02.
 Base: c37d96a2fd51f4a7ffd3fce094c24a4ee72175c0. Infrastructure unchanged.
 
-## Problem and measured baseline
+## Problem and baseline
 
-Framework AU is running, but most work does not belong to AU. An October 2
-158.503-second checkpoint sample advanced 100 source candidates and 3 AU orders:
-37.85 candidates/minute and 1.14 AU orders/minute. At a nearby checkpoint, 687 of
-720 candidates (95.4%) were outside AU. Source preparation, repeated source
-snapshot/auth reads, checkpoints and speculative NetSuite batches dominate time.
-Concurrency alone cannot solve work amplification.
+Framework AU is active but spends most work on other entities. An October 2
+158.503-second checkpoint sample advanced100 source candidates and3 AU orders:
+37.85 candidates/minute and1.14 completed AU orders/minute. A nearby checkpoint
+had687 of720 candidates outside AU (95.4%). Per-candidate source reads,
+authorization/snapshot/checkpoint round trips and speculative NetSuite preparation
+amplify the cost. Current AU scope contains only its own entity key.
 
-Private measurement artifacts: ~/.codex/artifacts/au-stall-20261002/ and
-~/.codex/artifacts/au-scope-speed-20261002/. No provider bodies or credentials
-belong in this document or public progress.
+Private evidence: ~/.codex/artifacts/au-stall-20261002/ and
+~/.codex/artifacts/au-scope-speed-20261002/. No credentials or provider bodies
+belong in this spec or public progress.
 
-## Verified connector facts and research
+## Connector research and measured contract
 
-The Framework authenticated `framework_sync` Solidus endpoint supports bounded
-`sync/orders?q[number_in][]=...` reads. A positive + absent-reference probe
-returned exactly one requested order in 0.427s. A ten-reference probe returned
-exactly ten requested orders in 0.228s with complete pagination metadata.
-One corresponding detail read took 0.266s. List/detail projections differ in
-lines, payments, adjustments and tax geography: list headers MUST NOT become
-financial snapshots, case observations, write preflights or fresh daily proofs.
-A second bounded probe returned ten headers in 0.263s and ten serial details in
-2.489s; all ten matched on entity, identity, completion and update timestamps.
+The authenticated Framework `framework_sync` endpoint supports bounded exact
+`sync/orders?q[number_in][]=...` reads. Positive+absent-reference probe: exactly
+one requested order,0.427s. Ten-reference probe: exactly ten orders,0.263s;
+ten serial details2.489s,10/10 entity/identity/timestamp parity.
 
-[Ransack's official search matcher contract](https://activerecord-hackery.github.io/ransack/getting-started/search-matches/)
+A separate mixed sample includes two orders each from subsidiaries1,2,4,5:
+8/8 list/detail entity, identity, completion and update timestamps match.
+Headers0.429s; details1.997s. A final read-only execution of the actual scope
+validator qualifies all8 headers and finds6 outside live AU scope; all8 contain
+the entity field. Raw null count0: no live-null serializer parity claim is made.
+Null handling preserves the existing detail rule and is regression-tested.
+
+List headers omit lines, payments, adjustments and tax geography. They MUST NOT
+become financial snapshots, case observations, write preflights or refreshed
+financial evidence. In-scope orders still need complete detail.
+
+[Ransack's search matcher contract](https://activerecord-hackery.github.io/ransack/getting-started/search-matches/)
 documents array `in` parameters. Its [predicate documentation](https://activerecord-hackery.github.io/ransack/getting-started/using-predicates/)
-warns that unsupported attributes can silently remove filters. Thus every
-response must prove exact requested identities and complete bounded metadata;
-this customer's live contract, not generic Rails behavior, determines support.
+warns unsupported attributes may silently remove filters, so every response must
+prove exact requested identities and complete pagination. This customer's live
+contract determines support; generic Rails behavior is insufficient.
 [SQLAlchemy concurrency guidance](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html#using-asyncsession-with-concurrent-tasks)
-requires one session per concurrent task. Preserve the existing isolated source
-workers; keep run budgets, cursors and finding commits coordinator-owned.
+requires one session per concurrent task. Existing isolated source workers and
+the coordinator's exclusive ownership of budgets/cursors are preserved.
 
-## Architecture
+## Final architecture
 
-1. Metabase discovers candidates with its existing verified keyset/window filters.
-   An omitted replica entity remains unknown; currency and address never infer it.
-2. For up to ten unknown-entity order candidates, fetch one authenticated exact
-   Solidus header batch. Validate every requested/returned identity, pagination,
-   explicit entity field and source version against the discovered candidate.
-3. Reject only candidates whose authoritative header proves an entity outside this config’s exact
-   allowed entity keys. This is the existing full-detail scope decision; the
-   live AU mapping contains only AU’s key, not a catalog of foreign entities.
-   Persist a bounded aggregate scope checkpoint. Missing, stale, ambiguous or
-   incomplete headers fall back to the existing authoritative detail path.
-4. Fetch full details for remaining candidates with the existing bounded source
-   concurrency, ETag validation, tenant/credential partitioning and durable snapshots.
-   Compare only after the existing full-detail identity/entity checks.
-5. Restrict speculative NetSuite batches to the prepared, in-scope references in
-   an ambiguous-entity batch. Preserve overlap for other established pipelines.
-6. Persist counters distinguishing scope reads, rejected candidates, fallbacks,
-   full details, source validations, target batches and completed financial orders.
-   Never claim scan candidates/minute as financial reconciliations/minute.
+1. Metabase discovers candidates through existing keyset/window contracts.
+   Missing replica entity remains unknown; address/currency never infer ownership.
+2. Choose only the read strategy from observed scope mix. Once10 candidates have
+   been processed/excluded/rejected, use scope-first when foreign work exceeds
+   in-scope work. Cold profiles get one bounded header probe; an owned majority
+   retains existing overlap and avoids further header overhead. Legacy-owning
+   profiles retain their existing path. Current Inc uses an explicit entity ID,
+   so the selector does not assume Inc owns the legacy key.
+3. For up to10 unknown-entity candidates on a foreign-dominated feed, fetch one
+   authenticated exact header batch. Check requested/returned identities,
+   positive unique IDs, complete pagination, explicit valid entity and aware
+   not-future source versions/completion. Known newer discovery versions require
+   detail fallback, except verified fresh same-millisecond serialization.
+4. Reject only a qualified authoritative entity outside this config's exact
+   allowed keys, using the identical full-detail scope rule. Foreign mappings
+   need not exist. Missing/stale/malformed/ambiguous headers retain full detail.
+5. Persist one bounded aggregate scope/cursor checkpoint. Preserve conservative
+   order budgets. An interrupted uncommitted checkpoint re-reads and re-pays;
+   it cannot lose a candidate or manufacture a finding.
+6. Prepare remaining full details through existing up-to4 isolated workers,
+   ETag/credential/version invalidation and durable snapshots. For ambiguous
+   foreign-dominated cohorts, NetSuite prefetch includes only full-detail-confirmed
+   in-scope references. Mostly owned feeds preserve existing provider overlap.
+7. List-endpoint non-authorization SourceReadError disables this optional read
+   for the invocation and falls back to normal paid detail recovery. Authentication,
+   scope/connection authorization, lease and database errors remain blocking.
+   Optional list failures do not consume the detail retry budget.
+8. Counters separate header reads/candidates/rejections/fallbacks, full details,
+   source validations, target batches and completed financial orders. Header
+   hits never refresh financial timestamps. Jev remains downstream classification.
 
-No new infrastructure, schema migration, AI scope classification, expanded
-financial authority, credential change or automatic profile activation.
-Jev classification remains downstream of deterministic evidence collection.
+No migration, infrastructure, environment, queue, credential, financial authority
+or accounting-profile activation changes. Current frontend is preserved.
 
 ## Acceptance targets (fixed before implementation)
 
-- Correctness: same in-scope references and financial reports as the detail-only
-  baseline; no excluded reference creates a finding or financial observation.
-- Provider amplification: at least 90% fewer full-detail reads for a cohort with
-  at least 90% foreign-entity candidates; zero NetSuite reads for header-rejected
-  references. One scope HTTP read for at most ten candidates.
-- Real throughput: at least 3x the measured AU baseline (114 candidates/minute)
-  across at least five minutes of comparable orders-phase work. Also report AU
-  completed orders/minute, phase, calls and scope ratio without projecting an
-  unsupported full-window completion time.
-- Recovery: bounded prepaid reads; checkpoint resumes without missing candidates;
-  cancellation, disablement, wrong tenant/connection, credential rotation,
-  missing/malformed entity, ignored filter, duplicate/extra rows, stale version
-  and incomplete pagination cannot create false foreign exclusions.
-- Release: focused regression checks, seeded lifecycle CI, full required CI,
-  independent exact-base/head T2 review, pinned backend rollout preserving current
-  frontend/queues/config, guarded live smoke and post-deploy AU measurements.
+- Same in-scope references and monetary reports as detail-only execution;
+  no excluded reference creates a financial finding/observation.
+- At least90% fewer full-detail reads for a cohort with at least90% foreign
+  candidates; zero NetSuite reads for header-rejected references. Max10 per read.
+- Real AU orders-phase throughput at least3× baseline:114 candidates/minute
+  across at least5 minutes of comparable work. Report completed AU orders/minute,
+  calls and scope ratio separately. No full-day ETA inferred from HTTP timings.
+- Tenant/connection/credential/version/disablement/lease/cancellation and durable
+  continuation tests cannot produce false exclusions or lost candidates.
+- Full required CI and seeded lifecycle; independent exact-base/head T2 review;
+  six-service immutable backend rollout preserving frontend/schema/Env/Cmd/queues;
+  guarded dedicated-tenant live smoke and actual AU speed measurement.
 
-## Iteration and evaluation record
+## Verified iterations and release evaluation
 
-Iteration 0: diagnosis and bounded authenticated endpoint probes above. No writes.
-Iteration 1: implement scope gate and reference-restricted target batches; compare
-reads, reports and resume behavior on seeded mixed-entity fixtures. The first
-99 focused checks pass: 100-candidate/95%-foreign cohort uses 5 full details
-instead of 100, produces the same five in-scope financial balances, and never
-prefetches a foreign reference. Malformed/missing headers preserve full fallback.
-Credential rotation during HTTP and config disablement before checkpoint were
-found by tests and fixed; the actual request credential fingerprint is captured
-before sending. The wider first acceptance run passed236 checks including seeded lifecycle.
-Final changed-path checks passed169 plus9 routing/recovery checks after the
-serial-path restriction and added continuation/cancellation tests. Fixtures use
-the production database clock to avoid future-queued host-clock drift. Current
-full CI, independent review and deployed throughput measurement remain pending.
-Iteration 2+: respond to measured failures or unmet targets, repeating the affected
-checks. Do not weaken evidence/freshness or move targets to manufacture a pass.
-Final evaluation and observed limitations will be appended before completion.
+Iteration0: baseline diagnosis and bounded endpoint research; no customer writes.
+Iteration1: initial gate and118-related-path foundation (first wider236 checks).
+Actual-config inspection caught the incorrect assumption of foreign mappings
+before deployment. Initial candidate3c695f43 was never merged/deployed.
+Iteration2: exact allowed-scope rule with own-entity-only fixtures;97 checks pass;
+mixed live parity above. Candidateeb2d0547 received actual Opus5.5High eight-angle
+review with no blocker/major, but is obsolete after subsequent changes.
+Iteration3: preserve mostly-owned overlap using actual scope mix; optional-list
+failure fallback and preparation restriction reset address review findingsF1/F2.
+Final118 checks PASS include monetary100.00 parity, missing refund proof remaining
+incomplete,95%foreign cohort100→5 full details, zero foreign target prefetch,
+config disablement, rotation, cancellation, budget continuation, list transport/
+HTTP/invalid-response fallback, blocking auth failure, cold/warm explicit Inc
+and legacy overlap, header validators and seeded lifecycle. Test fixtures use
+production PostgreSQL claim time to avoid host-clock future-queue drift.
 
-Iteration 2, actual-configuration correction: the first fixture included foreign
-entity mappings absent from live AU. Before release, the live config check
-exposed that valid foreign identities would not be rejected by that version.
-The gate now uses the identical full-detail allowed-scope rule, and the fixture
-contains only its own entity mapping. Valid explicit different IDs (including
-explicit legacy null) are outside scope; missing/malformed ownership remains
-unproven and falls back. Numeric targets are unchanged. Iteration 1 candidate
-3c695f43 was built for review preparation but never merged/deployed.
-
-Iteration 2 checks:97 routing/runner/concurrency/seeded-lifecycle checks pass
-with own-entity-only mappings. An additional live eight-order sample includes
-two each from subsidiaries1,2,4,5: all8 list/detail scope identities and versions
-match. Headers0.429s vs details1.997s. No customer observations were written.
+Current source hashes, test selections and actual completed results are recorded
+in the private iteration3 test receipt; final exact-head CI remains authoritative.
+Post-deploy measurement and final evaluation will be linked from STATE/handoff.
+Targets will not be weakened to manufacture a pass.

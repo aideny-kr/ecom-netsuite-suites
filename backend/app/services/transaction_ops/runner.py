@@ -412,6 +412,8 @@ async def run_investigation(
     batch_baseline = None
     staged_source = {}
     scope_checked = set()
+    scope_batch_disabled = False
+    scope_probe_preferred = None
 
     async def flush_findings():
         nonlocal batch_baseline
@@ -604,10 +606,23 @@ async def run_investigation(
             await settle(meter)
             return result
 
+    def scope_first():
+        # Strategy only: both paths still verify exact source scope before a
+        # financial comparison. Prior authoritative work avoids adding header
+        # reads or removing provider overlap from mostly in-scope profiles.
+        if mapping.business_entity_subsidiaries.get("legacy") == config["subsidiary_id"]:
+            return False
+        outside = progress.get("outside_scope", 0)
+        owned = progress.get("processed", 0) + progress.get("excluded", 0)
+        if outside + owned >= 10:
+            return outside > owned
+        return scope_probe_preferred is not False  # One bounded cold-start probe.
+
     async def prepare_concurrently(refs, workers):
         from app.services.transaction_ops import source_preparation
 
         connection_id = direct_source["source_connection_id"]
+        staged.prepared_references = None
         cached = {}
         if progress.get("phase") == "orders":
             with timing.measure("source_snapshot_batch"):
@@ -654,8 +669,10 @@ async def run_investigation(
         # have separate sessions and cannot mutate the run, its budget or cursor.
         # Each provider read retains its own paid timeout/retry policy. Do not
         # time out the join: target evidence and checkpoint commits must finish.
-        ambiguous_scope = progress.get("phase") == "orders" and bool(
-            set(refs).intersection(progress.get("unscoped_replica_refs", []))
+        ambiguous_scope = (
+            scope_first()
+            and progress.get("phase") == "orders"
+            and bool(set(refs).intersection(progress.get("unscoped_replica_refs", [])))
         )
         if ambiguous_scope:
             results, peak = await fetch()
@@ -1095,7 +1112,7 @@ async def run_investigation(
                     # Reject foreign replica candidates before paying for their
                     # full detail/snapshot/NetSuite preparation. Unknown rows
                     # retain the exact existing individual-read fallback.
-                    if progress.get("phase") == "orders":
+                    if scope_first() and not scope_batch_disabled and progress.get("phase") == "orders":
                         unknown = set(progress.get("unscoped_replica_refs", []))
                         scope_refs = [ref for ref in refs if ref in unknown and ref not in scope_checked]
                         if scope_refs:
@@ -1103,20 +1120,34 @@ async def run_investigation(
 
                             if not await reserve(2):
                                 return await finish("budget")
-                            scopes = await bounded_read(
-                                "source_scope_batch",
-                                lambda: source_scope.read_order_scopes(
-                                    db,
-                                    tenant_id,
-                                    direct_source["source_connection_id"],
-                                    scope_refs,
-                                    minimum_versions={
-                                        ref: _time(progress.get("pending_source_versions", {}).get(ref))
-                                        for ref in scope_refs
-                                    },
-                                ),
-                                retry_calls=2,
-                            )
+
+                            async def read_scope():
+                                nonlocal scope_batch_disabled
+                                try:
+                                    return await source_scope.read_order_scopes(
+                                        db,
+                                        tenant_id,
+                                        direct_source["source_connection_id"],
+                                        scope_refs,
+                                        minimum_versions={
+                                            ref: _time(progress.get("pending_source_versions", {}).get(ref))
+                                            for ref in scope_refs
+                                        },
+                                    )
+                                except SourceReadError as error:
+                                    if error.code in source_scope.AUTHORIZATION_ERRORS:
+                                        raise
+                                    # This optional read must not make the engine
+                                    # depend on the list endpoint's availability.
+                                    # Existing individual reads retain their paid
+                                    # recovery policy; no header retry consumes it.
+                                    scope_batch_disabled = True
+                                    progress["source_scope_read_fallbacks"] = (
+                                        progress.get("source_scope_read_fallbacks", 0) + 1
+                                    )
+                                    return {}
+
+                            scopes = await bounded_read("source_scope_batch", read_scope, retry_calls=2)
                             if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
                                 raise FeatureRevokedError
                             foreign = {
@@ -1124,6 +1155,8 @@ async def run_investigation(
                                 for ref, entity in scopes.items()
                                 if mapping.business_entity_subsidiaries.get(entity) != config["subsidiary_id"]
                             }
+                            if scopes:
+                                scope_probe_preferred = len(foreign) * 2 > len(scopes)
                             if foreign and not await reserve(0, len(foreign)):
                                 return await finish("budget")
                             scope_checked.update(scope_refs)
@@ -1201,8 +1234,10 @@ async def run_investigation(
                                 == config["subsidiary_id"]
                             ):
                                 prepared_scope.append(ref)
-                        if progress.get("phase") == "orders" and set(refs).intersection(
-                            progress.get("unscoped_replica_refs", [])
+                        if (
+                            scope_first()
+                            and progress.get("phase") == "orders"
+                            and set(refs).intersection(progress.get("unscoped_replica_refs", []))
                         ):
                             staged.prepared_references = set(prepared_scope)
                     progress["source_staged_groups"] = progress.get("source_staged_groups", 0) + 1

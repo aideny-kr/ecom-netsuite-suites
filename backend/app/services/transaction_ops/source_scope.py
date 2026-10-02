@@ -11,6 +11,9 @@ from app.services.transaction_ops.normalization import _time, source_entity_key
 from app.services.transaction_ops.source_reader import _ORDER_REFERENCE, _direct_read
 
 MAX_REFERENCES = 10
+AUTHORIZATION_ERRORS = frozenset(
+    {"source_not_found", "unsupported_source", "source_credentials_unavailable", "source_authentication_failed"}
+)
 
 
 def _scopes(body, references, minimum_versions, observed_at):
