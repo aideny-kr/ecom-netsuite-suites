@@ -103,10 +103,11 @@ async def operational_status(
     config_id: UUID | None = None,
     limit: int = Query(default=20, ge=1, le=50),
     offset: int = Query(default=0, ge=0),
+    daily_only: bool = False,
 ):
     from app.services.transaction_ops.operational_status import operational_status as read_status
 
-    return await read_status(db, user.tenant_id, config_id=config_id, limit=limit, offset=offset)
+    return await read_status(db, user.tenant_id, config_id=config_id, limit=limit, offset=offset, daily_only=daily_only)
 
 
 @router.post("/configs", response_model=ConfigOut, status_code=201)
