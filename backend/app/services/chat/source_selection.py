@@ -47,7 +47,9 @@ def _source_question(sources: dict[str, str], *, unavailable: bool = False) -> s
         return "None of the connected data sources meet your source choice. Which source would you like to use?"
     choices = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " or " + labels[-1]
     prefix = "The requested source selection is unavailable for this turn. " if unavailable else ""
-    return prefix + f"Which data source should I use for this question: {choices}?"
+    # The UI turns the fence into one button per source; a click sends the name, as a typed reply would.
+    buttons = "\n\n```sources\n" + "\n".join(labels) + "\n```"
+    return prefix + f"Which data source should I use for this question: {choices}?" + buttons
 
 
 def resolve_source_selection(
