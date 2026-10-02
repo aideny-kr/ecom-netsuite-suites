@@ -67,8 +67,8 @@ async def parallel_setup(committed, monkeypatch, **options):
     base = staged_netsuite.StagedNetSuite
 
     class Prefetch(base):
-        async def prefetch_orders(self, reference):
-            events.append(("target_prefetch", reference))
+        async def prefetch_orders(self, reference, *, references=None):
+            events.append(("target_prefetch", references or [reference]))
             target_started.set()
 
     monkeypatch.setattr(staged_netsuite, "StagedNetSuite", Prefetch)
