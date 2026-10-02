@@ -1025,6 +1025,7 @@ async def test_refresh_inventory_aging_r_items_over_5000_rows_not_truncated(db, 
             "first_snapshot_date": (SNAPSHOT - timedelta(days=7)).isoformat(),
             "last_snapshot_date": SNAPSHOT.isoformat(),
             "snapshot_count": 8,
+            "duplicate_grains": 0,
         }
     ]
     payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
@@ -1067,9 +1068,10 @@ async def test_refresh_inventory_aging_composed_at_stamp_advances_on_refresh(db,
     assert (datetime.now(timezone.utc) - stamped).total_seconds() < 30
 
 
-async def test_legacy_inventory_recipe_refuses_before_query_and_preserves_report(db, monkeypatch):
+@pytest.mark.parametrize("legacy_version", [None, 2])
+async def test_legacy_inventory_recipe_refuses_before_query_and_preserves_report(db, monkeypatch, legacy_version):
     _, recipe = build_playbook_recipe("inventory_aging", {})
-    del recipe["playbook"]["source_contract_version"]
+    recipe["playbook"]["source_contract_version"] = legacy_version
     tenant, user, report = await _seed_report(db, recipe=recipe)
     calls = []
     _patch_executor(monkeypatch, calls=calls)

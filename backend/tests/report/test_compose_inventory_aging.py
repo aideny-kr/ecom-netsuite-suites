@@ -125,7 +125,7 @@ async def test_main_stores_the_real_recipe_so_refresh_and_auto_refresh_selector_
 
     assert report.recipe_json is not None
     assert report.recipe_json["playbook"] == {
-        "source_contract_version": 2,
+        "source_contract_version": 3,
         "key": "inventory_aging",
         "params": {"locations": params["locations"]},
     }

@@ -138,3 +138,49 @@ def test_decimal_cents_reconcile_without_float_sum_drift():
     sources = ia.build_sources(params)
     for rid in ("r_items", "r_prior", "r_trend"):
         assert "CAST(s.inventory_amount AS NUMERIC) AS inventory_amount" in sources[rid]["params"]["query"]
+
+
+def test_raw_historical_duplicate_blocks_matching_multiplied_aggregates():
+    import sqlite3
+
+    from app.services.report.inventory_aging import BQ_TABLE, _r_meta_sql
+
+    data, params = _full_fixture()
+    # Current grain is unique; only a prior-day SKU is duplicated. Execute the
+    # actual raw-grain control SQL against the synthetic source, before joins.
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE inventory(location TEXT, sku TEXT, snapshot_date TEXT)")
+    for meta in data["r_meta"]:
+        loc = meta["location"]
+        db.executemany(
+            "INSERT INTO inventory VALUES (?, ?, ?)",
+            [
+                (loc, "first", meta["first_snapshot_date"]),
+                (loc, "prior", data["r_prior"][0]["snapshot_date"]),
+                (loc, "current", meta["last_snapshot_date"]),
+            ],
+        )
+    sql = _r_meta_sql("'Acme', 'Globex', 'Initech'").replace(BQ_TABLE, "inventory")
+    data["r_meta"] = [dict(row) for row in db.execute(sql)]
+    validate_source_controls(data, params)
+    db.execute("INSERT INTO inventory VALUES (?, ?, ?)", ("Acme", "prior", data["r_prior"][0]["snapshot_date"]))
+    data["r_meta"] = [dict(row) for row in db.execute(sql)]
+    # Both independently aggregated queries can contain the same multiplication.
+    prior = data["r_prior"][0]
+    for key in ("value", "value_90p", "value_180p", "skus", "skus_90p", "skus_180p", "qty", "qty_90p"):
+        prior[key] *= 4
+    trend = next(t for t in data["r_trend"] if t["location"] == "Acme" and str(t["d"]) == str(prior["snapshot_date"]))
+    for key in ("total_value", "value_90p", "skus", "qty"):
+        trend[key] *= 4
+    with pytest.raises(SourceIntegrityError, match="duplicate raw historical"):
+        validate_source_controls(data, params)
+    db.close()
+
+
+@pytest.mark.parametrize("value", [None, -1, "NaN", "1.1"])
+def test_missing_or_invalid_raw_grain_control_is_not_zero(value):
+    data, params = _full_fixture()
+    data["r_meta"][0]["duplicate_grains"] = value
+    with pytest.raises(SourceIntegrityError):
+        validate_source_controls(data, params)

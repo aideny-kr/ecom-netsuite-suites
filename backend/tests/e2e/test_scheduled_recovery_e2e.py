@@ -28,7 +28,16 @@ from tests.jobs.test_executor import _fake_spec, _seed_job_schedule
 
 
 @pytest.mark.parametrize(
-    "phase", ["remote_accepted", "receipt_committed", "concurrent", "query_pending", "query_complete", "query_provider"]
+    "phase",
+    [
+        "remote_accepted",
+        "receipt_committed",
+        "concurrent",
+        "query_pending",
+        "query_complete",
+        "query_provider",
+        "query_settled",
+    ],
 )
 async def test_crash_and_duplicate_delivery_use_durable_job_boundary(tmp_path, monkeypatch, phase):
     url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
@@ -102,6 +111,7 @@ async def effect(ctx, params):
                 f.write('accepted\\n'); f.flush(); os.fsync(f.fileno())
             if os.environ['CRASH_PHASE'] in {'query_pending','query_provider'}: os.kill(os.getpid(), signal.SIGKILL)
             await usage.complete({'bytes_processed':1024, 'bytes_billed':1024, 'cache_hit':False, 'job_id':usage.provider_job_id})
+            if os.environ['CRASH_PHASE'] == 'query_settled': os.kill(os.getpid(), signal.SIGKILL)
         return {'bytes_processed':1024, 'report_query_bytes':1024}
     with Path(os.environ['SYNTHETIC_SINK']).open('a') as f:
         f.write('accepted\\n'); f.flush(); os.fsync(f.fileno())
@@ -153,14 +163,18 @@ asyncio.run(main())
             await run_due_jobs(recovery, tid)
             saved = await recovery.get(Job, jid)
             assert saved.result_summary["reason"] == (
-                "blocked" if phase in {"remote_accepted", "query_pending", "query_provider"} else "done"
+                "blocked"
+                if phase in {"remote_accepted", "query_pending", "query_provider"}
+                else "error"
+                if phase == "query_settled"
+                else "done"
             )
             if phase in {"remote_accepted", "query_pending", "query_provider"}:
                 assert saved.result_summary["verification"] == "uncertain"
             if phase.startswith("query_"):
                 query = saved.result_summary["report_queries"][0]
                 assert query["state"] == ("pending" if phase in {"query_pending", "query_provider"} else "complete")
-                if phase == "query_complete":
+                if phase in {"query_complete", "query_settled"}:
                     assert saved.result_summary["usage"]["bytes_scanned"] == 1024
                     assert saved.result_summary["usage"]["usd"] is None
             if phase == "query_provider":

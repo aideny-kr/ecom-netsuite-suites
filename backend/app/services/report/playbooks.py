@@ -284,7 +284,7 @@ def _build_inventory_aging_recipe(params: dict) -> tuple[str, dict]:
         # already carries (never re-derived), so replaying the recipe can never
         # disagree with itself about which locations/compare_days/trend_weeks
         # were composed.
-        "playbook": {"key": "inventory_aging", "params": params, "source_contract_version": 2},
+        "playbook": {"key": "inventory_aging", "params": params, "source_contract_version": 3},
         "sections": [
             {
                 "type": section_type,

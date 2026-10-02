@@ -919,10 +919,15 @@ async def _settle_interrupted(db, row, job) -> str:
         return REASON_BLOCKED
     # No durable write/model intent: fail this occurrence, never silently replay
     # a potentially billed read. Future independently approved occurrences remain usable.
+    from app.services.jobs.report_queries import rebuild_query_usage
+
+    summary = dict(job.result_summary or {})
+    if summary.get("report_queries"):
+        summary["usage"] = rebuild_query_usage(summary)
     job.status = "failed"
     job.completed_at = datetime.now(timezone.utc)
     job.result_summary = {
-        **(job.result_summary or {}),
+        **summary,
         "reason": REASON_ERROR,
         "detail": "interrupted without durable effect intent; occurrence not replayed",
     }
@@ -1600,7 +1605,7 @@ async def _run_schedule_now_locked(
         await _mark_uncertain(db, row, job, detail)
         await set_tenant_context(db, str(tenant_id))
 
-    if reason == REASON_ERROR and retry_on_error:
+    if reason == REASON_ERROR and retry_on_error and job.status != "cancelled":
         if attempt >= RETRY_MAX_ATTEMPTS:
             # Item 4 (delta gate fix E): attempt exhaustion is checked FIRST,
             # unconditionally -- an occurrence that has ITSELF exhausted its

@@ -286,3 +286,39 @@ async def test_recovery_authorization_and_concurrency(client, db, admin_user, mo
         assert job.result_summary["report_queries"][-1]["state"] == "pending"
     assert len(reads) == (0 if change == "tenant" else 1)
     assert len(calls) == 2 and drive.calls == []
+
+
+async def test_missing_billed_usage_remains_pending(db, admin_user):
+    scope, job = await pending_query(db, admin_user)
+    with pytest.raises(ReportQueryUnknownError):
+        await scope.complete({"bytes_processed": 42, "job_id": scope.provider_job_id})
+    await db.refresh(job)
+    assert job.result_summary["report_queries"][0]["state"] == "pending"
+
+
+async def test_cancelled_query_stops_full_report_without_scheduling_retry(client, db, admin_user, monkeypatch):
+    from app.mcp.tools import bigquery_tools
+    from app.workers.tasks import scheduled_jobs as jobs
+    from tests.e2e.test_scheduled_report_delivery_e2e import setup_report_workflow
+
+    user, headers = admin_user
+    row, source, drive, calls = await setup_report_workflow(db, client, user, headers, monkeypatch, with_delivery=False)
+    tid = user.tenant_id
+    query = bigquery_tools.execute_query
+
+    async def cancel(**kwargs):
+        result = await query(**kwargs)
+        job = (await db.scalars(select(Job).where(Job.tenant_id == tid))).one()
+        job.status = "cancelled"
+        await db.commit()
+        return result
+
+    monkeypatch.setattr(bigquery_tools, "execute_query", cancel)
+    await jobs.run_due_jobs(db, tid)
+    await db.refresh(row)
+    job = (await db.scalars(select(Job).where(Job.tenant_id == tid))).one()
+    assert job.status == "cancelled"
+    assert job.result_summary["reason"] == "blocked"
+    assert row.retry_job_id is None
+    assert job.result_summary["usage"]["bytes_scanned"] == 1024
+    assert len(calls) == 1 and drive.calls == []

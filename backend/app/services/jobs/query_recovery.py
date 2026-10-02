@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.models.mcp_connector import McpConnector
 from app.services import audit_service, bigquery_service
-from app.services.jobs.report_queries import queries_uncertain, query_bytes
+from app.services.jobs.report_queries import rebuild_query_usage
 
 
 async def _source(db, tenant_id, intent):
@@ -87,17 +87,9 @@ async def reconcile_queries(db, *, tenant_id, actor_id, job):
         raise EvidenceUnavailableError("Query evidence changed during recovery")
     # Cancellation may have changed other summary fields while provider reads ran.
     summary = dict(job.result_summary or {})
-    usage = dict(summary.get("usage") or {})
-    outputs = summary.get("step_receipts", {})
-    other_bytes = sum(
-        max(0, int(v.get("bytes_processed") or 0) - int(v.get("report_query_bytes") or 0)) for v in outputs.values()
-    )
-    total = query_bytes({"report_queries": updated}) + other_bytes
-    usage.update(
-        known_bytes_scanned=total, bytes_scanned=total, query_usage_complete=True, usd=None, cost_status="unpriced"
-    )
-    job.result_summary = {**summary, "report_queries": updated, "usage": usage}
-    assert not queries_uncertain(job.result_summary)
+    summary["report_queries"] = updated
+    usage = rebuild_query_usage(summary)
+    job.result_summary = {**summary, "usage": usage}
     await audit_service.log_event(
         db,
         tenant_id=tenant_id,
@@ -107,7 +99,12 @@ async def reconcile_queries(db, *, tenant_id, actor_id, job):
         resource_type="job",
         resource_id=str(job.id),
         job_id=job.id,
-        payload={"provider": "bigquery", "queries": len(updated), "replayed": False, "bytes_scanned": total},
+        payload={
+            "provider": "bigquery",
+            "queries": len(updated),
+            "replayed": False,
+            "bytes_scanned": usage["bytes_scanned"],
+        },
     )
     await db.commit()
     return job.result_summary

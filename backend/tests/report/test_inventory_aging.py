@@ -126,6 +126,7 @@ def _full_fixture():
             "first_snapshot_date": (SNAPSHOT - timedelta(days=90)).isoformat(),
             "last_snapshot_date": SNAPSHOT.isoformat(),
             "snapshot_count": 90,
+            "duplicate_grains": 0,
         }
         for loc in ("Acme", "Globex", "Initech")
     ]
@@ -462,6 +463,7 @@ def _mover_zero_sku_delta_fixture():
             "first_snapshot_date": (SNAPSHOT - timedelta(days=90)).isoformat(),
             "last_snapshot_date": SNAPSHOT.isoformat(),
             "snapshot_count": 90,
+            "duplicate_grains": 0,
         }
     ]
     payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
@@ -564,6 +566,7 @@ def _narrative_fixture(loc_specs, *, prior_skus_90p_by_location: dict[str, int] 
                 "first_snapshot_date": (SNAPSHOT - timedelta(days=90)).isoformat(),
                 "last_snapshot_date": SNAPSHOT.isoformat(),
                 "snapshot_count": 90,
+                "duplicate_grains": 0,
             }
         )
     payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}

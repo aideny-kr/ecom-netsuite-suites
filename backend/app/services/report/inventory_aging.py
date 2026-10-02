@@ -523,11 +523,17 @@ ORDER BY location, d"""
 
 
 def _r_meta_sql(locs: str) -> str:
-    return (
-        f"SELECT location, MIN(snapshot_date) AS first_snapshot_date, "
-        f"MAX(snapshot_date) AS last_snapshot_date, COUNT(DISTINCT snapshot_date) AS snapshot_count "
-        f"FROM {BQ_TABLE} WHERE location IN ({locs}) GROUP BY location"
-    )
+    # Check the raw historical key before any restock join or aggregation can
+    # multiply duplicates identically in both prior and trend controls.
+    return f"""WITH raw_grain AS (
+  SELECT location, sku, snapshot_date, COUNT(*) AS row_count
+  FROM {BQ_TABLE} WHERE location IN ({locs})
+  GROUP BY location, sku, snapshot_date)
+SELECT location, MIN(snapshot_date) AS first_snapshot_date,
+       MAX(snapshot_date) AS last_snapshot_date,
+       COUNT(DISTINCT snapshot_date) AS snapshot_count,
+       SUM(CASE WHEN row_count > 1 THEN 1 ELSE 0 END) AS duplicate_grains
+FROM raw_grain GROUP BY location"""
 
 
 def build_sources(params: dict[str, Any]) -> dict[str, Source]:
@@ -639,6 +645,8 @@ def validate_source_controls(payloads: dict[str, list[dict]], params: dict[str, 
         if len(prior_rows) != 1 or len(meta_rows) != 1:
             fail("duplicate prior or metadata grain")
         prior, meta = prior_rows[0], meta_rows[0]
+        if number(meta, "duplicate_grains", integer=True) != 0:
+            fail("duplicate raw historical inventory grain")
         item_dates = {day(row, "snapshot_date") for row in items}
         if len(item_dates) != 1:
             fail("mixed item snapshot dates")

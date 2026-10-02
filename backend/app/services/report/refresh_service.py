@@ -378,7 +378,7 @@ async def refresh_report(
         if (
             isinstance(playbook_meta, dict)
             and playbook_meta.get("key") == "inventory_aging"
-            and playbook_meta.get("source_contract_version") != 2
+            and playbook_meta.get("source_contract_version") != 3
         ):
             raise RefreshError(
                 409, "This inventory report uses an older source format. Recompose it before refreshing."

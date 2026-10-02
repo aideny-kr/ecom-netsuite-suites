@@ -40,6 +40,24 @@ def queries_uncertain(summary):
     return any(q.get("state") not in {"complete", "not_dispatched"} for q in (summary or {}).get("report_queries", []))
 
 
+def rebuild_query_usage(summary):
+    """Rebuild usage from durable receipts after an interrupted worker."""
+    other_bytes = sum(
+        max(0, int(v.get("bytes_processed") or 0) - int(v.get("report_query_bytes") or 0))
+        for v in summary.get("step_receipts", {}).values()
+    )
+    total = query_bytes(summary) + other_bytes
+    complete = not queries_uncertain(summary)
+    return {
+        **(summary.get("usage") or {}),
+        "known_bytes_scanned": total,
+        "bytes_scanned": total if complete else None,
+        "query_usage_complete": complete,
+        "usd": None,
+        "cost_status": "unpriced",
+    }
+
+
 class ReportQueries:
     def __init__(self, ctx):
         self.ctx = ctx
@@ -47,6 +65,7 @@ class ReportQueries:
         self.error = None
         self.pending = None
         self.provider_job_id = None
+        self.stopped = False
 
     async def _job(self, *, settlement=False):
         await set_tenant_context(self.ctx.db, str(self.ctx.tenant_id))
@@ -61,6 +80,8 @@ class ReportQueries:
         return job
 
     def check(self):
+        if self.stopped:
+            raise ReportQueryUnknownError("Report stopped; usage settled without continuing execution")
         if self.pending is not None:
             raise ReportQueryUnknownError("Report query outcome or usage is unknown; reconciliation required")
         if self.error:
@@ -122,7 +143,7 @@ class ReportQueries:
         billed = result.get("bytes_billed") if isinstance(result, dict) else None
         if not isinstance(processed, int) or isinstance(processed, bool) or processed < 0:
             self.check()  # keep the pending reservation; never coerce absent usage to zero
-        if billed is not None and (not isinstance(billed, int) or isinstance(billed, bool) or billed < 0):
+        if not isinstance(billed, int) or isinstance(billed, bool) or billed < 0:
             self.check()
         if result.get("job_id") != self.provider_job_id:
             raise ReportQueryUnknownError("Provider query identity does not match reservation")
@@ -148,9 +169,8 @@ class ReportQueries:
             self.error = "Provider query receipt exceeds its billing cap"
         if limit is not None and query_bytes(job.result_summary) > limit:
             self.error = "Report scan budget exceeded"
+        self.stopped = job.status != "running"
         self.check()
-        if job.status != "running":
-            raise ReportQueryUnknownError("Report stopped; usage settled without continuing execution")
 
     async def not_dispatched(self):
         job = await self._job(settlement=True)
@@ -167,6 +187,8 @@ class ReportQueries:
         job.result_summary = {**summary, "report_queries": receipts}
         await self.ctx.db.commit()
         self.pending = None
+        self.stopped = job.status != "running"
+        self.check()
 
 
 @contextmanager
@@ -175,6 +197,10 @@ def report_queries(ctx):
     token = _scope.set(scope)
     try:
         yield scope
-        scope.check()  # survives tool wrappers that convert exceptions to results
     finally:
-        _scope.reset(token)
+        try:
+            # Preserve cancellation/budget/unknown state even when a wrapper
+            # converts a tool exception into a generic report failure.
+            scope.check()
+        finally:
+            _scope.reset(token)
