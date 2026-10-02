@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, text
 
 from app.core.config import settings
 from app.models.audit import AuditEvent
@@ -14,7 +14,7 @@ from app.models.transaction_ops import TransactionRun
 from app.services import email_service, ops_digest
 from app.services.transaction_ops import freshness_digest
 from tests.conftest import create_test_user
-from tests.test_ops_digest import _digest_rows
+from tests.test_ops_digest import _digest_rows, _seed_incidents
 from tests.test_transaction_operational_status import NOW, seed
 
 LATE = NOW + timedelta(days=2)
@@ -177,6 +177,42 @@ async def test_duplicate_busy_digest_skips_without_sending_or_auditing_success(d
     assert not await _digest_rows(db, admin_user[0].tenant_id)
 
 
+async def test_busy_persistent_tenant_does_not_expire_later_tenants(db, admin_user, admin_user_b, monkeypatch):
+    identifiers = [admin_user[0].tenant_id, admin_user_b[0].tenant_id]
+    await db.commit()  # Persistent ORM rows must expire on rollback, rather than be expunged as new rows.
+    monkeypatch.setattr(ops_digest, "claim_digest", AsyncMock(side_effect=[False, True]))
+    stats = await ops_digest.run_ops_digest(db, now=LATE, sender=AsyncMock(), tenant_ids=identifiers)
+    assert stats["tenant_busy"] == 1 and stats["tenants"] == 1 and stats["termination_reason"] == "budget"
+    assert not await _digest_rows(db, identifiers[0])
+    assert len(await _digest_rows(db, identifiers[1])) == 1
+
+
+async def test_failed_freshness_sql_read_keeps_other_incidents_and_delivery_lock(db, admin_user, monkeypatch):
+    tenant_id = admin_user[0].tenant_id
+    await _seed_incidents(db, tenant_id, LATE)
+
+    async def fail_read(*args, **kwargs):
+        async with db.bind.engine.connect() as other:
+            assert not await freshness_digest.claim_digest(other, tenant_id)
+        await db.execute(text("SELECT 1/0"))  # An aborted SQL transaction requires an actual savepoint rollback.
+
+    monkeypatch.setattr(freshness_digest, "operational_status", fail_read)
+
+    async def check_lock_after_savepoint_rollback(**mail):
+        async with db.bind.engine.connect() as other:
+            assert not await freshness_digest.claim_digest(other, tenant_id)
+
+    sender = AsyncMock(side_effect=check_lock_after_savepoint_rollback)
+    stats = await ops_digest.run_ops_digest(db, now=LATE, sender=sender, tenant_ids=[tenant_id])
+    sender.assert_awaited_once()
+    payload = (await _digest_rows(db, tenant_id))[-1].payload
+    assert payload["freshness_check_failed"] and payload["delivery"] == "sent"
+    assert payload["counts"]["connections"] == payload["counts"]["jobs"] == 1
+    assert "Freshness could not be checked" in sender.call_args.kwargs["text_body"]
+    assert "3 item(s)" in sender.call_args.kwargs["subject"]
+    assert stats["tenants"] == 1 and stats["tenant_failed"] == 0
+
+
 async def test_freshness_beyond_first_page_is_not_silently_skipped(db, admin_user, monkeypatch):
     await seed(db, admin_user[0])
     from app.services.transaction_ops.operational_status import operational_status
@@ -206,6 +242,7 @@ async def test_scope_cap_emails_incomplete_check_even_without_known_alerts(db, a
     await ops_digest.run_ops_digest(db, now=LATE, sender=sender, tenant_ids=[admin_user[0].tenant_id])
     sender.assert_awaited_once()
     assert "freshness check incomplete" in sender.call_args.kwargs["subject"]
+    assert "1 item(s)" in sender.call_args.kwargs["subject"]
     assert "additional schedules were not checked" in sender.call_args.kwargs["text_body"]
 
 

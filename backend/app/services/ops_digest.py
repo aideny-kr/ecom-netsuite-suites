@@ -193,7 +193,16 @@ async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dic
         stmt, order_by = queries[name]
         counts[name], ids[name] = await _category(db, stmt, order_by)
         truncated[name] = counts[name] > len(ids[name])
-    fresh = await collect_freshness(db, tenant_id, now=now)
+    try:
+        # A failed SQL read must not poison the transaction or hide the digest's
+        # existing incidents. The outer tenant delivery lock survives this rollback.
+        async with db.begin_nested():
+            fresh = await collect_freshness(db, tenant_id, now=now)
+        fresh_failed = False
+    except Exception:
+        logger.exception("ops_digest.freshness_check_failed", extra={"tenant_id": str(tenant_id)})
+        fresh = {"alerts": [], "keys": [], "scopes_checked": 0, "scope_truncated": False}
+        fresh_failed = True
     counts["freshness"] = len(fresh["alerts"])
     ids["freshness"] = [item["config_id"] for item in fresh["alerts"][:ROW_LIMIT]]
     truncated["freshness"] = len(fresh["alerts"]) > ROW_LIMIT
@@ -205,6 +214,7 @@ async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dic
         "freshness_alerts": fresh["alerts"][:ROW_LIMIT],
         "freshness_scopes_checked": fresh["scopes_checked"],
         "freshness_scope_truncated": fresh["scope_truncated"],
+        "freshness_check_failed": fresh_failed,
     }
 
 
@@ -252,11 +262,21 @@ async def admin_emails(db, tenant_id: UUID) -> list[str]:
     return list(dict.fromkeys(rows))
 
 
+def _attention_count(digest):
+    return (
+        sum(digest["counts"].values())
+        + int(bool(digest.get("freshness_scope_truncated")))
+        + int(bool(digest.get("freshness_check_failed")))
+    )
+
+
 def render(tenant_name: str, digest: dict, *, since: datetime, until: datetime) -> tuple[str, str, str]:
-    total = sum(digest["counts"].values())
+    total = _attention_count(digest)
     subject = f"[Suite Studio] Ops digest for {tenant_name}: {total} item(s) need attention"
     if digest.get("freshness_scope_truncated"):
         subject += " (freshness check incomplete)"
+    if digest.get("freshness_check_failed"):
+        subject += " (freshness unavailable)"
     lines = [
         f"Ops digest for {tenant_name}",
         f"Window: {since.isoformat()} to {until.isoformat()}",
@@ -267,7 +287,7 @@ def render(tenant_name: str, digest: dict, *, since: datetime, until: datetime) 
         f"<p>Window: {since.isoformat()} to {until.isoformat()}</p>",
     ]
     fresh = digest.get("freshness_alerts", [])
-    if fresh or digest.get("freshness_scope_truncated"):
+    if fresh or digest.get("freshness_scope_truncated") or digest.get("freshness_check_failed"):
         count = digest["counts"]["freshness"]
         suffix = f" (showing {len(fresh)} of {count})" if digest["truncated"]["freshness"] else ""
         lines.append(f"Daily reconciliation: {count} new alert(s){suffix}")
@@ -290,6 +310,10 @@ def render(tenant_name: str, digest: dict, *, since: datetime, until: datetime) 
                 f"Freshness checked the first {digest['freshness_scopes_checked']} daily schedules; "
                 "additional schedules were not checked. These counts are incomplete."
             )
+            lines.append(warning)
+            html.append(f"<p><strong>{escape(warning)}</strong></p>")
+        if digest.get("freshness_check_failed"):
+            warning = "Freshness could not be checked. Coverage is unknown; open Ops status to investigate."
             lines.append(warning)
             html.append(f"<p><strong>{escape(warning)}</strong></p>")
         url = f"{email_service.FRONTEND_URL.rstrip('/')}/settings/ops-status"
@@ -344,8 +368,10 @@ async def run_ops_digest(
 
     tenants, stats["truncated"], last = await tenants_due(db, tenant_ids=tenant_ids)
 
-    for tenant in tenants:
-        tenant_id = tenant.id
+    # Rollback expires persistent ORM objects even with expire_on_commit=False.
+    # Keep primitives so a busy/failed tenant cannot lazy-load later tenant rows.
+    due = [(tenant.id, tenant.name) for tenant in tenants]
+    for tenant_id, tenant_name in due:
         try:
             await set_tenant_context(db, str(tenant_id))
             if not await claim_digest(db, tenant_id):
@@ -354,7 +380,7 @@ async def run_ops_digest(
                 continue
             since = last.get(tenant_id) or (now - window)
             digest = await collect(db, tenant_id, now=now, since=since)
-            total = sum(digest["counts"].values()) + int(digest["freshness_scope_truncated"])
+            total = _attention_count(digest)
             # Recipients are only looked up when there is something to send them.
             recipients = await admin_emails(db, tenant_id) if total else []
             failed_recipients = []
@@ -365,7 +391,7 @@ async def run_ops_digest(
             elif not recipients:
                 delivery = "no_recipient"
             else:
-                subject, text_body, html_body = render(tenant.name, digest, since=since, until=now)
+                subject, text_body, html_body = render(tenant_name, digest, since=since, until=now)
                 for to_email in recipients:
                     try:
                         await send(to_email=to_email, subject=subject, text_body=text_body, html_body=html_body)
