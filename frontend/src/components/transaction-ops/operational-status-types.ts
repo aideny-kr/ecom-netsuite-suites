@@ -22,6 +22,12 @@ export interface OperationalRun {
 export interface OperationalEntity {
   config_id: string;
   name: string;
+  freshness?: {
+    state: "healthy" | "paused" | "not_applicable" | "within_grace" | "alert";
+    reason: "daily_scan_stopped" | "coverage_overdue" | "daily_completion_pending" | null;
+    deadline_at: string | null;
+    grace_hours: number;
+  };
   coverage: {
     status: string;
     checked_through: string | null;

@@ -68,6 +68,7 @@ function EntityStatus({ entity }: { entity: OperationalEntity }) {
           {label(entity.coverage.status)}
         </span>
       </div>
+      {entity.freshness?.state === "alert" && <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-[13px] font-medium text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">{entity.freshness.reason === "daily_scan_stopped" ? "Freshness alert: daily scan stopped before coverage completed." : "Freshness alert: daily coverage missed its completion deadline."} Expected through {entity.coverage.expected_checked_through || "an unverified date"}. Completion deadline: {timestamp(entity.freshness.deadline_at)}.</p>}
       {entity.active_runs.some(run => run.last_read_failure?.blocking) && <p className="mt-3 text-[13px] font-medium text-amber-700 dark:text-amber-300">A read issue is blocking an active run. Open run evidence for details.</p>}
       <div className="mt-5 grid gap-6 md:grid-cols-3">
         <div>

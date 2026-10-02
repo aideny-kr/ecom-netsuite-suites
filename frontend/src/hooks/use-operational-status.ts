@@ -17,3 +17,19 @@ export function useOperationalStatus(offset: number) {
     retry: (count, error) => !(error instanceof ApiError && [401, 403].includes(error.status)) && count < 1,
   });
 }
+
+export function useFreshnessStatus() {
+  const access = useTransactionAccess();
+  const query = useQuery({
+    queryKey: ["transaction-ops", access.tenantId, "freshness-status"],
+    queryFn: () => apiClient.get<OperationalStatus>(
+      "/api/v1/transaction-ops/operational-status?daily_only=true&limit=50",
+    ),
+    enabled: access.allowed,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: (count, error) => !(error instanceof ApiError && [401, 403].includes(error.status)) && count < 1,
+  });
+  // Never display cached tenant evidence after access is lost.
+  return { ...query, data: access.allowed ? query.data : undefined };
+}

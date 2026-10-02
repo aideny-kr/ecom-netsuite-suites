@@ -45,6 +45,13 @@ it("opens through Settings and displays coverage without promising accounting co
   expect(mocks.get).toHaveBeenCalledExactlyOnceWith("/api/v1/transaction-ops/operational-status?limit=20&offset=0");
 });
 
+it("shows the same missed daily coverage deadline in Ops status", async () => {
+  mocks.get.mockResolvedValue(status({ entities: [entity({ freshness: { state: "alert", reason: "coverage_overdue", deadline_at: "2026-10-02T00:00:00Z", grace_hours: 8 } })] }));
+  setup();
+  expect(await screen.findByText(/Freshness alert: daily coverage missed its completion deadline/)).toBeVisible();
+  expect(screen.getByText(/Completion deadline: 2026-10-02 00:00 UTC/)).toBeVisible();
+});
+
 it("does not expose the link or request status without existing reconciliation access", () => {
   mocks.access.allowed = false;
   setup();
