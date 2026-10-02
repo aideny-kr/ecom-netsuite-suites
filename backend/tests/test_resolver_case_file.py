@@ -250,7 +250,8 @@ def test_gl_detail_stays_in_the_saved_observation_and_is_offered_by_reference():
     result = build()
     assert "gl" not in json.dumps(result["netsuite"]["documents"])
     more = result["read_more"]["saved_observation"]
-    assert more["observation_id"] == OBSERVATION["audit_id"] and "gl" in more["sections"]
+    # GL lines come back through the saved reader's "documents" section (group_investigation.read_observation).
+    assert more["observation_id"] == OBSERVATION["audit_id"] and "documents" in more["sections"]
 
 
 def test_missing_inputs_are_named_never_guessed():
@@ -342,3 +343,97 @@ async def test_open_case_never_opens_another_tenants_case(world, tenant_b):  # n
         await case_file.open_case(world.db, tenant_b.id, order_reference="R000000175")
     with pytest.raises(StateError):
         await case_file.open_case(world.db, world.tenant.id, case_id=str(uuid4()))
+
+
+# --- packet review round 1 (gpt-6-astra) ----------------------------------------------
+
+
+def test_included_tax_is_removed_before_comparing_with_netsuite_net():
+    # F1: an EU line priced 120.00 including 20.00 VAT is 100.00 net in NetSuite: no difference.
+    source = deepcopy(SOURCE)
+    source.update(included_tax_total="20.0", additional_tax_total="0.0")
+    source["line_items"] = [
+        {
+            "id": "1",
+            "quantity": "1",
+            "price": "120.0",
+            "total": "120.0",
+            "variant": {"name": "Laptop", "sku": "L1"},
+            "adjustments": [{"label": "VAT", "amount": "20.0", "source_type": "Spree::TaxRate", "included": True}],
+        }
+    ]
+    report = deepcopy(REPORT)
+    report["targets"][0]["lines"] = [{"key": "line:1", "quantity": "1.0", "net": "100.0"}]
+    assert build(source_order=source, report=report)["netsuite"]["line_differences"] == []
+
+
+def test_a_line_with_promotions_or_unattributed_included_tax_is_not_amount_compared():
+    source = deepcopy(SOURCE)
+    source["line_items"] = [
+        {
+            "id": "1",
+            "quantity": "1",
+            "price": "100.0",
+            "total": "90.0",
+            "variant": {"name": "Laptop", "sku": "L1"},
+            "adjustments": [{"label": "Promo", "amount": "-10.0", "source_type": "Spree::PromotionAction"}],
+        }
+    ]
+    report = deepcopy(REPORT)
+    report["targets"][0]["lines"] = [{"key": "line:1", "quantity": "1.0", "net": "77.0"}]
+    assert build(source_order=source, report=report)["netsuite"]["line_differences"] == []
+    source["line_items"][0]["adjustments"] = [{"label": "VAT", "amount": "20.0", "source_type": "Spree::TaxRate"}]
+    source.update(included_tax_total="20.0")
+    assert build(source_order=source, report=report)["netsuite"]["line_differences"] == []
+
+
+def test_documents_include_every_saved_section_the_record_links_use():
+    # F2: credits and refunds a fresh read saved under related_refund_documents, deposits and
+    # invoice applications are part of the chain the agent needs.
+    observation = deepcopy(OBSERVATION)
+    sections = observation["evidence"]["sections"]
+    sections["deposits"] = [
+        {"id": "14500002", "tranId": "CD452120", "record_type": "customerdeposit", "total": "2669.84"}
+    ]
+    sections["invoice_applications"] = {
+        "documents": {"15840539": {"id": "15840539", "tranId": "CM11788", "record_type": "creditmemo", "total": "4.82"}}
+    }
+    sections["related_refund_documents"] = {
+        "documents": [
+            {"id": "71", "tranId": "CM900", "record_type": "creditmemo", "total": "10.00"},
+            {"id": "72", "tranId": "RF900", "record_type": "customerrefund", "total": "10.00"},
+        ]
+    }
+    report = deepcopy(REPORT)
+    report["refund_evidence"]["target"].pop("invoice_credits")
+    docs = {d["number"]: d for d in build(observation=observation, report=report)["netsuite"]["documents"]}
+    assert {"CD452120", "CM11788", "CM900", "RF900"} <= set(docs)
+    assert docs["RF900"]["type"] == "customer refund" and docs["CM11788"]["type"] == "credit memo"
+
+
+def test_the_size_limit_holds_for_any_input():
+    # F3: twenty matching adjustments with long labels once produced 53k characters.
+    source = deepcopy(SOURCE)
+    source["adjustments"] = [
+        {"label": f"Adjustment {i} " + "y" * 2000, "amount": "-4.82", "adjustable_type": "Spree::Order"}
+        for i in range(20)
+    ]
+    result = build(source_order=source, corrections=[("creditmemo", str(i)) for i in range(200)])
+    assert len(json.dumps(result)) <= case_file.MAX_CHARS
+    assert result["truncated"] is True
+
+
+def test_any_cut_list_marks_the_file_truncated():
+    # F4: 21 adjustments and 11 payments were cut to 20 and 10 with truncated=false.
+    source = deepcopy(SOURCE)
+    source["adjustments"] = [
+        {"label": f"A{i}", "amount": "-1.00", "adjustable_type": "Spree::Order"} for i in range(21)
+    ]
+    source["payments"] = [{"amount": "1.00", "state": "completed"} for _ in range(11)]
+    assert build(source_order=source)["truncated"] is True
+
+
+def test_read_more_names_only_sections_the_saved_reader_accepts():
+    # F5: the saved-observation reader accepts source, documents, applications and assessment only.
+    more = build()["read_more"]["saved_observation"]
+    assert set(more["sections"]) <= {"source", "documents", "applications", "assessment"}

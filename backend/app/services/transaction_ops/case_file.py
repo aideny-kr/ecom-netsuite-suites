@@ -8,10 +8,11 @@ saved, refunds and invoice credits, and verified fixes. Fresh reads stay with
 where to look next instead of guessing.
 
 Readable names and amounts copied from the inputs. The only computed value is a line's
-Solidus amount (price x quantity), to compare with NetSuite's line net; the only derived
-facts are exact comparisons (an adjustment equal to the difference, a line whose
-quantity or amount differs). The file is bounded (`MAX_CHARS`) so a huge order cannot
-flood the context; anything cut is marked `truncated`.
+Solidus net for comparison with NetSuite's line net (price x quantity, less tax the line
+marks as included); a line with promotions, or included tax it does not attribute, is
+not amount-compared. The only derived facts are exact comparisons (an adjustment equal
+to the difference, a line whose quantity or amount differs). The file is bounded
+(`MAX_CHARS`, checked last) so no order can flood the context; any cut sets `truncated`.
 """
 
 from __future__ import annotations
@@ -25,8 +26,14 @@ from sqlalchemy import select
 MAX_CHARS = 16_000  # ~4k tokens
 MAX_LINES = 30
 MAX_ADJUSTMENTS = 20
+MAX_PAYMENTS = 10
 MAX_DOCUMENTS = 20
+MAX_FACTS = 5
+MAX_FIXES = 10
+MAX_TEXT = 120
 NETSUITE_SALES_ORDER = "https://{account}.app.netsuite.com/app/accounting/transactions/salesord.nl?id={id}"
+# The saved-observation reader (group_investigation.read_observation) accepts only these.
+OBSERVATION_SECTIONS = ("source", "documents", "applications", "assessment")
 
 _TYPES = {
     "CustInvc": "invoice",
@@ -36,14 +43,41 @@ _TYPES = {
     "CustCred": "credit memo",
     "creditmemo": "credit memo",
     "CustDep": "customer deposit",
+    "customerdeposit": "customer deposit",
     "DepAppl": "deposit application",
+    "depositapplication": "deposit application",
     "CustPymt": "customer payment",
+    "customerpayment": "customer payment",
     "CustRfnd": "customer refund",
+    "customerrefund": "customer refund",
     "CashRfnd": "cash refund",
+    "cashrefund": "cash refund",
     "RtnAuth": "return authorization",
+    "returnauthorization": "return authorization",
     "ItemShip": "item fulfillment",
+    "itemfulfillment": "item fulfillment",
     "SalesOrd": "sales order",
+    "salesorder": "sales order",
 }
+
+
+class _Cuts:
+    """Records whether any list or text was shortened, so `truncated` is never silently false."""
+
+    def __init__(self):
+        self.any = False
+
+    def take(self, items, limit):
+        items = list(items)
+        if len(items) > limit:
+            self.any = True
+        return items[:limit]
+
+    def text(self, value, limit=MAX_TEXT):
+        if isinstance(value, str) and len(value) > limit:
+            self.any = True
+            return value[: limit - 1] + "…"
+        return value
 
 
 def _amount(value):
@@ -83,7 +117,7 @@ def _comparison(report):
     }
 
 
-def _order_adjustments(source):
+def _order_adjustments(source, cuts):
     rows = []
     for a in source.get("adjustments") or []:
         if not isinstance(a, dict) or a.get("source_type") == "Spree::TaxRate":
@@ -91,33 +125,55 @@ def _order_adjustments(source):
         if a.get("adjustable_type") not in (None, "Spree::Order"):
             continue
         rows.append(
-            {"label": a.get("label"), "amount": a.get("amount"), "date": (a.get("created_at") or "")[:10] or None}
+            {
+                "label": cuts.text(a.get("label")),
+                "amount": a.get("amount"),
+                "date": (a.get("created_at") or "")[:10] or None,
+            }
         )
     return rows
 
 
-def _solidus(source):
+def _comparable_net(li, price, qty, order_includes_tax):
+    """Solidus net to compare with NetSuite's line net, or (None, reason) when it would be a guess."""
+    adjustments = [a for a in li.get("adjustments") or [] if isinstance(a, dict)]
+    if any(a.get("source_type") != "Spree::TaxRate" for a in adjustments):
+        return None, "promotions on the line"
+    taxes = [a for a in adjustments if a.get("source_type") == "Spree::TaxRate"]
+    if order_includes_tax and any(not isinstance(a.get("included"), bool) for a in taxes):
+        return None, "included tax not attributed to the line"
+    if price is None or qty is None:
+        return None, "price or quantity missing"
+    included = sum((_amount(a.get("amount")) or Decimal(0) for a in taxes if a.get("included") is True), Decimal(0))
+    return price * qty - included, None
+
+
+def _solidus(source, cuts):
     if not isinstance(source, dict):
         return {"available": False, "reason": "no saved Solidus order for this case"}
+    order_includes_tax = (_amount(source.get("included_tax_total")) or Decimal(0)) != 0
     lines = []
     for li in source.get("line_items") or []:
         if not isinstance(li, dict):
             continue
         variant = li.get("variant") or {}
+        price, qty = _amount(li.get("price")), _amount(li.get("quantity"))
         promos = [
-            {"label": a.get("label"), "amount": a.get("amount")}
+            {"label": cuts.text(a.get("label")), "amount": a.get("amount")}
             for a in li.get("adjustments") or []
             if isinstance(a, dict) and a.get("source_type") != "Spree::TaxRate"
         ]
+        net, not_compared = _comparable_net(li, price, qty, order_includes_tax)
         lines.append(
             {
                 "id": li.get("id"),
-                "product": variant.get("name"),
+                "product": cuts.text(variant.get("name")),
                 "sku": variant.get("sku"),
                 "qty": li.get("quantity"),
                 "price": li.get("price"),
                 "total": li.get("total"),
                 **({"promotions": promos} if promos else {}),
+                **({"net_for_comparison": str(net)} if net is not None else {"amount_not_compared": not_compared}),
             }
         )
     return {
@@ -137,12 +193,15 @@ def _solidus(source):
             "total": source.get("total"),
             "paid": source.get("payment_total"),
         },
-        "order_adjustments": _order_adjustments(source)[:MAX_ADJUSTMENTS],
-        "payments": [
-            {"amount": p.get("amount"), "state": p.get("state")}
-            for p in source.get("payments") or []
-            if isinstance(p, dict)
-        ][:10],
+        "order_adjustments": cuts.take(_order_adjustments(source, cuts), MAX_ADJUSTMENTS),
+        "payments": cuts.take(
+            (
+                {"amount": p.get("amount"), "state": p.get("state")}
+                for p in source.get("payments") or []
+                if isinstance(p, dict)
+            ),
+            MAX_PAYMENTS,
+        ),
         "lines": lines,
     }
 
@@ -154,14 +213,13 @@ def _line_differences(solidus, target):
         other = ns.get(f"line:{line.get('id')}")
         if not other:
             continue
-        # NetSuite's net is the line amount (quantity x rate), so it compares with Solidus's
-        # price x quantity, never the unit price (live 2026-10-02, R190994976).
-        price, qty = _amount(line.get("price")), _amount(line.get("qty"))
-        amount = price * qty if price is not None and qty is not None else None
+        # NetSuite's net is the line amount (quantity x rate, before tax), so it compares with
+        # the Solidus line's net, never the unit price (live 2026-10-02, R190994976).
+        net = _amount(line.get("net_for_comparison"))
         differs = []
-        if _amount(other.get("quantity")) != qty:
+        if _amount(other.get("quantity")) != _amount(line.get("qty")):
             differs.append("quantity")
-        if _amount(other.get("net")) is not None and amount is not None and _amount(other.get("net")) != amount:
+        if _amount(other.get("net")) is not None and net is not None and _amount(other.get("net")) != net:
             differs.append("amount")
         if differs:
             diffs.append(
@@ -170,7 +228,7 @@ def _line_differences(solidus, target):
                     "sku": line.get("sku"),
                     "solidus_qty": line.get("qty"),
                     "netsuite_qty": other.get("quantity"),
-                    "solidus_amount": None if amount is None else str(amount),
+                    "solidus_amount": line.get("net_for_comparison"),
                     "netsuite_net": other.get("net"),
                     "differs": differs,
                 }
@@ -178,8 +236,30 @@ def _line_differences(solidus, target):
     return diffs
 
 
-def _documents(observation, report):
-    """NetSuite documents earlier reads saved, once each, with readable fields only."""
+def _merge_document(docs, doc, cuts):
+    if not isinstance(doc, dict) or not doc.get("id"):
+        return
+    entry = docs.setdefault(str(doc["id"]), {"id": str(doc["id"])})
+    fields = {
+        "type": _TYPES.get(doc.get("record_type"), entry.get("type") or doc.get("record_type")),
+        "number": doc.get("tranId") or entry.get("number"),
+        "status": _ref(doc.get("status")) or entry.get("status"),
+        "total": doc.get("total"),
+        "tax": doc.get("taxTotal"),
+        "paid": doc.get("amountPaid"),
+        "remaining": doc.get("amountRemaining"),
+        "created_from": cuts.text(_ref(doc.get("createdFrom"))),
+        "period": _ref(doc.get("postingPeriod")),
+    }
+    entry.update({k: v for k, v in fields.items() if v is not None or k not in entry})
+
+
+def _documents(observation, report, cuts):
+    """NetSuite documents earlier reads saved, once each, readable fields only.
+
+    The same saved sections `record_links.evidence_record_links` uses, plus the linked
+    documents inventory and the refund read's invoice credits.
+    """
     docs = {}
     sections = ((observation or {}).get("evidence") or {}).get("sections") or {}
     for row in (sections.get("linked_documents") or {}).get("rows") or []:
@@ -191,22 +271,13 @@ def _documents(observation, report):
                 "status": row.get("status_name"),
             }
     for doc in sections.get("posting_documents") or []:
-        if not isinstance(doc, dict) or not doc.get("id"):
-            continue
-        entry = docs.setdefault(str(doc["id"]), {"id": str(doc["id"])})
-        entry.update(
-            {
-                "type": _TYPES.get(doc.get("record_type"), entry.get("type") or doc.get("record_type")),
-                "number": doc.get("tranId") or entry.get("number"),
-                "status": _ref(doc.get("status")) or entry.get("status"),
-                "total": doc.get("total"),
-                "tax": doc.get("taxTotal"),
-                "paid": doc.get("amountPaid"),
-                "remaining": doc.get("amountRemaining"),
-                "created_from": _ref(doc.get("createdFrom")),
-                "period": _ref(doc.get("postingPeriod")),
-            }
-        )
+        _merge_document(docs, doc, cuts)
+    for doc in sections.get("deposits") or []:
+        _merge_document(docs, doc, cuts)
+    for doc in ((sections.get("invoice_applications") or {}).get("documents") or {}).values():
+        _merge_document(docs, doc, cuts)
+    for doc in (sections.get("related_refund_documents") or {}).get("documents") or []:
+        _merge_document(docs, doc, cuts)
     credits = ((report.get("refund_evidence") or {}).get("target") or {}).get("invoice_credits") or {}
     if credits.get("complete") is True:
         for credit in credits.get("credits") or []:
@@ -243,11 +314,12 @@ def _refunds(report):
 
 def build_case_file(*, case, report, source_order, observation, corrections):
     """Pure: the same inputs always give the same file. No reads, no clock."""
+    cuts = _Cuts()
     report = report or {}
     targets = report.get("targets") or []
     target = targets[0] if len(targets) == 1 and isinstance(targets[0], dict) else {}
     scope = case.get("scope") or {}
-    solidus = _solidus(source_order)
+    solidus = _solidus(source_order, cuts)
     so_id = str(target.get("record_id") or "") or None
     sections = ((observation or {}).get("evidence") or {}).get("sections") or {}
     so_section = sections.get("sales_order") or {}
@@ -267,7 +339,7 @@ def build_case_file(*, case, report, source_order, observation, corrections):
             "last_observed_at": case.get("last_observed_at"),
         },
         "comparison": _comparison(report),
-        "facts": {"adjustments_equal_to_difference": explaining},
+        "facts": {"adjustments_equal_to_difference": cuts.take(explaining, MAX_FACTS)},
         "solidus": solidus,
         "netsuite": {
             "sales_order": {
@@ -282,18 +354,20 @@ def build_case_file(*, case, report, source_order, observation, corrections):
                 "link": NETSUITE_SALES_ORDER.format(account=account, id=so_id) if so_id and account else None,
             },
             "line_differences": _line_differences(solidus, target) if solidus.get("available") else [],
-            "documents": _documents(observation, report)[:MAX_DOCUMENTS],
+            "documents": cuts.take(_documents(observation, report, cuts), MAX_DOCUMENTS),
             "refunds": _refunds(report),
         },
         "history": {
-            "verified_fixes": [{"record_type": t, "record_id": r} for t, r in sorted(corrections or [])],
+            "verified_fixes": cuts.take(
+                ({"record_type": t, "record_id": r} for t, r in sorted(corrections or [])), MAX_FIXES
+            ),
         },
         "read_more": {
             "saved_observation": (
                 {
                     "observation_id": observation.get("audit_id"),
                     "observed_at": observation.get("observed_at"),
-                    "sections": sorted(sections),
+                    "sections": list(OBSERVATION_SECTIONS),
                     "how": "transaction_ops_accounting_evidence(case_id, observation_id, section): saved, no new reads",
                 }
                 if observation
@@ -305,32 +379,55 @@ def build_case_file(*, case, report, source_order, observation, corrections):
         },
         "truncated": False,
     }
+    if solidus.get("available"):
+        solidus["lines"] = cuts.take(solidus["lines"], MAX_LINES)
+    result["truncated"] = cuts.any
     return _bounded(result)
 
 
+def _size(result):
+    return len(json.dumps(result, default=str))
+
+
 def _bounded(result):
-    """Trim the longest lists until the file fits; say so."""
-    if len(json.dumps(result, default=str)) <= MAX_CHARS:
+    """Shorten lists, then texts, until the file fits. The final check always holds."""
+    if _size(result) <= MAX_CHARS:
         return result
     result["truncated"] = True
-    for path, floor in (
-        (("solidus", "lines"), 0),
-        (("netsuite", "line_differences"), 5),
-        (("netsuite", "documents"), 5),
-        (("solidus", "order_adjustments"), 5),
+    solidus, netsuite = result.get("solidus") or {}, result.get("netsuite") or {}
+    for holder, key, floor in (
+        (solidus, "lines", 0),
+        (netsuite, "line_differences", 5),
+        (netsuite, "documents", 5),
+        (solidus, "order_adjustments", 5),
+        (solidus, "payments", 3),
+        (result.get("history") or {}, "verified_fixes", 3),
+        (result.get("facts") or {}, "adjustments_equal_to_difference", 1),
     ):
-        holder = result.get(path[0]) or {}
-        items = holder.get(path[1])
-        if not isinstance(items, list):
-            continue
-        cut = min(len(items), MAX_LINES)
-        while cut > floor and len(json.dumps(result, default=str)) > MAX_CHARS:
-            cut = max(floor, cut - 5 if cut > 10 else cut - 1)
-            holder[path[1]] = items[:cut]
-        if len(json.dumps(result, default=str)) <= MAX_CHARS:
+        items = holder.get(key)
+        while isinstance(items, list) and len(items) > floor and _size(result) > MAX_CHARS:
+            items = items[: max(floor, len(items) - max(1, len(items) // 4))]
+            holder[key] = items
+        if _size(result) <= MAX_CHARS:
             return result
-        holder[path[1]] = items[:floor]
-    return result
+    for adjustment in solidus.get("order_adjustments") or []:
+        if isinstance(adjustment.get("label"), str) and len(adjustment["label"]) > 40:
+            adjustment["label"] = adjustment["label"][:39] + "…"
+    facts = result.get("facts") or {}
+    facts["adjustments_equal_to_difference"] = [
+        (label[:39] + "…") if isinstance(label, str) and len(label) > 40 else label
+        for label in facts.get("adjustments_equal_to_difference") or []
+    ]
+    if _size(result) <= MAX_CHARS:
+        return result
+    # Last resort: the comparison and identity only, so the file never exceeds the bound.
+    return {
+        "case": result.get("case"),
+        "comparison": result.get("comparison"),
+        "read_more": result.get("read_more"),
+        "truncated": True,
+        "note": "The saved evidence for this case is too large to summarise; read sections through read_more.",
+    }
 
 
 async def open_case(db, tenant_id, *, case_id=None, order_reference=None):
