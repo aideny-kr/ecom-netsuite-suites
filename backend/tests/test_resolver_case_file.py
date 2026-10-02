@@ -178,49 +178,6 @@ def test_tax_rate_rows_are_not_order_adjustments():
     assert "Sales tax" not in labels
 
 
-def test_line_differences_name_the_product():
-    diffs = build()["netsuite"]["line_differences"]
-    assert diffs == [
-        {
-            "product": "DDR5-5600 - 64GB (2 x 32GB)",
-            "sku": "FRANRM0003X2",
-            "solidus_qty": "1",
-            "netsuite_qty": "2.0",
-            "solidus_amount": "810.0",
-            "netsuite_net": "810.0",
-            "differs": ["quantity"],
-        }
-    ]
-
-
-def test_netsuite_net_is_the_line_amount_not_the_unit_price():
-    # Live 2026-10-02 (R190994976): a 2-unit line was flagged because NetSuite's net (qty x rate)
-    # was compared with Solidus's unit price. Same quantity and same amount is no difference.
-    source = deepcopy(SOURCE)
-    source["line_items"][0].update(quantity="2", price="45.0")
-    report = deepcopy(REPORT)
-    report["targets"][0]["lines"][0].update(quantity="2.0", net="90.0")
-    names = [d["product"] for d in build(source_order=source, report=report)["netsuite"]["line_differences"]]
-    assert "Ryzen AI 7 350" not in names
-    report["targets"][0]["lines"][0].update(net="80.0")
-    diff = [
-        d
-        for d in build(source_order=source, report=report)["netsuite"]["line_differences"]
-        if d["product"] == "Ryzen AI 7 350"
-    ]
-    assert diff == [
-        {
-            "product": "Ryzen AI 7 350",
-            "sku": "FRANWD0007",
-            "solidus_qty": "2",
-            "netsuite_qty": "2.0",
-            "solidus_amount": "90.0",
-            "netsuite_net": "80.0",
-            "differs": ["amount"],
-        }
-    ]
-
-
 def test_netsuite_documents_merge_saved_observation_and_invoice_credits_once_each():
     docs = {d["number"]: d for d in build()["netsuite"]["documents"]}
     assert set(docs) == {"INV363632", "CD410934", "CM11788"}
@@ -348,45 +305,6 @@ async def test_open_case_never_opens_another_tenants_case(world, tenant_b):  # n
 # --- packet review round 1 (gpt-6-astra) ----------------------------------------------
 
 
-def test_included_tax_is_removed_before_comparing_with_netsuite_net():
-    # F1: an EU line priced 120.00 including 20.00 VAT is 100.00 net in NetSuite: no difference.
-    source = deepcopy(SOURCE)
-    source.update(included_tax_total="20.0", additional_tax_total="0.0")
-    source["line_items"] = [
-        {
-            "id": "1",
-            "quantity": "1",
-            "price": "120.0",
-            "total": "120.0",
-            "variant": {"name": "Laptop", "sku": "L1"},
-            "adjustments": [{"label": "VAT", "amount": "20.0", "source_type": "Spree::TaxRate", "included": True}],
-        }
-    ]
-    report = deepcopy(REPORT)
-    report["targets"][0]["lines"] = [{"key": "line:1", "quantity": "1.0", "net": "100.0"}]
-    assert build(source_order=source, report=report)["netsuite"]["line_differences"] == []
-
-
-def test_a_line_with_promotions_or_unattributed_included_tax_is_not_amount_compared():
-    source = deepcopy(SOURCE)
-    source["line_items"] = [
-        {
-            "id": "1",
-            "quantity": "1",
-            "price": "100.0",
-            "total": "90.0",
-            "variant": {"name": "Laptop", "sku": "L1"},
-            "adjustments": [{"label": "Promo", "amount": "-10.0", "source_type": "Spree::PromotionAction"}],
-        }
-    ]
-    report = deepcopy(REPORT)
-    report["targets"][0]["lines"] = [{"key": "line:1", "quantity": "1.0", "net": "77.0"}]
-    assert build(source_order=source, report=report)["netsuite"]["line_differences"] == []
-    source["line_items"][0]["adjustments"] = [{"label": "VAT", "amount": "20.0", "source_type": "Spree::TaxRate"}]
-    source.update(included_tax_total="20.0")
-    assert build(source_order=source, report=report)["netsuite"]["line_differences"] == []
-
-
 def test_documents_include_every_saved_section_the_record_links_use():
     # F2: credits and refunds a fresh read saved under related_refund_documents, deposits and
     # invoice applications are part of the chain the agent needs.
@@ -442,35 +360,6 @@ def test_read_more_names_only_sections_the_saved_reader_accepts():
 # --- packet review round 2: the two shapes made unrepresentable ------------------------
 
 
-@pytest.mark.parametrize(
-    "order_tax, line_changes",
-    [
-        ("20.0", {"adjustments": []}),  # included tax on the order, nothing attributed to the line
-        ("0.0", {"adjustments": [{"label": "VAT", "amount": None, "source_type": "Spree::TaxRate", "included": True}]}),
-        ("0.0", {"included_tax_total": "20.0", "adjustments": []}),
-    ],
-)
-def test_any_included_tax_means_the_amount_is_not_compared(order_tax, line_changes):
-    # Round 2 F1: amounts are compared only when nothing is included in the price.
-    source = deepcopy(SOURCE)
-    source.update(included_tax_total=order_tax)
-    source["line_items"] = [
-        {
-            "id": "1",
-            "quantity": "1",
-            "price": "120.0",
-            "total": "120.0",
-            "variant": {"name": "Laptop", "sku": "L1"},
-            **line_changes,
-        }
-    ]
-    report = deepcopy(REPORT)
-    report["targets"][0]["lines"] = [{"key": "line:1", "quantity": "1.0", "net": "100.0"}]
-    result = build(source_order=source, report=report)
-    assert result["netsuite"]["line_differences"] == []
-    assert result["solidus"]["lines"][0]["amount_not_compared"]
-
-
 def test_the_bound_holds_when_every_field_is_huge():
     # Round 2 F3: 400 comparison adjustments, and a 2,048-character currency, each broke the bound.
     report = deepcopy(REPORT)
@@ -480,3 +369,41 @@ def test_the_bound_holds_when_every_field_is_huge():
     result = build(report=report, case={**CASE, "order_reference": "R" * 3000})
     assert len(json.dumps(result)) <= case_file.MAX_CHARS
     assert result["truncated"] is True
+
+
+# --- lines: copied values only (review rounds 1-3 found inference bugs in every round) --
+
+
+def test_lines_pair_solidus_and_netsuite_values_as_copied():
+    lines = {line["product"]: line for line in build()["lines"]}
+    assert lines["DDR5-5600 - 64GB (2 x 32GB)"] == {
+        "product": "DDR5-5600 - 64GB (2 x 32GB)",
+        "sku": "FRANRM0003X2",
+        "solidus": {"qty": "1", "price": "810.0", "total": "871.45"},
+        "netsuite": {"qty": "2.0", "net": "810.0", "tax": "61.45"},
+    }
+
+
+@pytest.mark.parametrize(
+    "line_changes",
+    [
+        {"adjustments": [{"label": "VAT", "amount": "20.0", "source_type": "Spree::TaxRate", "included": True}]},
+        {"adjustments": [{"label": "Promo", "amount": "-10.0", "source_type": "Spree::PromotionAction"}]},
+        {"adjustments": None, "adjustment_total": "-10.00", "discounted_amount": "90.00"},  # round 3 F6
+        {"quantity": None},  # round 3 F7
+    ],
+)
+def test_nothing_is_derived_about_lines(line_changes):
+    source = deepcopy(SOURCE)
+    source["line_items"][0].update(line_changes)
+    result = build(source_order=source)
+    text = json.dumps(result["lines"])
+    assert "differs" not in text and "amount_not_compared" not in text and "net_for_comparison" not in text
+    assert "line_differences" not in json.dumps(result)
+
+
+def test_netsuite_only_lines_are_listed_by_key():
+    report = deepcopy(REPORT)
+    report["targets"][0]["lines"].append({"key": "line:999", "quantity": "1.0", "net": "5.00"})
+    extra = [line for line in build(report=report)["lines"] if line.get("netsuite_only")]
+    assert extra == [{"netsuite_only": "line:999", "netsuite": {"qty": "1.0", "net": "5.00", "tax": None}}]

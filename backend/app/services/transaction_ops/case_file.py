@@ -7,12 +7,12 @@ saved, refunds and invoice credits, and verified fixes. Fresh reads stay with
 `transaction_ops_accounting_evidence` and the live chain reader (B6); the file says
 where to look next instead of guessing.
 
-Readable names and amounts copied from the inputs. The only computed value is a line's
-Solidus amount (price x quantity) for comparison with NetSuite's line net, and only when
-nothing is included in the price (no included tax, no promotions); otherwise the line
-says why its amount is not compared. The only derived facts are exact comparisons (an adjustment equal
-to the difference, a line whose quantity or amount differs). The file is bounded
-(`MAX_CHARS`, checked last) so no order can flood the context; any cut sets `truncated`.
+Values are copied from the inputs, never computed. Lines are paired Solidus-to-NetSuite
+by line key with their values as saved, and the reader compares them: three review
+rounds each found a new way a derived line comparison turned missing or included
+evidence into a false fact. The only derived fact is exact: an order adjustment equal to
+the order-total difference. The file is bounded (`MAX_CHARS`, enforced by a final
+clipper) so no order can flood the context; any cut sets `truncated`.
 """
 
 from __future__ import annotations
@@ -134,41 +134,19 @@ def _order_adjustments(source, cuts):
     return rows
 
 
-def _comparable_net(li, price, qty, order_includes_tax):
-    """Solidus net to compare with NetSuite's line net, or (None, reason).
-
-    Compared only when nothing is included in the price: no included tax on the order or
-    the line, and no promotions. Anything else would mean inferring tax or discounts, and a
-    wrong inference becomes a false fact (review rounds 1 and 2 on PR B5); quantities are
-    still compared.
-    """
-    adjustments = [a for a in li.get("adjustments") or [] if isinstance(a, dict)]
-    if any(a.get("source_type") != "Spree::TaxRate" for a in adjustments):
-        return None, "promotions on the line"
-    line_included = _amount(li.get("included_tax_total"))
-    if order_includes_tax or (line_included or Decimal(0)) != 0 or any(a.get("included") is True for a in adjustments):
-        return None, "tax included in prices"
-    if price is None or qty is None:
-        return None, "price or quantity missing"
-    return price * qty, None
-
-
 def _solidus(source, cuts):
     if not isinstance(source, dict):
         return {"available": False, "reason": "no saved Solidus order for this case"}
-    order_includes_tax = (_amount(source.get("included_tax_total")) or Decimal(0)) != 0
     lines = []
     for li in source.get("line_items") or []:
         if not isinstance(li, dict):
             continue
         variant = li.get("variant") or {}
-        price, qty = _amount(li.get("price")), _amount(li.get("quantity"))
         promos = [
             {"label": cuts.text(a.get("label")), "amount": a.get("amount")}
             for a in li.get("adjustments") or []
             if isinstance(a, dict) and a.get("source_type") != "Spree::TaxRate"
         ]
-        net, not_compared = _comparable_net(li, price, qty, order_includes_tax)
         lines.append(
             {
                 "id": li.get("id"),
@@ -178,7 +156,6 @@ def _solidus(source, cuts):
                 "price": li.get("price"),
                 "total": li.get("total"),
                 **({"promotions": promos} if promos else {}),
-                **({"net_for_comparison": str(net)} if net is not None else {"amount_not_compared": not_compared}),
             }
         )
     return {
@@ -211,34 +188,38 @@ def _solidus(source, cuts):
     }
 
 
-def _line_differences(solidus, target):
+def _paired_lines(solidus, target):
+    """Solidus lines next to the NetSuite line with the same key, values as saved; then NetSuite-only lines."""
     ns = {line.get("key"): line for line in target.get("lines") or [] if isinstance(line, dict) and line.get("key")}
-    diffs = []
+    pairs, used = [], set()
     for line in solidus.get("lines") or []:
-        other = ns.get(f"line:{line.get('id')}")
-        if not other:
-            continue
-        # NetSuite's net is the line amount (quantity x rate, before tax), so it compares with
-        # the Solidus line's net, never the unit price (live 2026-10-02, R190994976).
-        net = _amount(line.get("net_for_comparison"))
-        differs = []
-        if _amount(other.get("quantity")) != _amount(line.get("qty")):
-            differs.append("quantity")
-        if _amount(other.get("net")) is not None and net is not None and _amount(other.get("net")) != net:
-            differs.append("amount")
-        if differs:
-            diffs.append(
+        key = f"line:{line.get('id')}"
+        other = ns.get(key)
+        used.add(key)
+        pairs.append(
+            {
+                "product": line.get("product"),
+                "sku": line.get("sku"),
+                "solidus": {
+                    "qty": line.get("qty"),
+                    "price": line.get("price"),
+                    "total": line.get("total"),
+                    **({"promotions": line["promotions"]} if line.get("promotions") else {}),
+                },
+                "netsuite": (
+                    {"qty": other.get("quantity"), "net": other.get("net"), "tax": other.get("tax")} if other else None
+                ),
+            }
+        )
+    for key, other in ns.items():
+        if key not in used:
+            pairs.append(
                 {
-                    "product": line.get("product"),
-                    "sku": line.get("sku"),
-                    "solidus_qty": line.get("qty"),
-                    "netsuite_qty": other.get("quantity"),
-                    "solidus_amount": line.get("net_for_comparison"),
-                    "netsuite_net": other.get("net"),
-                    "differs": differs,
+                    "netsuite_only": key,
+                    "netsuite": {"qty": other.get("quantity"), "net": other.get("net"), "tax": other.get("tax")},
                 }
             )
-    return diffs
+    return pairs
 
 
 def _merge_document(docs, doc, cuts):
@@ -345,7 +326,8 @@ def build_case_file(*, case, report, source_order, observation, corrections):
         },
         "comparison": _comparison(report),
         "facts": {"adjustments_equal_to_difference": cuts.take(explaining, MAX_FACTS)},
-        "solidus": solidus,
+        "solidus": {key: value for key, value in solidus.items() if key != "lines"},
+        "lines": cuts.take(_paired_lines(solidus, target), MAX_LINES),
         "netsuite": {
             "sales_order": {
                 "id": so_id,
@@ -358,7 +340,6 @@ def build_case_file(*, case, report, source_order, observation, corrections):
                 "total": target.get("total"),
                 "link": NETSUITE_SALES_ORDER.format(account=account, id=so_id) if so_id and account else None,
             },
-            "line_differences": _line_differences(solidus, target) if solidus.get("available") else [],
             "documents": cuts.take(_documents(observation, report, cuts), MAX_DOCUMENTS),
             "refunds": _refunds(report),
         },
@@ -384,8 +365,6 @@ def build_case_file(*, case, report, source_order, observation, corrections):
         },
         "truncated": False,
     }
-    if solidus.get("available"):
-        solidus["lines"] = cuts.take(solidus["lines"], MAX_LINES)
     result["truncated"] = cuts.any
     return _bounded(result)
 
@@ -401,8 +380,7 @@ def _bounded(result):
     result["truncated"] = True
     solidus, netsuite = result.get("solidus") or {}, result.get("netsuite") or {}
     for holder, key, floor in (
-        (solidus, "lines", 0),
-        (netsuite, "line_differences", 5),
+        (result, "lines", 5),
         (netsuite, "documents", 5),
         (solidus, "order_adjustments", 5),
         (solidus, "payments", 3),
