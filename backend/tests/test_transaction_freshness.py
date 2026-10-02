@@ -135,7 +135,7 @@ def test_no_verified_scan_retains_its_first_eligible_check_deadline():
     e = entity()
     e["coverage"] |= {"status": "not_verified", "completed_until": None}
     result = freshness(e, daily_check_hour=9, now=NOW, configured_at=datetime(2026, 9, 29, 18, tzinfo=timezone.utc))
-    assert result["deadline_at"] == "2026-10-01T00:00:00+00:00"  # Created after check; first checkSep30
+    assert result["deadline_at"] == "2026-09-30T02:00:00+00:00"  # Created11AM; eligible in current cycle
     assert result["state"] == "alert"
 
 
@@ -143,7 +143,7 @@ def test_new_config_created_after_daily_check_gets_initial_grace():
     e = entity()
     e["coverage"] |= {"status": "not_verified", "completed_until": None}
     result = freshness(e, daily_check_hour=9, now=NOW, configured_at=NOW)
-    assert result["deadline_at"] == "2026-10-03T00:00:00+00:00"
+    assert result["deadline_at"] == "2026-10-02T01:00:00+00:00"  # Eight hours from creation at10AM
     assert result["state"] == "within_grace"
 
 
