@@ -229,11 +229,11 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
   the toolless baseline problem (#205) for this domain.
 - **Runs on every PR that touches the resolver** (CI, held-in set) and nightly (full set).
 
-## 8. Slices (each gated by the benchmark)
+## 8. Slices (each gated by the benchmark; work blocks in `plans/2026-10-02-accounting-resolver-blocks.md`)
 
 | Slice | Builds | Exit criterion |
 |---|---|---|
-| S0 | Environment binding at the dispatcher; risk ratings | Tests prove a write to the unchosen environment is refused |
+| S0 | Environment binding at the dispatcher; risk ratings (blocked on a sandbox connector, which needs Aiden's OAuth; must land before S4, not before reads) | Tests prove a write to the unchosen environment is refused |
 | S1 | Resolve benchmark on "Order differences" first: tasks, labelling sheet, Aiden's gold labels, graders, runner; baseline runs of today's agent and the Claude+MCP reference | Numbers for both on the held-in set |
 | S2 | Ops MCP server: read tools first (`case_open`, `evidence_read`, `chain_read`, `netsuite_query/schema`, `precedent_find`) | Reference agent on the new tools ≥ reference on raw tools |
 | S3 | Resolver profile in the orchestrator: ≤10 tools + tool search, skills, output contract, case file log, budgets | Our agent's G1 on held-in ≥ reference; G4, G5 met |
