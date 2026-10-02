@@ -31,5 +31,5 @@ export function useFreshnessStatus() {
     retry: (count, error) => !(error instanceof ApiError && [401, 403].includes(error.status)) && count < 1,
   });
   // Never display cached tenant evidence after access is lost.
-  return { ...query, data: access.allowed ? query.data : undefined };
+  return { ...query, allowed: access.allowed, data: access.allowed ? query.data : undefined };
 }

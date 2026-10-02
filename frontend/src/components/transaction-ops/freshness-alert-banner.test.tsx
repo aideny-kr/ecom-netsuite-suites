@@ -96,6 +96,15 @@ it("removes protected cached evidence on a 403 without retrying the denied reque
   await screen.findByText(/Framework AU/);
   mocks.get.mockRejectedValue(new ApiError("forbidden", 403));
   await act(async () => { await view.client.refetchQueries(); });
-  expect(screen.queryByText(/Framework AU/)).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText(/Framework AU/)).not.toBeInTheDocument());
   expect(mocks.get).toHaveBeenCalledTimes(2);
+});
+
+it("also removes a previous failed-check warning when reconciliation access is revoked", async () => {
+  mocks.get.mockRejectedValue(new Error("offline"));
+  const view = setup();
+  await screen.findByText(/Freshness check failed/);
+  mocks.access.allowed = false;
+  view.refreshTree();
+  expect(screen.queryByLabelText("Reconciliation freshness")).not.toBeInTheDocument();
 });

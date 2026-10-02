@@ -10,6 +10,7 @@ export function FreshnessAlertBanner() {
   const denied = query.error instanceof ApiError && [401, 403].includes(query.error.status);
   const data = denied ? undefined : query.data;
   const alerts = data?.entities.filter(entity => entity.freshness?.state === "alert") || [];
+  if (!query.allowed) return null;
   if (!alerts.length && !data?.truncated && !query.isError) return null;
   if (denied) return null;
 
