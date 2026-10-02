@@ -14,6 +14,9 @@ What counts as needing a human, per tenant:
   grace period (a worker died mid-write);
 * connections currently in ``error`` (a standing condition, not windowed);
 * jobs that failed since the last digest.
+* daily reconciliation coverage that stopped or exceeded its completion deadline.
+  An unchanged coverage window is emailed once after successful delivery; failed
+  deliveries remain retryable. Concurrent duplicate digest workers skip busy tenants.
 
 The digest is read-only: it never retries, resets or resends anything.
 """
@@ -37,6 +40,7 @@ from app.models.tenant import Tenant
 from app.models.transaction_ops import TransactionOperation, TransactionRun
 from app.models.user import Role, User, UserRole
 from app.services import audit_service, email_service
+from app.services.transaction_ops.freshness_digest import claim_digest, collect_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +61,10 @@ _LABELS = {
     "cards": "Write confirmations left indeterminate or stuck executing",
     "connections": "Connections in error",
     "jobs": "Jobs that failed",
+    "freshness": "Daily reconciliation needs attention",
 }
 CATEGORIES = tuple(_LABELS)
+RECORD_CATEGORIES = CATEGORIES[:-1]
 
 
 def _stale_after() -> timedelta:
@@ -180,14 +186,26 @@ async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dic
             func.coalesce(Job.completed_at, Job.updated_at).desc(),
         ),
     }
-    if tuple(queries) != CATEGORIES:  # a plain check, so `python -O` cannot strip it
-        raise RuntimeError(f"digest categories {tuple(queries)} drifted from labels {CATEGORIES}")
+    if tuple(queries) != RECORD_CATEGORIES:  # a plain check, so `python -O` cannot strip it
+        raise RuntimeError(f"digest categories {tuple(queries)} drifted from labels {RECORD_CATEGORIES}")
     counts, ids, truncated = {}, {}, {}
-    for name in CATEGORIES:
+    for name in RECORD_CATEGORIES:
         stmt, order_by = queries[name]
         counts[name], ids[name] = await _category(db, stmt, order_by)
         truncated[name] = counts[name] > len(ids[name])
-    return {"counts": counts, "ids": ids, "truncated": truncated}
+    fresh = await collect_freshness(db, tenant_id, now=now)
+    counts["freshness"] = len(fresh["alerts"])
+    ids["freshness"] = [item["config_id"] for item in fresh["alerts"][:ROW_LIMIT]]
+    truncated["freshness"] = len(fresh["alerts"]) > ROW_LIMIT
+    return {
+        "counts": counts,
+        "ids": ids,
+        "truncated": truncated,
+        "freshness_keys": fresh["keys"],
+        "freshness_alerts": fresh["alerts"][:ROW_LIMIT],
+        "freshness_scopes_checked": fresh["scopes_checked"],
+        "freshness_scope_truncated": fresh["scope_truncated"],
+    }
 
 
 def _epoch(value: datetime | None) -> float:
@@ -237,6 +255,8 @@ async def admin_emails(db, tenant_id: UUID) -> list[str]:
 def render(tenant_name: str, digest: dict, *, since: datetime, until: datetime) -> tuple[str, str, str]:
     total = sum(digest["counts"].values())
     subject = f"[Suite Studio] Ops digest for {tenant_name}: {total} item(s) need attention"
+    if digest.get("freshness_scope_truncated"):
+        subject += " (freshness check incomplete)"
     lines = [
         f"Ops digest for {tenant_name}",
         f"Window: {since.isoformat()} to {until.isoformat()}",
@@ -246,7 +266,41 @@ def render(tenant_name: str, digest: dict, *, since: datetime, until: datetime) 
         f"<h2>Ops digest for {escape(tenant_name)}</h2>",
         f"<p>Window: {since.isoformat()} to {until.isoformat()}</p>",
     ]
-    for name in CATEGORIES:
+    fresh = digest.get("freshness_alerts", [])
+    if fresh or digest.get("freshness_scope_truncated"):
+        count = digest["counts"]["freshness"]
+        suffix = f" (showing {len(fresh)} of {count})" if digest["truncated"]["freshness"] else ""
+        lines.append(f"Daily reconciliation: {count} new alert(s){suffix}")
+        html.append(f"<h3>Daily reconciliation: {count} new alert(s){escape(suffix)}</h3>")
+        for item in fresh:
+            reason = "daily scan stopped" if item["reason"] == "daily_scan_stopped" else "coverage overdue"
+            verified = item["checked_through"] or "No completed daily scan verified"
+            detail = (
+                f"{item['name']}: {reason}. Verified through {verified}; "
+                f"expected {item['expected_checked_through']}. Completion deadline: {item['deadline_at']}."
+            )
+            lines.append(f"  - {detail}")
+            html.append(
+                '<div style="padding:16px;margin:12px 0;border:1px solid #b7791f;'
+                'border-radius:8px;background:#fffaf0;color:#333">'
+                f"<strong>{escape(item['name'])}</strong><p>{escape(detail)}</p></div>"
+            )
+        if digest.get("freshness_scope_truncated"):
+            warning = (
+                f"Freshness checked the first {digest['freshness_scopes_checked']} daily schedules; "
+                "additional schedules were not checked. These counts are incomplete."
+            )
+            lines.append(warning)
+            html.append(f"<p><strong>{escape(warning)}</strong></p>")
+        url = f"{email_service.FRONTEND_URL.rstrip('/')}/settings/ops-status"
+        lines.extend(
+            [f"Ops status: {url}", "Source: saved daily scan coverage; separate from accounting completion.", ""]
+        )
+        html.append(
+            f'<p><a href="{escape(url, quote=True)}">Open Ops status</a></p>'
+            "<p>Source: saved daily scan coverage; separate from accounting completion.</p>"
+        )
+    for name in RECORD_CATEGORIES:
         count = digest["counts"][name]
         if not count:
             continue
@@ -279,7 +333,14 @@ async def run_ops_digest(
     if now.utcoffset() is None:
         raise ValueError("An aware clock is required")
     send = sender or email_service.send_ops_digest_email
-    stats = {"tenants": 0, "sent": 0, "tenant_failed": 0, "truncated": False, "termination_reason": "done"}
+    stats = {
+        "tenants": 0,
+        "sent": 0,
+        "tenant_failed": 0,
+        "tenant_busy": 0,
+        "truncated": False,
+        "termination_reason": "done",
+    }
 
     tenants, stats["truncated"], last = await tenants_due(db, tenant_ids=tenant_ids)
 
@@ -287,9 +348,13 @@ async def run_ops_digest(
         tenant_id = tenant.id
         try:
             await set_tenant_context(db, str(tenant_id))
+            if not await claim_digest(db, tenant_id):
+                await db.rollback()
+                stats["tenant_busy"] += 1
+                continue
             since = last.get(tenant_id) or (now - window)
             digest = await collect(db, tenant_id, now=now, since=since)
-            total = sum(digest["counts"].values())
+            total = sum(digest["counts"].values()) + int(digest["freshness_scope_truncated"])
             # Recipients are only looked up when there is something to send them.
             recipients = await admin_emails(db, tenant_id) if total else []
             failed_recipients = []
@@ -340,7 +405,7 @@ async def run_ops_digest(
             stats["tenant_failed"] += 1
             logger.exception("ops_digest.tenant_failed", extra={"tenant_id": str(tenant_id)})
 
-    if stats["truncated"]:
+    if stats["truncated"] or stats["tenant_busy"]:
         stats["termination_reason"] = "budget"
     elif stats["tenant_failed"]:
         stats["termination_reason"] = "error"
