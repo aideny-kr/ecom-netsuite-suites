@@ -411,6 +411,7 @@ async def run_investigation(
     finding_batch = []
     batch_baseline = None
     staged_source = {}
+    scope_checked = set()
 
     async def flush_findings():
         nonlocal batch_baseline
@@ -653,7 +654,14 @@ async def run_investigation(
         # have separate sessions and cannot mutate the run, its budget or cursor.
         # Each provider read retains its own paid timeout/retry policy. Do not
         # time out the join: target evidence and checkpoint commits must finish.
-        (results, peak), _ = await source_preparation.joined(fetch(), staged.prefetch_orders(refs[0]))
+        ambiguous_scope = progress.get("phase") == "orders" and bool(
+            set(refs).intersection(progress.get("unscoped_replica_refs", []))
+        )
+        if ambiguous_scope:
+            results, peak = await fetch()
+        else:
+            (results, peak), _ = await source_preparation.joined(fetch(), staged.prefetch_orders(refs[0]))
+        eligible = []
         progress["source_prepare_concurrency_peak"] = max(progress.get("source_prepare_concurrency_peak", 0), peak)
         progress["pipeline_prepare_batches"] = progress.get("pipeline_prepare_batches", 0) + 1
         for ref in refs:
@@ -683,6 +691,15 @@ async def run_investigation(
                 )
                 progress[counter] = progress.get(counter, 0) + 1
             staged_source[ref] = (reused, observed["read_at"])
+            orders = observed.get("orders") or []
+            if (
+                len(orders) == 1
+                and orders[0].get("number") == ref
+                and mapping.business_entity_subsidiaries.get(source_entity_key(orders[0])) == config["subsidiary_id"]
+            ):
+                eligible.append(ref)
+        if ambiguous_scope and eligible:
+            await staged.prefetch_orders(eligible[0], references=eligible)
         return True
 
     try:
@@ -1074,6 +1091,57 @@ async def run_investigation(
                 )
                 if count > 1:
                     refs = progress["pending_refs"][:count]
+                    # An authenticated list header proves entity routing only.
+                    # Reject foreign replica candidates before paying for their
+                    # full detail/snapshot/NetSuite preparation. Unknown rows
+                    # retain the exact existing individual-read fallback.
+                    if progress.get("phase") == "orders":
+                        unknown = set(progress.get("unscoped_replica_refs", []))
+                        scope_refs = [ref for ref in refs if ref in unknown and ref not in scope_checked]
+                        if scope_refs:
+                            from app.services.transaction_ops import source_scope
+
+                            if not await reserve(2):
+                                return await finish("budget")
+                            scopes = await bounded_read(
+                                "source_scope_batch",
+                                lambda: source_scope.read_order_scopes(
+                                    db,
+                                    tenant_id,
+                                    direct_source["source_connection_id"],
+                                    scope_refs,
+                                    minimum_versions={
+                                        ref: _time(progress.get("pending_source_versions", {}).get(ref))
+                                        for ref in scope_refs
+                                    },
+                                ),
+                                retry_calls=2,
+                            )
+                            if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
+                                raise FeatureRevokedError
+                            foreign = {
+                                ref
+                                for ref, entity in scopes.items()
+                                if mapping.business_entity_subsidiaries.get(entity) is not None
+                                and mapping.business_entity_subsidiaries[entity] != config["subsidiary_id"]
+                            }
+                            if foreign and not await reserve(0, len(foreign)):
+                                return await finish("budget")
+                            scope_checked.update(scope_refs)
+                            progress["source_scope_batches"] = progress.get("source_scope_batches", 0) + 1
+                            progress["source_scope_candidates"] = progress.get("source_scope_candidates", 0) + len(
+                                scope_refs
+                            )
+                            progress["source_scope_fallbacks"] = progress.get("source_scope_fallbacks", 0) + sum(
+                                ref not in scopes or scopes[ref] not in mapping.business_entity_subsidiaries
+                                for ref in scope_refs
+                            )
+                            progress["source_scope_rejected"] = progress.get("source_scope_rejected", 0) + len(foreign)
+                            progress["outside_scope"] = progress.get("outside_scope", 0) + len(foreign)
+                            progress["pending_refs"] = [ref for ref in progress["pending_refs"] if ref not in foreign]
+                            await save()
+                            if foreign:
+                                continue
                     if not await reserve(0, count):
                         return await finish("budget")
                     from app.services.transaction_ops import source_preparation
@@ -1084,6 +1152,8 @@ async def run_investigation(
                         if not await prepare_concurrently(refs, workers):
                             return await finish("budget")
                     else:
+                        staged.prepared_references = None
+                        prepared_scope = []
                         for ref in refs:
                             if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
                                 return await finish("stall")
@@ -1125,6 +1195,18 @@ async def run_investigation(
                                         db, tenant_id, direct_source["source_connection_id"], ref, observed, now=clock()
                                     )
                             staged_source[ref] = (reused, observed["read_at"])
+                            orders = observed.get("orders") or []
+                            if (
+                                len(orders) == 1
+                                and orders[0].get("number") == ref
+                                and mapping.business_entity_subsidiaries.get(source_entity_key(orders[0]))
+                                == config["subsidiary_id"]
+                            ):
+                                prepared_scope.append(ref)
+                        if progress.get("phase") == "orders" and set(refs).intersection(
+                            progress.get("unscoped_replica_refs", [])
+                        ):
+                            staged.prepared_references = set(prepared_scope)
                     progress["source_staged_groups"] = progress.get("source_staged_groups", 0) + 1
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
             can_validate = snapshot_floor is not None
