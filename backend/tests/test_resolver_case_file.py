@@ -437,3 +437,46 @@ def test_read_more_names_only_sections_the_saved_reader_accepts():
     # F5: the saved-observation reader accepts source, documents, applications and assessment only.
     more = build()["read_more"]["saved_observation"]
     assert set(more["sections"]) <= {"source", "documents", "applications", "assessment"}
+
+
+# --- packet review round 2: the two shapes made unrepresentable ------------------------
+
+
+@pytest.mark.parametrize(
+    "order_tax, line_changes",
+    [
+        ("20.0", {"adjustments": []}),  # included tax on the order, nothing attributed to the line
+        ("0.0", {"adjustments": [{"label": "VAT", "amount": None, "source_type": "Spree::TaxRate", "included": True}]}),
+        ("0.0", {"included_tax_total": "20.0", "adjustments": []}),
+    ],
+)
+def test_any_included_tax_means_the_amount_is_not_compared(order_tax, line_changes):
+    # Round 2 F1: amounts are compared only when nothing is included in the price.
+    source = deepcopy(SOURCE)
+    source.update(included_tax_total=order_tax)
+    source["line_items"] = [
+        {
+            "id": "1",
+            "quantity": "1",
+            "price": "120.0",
+            "total": "120.0",
+            "variant": {"name": "Laptop", "sku": "L1"},
+            **line_changes,
+        }
+    ]
+    report = deepcopy(REPORT)
+    report["targets"][0]["lines"] = [{"key": "line:1", "quantity": "1.0", "net": "100.0"}]
+    result = build(source_order=source, report=report)
+    assert result["netsuite"]["line_differences"] == []
+    assert result["solidus"]["lines"][0]["amount_not_compared"]
+
+
+def test_the_bound_holds_when_every_field_is_huge():
+    # Round 2 F3: 400 comparison adjustments, and a 2,048-character currency, each broke the bound.
+    report = deepcopy(REPORT)
+    report["balance"]["adjustments"] = [{"kind": f"kind-{i}-" + "z" * 50, "total": "1.00"} for i in range(400)]
+    report["balance"]["currency"] = "\U0001f4b0" * 2048
+    report["balance"]["reason"] = "r" * 5000
+    result = build(report=report, case={**CASE, "order_reference": "R" * 3000})
+    assert len(json.dumps(result)) <= case_file.MAX_CHARS
+    assert result["truncated"] is True

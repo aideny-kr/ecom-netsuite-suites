@@ -8,9 +8,9 @@ saved, refunds and invoice credits, and verified fixes. Fresh reads stay with
 where to look next instead of guessing.
 
 Readable names and amounts copied from the inputs. The only computed value is a line's
-Solidus net for comparison with NetSuite's line net (price x quantity, less tax the line
-marks as included); a line with promotions, or included tax it does not attribute, is
-not amount-compared. The only derived facts are exact comparisons (an adjustment equal
+Solidus amount (price x quantity) for comparison with NetSuite's line net, and only when
+nothing is included in the price (no included tax, no promotions); otherwise the line
+says why its amount is not compared. The only derived facts are exact comparisons (an adjustment equal
 to the difference, a line whose quantity or amount differs). The file is bounded
 (`MAX_CHARS`, checked last) so no order can flood the context; any cut sets `truncated`.
 """
@@ -135,17 +135,22 @@ def _order_adjustments(source, cuts):
 
 
 def _comparable_net(li, price, qty, order_includes_tax):
-    """Solidus net to compare with NetSuite's line net, or (None, reason) when it would be a guess."""
+    """Solidus net to compare with NetSuite's line net, or (None, reason).
+
+    Compared only when nothing is included in the price: no included tax on the order or
+    the line, and no promotions. Anything else would mean inferring tax or discounts, and a
+    wrong inference becomes a false fact (review rounds 1 and 2 on PR B5); quantities are
+    still compared.
+    """
     adjustments = [a for a in li.get("adjustments") or [] if isinstance(a, dict)]
     if any(a.get("source_type") != "Spree::TaxRate" for a in adjustments):
         return None, "promotions on the line"
-    taxes = [a for a in adjustments if a.get("source_type") == "Spree::TaxRate"]
-    if order_includes_tax and any(not isinstance(a.get("included"), bool) for a in taxes):
-        return None, "included tax not attributed to the line"
+    line_included = _amount(li.get("included_tax_total"))
+    if order_includes_tax or (line_included or Decimal(0)) != 0 or any(a.get("included") is True for a in adjustments):
+        return None, "tax included in prices"
     if price is None or qty is None:
         return None, "price or quantity missing"
-    included = sum((_amount(a.get("amount")) or Decimal(0) for a in taxes if a.get("included") is True), Decimal(0))
-    return price * qty - included, None
+    return price * qty, None
 
 
 def _solidus(source, cuts):
@@ -420,14 +425,23 @@ def _bounded(result):
     ]
     if _size(result) <= MAX_CHARS:
         return result
-    # Last resort: the comparison and identity only, so the file never exceeds the bound.
-    return {
-        "case": result.get("case"),
-        "comparison": result.get("comparison"),
-        "read_more": result.get("read_more"),
-        "truncated": True,
-        "note": "The saved evidence for this case is too large to summarise; read sections through read_more.",
-    }
+    # The bound by construction: clip every string and list, tighter each pass, then a fixed
+    # file. Patching one oversized field at a time failed twice (review rounds 1 and 2).
+    for text_limit, list_limit in ((200, 10), (80, 5), (40, 3), (20, 1)):
+        clipped = _clip(result, text_limit, list_limit)
+        if _size(clipped) <= MAX_CHARS:
+            return clipped
+    return {"truncated": True, "note": "The saved evidence for this case is too large to summarise; open it by id."}
+
+
+def _clip(value, text_limit, list_limit):
+    if isinstance(value, str):
+        return value if len(value) <= text_limit else value[: text_limit - 1] + "…"
+    if isinstance(value, list):
+        return [_clip(item, text_limit, list_limit) for item in value[:list_limit]]
+    if isinstance(value, dict):
+        return {key: _clip(item, text_limit, list_limit) for key, item in value.items()}
+    return value
 
 
 async def open_case(db, tenant_id, *, case_id=None, order_reference=None):
