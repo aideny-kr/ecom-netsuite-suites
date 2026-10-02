@@ -175,15 +175,18 @@ async def reconcile_run(db, *, tenant_id, schedule_id, job_id, actor_id):
             return {"verification": "uncertain", "detail": "schedule execution or reconciliation in progress"}
         try:
             await db.refresh(job)
-            if (job.result_summary or {}).get("verification") == "verified":
-                return {"verification": "verified", "job_id": str(job_id)}
+            if (job.result_summary or {}).get("verification") in {"verified", "reconciled"}:
+                return {"verification": job.result_summary["verification"], "job_id": str(job_id)}
             if (job.result_summary or {}).get("verification") != "uncertain" or job.status == "running":
                 raise EvidenceUnavailableError("run is not awaiting reconciliation")
             summary = dict(job.result_summary or {})
             from app.services.jobs.report_queries import queries_uncertain
 
             if queries_uncertain(summary):
-                raise EvidenceUnavailableError("Report query usage is unknown; provider-specific recovery required")
+                from app.services.jobs.query_recovery import reconcile_queries
+
+                summary = await reconcile_queries(db, tenant_id=tenant_id, actor_id=actor_id, job=job)
+                await set_tenant_context(db, str(tenant_id))
             parameters = job.parameters or {}
             steps = (parameters.get("plan") or {}).get("steps") or []
             receipts = summary.get("step_receipts", {})
@@ -193,6 +196,37 @@ async def reconcile_run(db, *, tenant_id, schedule_id, job_id, actor_id):
                 )
             ).all()
             effects = [e for e in events if e.action.endswith(".started") and e.category == "jobs"]
+            if summary.get("report_queries") and not effects:
+                # Query usage is known, but the interrupted report is NOT a
+                # verified delivery. Fail the occurrence without rerunning it.
+                await _authorize(db, tenant_id, actor_id)
+                await db.refresh(job, with_for_update=True)
+                cancelled = job.status == "cancelled"
+                job.result_summary = {
+                    **job.result_summary,
+                    "verification": "reconciled",
+                    "execution_complete": False,
+                    "reason": "blocked" if cancelled else "error",
+                    "detail": "Query usage reconciled; interrupted report not replayed or delivered",
+                }
+                if not cancelled:
+                    job.status = "failed"
+                job.completed_at = datetime.now(timezone.utc)
+                await db.refresh(schedule, with_for_update=True)
+                schedule.last_run_status = job.result_summary["reason"]
+                await audit_service.log_event(
+                    db,
+                    tenant_id=tenant_id,
+                    category="jobs",
+                    action="jobs.run.reconciled",
+                    actor_id=actor_id,
+                    resource_type="job",
+                    resource_id=str(job_id),
+                    job_id=job_id,
+                    payload={"verification": "reconciled", "source": "query_usage_readback", "replayed": False},
+                )
+                await db.commit()
+                return {"verification": "reconciled", "job_id": str(job_id)}
             writes = [step for step in steps if step.get("type") == "drive.upload"]
             if (
                 not writes

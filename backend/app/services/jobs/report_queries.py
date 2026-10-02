@@ -5,6 +5,7 @@ provider may have spent money; it must never become zero usage or a blind retry.
 USD is intentionally unsupported as a ceiling without an account pricing contract.
 """
 
+import hashlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -36,7 +37,7 @@ def query_bytes(summary):
 
 
 def queries_uncertain(summary):
-    return any(q.get("state") != "complete" for q in (summary or {}).get("report_queries", []))
+    return any(q.get("state") not in {"complete", "not_dispatched"} for q in (summary or {}).get("report_queries", []))
 
 
 class ReportQueries:
@@ -45,15 +46,17 @@ class ReportQueries:
         self.bytes_processed = 0
         self.error = None
         self.pending = None
+        self.provider_job_id = None
 
-    async def _job(self):
+    async def _job(self, *, settlement=False):
         await set_tenant_context(self.ctx.db, str(self.ctx.tenant_id))
         job = await self.ctx.db.scalar(
             select(Job)
             .where(Job.id == self.ctx.run_id, Job.tenant_id == self.ctx.tenant_id)
+            .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if job is None or job.status != "running":
+        if job is None or (not settlement and job.status != "running"):
             raise ReportQueryUnknownError("Report query requires its running job")
         return job
 
@@ -63,7 +66,9 @@ class ReportQueries:
         if self.error:
             raise ReportQueryBudgetError(self.error)
 
-    async def begin(self, *, source_id=None, query_sha256=None):
+    async def begin(
+        self, *, source_id=None, query_sha256=None, project_id=None, location=None, credential_binding=None
+    ):
         self.check()
         if self.ctx.budget.get("usd") is not None:
             self.error = "Report USD ceilings require an account pricing contract; use scan/time limits"
@@ -86,6 +91,15 @@ class ReportQueries:
         cap = min(1_000_000_000, remaining) if remaining is not None else 1_000_000_000
         receipts = list(summary.get("report_queries", []))
         self.pending = len(receipts)
+        self.provider_job_id = (
+            "ss_report_"
+            + hashlib.sha256(
+                (
+                    f"{self.ctx.tenant_id}:{self.ctx.run_id}:{self.ctx.current_step_id}:{self.pending}:"
+                    f"{source_id}:{project_id}:{location or 'US'}:{query_sha256}"
+                ).encode()
+            ).hexdigest()
+        )
         receipts.append(
             {
                 "step_id": self.ctx.current_step_id,
@@ -93,6 +107,10 @@ class ReportQueries:
                 "maximum_bytes_billed": cap,
                 "source_id": source_id,
                 "query_sha256": query_sha256,
+                "provider_job_id": self.provider_job_id,
+                "project_id": project_id,
+                "location": location or "US",
+                "credential_binding": credential_binding,
             }
         )
         job.result_summary = {**summary, "report_queries": receipts}
@@ -106,7 +124,9 @@ class ReportQueries:
             self.check()  # keep the pending reservation; never coerce absent usage to zero
         if billed is not None and (not isinstance(billed, int) or isinstance(billed, bool) or billed < 0):
             self.check()
-        job = await self._job()
+        if result.get("job_id") != self.provider_job_id:
+            raise ReportQueryUnknownError("Provider query identity does not match reservation")
+        job = await self._job(settlement=True)
         summary = dict(job.result_summary or {})
         receipts = list(summary.get("report_queries", []))
         if self.pending is None or self.pending >= len(receipts) or receipts[self.pending]["state"] != "pending":
@@ -129,6 +149,24 @@ class ReportQueries:
         if limit is not None and query_bytes(job.result_summary) > limit:
             self.error = "Report scan budget exceeded"
         self.check()
+        if job.status != "running":
+            raise ReportQueryUnknownError("Report stopped; usage settled without continuing execution")
+
+    async def not_dispatched(self):
+        job = await self._job(settlement=True)
+        summary = dict(job.result_summary or {})
+        receipts = list(summary.get("report_queries", []))
+        if self.pending is None or receipts[self.pending].get("provider_job_id") != self.provider_job_id:
+            raise ReportQueryUnknownError("Report query reservation changed")
+        receipts[self.pending] = {
+            **receipts[self.pending],
+            "state": "not_dispatched",
+            "bytes_processed": 0,
+            "bytes_billed": 0,
+        }
+        job.result_summary = {**summary, "report_queries": receipts}
+        await self.ctx.db.commit()
+        self.pending = None
 
 
 @contextmanager

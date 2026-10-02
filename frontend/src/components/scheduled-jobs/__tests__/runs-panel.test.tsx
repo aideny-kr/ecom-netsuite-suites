@@ -72,3 +72,11 @@ it("never turns provider output text into an unsafe external link", () => {
   expect(screen.getByText("Uncertain")).toBeInTheDocument();
   expect(screen.queryByRole("link")).not.toBeInTheDocument();
 });
+
+
+it("distinguishes recovered usage from verified delivery", () => {
+  mocks.runs.mockReturnValue({ data: [run({ verification: "reconciled", status: "failed", reason: "error" })], isPending: false });
+  wrap(<RunsPanel scheduleId="s-1" />);
+  expect(screen.getByText("Usage reconciled")).toBeInTheDocument();
+  expect(screen.queryByText("Delivery verified")).not.toBeInTheDocument();
+});

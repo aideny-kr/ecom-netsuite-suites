@@ -192,7 +192,7 @@ it("step 2 saves bounded cadence then opens the exact plan for approval", async 
   expect(routerPush).toHaveBeenCalledWith("/scheduled-jobs/s-9");
 });
 
-it("does not impose query budgets on report-only plans or a default timeout", async () => {
+it("offers a scan limit on report-only plans without claiming USD pricing", async () => {
   mocks.scheduledJob.mockReturnValue({ data: { ...detail(), plan_json: { steps: [{ id: "r", type: "report.compose", params: {} }] } }, isPending: false, isError: false });
   createMutate.mockImplementation((_body, { onSuccess }) => onSuccess({ id: "s-9" }));
   wrap(<NewJob />);
@@ -200,8 +200,9 @@ it("does not impose query budgets on report-only plans or a default timeout", as
   fireEvent.click(screen.getByRole("button", { name: "Compile plan →" }));
   await screen.findByRole("button", { name: "Save" });
   expect(screen.queryByLabelText("Maximum query cost (USD)")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("Maximum bytes scanned")).not.toBeInTheDocument();
-  expect(screen.getByText(/internal report queries are not metered/i)).toBeInTheDocument();
+  expect(screen.getByLabelText("Maximum bytes scanned")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Maximum bytes scanned"), { target: { value: "10000" } });
+  expect(screen.getByText(/including queries inside reports/i)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
-  expect(updateMutate).toHaveBeenCalledWith(expect.objectContaining({ budget: {} }), expect.anything());
+  expect(updateMutate).toHaveBeenCalledWith(expect.objectContaining({ budget: { bytes_scanned: 10000 } }), expect.anything());
 });

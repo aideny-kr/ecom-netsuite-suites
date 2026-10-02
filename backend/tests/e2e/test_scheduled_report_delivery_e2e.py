@@ -85,7 +85,7 @@ async def setup_report_workflow(
             "truncated": failure == "partial" and rid == "r_items",
             "bytes_processed": None if failure == "unknown_usage" else 1024,
             "bytes_billed": 1024,
-            "job_id": f"synthetic-{rid}",
+            "job_id": kwargs["job_id"],
             "cache_hit": False,
         }
 

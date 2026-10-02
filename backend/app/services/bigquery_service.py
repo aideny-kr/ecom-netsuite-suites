@@ -8,11 +8,16 @@ Tests mock _get_client so the sync calls are instant.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from typing import Any
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
+
+
+class QueryNotDispatchedError(RuntimeError):
+    """Validation/client setup failed before any query submission."""
 
 
 class BigQueryClientError(RuntimeError):
@@ -91,6 +96,7 @@ async def execute_query(
     max_bytes_billed: int = 1_000_000_000,
     timeout_seconds: int = 30,
     location: str | None = None,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute a read-only BigQuery SQL query.
 
@@ -105,12 +111,20 @@ async def execute_query(
     BI-tool surface -- do NOT add a dry run to `execute_query` casually,
     since every call here already pays for one real query execution.
     """
-    _validate_read_only(query)
 
     def _sync_execute():
-        client = _get_client(credentials, project_id, location=location)
-        job_config = bigquery.QueryJobConfig(maximum_bytes_billed=max_bytes_billed)
-        job = client.query(query, job_config=job_config)
+        try:
+            _validate_read_only(query)
+            client = _get_client(credentials, project_id, location=location)
+            job_config = bigquery.QueryJobConfig(maximum_bytes_billed=max_bytes_billed)
+        except Exception as exc:
+            if job_id is not None:
+                raise QueryNotDispatchedError("Query validation or client setup failed before submission") from exc
+            raise
+        # A scheduled report owns this identity. Never let SDK job retries
+        # create another billable query under a new ID after a failed job.
+        options = {"job_id": job_id, "job_retry": None, "location": location or "US"} if job_id else {}
+        job = client.query(query, job_config=job_config, **options)
         result = job.result(timeout=timeout_seconds)
 
         columns = [field.name for field in result.schema]
@@ -135,6 +149,32 @@ async def execute_query(
         }
 
     return await asyncio.to_thread(_sync_execute)
+
+
+async def read_query_receipt(credentials: dict, project_id: str, job_id: str, *, location: str) -> dict:
+    """Read jobs.get metadata only. Missing/running/error-without-usage stays unknown.
+
+    A 404 cannot prove no dispatch (visibility, retention and location matter).
+    Never call query(), result(), cancel(), or retry the original operation here.
+    """
+
+    def read():
+        client = _get_client(credentials, project_id, location=location)
+        job = client.get_job(job_id, project=project_id, location=location, retry=None, timeout=10)
+        return {
+            "state": job.state,
+            "job_id": job.job_id,
+            "project_id": job.project,
+            "location": job.location,
+            "query_sha256": hashlib.sha256(job.query.encode()).hexdigest() if isinstance(job.query, str) else None,
+            "maximum_bytes_billed": job.maximum_bytes_billed,
+            "bytes_processed": job.total_bytes_processed,
+            "bytes_billed": job.total_bytes_billed,
+            "cache_hit": job.cache_hit,
+            "provider_failed": job.error_result is not None,
+        }
+
+    return await asyncio.to_thread(read)
 
 
 async def discover_schema(
