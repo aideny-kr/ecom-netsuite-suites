@@ -6,11 +6,11 @@ from zoneinfo import ZoneInfo
 GRACE_HOURS = 8
 
 
-def freshness(entity, *, daily_check_hour, now):
+def freshness(entity, *, daily_check_hour, now, configured_at=None):
     """A standing condition, cleared by verified coverage rather than old errors.
 
-    The deadline belongs to the expected coverage day, not to the latest run or
-    heartbeat. Starting another run cannot move it. Retryable stops within their
+    The deadline belongs to the first missing coverage day, not to the latest
+    expected day, run or heartbeat. Starting another run cannot move it. Retryable stops within their
     finite continuation window get the grace period; terminal stops do not.
     """
     coverage, schedule = entity["coverage"], entity["schedule"]
@@ -21,7 +21,19 @@ def freshness(entity, *, daily_check_hour, now):
         return result | {"state": "paused"}
     zone = ZoneInfo(schedule["timezone"])
     expected = datetime.fromisoformat(coverage["expected_until"]).astimezone(zone)
-    check = datetime.combine(expected.date(), time(daily_check_hour), zone).astimezone(timezone.utc)
+    completed = datetime.fromisoformat(coverage["completed_until"]) if coverage.get("completed_until") else None
+    due_day = expected.date()
+    if coverage["status"] != "up_to_date":
+        if completed:
+            due_day = min(due_day, completed.astimezone(zone).date() + timedelta(days=1))
+        elif configured_at is not None:
+            # Without any verified scan, preserve the first possible check's
+            # deadline. A broken initial schedule must not get new grace daily.
+            created = configured_at.astimezone(zone)
+            due_day = created.date()
+            if datetime.combine(due_day, time(daily_check_hour), zone) < created:
+                due_day += timedelta(days=1)
+    check = datetime.combine(due_day, time(daily_check_hour), zone).astimezone(timezone.utc)
     deadline = check + timedelta(hours=GRACE_HOURS)
     result["deadline_at"] = deadline.isoformat()
     if coverage["status"] == "up_to_date":
@@ -34,7 +46,6 @@ def freshness(entity, *, daily_check_hour, now):
     # Only a failed window still missing from coverage is relevant. An old
     # failed attempt is not evidence that a newer window stopped.
     failed_end = datetime.fromisoformat(latest["window_end"]) if latest and latest.get("window_end") else None
-    completed = datetime.fromisoformat(coverage["completed_until"]) if coverage.get("completed_until") else None
     missing_window = failed_end is not None and (completed is None or failed_end > completed)
     stopped = (
         latest

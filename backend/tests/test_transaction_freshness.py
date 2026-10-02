@@ -119,6 +119,34 @@ def test_before_cutoff_uses_previous_days_unmet_deadline():
     assert check(e, datetime(2026, 10, 1, 15, tzinfo=timezone.utc))["reason"] == "coverage_overdue"
 
 
+def test_multiple_days_behind_do_not_receive_new_grace_at_each_daily_cutoff():
+    e = entity()
+    e["coverage"]["completed_until"] = "2026-09-29T07:00:00+00:00"
+    assert check(e)["reason"] == "coverage_overdue"  # 10AM PDT, yesterday's deadline already missed
+    assert check(e)["deadline_at"] == "2026-10-01T00:00:00+00:00"
+    e["active_runs"] = [{"origin": "schedule"}]
+    e["coverage"]["expected_until"] = "2026-10-02T07:00:00+00:00"
+    assert check(e, datetime(2026, 10, 2, 17, tzinfo=timezone.utc))["deadline_at"] == "2026-10-01T00:00:00+00:00"
+    e["coverage"]["completed_until"] = "2026-10-01T07:00:00+00:00"
+    assert check(e, datetime(2026, 10, 2, 17, tzinfo=timezone.utc))["state"] == "within_grace"
+
+
+def test_no_verified_scan_retains_its_first_eligible_check_deadline():
+    e = entity()
+    e["coverage"] |= {"status": "not_verified", "completed_until": None}
+    result = freshness(e, daily_check_hour=9, now=NOW, configured_at=datetime(2026, 9, 29, 18, tzinfo=timezone.utc))
+    assert result["deadline_at"] == "2026-10-01T00:00:00+00:00"  # Created after check; first checkSep30
+    assert result["state"] == "alert"
+
+
+def test_new_config_created_after_daily_check_gets_initial_grace():
+    e = entity()
+    e["coverage"] |= {"status": "not_verified", "completed_until": None}
+    result = freshness(e, daily_check_hour=9, now=NOW, configured_at=NOW)
+    assert result["deadline_at"] == "2026-10-03T00:00:00+00:00"
+    assert result["state"] == "within_grace"
+
+
 @pytest.mark.parametrize(
     "day,midnight,deadline",
     [("2026-11-01", "07:00", "2026-11-02T01:00:00+00:00"), ("2026-03-08", "08:00", "2026-03-09T00:00:00+00:00")],
@@ -126,6 +154,7 @@ def test_before_cutoff_uses_previous_days_unmet_deadline():
 def test_dst_uses_local_check_time_then_elapsed_grace(day, midnight, deadline):
     e = entity()
     e["coverage"]["expected_until"] = f"{day}T{midnight}:00+00:00"
+    e["coverage"]["completed_until"] = None
     assert check(e)["deadline_at"] == deadline
 
 
@@ -133,4 +162,5 @@ def test_non_pacific_check_hour_is_respected():
     e = entity()
     e["schedule"]["timezone"] = "Australia/Sydney"
     e["coverage"]["expected_until"] = "2026-09-30T14:00:00+00:00"
+    e["coverage"]["completed_until"] = None
     assert freshness(e, daily_check_hour=6, now=NOW)["deadline_at"] == "2026-10-01T04:00:00+00:00"

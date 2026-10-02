@@ -375,7 +375,9 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
             "next_action": _next_action(config, last, snapshots, cover, planned, recovery, now),
         }
         policy = ReconciliationPolicy.model_validate((config.mapping_json or {}).get("reconciliation_policy") or {})
-        entity["freshness"] = freshness(entity, daily_check_hour=policy.daily_check_hour, now=now)
+        entity["freshness"] = freshness(
+            entity, daily_check_hour=policy.daily_check_hour, now=now, configured_at=config.created_at
+        )
         result["entities"].append(entity)
     return result
 
