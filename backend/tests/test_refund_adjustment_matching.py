@@ -544,3 +544,37 @@ async def test_a_subsidiary_that_has_not_declared_its_tax_accounts_stays_as_it_w
     assert result["amount"] == Decimal(US_CREDIT_TOTAL)
     assert result["tax_adjustments"] == []
     assert reader.ledger_reads == 0, "and it should not spend a provider call to find that out"
+
+
+# Packet review of the invoice-credit change (2026-10-01), F1: a credit memo already
+# subtracted as a verified refund tax adjustment must not be subtracted again as an
+# invoice credit.
+
+
+def _with_invoice_credit(case, credit_id):
+    s, t, c, r = case
+    r["target"]["dependency_manifest"] = {"version": 1, "order_id": "77", "transaction_ids": ["77"]}
+    r["target"]["invoice_credits"] = {
+        "complete": True,
+        "credits": [{"id": credit_id, "number": "CM" + credit_id, "invoice_id": "9", "total": "20", "tax": "0"}],
+        "total": "20",
+        "tax": "0",
+    }
+    return s, t, c, r
+
+
+def test_a_tax_adjustment_credit_is_never_also_counted_as_an_invoice_credit():
+    s, t, c, r = _with_invoice_credit(balance_case(), "3")  # "3" is the tax reversal's credit memo
+    s["orders"][0]["total"] = "80"
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["status"] == "difference"
+    assert result["amounts"]["order_total"]["target"] == "100.00"
+    assert not any(a.get("kind") == "invoice_credit_memos" for a in result.get("adjustments") or [])
+
+
+def test_a_different_invoice_credit_still_counts_beside_a_tax_adjustment():
+    s, t, c, r = _with_invoice_credit(balance_case(), "5")
+    s["orders"][0]["total"] = "80"
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["status"] == "matched"
+    assert result["amounts"]["order_total"] == {"source": "80.00", "target": "80.00", "delta": "0.00"}

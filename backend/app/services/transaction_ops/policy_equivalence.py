@@ -13,7 +13,7 @@ from decimal import Decimal
 from app.services.transaction_ops.evidence_contract import VERSION
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile
 
-RULE_VERSION = 1
+RULE_VERSION = 2  # 2: a saved order-total difference without an invoice-credit read is affected
 SCOPE_KEYS = (
     "source_connection_id",
     "source_step_id",
@@ -152,6 +152,12 @@ def evaluate(report, snapshot, changed, *, evaluated_at):
         for metric in ("order_total", "tax", "refunds"):
             if not all(Decimal(balance["amounts"][metric][key]).is_finite() for key in ("source", "target", "delta")):
                 return gap("original_numeric_result_invalid")
+        # 2026-10-01: credit memos created from the order's invoice can explain an
+        # order-total difference (order_reconciliation._invoice_credits). A saved
+        # difference observed before credits were read is affected, so only those
+        # orders are read again; matched orders and other differences keep reuse.
+        if "invoice_credits" not in target and Decimal(balance["amounts"]["order_total"]["delta"]) != 0:
+            return gap("invoice_credits_not_read", "affected")
         return {
             "status": "equivalent",
             "reason": "changed_reasons_absent",
