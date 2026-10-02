@@ -99,6 +99,7 @@ async def test_sparse_owned_pages_fill_one_financial_batch_without_foreign_reads
     assert [set(v) for k, v in events if k == "target_prefetch"] == [own]
     assert {ref for k, ref in events if k == "compare"} == own
     assert all(len(call.args[3]) <= 10 for call in batch.call_args_list)
+    assert batch.await_count <= 2 * (len(refs) // 20) + 1
     assert max(len(p.get("pending_refs", [])) for p in snapshots) <= 29
     current = await state.get_run(db, actor.tenant_id, run.id)
     assert current.orders_used == len(refs) and current.api_calls_held == 0

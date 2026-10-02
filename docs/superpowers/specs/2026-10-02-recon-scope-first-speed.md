@@ -160,3 +160,12 @@ financial orders; cancel/disable/checkpoint/provider/page/lease failures are fen
 Fixtures now use valid nine-digit numbers and matching discovery/detail timestamps.
 Exact tested file hashes are captured before commit and verified against the
 reviewed candidate; actual base for this iteration6d5c55a013bff6af68928eb442a092f0d64bd8f0.
+
+Pre-release review of7c678642 foundF1major/F2minor: retained owned prefix
+shrinks routing batches to one unknown row, and tests lacked a call-count limit.
+Self-review and native Opus5.5High independently found the same issue. Fixed before
+merge/deploy: select up to10 unchecked unknown references from the bounded whole
+buffer, independently of the<=10 financial slice. A200candidate paginated cohort
+now asserts<=21 headercalls (two per20 plus initial cold boundary). All135checks
+PASS46.17s on corrected source; new exact-head review/CI stillrequired.7c image
+never deployed; its completed failed review retained as evidence, not authority.

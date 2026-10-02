@@ -1163,7 +1163,11 @@ async def run_investigation(
                     # retain the exact existing individual-read fallback.
                     if scope_first() and not scope_batch_disabled and progress.get("phase") == "orders":
                         unknown = set(progress.get("unscoped_replica_refs", []))
-                        scope_refs = [ref for ref in refs if ref in unknown and ref not in scope_checked]
+                        # Retained owned candidates must not shrink routing
+                        # batches to one unknown row. The entire buffer is
+                        # bounded29; this paid header read remains max10.
+                        candidates = progress["pending_refs"] if progress.get("source_owned_fill_pages") else refs
+                        scope_refs = [ref for ref in candidates if ref in unknown and ref not in scope_checked][:count]
                         if scope_refs:
                             from app.services.transaction_ops import source_scope
 
