@@ -71,7 +71,7 @@ class EvidenceDrive(FakeDriveClient):
         return result
 
 
-async def uncertain_delivery(db, monkeypatch):
+async def uncertain_delivery(db, monkeypatch, *, with_query=False):
     tenant = await create_test_tenant(db)
     user, _ = await create_test_user(db, tenant, role_name="admin")
     report = await _seed_report(db, tenant, user)
@@ -82,7 +82,18 @@ async def uncertain_delivery(db, monkeypatch):
     monkeypatch.setattr(delivery, "_render_xlsx_bytes", lambda r: b"synthetic-xlsx")
 
     async def compose(ctx, params):
-        return {"report_id": str(report.id), "report": report}
+        if with_query:
+            from app.services.jobs.report_queries import report_queries
+
+            with report_queries(ctx) as usage:
+                await usage.begin()
+                await usage.complete({"bytes_processed": 1024, "bytes_billed": 1024, "job_id": usage.provider_job_id})
+        return {
+            "report_id": str(report.id),
+            "report": report,
+            "bytes_processed": 1024 if with_query else 0,
+            "report_query_bytes": 1024 if with_query else 0,
+        }
 
     monkeypatch.setitem(STEP_REGISTRY, "report.compose", _fake_spec("read", compose))
     plan = {
@@ -349,3 +360,24 @@ async def test_reconciliation_audit_contains_only_delivery_evidence(db, monkeypa
         select(AuditEvent).where(AuditEvent.job_id == job.id, AuditEvent.action == "jobs.run.reconciled")
     )
     assert set(event.payload["outputs"]) == {"upload"}
+
+
+async def test_interrupted_delivery_and_readback_reconstruct_completed_query_usage(db, monkeypatch):
+    tenant, user, schedule, job, connector, drive = await uncertain_delivery(db, monkeypatch, with_query=True)
+    summary = {k: v for k, v in job.result_summary.items() if k != "usage"}
+    job.result_summary = summary
+    job.status = "running"
+    await db.commit()
+    assert await jobs._settle_interrupted(db, schedule, job) == "blocked"
+    await db.refresh(job)
+    assert job.result_summary["usage"]["bytes_scanned"] == 1024
+    # Also repair an older uncertain run that already missed reconstruction.
+    job.result_summary = {k: v for k, v in job.result_summary.items() if k != "usage"}
+    await db.commit()
+    before = list(drive.calls)
+    result = await reconcile(db, tenant, user, schedule, job)
+    assert result["verification"] == "verified"
+    assert job.result_summary["usage"]["bytes_scanned"] == 1024
+    assert job.result_summary["usage"]["usd"] is None
+    assert set(drive.calls[len(before) :]) == {"read_evidence"}
+    assert drive.calls.count("upload_new") == 2

@@ -180,7 +180,7 @@ async def reconcile_run(db, *, tenant_id, schedule_id, job_id, actor_id):
             if (job.result_summary or {}).get("verification") != "uncertain" or job.status == "running":
                 raise EvidenceUnavailableError("run is not awaiting reconciliation")
             summary = dict(job.result_summary or {})
-            from app.services.jobs.report_queries import queries_uncertain
+            from app.services.jobs.report_queries import queries_uncertain, rebuild_query_usage
 
             if queries_uncertain(summary):
                 from app.services.jobs.query_recovery import reconcile_queries
@@ -202,8 +202,10 @@ async def reconcile_run(db, *, tenant_id, schedule_id, job_id, actor_id):
                 await _authorize(db, tenant_id, actor_id)
                 await db.refresh(job, with_for_update=True)
                 cancelled = job.status == "cancelled"
+                summary = dict(job.result_summary or {})
+                summary["usage"] = rebuild_query_usage(summary)
                 job.result_summary = {
-                    **job.result_summary,
+                    **summary,
                     "verification": "reconciled",
                     "execution_complete": False,
                     "reason": "blocked" if cancelled else "error",
@@ -256,6 +258,9 @@ async def reconcile_run(db, *, tenant_id, schedule_id, job_id, actor_id):
             await db.refresh(job, with_for_update=True)
             await db.refresh(schedule, with_for_update=True)
             cancelled = job.status == "cancelled"
+            summary = dict(job.result_summary or {})
+            if summary.get("report_queries"):
+                summary["usage"] = rebuild_query_usage(summary)
             job.result_summary = {
                 **summary,
                 "verification": "verified",

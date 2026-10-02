@@ -914,16 +914,18 @@ async def _settle_completed_receipt(db, row, job) -> bool:
 
 
 async def _settle_interrupted(db, row, job) -> str:
-    if await _effect_started(db, row.tenant_id, job.id):
+    from app.services.jobs.report_queries import rebuild_query_usage
+
+    effect_started = await _effect_started(db, row.tenant_id, job.id)
+    summary = dict(job.result_summary or {})
+    if summary.get("report_queries"):
+        summary["usage"] = rebuild_query_usage(summary)
+        job.result_summary = summary
+    if effect_started:
         await _mark_uncertain(db, row, job, "worker interrupted; execution result unknown")
         return REASON_BLOCKED
     # No durable write/model intent: fail this occurrence, never silently replay
     # a potentially billed read. Future independently approved occurrences remain usable.
-    from app.services.jobs.report_queries import rebuild_query_usage
-
-    summary = dict(job.result_summary or {})
-    if summary.get("report_queries"):
-        summary["usage"] = rebuild_query_usage(summary)
     job.status = "failed"
     job.completed_at = datetime.now(timezone.utc)
     job.result_summary = {

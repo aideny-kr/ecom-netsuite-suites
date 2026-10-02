@@ -76,6 +76,7 @@ class ReportQueries:
             .execution_options(populate_existing=True)
         )
         if job is None or (not settlement and job.status != "running"):
+            self.stopped = True
             raise ReportQueryUnknownError("Report query requires its running job")
         return job
 
@@ -162,10 +163,11 @@ class ReportQueries:
         }
         job.result_summary = {**summary, "report_queries": receipts}
         await self.ctx.db.commit()
+        maximum_bytes_billed = receipts[self.pending]["maximum_bytes_billed"]
         self.pending = None
         self.bytes_processed += processed
         limit = self.ctx.budget.get("bytes_scanned")
-        if billed is not None and billed > receipts[-1]["maximum_bytes_billed"]:
+        if billed > maximum_bytes_billed:
             self.error = "Provider query receipt exceeds its billing cap"
         if limit is not None and query_bytes(job.result_summary) > limit:
             self.error = "Report scan budget exceeded"

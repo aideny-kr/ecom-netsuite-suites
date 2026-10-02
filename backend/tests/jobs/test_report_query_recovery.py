@@ -322,3 +322,14 @@ async def test_cancelled_query_stops_full_report_without_scheduling_retry(client
     assert row.retry_job_id is None
     assert job.result_summary["usage"]["bytes_scanned"] == 1024
     assert len(calls) == 1 and drive.calls == []
+
+
+async def test_cancellation_between_queries_remains_a_stop_after_begin_error(db, admin_user):
+    scope, job = await pending_query(db, admin_user)
+    await scope.complete({"bytes_processed": 100, "bytes_billed": 100, "job_id": scope.provider_job_id})
+    job.status = "cancelled"
+    await db.commit()
+    with pytest.raises(ReportQueryUnknownError):
+        await scope.begin()
+    with pytest.raises(ReportQueryUnknownError, match="Report stopped"):
+        scope.check()
