@@ -99,13 +99,16 @@ prompt. The in-app orchestrator stays the product's brain.
 - Runs inside `chat/orchestrator.py` as an **accounting-turn profile**, not a new agent.
 - **The loop is model-driven, with phases shown as checklist state, not as a router:**
   investigate → diagnose → act (explain, propose, or escalate) → verify.
-- **Model: the strongest Claude model for resolve turns (decided §9 D2).** Today that is
-  Claude Fable 5.1 (`claude-fable-5-1`); our model-tiering policy ranks Fable above Opus.
+- **Model: Claude Opus 5.5 (`claude-opus-5-5`) at high thinking for complex issues (decided
+  §9 D2).**
+  - A turn is complex when it starts from a case or issue group, or when the conversation
+    already has a case open. This is decided by code, not by a classifier, so it isn't routing.
+  - Other turns keep the tenant's default model (Framework: `claude-sonnet-5`).
   - Thinking is never below `med`.
   - **Check in S3 before relying on it:**
     - the forced-tool and text-block contracts (Sonnet 5.5 broke them, #353;
       `_FORCEABLE_MODEL`);
-    - that Framework's own key (BYOK) has access to it;
+    - that Framework's own key (BYOK) has access to Opus 5.5;
     - the cost per resolved case against G5.
 - **Budgets live in run state:** steps ≤ 40 (existing), tokens per case ≤ 300k (hard), and
   stall detection (the same failing call or empty result twice ends the loop).
@@ -243,7 +246,7 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
 | # | Chose | Over | Because |
 |---|---|---|---|
 | D1 | **Our orchestrator** as the brain, with our capabilities built as an **Ops MCP server** | Claude Agent SDK harness; Anthropic Managed Agents | It keeps multi-provider models, our approval cards and tenant scoping. Claude Code or Codex can drive the same MCP later, and it is the benchmark's reference. |
-| D2 | **The strongest Claude model** for resolve turns (today Claude Fable 5.1) | Benchmark-picked model; staying on Sonnet 5 | Correctness first; cost is measured by G5, not used to pick the model. |
+| D2 | **Claude Opus 5.5 at high thinking for complex issues** (a turn started from a case or issue group, or with a case open); other turns keep the tenant default | Fable 5.1; a benchmark-picked model; Sonnet 5 for everything | Aiden's call: Opus 5.5 high is the resolver brain. Cost is measured by G5. |
 | D3 | **"Order differences" first**: the Inc group (46 orders, four situations) and the 20 "adjustment never reached NetSuite" orders | Tax-only refunds first; a mix | The answers are mostly known, so gold labels are cheap and trustworthy. |
 | D4 | **Aiden labels every task** | The builder labels and Aiden spot-checks; agent labels | Independent gold labels; the labelling sheet carries no suggested answer. |
 
