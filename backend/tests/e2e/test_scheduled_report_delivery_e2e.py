@@ -337,14 +337,15 @@ async def test_report_query_receipt_cannot_borrow_another_tenants_job(db, admin_
     db.add(job)
     await db.flush()
     ctx = StepContext(job_id=uuid4(), run_id=job.id, tenant_id=uuid4(), db=db)
-    with pytest.raises(ReportQueryUnknownError, match="Report stopped"):
+    with pytest.raises(ReportQueryUnknownError, match="Report stopped") as stopped:
         with report_queries(ctx) as usage:
-            # The tenant guard rejects the borrowed job before recording intent.
-            # The context boundary must retain that stop even if a caller catches it.
-            with pytest.raises(ReportQueryUnknownError, match="running job"):
-                await usage.begin()
-            assert usage.stopped is True
-            assert usage.pending is None
+            await usage.begin()
+    # Assert outside the scope so its final stop cannot mask a failed assertion.
+    # The original tenant rejection remains chained to the retained stop.
+    assert isinstance(stopped.value.__context__, ReportQueryUnknownError)
+    assert "running job" in str(stopped.value.__context__)
+    assert usage.stopped is True
+    assert usage.pending is None
     await db.refresh(job)
     assert job.status == "running"
     assert not job.result_summary
