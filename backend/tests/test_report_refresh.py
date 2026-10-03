@@ -1009,6 +1009,8 @@ async def test_refresh_inventory_aging_r_items_over_5000_rows_not_truncated(db, 
     survive extraction -- a silent truncation at 5000 would drop 1000 SKUs from every
     KPI/bucket/top-positions total with no truncation indicator anywhere in the
     inventory_aging render (unlike statement_builder's own row-cap warn chip)."""
+    from datetime import timedelta
+
     from tests.report.test_inventory_aging import SNAPSHOT, _item, _prior_row, _trend_row
 
     location = "Acme"
@@ -1016,13 +1018,14 @@ async def test_refresh_inventory_aging_r_items_over_5000_rows_not_truncated(db, 
     prior = [
         _prior_row(location, value=0, value_90p=0, value_180p=0, skus=0, skus_90p=0, skus_180p=0, qty=0, qty_90p=0)
     ]
-    trend = [_trend_row(location, SNAPSHOT, 60000, 0, 0.0)]
+    trend = [_trend_row(location, SNAPSHOT, 60000, 0, 0.0, skus=6000, qty=6000)]
     meta = [
         {
             "location": location,
-            "first_snapshot_date": SNAPSHOT.isoformat(),
+            "first_snapshot_date": (SNAPSHOT - timedelta(days=7)).isoformat(),
             "last_snapshot_date": SNAPSHOT.isoformat(),
-            "snapshot_count": 1,
+            "snapshot_count": 8,
+            "duplicate_grains": 0,
         }
     ]
     payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
@@ -1063,3 +1066,32 @@ async def test_refresh_inventory_aging_composed_at_stamp_advances_on_refresh(db,
     assert head_model["composed_at"] != original_captured_at
     stamped = datetime.fromisoformat(head_model["composed_at"])
     assert (datetime.now(timezone.utc) - stamped).total_seconds() < 30
+
+
+@pytest.mark.parametrize("legacy_version", [None, 2])
+async def test_legacy_inventory_recipe_refuses_before_query_and_preserves_report(db, monkeypatch, legacy_version):
+    _, recipe = build_playbook_recipe("inventory_aging", {})
+    recipe["playbook"]["source_contract_version"] = legacy_version
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    calls = []
+    _patch_executor(monkeypatch, calls=calls)
+    with pytest.raises(RefreshError, match="Recompose it before refreshing") as error:
+        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+    assert error.value.status_code == 409
+    assert calls == []
+    await db.refresh(report)
+    assert report.rendered_html == "<html>v1</html>"
+    assert report.version == 1
+
+
+async def test_report_refresh_preserves_budget_error_type(db, monkeypatch):
+    from app.services.jobs.report_queries import ReportQueryBudgetError
+
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+
+    async def stop(*args, **kwargs):
+        raise ReportQueryBudgetError("scan ceiling exhausted")
+
+    monkeypatch.setattr("app.services.report.refresh_service._execute_sources", stop)
+    with pytest.raises(ReportQueryBudgetError, match="scan ceiling exhausted"):
+        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)

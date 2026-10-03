@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from app.services.report.period_resolver import PeriodUnavailableReason
@@ -283,7 +284,7 @@ def _build_inventory_aging_recipe(params: dict) -> tuple[str, dict]:
         # already carries (never re-derived), so replaying the recipe can never
         # disagree with itself about which locations/compare_days/trend_weeks
         # were composed.
-        "playbook": {"key": "inventory_aging", "params": params},
+        "playbook": {"key": "inventory_aging", "params": params, "source_contract_version": 3},
         "sections": [
             {
                 "type": section_type,
@@ -334,7 +335,13 @@ def rebuild_playbook_spec(
     if playbook_key != "inventory_aging":
         raise RefreshError(501, f"playbook '{playbook_key}' has no rebuild hook — cannot compose/refresh headlessly")
 
-    from app.services.report.inventory_aging import SourceTruncated, compute, rows_from_table_payload
+    from app.services.report.inventory_aging import (
+        SourceIntegrityError,
+        SourceTruncated,
+        compute,
+        rows_from_table_payload,
+        validate_source_controls,
+    )
     from app.services.report.report_html import (
         build_inventory_aging_provenance,
         build_inventory_aging_sections,
@@ -350,9 +357,22 @@ def rebuild_playbook_spec(
     # HTTP-mappable failure shape for this recipe branch.
     try:
         converted = {rid: rows_from_table_payload(payload, rid=rid) for rid, payload in payloads.items()}
-    except SourceTruncated as exc:
+        validate_source_controls(converted, params)
+    except (SourceTruncated, SourceIntegrityError) as exc:
         raise RefreshError(502, str(exc)) from exc
     report_data = compute(converted, params)
+    report_data = replace(
+        report_data,
+        provenance=replace(
+            report_data.provenance,
+            integrity_checks=report_data.provenance.integrity_checks
+            + (
+                "Requested source locations are present; item and snapshot grains are unique.",
+                "Current item values and counts match independent same-date trend controls exactly.",
+                "Prior totals match trend totals wherever the same comparison date is present.",
+            ),
+        ),
+    )
     sections = build_inventory_aging_sections(report_data, composed_at=composed_at)
     spec = {"title": inventory_aging_title(report_data), "sections": sections}
     method_provenance = build_inventory_aging_provenance(report_data.provenance)
@@ -419,11 +439,15 @@ async def compose_playbook_report(
     actor_type="user",
     closed_period=None,
     test_run_id: uuid.UUID | None = None,
+    scheduled_run_id: uuid.UUID | None = None,
 ):
     """Deterministic compose: recipe template → fail-closed source execution →
     frozen HTML → normal Report row. Reuses the refresh engine's execution seam
     on purpose — identical validation, identical failure semantics, and the
-    resulting report auto-refreshes like any composed one.
+    resulting report auto-refreshes unless a workflow owns its period snapshot.
+    Those snapshots default to auto-refresh off from the first insert, avoiding
+    independent sweep spending after the workflow stops. An explicit report
+    settings change can opt back in. Legacy tracking series are unchanged.
 
     ``actor_type`` defaults to "user" because the HTTP endpoint (a real person) was the
     only caller for Stage 1. Stage 2's scheduled sweep passes "system" with
@@ -458,6 +482,9 @@ async def compose_playbook_report(
         spec_json_safe,
     )
 
+    if test_run_id is not None and scheduled_run_id is not None:
+        raise ValueError("A report cannot belong to both a test and a live workflow run")
+    source_run_id = test_run_id or scheduled_run_id
     if test_run_id is not None and (
         mode != "period" or playbook_key not in {"income_statement", "balance_sheet", "trial_balance"}
     ):
@@ -708,8 +735,8 @@ async def compose_playbook_report(
         .values(
             tenant_id=tenant_id,
             title=title,
-            auto_refresh="off" if test_run_id is not None else "daily",
-            source_run_id=test_run_id,
+            auto_refresh="off" if source_run_id is not None else "daily",
+            source_run_id=source_run_id,
             # Risk 3: a financial_statement model carries raw Decimal (spark/trend)
             # fields — sanitize BEFORE persisting (spec_json_safe), never before
             # rendering (html above was already built from the live Decimal-bearing
@@ -766,6 +793,8 @@ async def compose_playbook_report(
     audit_payload = {"playbook": playbook_key, "source_count": len(recipe["sources"])}
     if test_run_id is not None:
         audit_payload.update(execution_mode="test", test_run_id=str(test_run_id))
+    elif scheduled_run_id is not None:
+        audit_payload.update(execution_mode="live", scheduled_run_id=str(scheduled_run_id))
     if series_id is not None:
         audit_payload["series_id"] = str(series_id)
     await audit_service.log_event(

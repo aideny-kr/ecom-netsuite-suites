@@ -124,7 +124,11 @@ async def test_main_stores_the_real_recipe_so_refresh_and_auto_refresh_selector_
     report = await compose_inventory_aging.main(tenant.id, params["locations"], db=db)
 
     assert report.recipe_json is not None
-    assert report.recipe_json["playbook"] == {"key": "inventory_aging", "params": {"locations": params["locations"]}}
+    assert report.recipe_json["playbook"] == {
+        "source_contract_version": 3,
+        "key": "inventory_aging",
+        "params": {"locations": params["locations"]},
+    }
     assert len(report.recipe_json["sources"]) == 4
 
 

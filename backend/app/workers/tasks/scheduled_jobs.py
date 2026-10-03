@@ -555,6 +555,7 @@ async def _run_steps(
     control_version: int | None = None,
 ) -> tuple[str, dict[str, Any], str | None]:
     """Replay `steps` in order. Returns (reason, outputs, detail)."""
+    from app.services.jobs.report_queries import ReportQueryBudgetError, ReportQueryUnknownError
     from app.services.report.report_delivery import DeliveryUnavailable
 
     outputs: dict[str, Any] = {}
@@ -668,6 +669,12 @@ async def _run_steps(
                     readiness_hash = (run.parameters or {}).get("readiness_hash")
                 with reviewed_sources(ctx, control_version, readiness_hash):
                     artifact = await spec.executor(ctx, params)
+        except ReportQueryBudgetError as exc:
+            await db.rollback()
+            return REASON_BUDGET, outputs, str(exc)
+        except ReportQueryUnknownError as exc:
+            await db.rollback()
+            return REASON_BLOCKED, outputs, str(exc)
         except SourceScopeChangedError as exc:
             await db.rollback()
             if ctx.execution_mode != "test":
@@ -827,7 +834,12 @@ def _stamp_blocked_existing_job(job: Job | None, detail: str) -> uuid.UUID | Non
         return None
     job.status = "completed"
     job.completed_at = datetime.now(timezone.utc)
-    job.result_summary = {"reason": REASON_BLOCKED, "outputs": {}, "detail": detail}
+    job.result_summary = {
+        **(job.result_summary or {}),
+        "reason": REASON_BLOCKED,
+        "outputs": (job.result_summary or {}).get("outputs", {}),
+        "detail": detail,
+    }
     job.error_message = detail
     return job.id
 
@@ -857,6 +869,12 @@ async def run_schedule_now(db: AsyncSession, schedule_id: uuid.UUID, **kwargs) -
 
 async def _effect_started(db, tenant_id, job_id) -> bool:
     """Durable write intent or paid-model reservation; never infer absence from a timeout."""
+    from app.services.jobs.report_queries import queries_uncertain
+
+    await set_tenant_context(db, str(tenant_id))
+    query_job = await db.get(Job, job_id, populate_existing=True)
+    if query_job is not None and queries_uncertain(query_job.result_summary):
+        return True
     await set_tenant_context(db, str(tenant_id))
     return bool(
         await db.scalar(
@@ -896,7 +914,14 @@ async def _settle_completed_receipt(db, row, job) -> bool:
 
 
 async def _settle_interrupted(db, row, job) -> str:
-    if await _effect_started(db, row.tenant_id, job.id):
+    from app.services.jobs.report_queries import rebuild_query_usage
+
+    effect_started = await _effect_started(db, row.tenant_id, job.id)
+    summary = dict(job.result_summary or {})
+    if summary.get("report_queries"):
+        summary["usage"] = rebuild_query_usage(summary)
+        job.result_summary = summary
+    if effect_started:
         await _mark_uncertain(db, row, job, "worker interrupted; execution result unknown")
         return REASON_BLOCKED
     # No durable write/model intent: fail this occurrence, never silently replay
@@ -904,7 +929,7 @@ async def _settle_interrupted(db, row, job) -> str:
     job.status = "failed"
     job.completed_at = datetime.now(timezone.utc)
     job.result_summary = {
-        **(job.result_summary or {}),
+        **summary,
         "reason": REASON_ERROR,
         "detail": "interrupted without durable effect intent; occurrence not replayed",
     }
@@ -1390,9 +1415,26 @@ async def _run_schedule_now_locked(
         actor_type=actor_type,
     )
 
+    from app.services.jobs.report_queries import queries_uncertain, query_bytes
+
+    await set_tenant_context(db, str(tenant_id))
+    query_job = await db.get(Job, job_id_value, populate_existing=True)
+    query_summary = query_job.result_summary or {}
     elapsed = time.monotonic() - execution_started
     used_bytes = sum(int(out.get("bytes_processed") or 0) for out in outputs.values())
+    used_bytes += max(
+        0, query_bytes(query_summary) - sum(int(out.get("report_query_bytes") or 0) for out in outputs.values())
+    )
     used = {"seconds": elapsed, "bytes_scanned": used_bytes, "usd": used_bytes * _BIGQUERY_USD_PER_BYTE}
+    if query_summary.get("report_queries"):
+        complete_usage = not queries_uncertain(query_summary)
+        used.update(
+            usd=None,
+            known_bytes_scanned=used_bytes,
+            bytes_scanned=used_bytes if complete_usage else None,
+            query_usage_complete=complete_usage,
+            cost_status="unpriced",
+        )
     effect_started = await _effect_started(db, tenant_id, job_id_value)
     effect_uncertain = reason != REASON_DONE and effect_started
     if effect_uncertain:
@@ -1491,7 +1533,8 @@ async def _run_schedule_now_locked(
                 await db.execute(
                     text(
                         "UPDATE jobs SET status = 'failed', "
-                        "result_summary = CAST(:result_summary AS JSON), "
+                        "result_summary = CAST(COALESCE(CAST(result_summary AS JSONB), '{}'::jsonb) "
+                        "|| CAST(:result_summary AS JSONB) AS JSON), "
                         "error_message = :error_message, "
                         "completed_at = :completed_at "
                         "WHERE id = :job_id AND tenant_id = :tenant_id"
@@ -1564,7 +1607,7 @@ async def _run_schedule_now_locked(
         await _mark_uncertain(db, row, job, detail)
         await set_tenant_context(db, str(tenant_id))
 
-    if reason == REASON_ERROR and retry_on_error:
+    if reason == REASON_ERROR and retry_on_error and job.status != "cancelled":
         if attempt >= RETRY_MAX_ATTEMPTS:
             # Item 4 (delta gate fix E): attempt exhaustion is checked FIRST,
             # unconditionally -- an occurrence that has ITSELF exhausted its

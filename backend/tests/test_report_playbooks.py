@@ -121,7 +121,11 @@ def test_build_playbook_recipe_for_inventory_aging_carries_the_playbook_key():
     NEVER carry this key -- see test_build_income_statement_recipe below, which
     asserts its absence so the statement path stays untouched byte-for-byte."""
     _, recipe = build_playbook_recipe("inventory_aging", {"locations": ["Acme", "Globex"]})
-    assert recipe["playbook"] == {"key": "inventory_aging", "params": {"locations": ["Acme", "Globex"]}}
+    assert recipe["playbook"] == {
+        "source_contract_version": 3,
+        "key": "inventory_aging",
+        "params": {"locations": ["Acme", "Globex"]},
+    }
 
 
 def test_build_playbook_recipe_for_inventory_aging_rejects_bad_location():
@@ -178,7 +182,7 @@ async def test_compose_playbook_report_composes_inventory_aging_headlessly(db, m
     assert len(calls) == 4
     assert report.title == "Inventory Aging Weekly"
     assert report.recipe_json is not None
-    assert report.recipe_json["playbook"] == {"key": "inventory_aging", "params": params}
+    assert report.recipe_json["playbook"] == {"source_contract_version": 3, "key": "inventory_aging", "params": params}
     assert len(report.recipe_json["sources"]) == 4
     assert "Watch items" in report.rendered_html
     assert "<h1>Inventory Aging — Week of " in report.rendered_html
@@ -839,6 +843,8 @@ async def test_compose_playbook_trial_balance_renders_full_statement(db, monkeyp
     )
 
     assert len(calls) == 2
+    assert report.auto_refresh == "daily" and report.source_run_id is None
+    assert not report.title.startswith("Test ·")
     html = report.rendered_html
     assert html.count("<h1") == 1
     assert "Debits = Credits" in html  # the statement's own check row

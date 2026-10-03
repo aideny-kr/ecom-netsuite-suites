@@ -44,6 +44,7 @@ def _item(location, sku, days, value, qty, *, desc="Widget", category="Misc"):
 def _prior_row(location, *, value, value_90p, value_180p, skus, skus_90p, skus_180p, qty, qty_90p):
     return {
         "location": location,
+        "snapshot_date": (SNAPSHOT - timedelta(days=7)).isoformat(),
         "skus": skus,
         "qty": qty,
         "value": value,
@@ -55,10 +56,12 @@ def _prior_row(location, *, value, value_90p, value_180p, skus, skus_90p, skus_1
     }
 
 
-def _trend_row(location, d, total_value, value_90p, pct_90p):
+def _trend_row(location, d, total_value, value_90p, pct_90p, *, skus=1, qty=1):
     return {
         "location": location,
         "d": d.isoformat(),
+        "skus": skus,
+        "qty": qty,
         "total_value": total_value,
         "value_90p": value_90p,
         "pct_90p": pct_90p,
@@ -102,7 +105,7 @@ def _full_fixture():
     # 3 weekly trend points per location, deliberately UNSORTED to exercise ordering.
     trend = []
     weekly_values = {
-        "Acme": [(2, 20000, 8000), (1, 22000, 9000), (0, 24000, 9000)],
+        "Acme": [(2, 20000, 8000), (1, 22000, 19000), (0, 24000, 21000)],
         "Globex": [(2, 9000, 1700), (1, 9500, 1900), (0, 10000, 2000)],
         "Initech": [(2, 9000, 3500), (1, 8400, 3800), (0, 8000, 4000)],
     }
@@ -110,7 +113,10 @@ def _full_fixture():
         for weeks_ago, total_value, value_90p in points:
             d = SNAPSHOT - timedelta(weeks=weeks_ago)
             pct_90p = round(value_90p / total_value * 100, 1)
-            trend.append(_trend_row(loc, d, total_value, value_90p, pct_90p))
+            counts = {"Acme": (9, 240), "Globex": (3, 100), "Initech": (3, 80)}
+            prior_counts = {"Acme": (8, 220), "Globex": (3, 95), "Initech": (3, 84)}
+            skus, qty = (prior_counts if weeks_ago == 1 else counts)[loc]
+            trend.append(_trend_row(loc, d, total_value, value_90p, pct_90p, skus=skus, qty=qty))
     # shuffle deterministically (reverse) so "oldest -> newest" is a real assertion
     trend = list(reversed(trend))
 
@@ -120,6 +126,7 @@ def _full_fixture():
             "first_snapshot_date": (SNAPSHOT - timedelta(days=90)).isoformat(),
             "last_snapshot_date": SNAPSHOT.isoformat(),
             "snapshot_count": 90,
+            "duplicate_grains": 0,
         }
         for loc in ("Acme", "Globex", "Initech")
     ]
@@ -404,8 +411,8 @@ def test_watch_item_zero_sku_delta_renders_no_change_not_zero_left():
     "delta,expected",
     [
         (0, "with no change in the number of aged SKUs"),
-        (-5, "as 5 SKUs left the 90+ buckets"),
-        (3, "as 3 SKUs entered the 90+ buckets"),
+        (-5, "with 5 fewer SKUs in the 90+ buckets"),
+        (3, "with 3 more SKUs in the 90+ buckets"),
     ],
 )
 def test_sku_delta_clause_zero_negative_positive(delta, expected):
@@ -429,8 +436,8 @@ def test_highlight_ordering_largest_mover_first():
     texts = [h.text for h in report.highlights]
     # Acme's aged-value mover ($2,000 swing) must outrank Initech's
     # denominator-attribution highlight ($400 swing) in the SAME (dollar) units.
-    mover_idx = next(i for i, t in enumerate(texts) if "Acme" in t and "driven by" in t)
-    attribution_idx = next(i for i, t in enumerate(texts) if "Initech" in t and "denominator moved" in t)
+    mover_idx = next(i for i, t in enumerate(texts) if "Acme" in t and "aged value rose" in t)
+    attribution_idx = next(i for i, t in enumerate(texts) if "Initech" in t and "total on-hand value fell" in t)
     assert mover_idx < attribution_idx
 
 
@@ -456,6 +463,7 @@ def _mover_zero_sku_delta_fixture():
             "first_snapshot_date": (SNAPSHOT - timedelta(days=90)).isoformat(),
             "last_snapshot_date": SNAPSHOT.isoformat(),
             "snapshot_count": 90,
+            "duplicate_grains": 0,
         }
     ]
     payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
@@ -558,6 +566,7 @@ def _narrative_fixture(loc_specs, *, prior_skus_90p_by_location: dict[str, int] 
                 "first_snapshot_date": (SNAPSHOT - timedelta(days=90)).isoformat(),
                 "last_snapshot_date": SNAPSHOT.isoformat(),
                 "snapshot_count": 90,
+                "duplicate_grains": 0,
             }
         )
     payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
@@ -682,7 +691,7 @@ def test_narrative_paragraph2_improved_clause_uses_the_aged_buckets_wording():
     report = ia.compute(payloads, params)
     p2 = report.narrative.paragraph_2
     assert "and improved the most" in p2
-    assert "2 SKUs left the aged buckets" in p2
+    assert "2 fewer SKUs in the aged buckets" in p2
     assert "the 90+ buckets" not in p2
 
 
@@ -955,3 +964,15 @@ def test_json_safe_converts_decimal_date_and_dataclasses_never_through_float():
     import json
 
     json.dumps(safe)
+
+
+def test_narrative_never_infers_sku_lineage_or_exclusive_denominator_cause():
+    payloads, params = _full_fixture()
+    report = ia.compute(payloads, params)
+    text = " ".join(
+        [*(h.text for h in report.highlights), *(w.text for w in report.watch_items), report.narrative.paragraph_2]
+    )
+    assert "driven by" not in text
+    assert "SKUs entered" not in text and "SKUs left" not in text
+    assert "denominator moved, not" not in text
+    assert "1 more SKU in the 90+ buckets" in text

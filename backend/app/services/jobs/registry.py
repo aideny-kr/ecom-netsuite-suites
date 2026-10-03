@@ -209,29 +209,39 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
     a plan whose only steps after compose were reads (never reaching
     ``drive.upload`` at all) had NOTHING covering this flush, so a later
     read step raising rolled back this stamp along with everything else."""
-    if "report_id" in params:
-        from app.services.report.refresh_service import refresh_report
+    from app.services.jobs.report_queries import report_queries
 
-        report = await refresh_report(
-            ctx.db,
-            report_id=uuid.UUID(params["report_id"]),
-            tenant_id=ctx.tenant_id,
-            actor_id=ctx.actor_id,
-            actor_type=ctx.actor_type,
-        )
-    else:
-        from app.services.report.playbooks import compose_playbook_report
+    with report_queries(ctx) as query_usage:
+        if "report_id" in params:
+            from app.services.report.refresh_service import refresh_report
 
-        report = await compose_playbook_report(
-            ctx.db,
-            playbook_key=params["playbook_key"],
-            params=params["params"],
-            tenant_id=ctx.tenant_id,
-            actor_id=ctx.actor_id,
-            actor_type=ctx.actor_type,
-            mode=params.get("mode", "period"),
-            **({"test_run_id": ctx.run_id} if ctx.execution_mode == "test" else {}),
-        )
+            report = await refresh_report(
+                ctx.db,
+                report_id=uuid.UUID(params["report_id"]),
+                tenant_id=ctx.tenant_id,
+                actor_id=ctx.actor_id,
+                actor_type=ctx.actor_type,
+            )
+        else:
+            from app.services.report.playbooks import compose_playbook_report
+
+            run_origin = {}
+            if ctx.execution_mode == "test":
+                run_origin = {"test_run_id": ctx.run_id}
+            elif params.get("mode", "period") == "period":
+                # Legacy tracking series own their cadence independently. Only a
+                # workflow's new period snapshot is owned by this particular run.
+                run_origin = {"scheduled_run_id": ctx.run_id}
+            report = await compose_playbook_report(
+                ctx.db,
+                playbook_key=params["playbook_key"],
+                params=params["params"],
+                tenant_id=ctx.tenant_id,
+                actor_id=ctx.actor_id,
+                actor_type=ctx.actor_type,
+                mode=params.get("mode", "period"),
+                **run_origin,
+            )
 
     # compose/refresh may have committed mid-flight (an OAuth token refresh,
     # refresh_report's own claim commit, ...) which clears the transaction
@@ -255,6 +265,8 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
     await ctx.db.flush()
 
     return {
+        "bytes_processed": query_usage.bytes_processed,
+        "report_query_bytes": query_usage.bytes_processed,
         "report": report,
         "report_id": str(report.id),
         "rendered_html": report.rendered_html,

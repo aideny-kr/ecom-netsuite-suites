@@ -58,7 +58,7 @@ AGE_DEFINITION_TEXT = (
 )
 INTEGRITY_CHECKS: tuple[str, ...] = (
     "Every location's aging-bucket values sum to that location's on-hand value.",
-    "The all-locations row is the sum of the three locations, not a re-query.",
+    "The all-locations row is the sum of the selected locations, not a re-query.",
 )
 
 # Locations are interpolated as SQL string literals (the bigquery_sql tool takes a
@@ -330,31 +330,17 @@ def _fmt_pts(value: Decimal) -> str:
     return f"{value}"
 
 
-def _sku_delta_clause(
-    delta: int,
-    *,
-    connector: str = "as",
-    left_verb: str = "left",
-    entered_verb: str = "entered",
-    bucket_noun: str = "the 90+ buckets",
-) -> str:
-    """Zero-count-safe SKU-delta clause for the aged buckets (render-polish brief
-    item 2). A literal ``0`` had been rendering as ``"as 0 SKUs left the 90+
-    buckets"`` -- a real threshold-fixture case (a location can cross the $50K
-    aged-VALUE threshold with its aged SKU COUNT unchanged, e.g. a pure
-    price/quantity move on the same positions) -- so zero gets its own honest
-    wording instead of an arbitrarily-picked direction word. ``connector``/
-    ``left_verb``/``entered_verb`` let both call sites (watch items' "as N SKUs
-    left/entered ..." and highlights' "driven by N SKUs leaving/entering ...")
-    share this one zero-handling rule while keeping their own grammar.
-    ``bucket_noun`` lets narrative paragraph 2 use its own pre-existing "the
-    aged buckets" phrasing (matching the mock's literal reference sentence)
-    while watch items/highlights keep "the 90+ buckets" -- the two call sites
-    were never meant to share this noun, only the zero-handling rule."""
+def _sku_delta_clause(delta: int, *, bucket_noun: str = "the 90+ buckets") -> str:
+    """Describe net count movement without inferring item entry/exit or causality.
+
+    Prior sources contain aggregates, not per-SKU lineage. A net count change
+    cannot establish which items moved or what drove a monetary change.
+    """
     if delta == 0:
         return "with no change in the number of aged SKUs"
-    verb = entered_verb if delta > 0 else left_verb
-    return f"{connector} {abs(delta)} SKUs {verb} {bucket_noun}"
+    noun = "SKU" if abs(delta) == 1 else "SKUs"
+    direction = "more" if delta > 0 else "fewer"
+    return f"with {abs(delta)} {direction} {noun} in {bucket_noun}"
 
 
 def _ordinal(n: int) -> str:
@@ -465,7 +451,8 @@ def _latest_cte(locs: str, snapshot_literal: str | None) -> str:
 def _r_items_sql(locs: str, snapshot_literal: str | None) -> str:
     return f"""WITH {_last_restock_ctes(locs, snapshot_literal)},
 {_latest_cte(locs, snapshot_literal)},
-cur AS (SELECT s.location, s.sku, s.item_desc, s.category, s.qty_on_hand, s.inventory_amount, s.snapshot_date
+cur AS (SELECT s.location, s.sku, s.item_desc, s.category, s.qty_on_hand,
+               CAST(s.inventory_amount AS NUMERIC) AS inventory_amount, s.snapshot_date
         FROM {BQ_TABLE} s JOIN latest l ON l.location = s.location AND l.d = s.snapshot_date WHERE s.qty_on_hand > 0)
 SELECT c.*, r.last_restock_date, DATE_DIFF(c.snapshot_date, r.last_restock_date, DAY) AS days,
        {_bucket_case("DATE_DIFF(c.snapshot_date, r.last_restock_date, DAY)")} AS bucket
@@ -478,21 +465,21 @@ def _r_prior_sql(locs: str, compare_days: int, snapshot_literal: str | None) -> 
 prior_date AS (SELECT location, DATE_SUB(d, INTERVAL {compare_days} DAY) AS d FROM latest),
 {_last_restock_ctes(locs, None)},
 snap AS (
-  SELECT s.location, s.sku, s.qty_on_hand, s.inventory_amount, s.snapshot_date
+  SELECT s.location, s.sku, s.qty_on_hand, CAST(s.inventory_amount AS NUMERIC) AS inventory_amount, s.snapshot_date
   FROM {BQ_TABLE} s JOIN prior_date p ON p.location = s.location AND p.d = s.snapshot_date
   WHERE s.qty_on_hand > 0),
 withbucket AS (
-  SELECT sn.location, sn.sku, sn.qty_on_hand, sn.inventory_amount,
+  SELECT sn.location, sn.sku, sn.qty_on_hand, sn.inventory_amount, sn.snapshot_date,
          DATE_DIFF(sn.snapshot_date, r.last_restock_date, DAY) AS days
   FROM snap sn LEFT JOIN last_restock r
     ON r.location = sn.location AND r.sku = sn.sku AND r.snapshot_date = sn.snapshot_date)
-SELECT location,
+SELECT location, snapshot_date,
        COUNT(*) AS skus, SUM(qty_on_hand) AS qty, SUM(inventory_amount) AS value,
        COUNTIF(days > 90) AS skus_90p, SUM(IF(days > 90, qty_on_hand, 0)) AS qty_90p,
        SUM(IF(days > 90, inventory_amount, 0)) AS value_90p,
        SUM(IF(days > 180, inventory_amount, 0)) AS value_180p,
        COUNTIF(days > 180) AS skus_180p
-FROM withbucket GROUP BY location"""
+FROM withbucket GROUP BY location, snapshot_date"""
 
 
 def _r_trend_sql(locs: str, trend_weeks: int, snapshot_literal: str | None) -> str:
@@ -513,32 +500,40 @@ distinct_days AS (
         JOIN latest l ON l.location = s.location
         WHERE s.qty_on_hand > 0 AND s.snapshot_date <= l.d)),
 ranked AS (
-  SELECT s.location, s.sku, s.snapshot_date, s.qty_on_hand, s.inventory_amount, dd.day_rn
+  SELECT s.location, s.sku, s.snapshot_date, s.qty_on_hand,
+         CAST(s.inventory_amount AS NUMERIC) AS inventory_amount, dd.day_rn
   FROM {BQ_TABLE} s
   JOIN distinct_days dd ON dd.location = s.location AND dd.d = s.snapshot_date
   WHERE s.qty_on_hand > 0),
 withbucket AS (
-  SELECT rk.location, rk.sku, rk.snapshot_date, rk.inventory_amount,
+  SELECT rk.location, rk.sku, rk.snapshot_date, rk.inventory_amount, rk.qty_on_hand,
          DATE_DIFF(rk.snapshot_date, lr.last_restock_date, DAY) AS days, rk.day_rn
   FROM ranked rk LEFT JOIN last_restock lr
     ON lr.location = rk.location AND lr.sku = rk.sku AND lr.snapshot_date = rk.snapshot_date
   WHERE rk.day_rn <= 7 * {trend_weeks}),
 per_day AS (
   SELECT location, snapshot_date AS d, day_rn,
+         COUNT(*) AS skus, SUM(qty_on_hand) AS qty,
          SUM(inventory_amount) AS total_value,
          SUM(IF(days > 90, inventory_amount, 0)) AS value_90p
   FROM withbucket GROUP BY location, snapshot_date, day_rn)
-SELECT location, d, total_value, value_90p, SAFE_DIVIDE(value_90p, total_value) * 100 AS pct_90p
+SELECT location, d, skus, qty, total_value, value_90p, SAFE_DIVIDE(value_90p, total_value) * 100 AS pct_90p
 FROM per_day WHERE MOD(day_rn - 1, 7) = 0
 ORDER BY location, d"""
 
 
 def _r_meta_sql(locs: str) -> str:
-    return (
-        f"SELECT location, MIN(snapshot_date) AS first_snapshot_date, "
-        f"MAX(snapshot_date) AS last_snapshot_date, COUNT(DISTINCT snapshot_date) AS snapshot_count "
-        f"FROM {BQ_TABLE} WHERE location IN ({locs}) GROUP BY location"
-    )
+    # Check the raw historical key before any restock join or aggregation can
+    # multiply duplicates identically in both prior and trend controls.
+    return f"""WITH raw_grain AS (
+  SELECT location, sku, snapshot_date, COUNT(*) AS row_count
+  FROM {BQ_TABLE} WHERE location IN ({locs})
+  GROUP BY location, sku, snapshot_date)
+SELECT location, MIN(snapshot_date) AS first_snapshot_date,
+       MAX(snapshot_date) AS last_snapshot_date,
+       COUNT(DISTINCT snapshot_date) AS snapshot_count,
+       SUM(CASE WHEN row_count > 1 THEN 1 ELSE 0 END) AS duplicate_grains
+FROM raw_grain GROUP BY location"""
 
 
 def build_sources(params: dict[str, Any]) -> dict[str, Source]:
@@ -589,6 +584,154 @@ def build_sources(params: dict[str, Any]) -> dict[str, Source]:
 # ---------------------------------------------------------------------------
 # compute() — the pure aggregation/insight engine
 # ---------------------------------------------------------------------------
+class SourceIntegrityError(ValueError):
+    """Source receipts cannot support a complete, consistent inventory report."""
+
+
+def validate_source_controls(payloads: dict[str, list[dict]], params: dict[str, Any]) -> None:
+    """Validate independent source aggregates before headless compose/refresh.
+
+    This is stricter than the pure calculation helpers, which also serve small
+    component fixtures. Missing inventory is not evidence of zero inventory.
+    Amounts compare exactly as Decimal; source percentages allow only the
+    report's one-decimal display rounding. No materiality threshold hides a
+    monetary mismatch. These controls do not establish currency or valuation.
+    """
+    raw_locations = params.get("locations")
+    locations = _validate_locations(list(DEFAULT_LOCATIONS) if raw_locations is None else raw_locations)
+    compare_days = _validate_positive_int(params.get("compare_days", DEFAULT_COMPARE_DAYS), "compare_days")
+
+    def fail(reason: str) -> None:
+        # Do not include source values/SKUs in errors persisted to job history.
+        raise SourceIntegrityError(f"Inventory source controls failed: {reason}; recompose from complete sources")
+
+    def number(row: dict, key: str, *, integer: bool = False, nullable: bool = False) -> Decimal:
+        value = row.get(key)
+        if value is None and nullable:
+            return Decimal(0)
+        try:
+            result = _to_decimal(value)
+        except (ValueError, TypeError, ArithmeticError):
+            fail(f"invalid {key}")
+        if value is None or not result.is_finite() or (integer and result != result.to_integral_value()):
+            fail(f"invalid {key}")
+        return result
+
+    def day(row: dict, key: str) -> date:
+        try:
+            return _parse_date(row[key])
+        except (KeyError, ValueError, TypeError):
+            fail(f"missing or invalid {key}")
+
+    grouped = {}
+    for rid in RESULT_IDS:
+        rows = payloads.get(rid)
+        if not isinstance(rows, list) or not rows:
+            fail(f"missing {rid}")
+        groups = {loc: [] for loc in locations}
+        for row in rows:
+            if not isinstance(row, dict) or row.get("location") not in groups:
+                fail(f"unexpected location in {rid}")
+            groups[row["location"]].append(row)
+        if any(not group for group in groups.values()):
+            fail(f"incomplete location coverage in {rid}")
+        grouped[rid] = groups
+
+    dates = set()
+    for loc in locations:
+        items = grouped["r_items"][loc]
+        prior_rows = grouped["r_prior"][loc]
+        meta_rows = grouped["r_meta"][loc]
+        if len(prior_rows) != 1 or len(meta_rows) != 1:
+            fail("duplicate prior or metadata grain")
+        prior, meta = prior_rows[0], meta_rows[0]
+        if number(meta, "duplicate_grains", integer=True) != 0:
+            fail("duplicate raw historical inventory grain")
+        item_dates = {day(row, "snapshot_date") for row in items}
+        if len(item_dates) != 1:
+            fail("mixed item snapshot dates")
+        snapshot = next(iter(item_dates))
+        dates.add(snapshot)
+        if params.get("snapshot_date") and snapshot != _parse_date(params["snapshot_date"]):
+            fail("requested snapshot differs from source")
+        if day(prior, "snapshot_date") != snapshot - timedelta(days=compare_days):
+            fail("prior snapshot differs from comparison period")
+        first, last = day(meta, "first_snapshot_date"), day(meta, "last_snapshot_date")
+        count = number(meta, "snapshot_count", integer=True)
+        if first > day(prior, "snapshot_date") or last < snapshot or count < 2:
+            fail("insufficient snapshot metadata coverage")
+        if not params.get("snapshot_date") and last != snapshot:
+            fail("latest snapshot changed between sources")
+
+        seen = set()
+        total, aged, units = Decimal(0), Decimal(0), Decimal(0)
+        for row in items:
+            sku = row.get("sku")
+            if not isinstance(sku, str) or not sku or sku in seen:
+                fail("missing or duplicate item grain")
+            seen.add(sku)
+            quantity = number(row, "qty_on_hand", integer=True)
+            age = number(row, "days", integer=True)
+            value = number(row, "inventory_amount")
+            if quantity <= 0 or age < 0 or (snapshot - day(row, "last_restock_date")).days != age:
+                fail("invalid item quantity or age")
+            total += value
+            units += quantity
+            if age > 90:
+                aged += value
+
+        for key in ("value", "value_90p", "value_180p"):
+            number(prior, key)
+        for key in ("skus", "skus_90p", "skus_180p", "qty", "qty_90p"):
+            if number(prior, key, integer=True) < 0:
+                fail("negative prior quantity or count")
+        if not (number(prior, "skus_180p") <= number(prior, "skus_90p") <= number(prior, "skus")) or number(
+            prior, "qty_90p"
+        ) > number(prior, "qty"):
+            fail("inconsistent prior counts")
+
+        for count_key, value_keys in (
+            ("skus", ("qty", "value")),
+            ("skus_90p", ("qty_90p", "value_90p")),
+            ("skus_180p", ("value_180p",)),
+        ):
+            if number(prior, count_key) == 0 and any(number(prior, key) != 0 for key in value_keys):
+                fail("nonzero value or quantity in an empty prior bucket")
+        if (number(prior, "skus") > 0 and number(prior, "qty") == 0) or (
+            number(prior, "skus_90p") > 0 and number(prior, "qty_90p") == 0
+        ):
+            fail("nonempty prior bucket has zero quantity")
+
+        trend = {}
+        for row in grouped["r_trend"][loc]:
+            d = day(row, "d")
+            if d in trend or d > snapshot or d < first:
+                fail("duplicate or out-of-period trend grain")
+            trend[d] = row
+            if number(row, "skus", integer=True) <= 0 or number(row, "qty", integer=True) <= 0:
+                fail("invalid trend counts")
+            value, value_90p = number(row, "total_value"), number(row, "value_90p")
+            pct = number(row, "pct_90p", nullable=value == 0)
+            expected = value_90p / value * 100 if value else Decimal(0)
+            if round1(pct) != round1(expected):
+                fail("trend percentage differs from its totals")
+        current = trend.get(snapshot)
+        if current is None or number(current, "total_value") != total or number(current, "value_90p") != aged:
+            fail("current item and trend totals disagree")
+        if number(current, "skus") != len(items) or number(current, "qty") != units:
+            fail("current item and trend counts disagree")
+        comparison = trend.get(day(prior, "snapshot_date"))
+        if comparison is not None and (
+            number(comparison, "total_value") != number(prior, "value")
+            or number(comparison, "value_90p") != number(prior, "value_90p")
+            or number(comparison, "skus") != number(prior, "skus")
+            or number(comparison, "qty") != number(prior, "qty")
+        ):
+            fail("prior and same-date trend totals disagree")
+    if len(dates) != 1:
+        fail("locations have different snapshot dates")
+
+
 def _bucket_rows_for(location: str, items: list[dict]) -> tuple[BucketRow, ...]:
     on_hand_value = sum((_to_decimal(it["inventory_amount"]) for it in items), Decimal("0"))
     rows = []
@@ -923,19 +1066,16 @@ def _highlights(
                 aged_word = "rose" if loc.aged90_value_delta > 0 else "fell"
                 text = (
                     f"{loc.location}'s aged share {share_word} {_fmt_pts(abs(loc.aged90_share_delta_pts))} pts to "
-                    f"{_fmt_pct(loc.aged90_share_pct)} because total on-hand value {total_word} "
+                    f"{_fmt_pct(loc.aged90_share_pct)}; total on-hand value {total_word} "
                     f"{_fmt_money(abs(loc.delta_value))} ({_fmt_signed_pct(loc.delta_pct)}) while aged value "
-                    f"{aged_word} {_fmt_money(abs(loc.aged90_value_delta))}: the denominator moved, not the "
-                    "aged stock."
+                    f"{aged_word} {_fmt_money(abs(loc.aged90_value_delta))}."
                 )
                 candidates.append(Highlight(text=text, impact=abs(loc.delta_value)))
 
     mover = max(locations, key=lambda loc: abs(loc.aged90_value_delta))
     if mover.aged90_value_delta != 0:
         verb = "rose" if mover.aged90_value_delta > 0 else "fell"
-        driver_clause = _sku_delta_clause(
-            mover.skus_90p_delta, connector="driven by", left_verb="leaving", entered_verb="entering"
-        )
+        driver_clause = _sku_delta_clause(mover.skus_90p_delta)
         text = (
             f"{mover.location}'s aged value {verb} {_fmt_money(abs(mover.aged90_value_delta))} "
             f"({_fmt_signed_pct(mover.aged90_value_delta_pct)}), {driver_clause}."

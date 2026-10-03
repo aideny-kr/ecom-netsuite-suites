@@ -162,7 +162,7 @@ export function NewJob(): JSX.Element {
       {
         cron_expression: buildCron(cadence, { hour, minute, weekday, monthDay, raw: rawCron }),
         timezone,
-        budget: Object.fromEntries([["seconds", seconds], ...(hasStandaloneQuery ? [["bytes_scanned", bytes], ...(!hasAgent ? [["usd", usd]] : [])] : [])].filter(([, v]) => v !== "").map(([k, v]) => [k, Number(v)])),
+        budget: Object.fromEntries([["seconds", seconds], ...(hasQueryBudget ? [["bytes_scanned", bytes], ...(!hasAgent && !hasReport ? [["usd", usd]] : [])] : [])].filter(([, v]) => v !== "").map(([k, v]) => [k, Number(v)])),
       },
       { onSuccess: () => router.push(`/scheduled-jobs/${createdId}`) },
     );
@@ -171,8 +171,10 @@ export function NewJob(): JSX.Element {
   const plainError = create.isError && !clarification ? ((create.error as Error | null)?.message ?? null) : null;
   const steps = detailQuery.data?.plan_json?.steps ?? [];
   const hasStandaloneQuery = steps.some((step) => step.type === "bigquery_sql");
+  const hasReport = steps.some((step) => step.type === "report.compose");
+  const hasQueryBudget = hasStandaloneQuery || hasReport;
   const hasAgent = steps.some((step) => step.type === "agent.review_saved_case");
-  const limitsValid = [seconds, ...(hasStandaloneQuery ? [bytes, ...(!hasAgent ? [usd] : [])] : [])].every((v) => v === "" || (Number.isFinite(Number(v)) && Number(v) > 0));
+  const limitsValid = [seconds, ...(hasQueryBudget ? [bytes, ...(!hasAgent && !hasReport ? [usd] : [])] : [])].every((v) => v === "" || (Number.isFinite(Number(v)) && Number(v) > 0));
 
   return (
     <div className="max-w-2xl animate-fade-in space-y-4">
@@ -326,12 +328,12 @@ export function NewJob(): JSX.Element {
                   <p className="text-[13px] text-muted-foreground">Delivery follows the compiled steps. Reports stay in app; Drive uploads use the connected Drive’s Reports folder and the report’s folder. Email and arbitrary folder overrides are not supported.</p>
                   <fieldset className="space-y-2">
                     <legend className="text-[13px] font-semibold">Per-run limits</legend>
-                    {[["Maximum seconds", seconds, setSeconds], ...(hasStandaloneQuery ? [["Maximum bytes scanned", bytes, setBytes], ...(!hasAgent ? [["Maximum query cost (USD)", usd, setUsd]] : [])] : [])].map(([label, value, setter]) => (
+                    {[["Maximum seconds", seconds, setSeconds], ...(hasQueryBudget ? [["Maximum bytes scanned", bytes, setBytes], ...(!hasAgent && !hasReport ? [["Maximum query cost (USD)", usd, setUsd]] : [])] : [])].map(([label, value, setter]) => (
                       <label key={label as string} className="flex flex-wrap items-center gap-2 text-[13px]">
                         {label as string}<input aria-label={label as string} type="number" min="0.01" step="any" className="h-8 w-40 rounded-md border bg-background px-2" value={value as string} onChange={(e) => (setter as (v: string) => void)(e.target.value)} />
                       </label>
                     ))}
-                    <p className="text-xs text-muted-foreground">Blank means no workflow limit. Bytes and estimated query cost cover standalone bigquery_sql steps only; internal report queries are not metered by these limits. Agent steps use their own token and time limits and do not support a USD ceiling. A time limit can interrupt a Drive upload with an unknown outcome that requires reconciliation.</p>
+                    <p className="text-xs text-muted-foreground">Blank means no workflow limit. The scan limit covers BigQuery reads, including queries inside reports. Report query cost is unpriced; USD ceilings are unavailable for report plans. Standalone queries retain their estimated USD limit. Agent steps use their own token and time limits and do not support a USD ceiling. A time limit can interrupt a Drive upload with an unknown outcome that requires reconciliation.</p>
                   </fieldset>
                 </div>
 

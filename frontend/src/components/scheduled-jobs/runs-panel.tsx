@@ -88,7 +88,7 @@ export function RunsPanel({ scheduleId }: { scheduleId: string }): JSX.Element {
                         <Pill tone={runStatusTone(run.reason)}>{runStatusLabel(run.reason)}</Pill>
                         {run.detail && <span className="ml-1.5 font-mono text-[11px]">{run.detail}</span>}
                       </td>
-                      <td className="py-1.5 pr-2">{run.verification === "verified" ? "Delivery verified" : run.verification === "uncertain" ? "Uncertain" : "Not verified"}</td>
+                      <td className="py-1.5 pr-2">{run.verification === "verified" ? "Delivery verified" : run.verification === "reconciled" ? "Usage reconciled" : run.verification === "uncertain" ? "Uncertain" : "Not verified"}</td>
                       <td className="py-1.5 pr-2 text-muted-foreground">
                         <OutputLinks outputs={run.outputs} />
                         <details className="mt-1"><summary className="cursor-pointer">Run evidence · v{run.plan_version ?? "—"}</summary>

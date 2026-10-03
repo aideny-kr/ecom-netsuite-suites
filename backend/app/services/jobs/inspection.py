@@ -46,6 +46,10 @@ def inspect_plan(schedule, *, use_pending=False):
                     "input_schema": spec.params_schema,
                 }
             )
+            if step.type == "report.compose" and (schedule.budget_json or {}).get("usd") is not None:
+                blockers.append(
+                    f"Step {step.id}: report USD ceilings need an account pricing contract; use scan/time limits"
+                )
             if step.type == "report.compose" and "playbook_key" in step.params:
                 from app.services.report.playbooks import PLAYBOOKS, build_playbook_recipe
 
