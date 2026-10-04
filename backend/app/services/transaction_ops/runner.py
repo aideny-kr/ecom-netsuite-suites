@@ -342,11 +342,11 @@ async def run_investigation(
         )
 
     async def finish(reason):
-        await state.finish_run(db, tenant_id, run_id, reason, lease_token=token, now=clock())
+        finished = await state.finish_run(db, tenant_id, run_id, reason, lease_token=token, now=clock())
         return {
             "run_id": str(run_id),
             "status": "finished",
-            "termination_reason": reason,
+            "termination_reason": getattr(finished, "termination_reason", reason),
             "processed": progress["processed"],
             "matched": progress["matched"],
             "needs_review": progress["needs_review"],
@@ -745,6 +745,8 @@ async def run_investigation(
     except TimeoutError:
         return await finish("budget" if clock() >= run.deadline_at else "error")
     except state_service.StateError as exc:
+        if exc.code == "scheduled_detection_access_revoked":
+            return await finish("stall")
         if exc.code == "run_lease_lost":
             if clock() >= run.deadline_at:
                 try:

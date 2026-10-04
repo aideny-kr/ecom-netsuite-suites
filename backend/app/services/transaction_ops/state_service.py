@@ -523,11 +523,29 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
         await _finish_audited(db, tenant_id, row, "stall", now)
         await _commit(db, tenant_id)
         return None
+    if not await _scheduled_access(db, tenant_id, row, now, config=config):
+        return None
     row.deadline_at = deadline
     row.status, row.lease_token = "running", uuid.uuid4()
     row.lease_until = min(row.deadline_at, now + _LEASE)
     await _commit(db, tenant_id)
     return row.lease_token
+
+
+async def _scheduled_access(db, tenant_id, run, now, *, config=None):
+    if run.origin != "schedule":
+        return True
+    from app.services.transaction_ops.scheduled_detection import authorize
+
+    config = config or await get_config(db, tenant_id, run.config_id)
+    try:
+        await authorize(db, tenant_id, run, config)
+    except StateError:
+        run.progress_json = {**run.progress_json, "reason": "scheduled_detection_access_revoked"}
+        await _finish_audited(db, tenant_id, run, "stall", now)
+        await _commit(db, tenant_id)
+        return False
+    return True
 
 
 async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, orders=0, now=None):
@@ -543,6 +561,8 @@ async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, ord
         await _commit(db, tenant_id)
         return False
     _lease(row, lease_token, now)
+    if not await _scheduled_access(db, tenant_id, row, now):
+        return False
     if row.api_calls_used + api_calls > row.max_api_calls or row.orders_used + orders > row.max_orders:
         await _finish_audited(db, tenant_id, row, "budget", now)
         await _commit(db, tenant_id)
@@ -617,10 +637,20 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     if request.report_json.get("order_reference", order_reference) != order_reference:
         raise StateError("finding_order_mismatch", 422)
     request = request.model_copy(
-        update={"report_json": {k: v for k, v in request.report_json.items() if k != "case_id"}}
+        update={
+            "report_json": {k: v for k, v in request.report_json.items() if k not in {"case_id", "scheduled_detection"}}
+        }
     )
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
+    if not await _scheduled_access(db, tenant_id, run, now):
+        raise StateError("scheduled_detection_access_revoked", 403)
+    if run.origin == "schedule":
+        from app.services.transaction_ops.scheduled_detection import receipt
+
+        config = await get_config(db, tenant_id, run.config_id)
+        detection = await receipt(db, tenant_id, run, config, request.report_json, now=now)
+        request = request.model_copy(update={"report_json": {**request.report_json, "scheduled_detection": detection}})
     if run.origin == "recovery" and run.params_json.get("approval_message_id"):
         from app.services.transaction_ops.accounting_recheck import bound_report
 
