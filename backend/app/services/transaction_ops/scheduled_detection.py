@@ -13,24 +13,39 @@ from app.models.tenant import Tenant
 from app.models.user import User
 
 
-async def authorize(db, tenant_id, run, config):
+async def authorize_config(db, tenant_id, config):
     from app.services.transaction_ops import state_service as state
 
     if (
         config.tenant_id != tenant_id
         or not config.enabled
         or not config.schedule_enabled
-        or config.config_key != run.config_snapshot.get("config_key")
         or not await db.scalar(select(Tenant.is_active).where(Tenant.id == tenant_id))
     ):
         raise state.StateError("scheduled_detection_access_revoked", 403)
-    actor = await db.scalar(select(User).where(User.id == config.created_by, User.tenant_id == tenant_id))
+    actor = await db.scalar(
+        select(User)
+        .where(User.id == config.created_by, User.tenant_id == tenant_id)
+        .execution_options(populate_existing=True)
+    )
     if actor is None or actor.global_role == "superadmin":
         raise state.StateError("scheduled_detection_access_revoked", 403)
     for permission in ("recon.run", "connections.view"):
         await state._human(db, tenant_id, actor, permission)
     await state._check_bindings(db, tenant_id, config)
+    from app.services.transaction_ops.context_provenance import _binding
+
+    if await _binding(db, tenant_id, config) is None:
+        raise state.StateError("scheduled_detection_access_revoked", 403)
     return actor
+
+
+async def authorize(db, tenant_id, run, config):
+    from app.services.transaction_ops import state_service as state
+
+    if config.config_key != run.config_snapshot.get("config_key"):
+        raise state.StateError("scheduled_detection_access_revoked", 403)
+    return await authorize_config(db, tenant_id, config)
 
 
 def classify(report, *, now, scope=None):
@@ -78,10 +93,15 @@ def classify(report, *, now, scope=None):
                 and target["currency"] == source["currency"]
                 and target["authoritative"] is True
                 and fresh(target["observed_at"])
+                and clock(target["updated_at"]) <= clock(target["observed_at"])
             ):
                 return result
         if clock(lookup["observed_at"]) < clock(source["updated_at"]):
             return {**result, "outcome": "timing_difference", "reason": "destination_observed_before_source_version"}
+        if targets and any(clock(target["updated_at"]) < clock(source["updated_at"]) for target in targets):
+            return {**result, "outcome": "timing_difference", "reason": "destination_version_precedes_source_version"}
+        if not targets and source["status"] not in {"confirmed", "fulfilled"}:
+            return {**result, "outcome": "needs_review", "reason": "source_lifecycle_requires_review"}
         if not targets:
             return {**result, "outcome": "observed_missing", "reason": "complete_exact_lookup_empty"}
         if len(targets) != 1:
@@ -105,9 +125,12 @@ async def receipt(db, tenant_id, run, config, report, *, now):
     # No book/period is inferred from an order timestamp. The manifest records
     # available revisions, not permission to apply a policy to this observation.
     manifest = await context_provenance.context_manifest(db, tenant_id, config, actor_id=config.created_by)
+    if manifest.get("status") == "unavailable":
+        raise state.StateError("scheduled_detection_access_revoked", 403)
     skill = load_skill_snapshot("accounting_operations")
     return {
         **classify(report, now=now, scope=run.config_snapshot),
+        "observed_balance_status": report.get("balance", {}).get("status"),
         "schema_version": 1,
         "detector": "scheduled_order_evidence_v1",
         "run_id": str(run.id),

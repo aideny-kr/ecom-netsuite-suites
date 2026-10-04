@@ -17,6 +17,7 @@ def solidus_sync(
     connection_id: str,
     pages_remaining: int = MAX_REFRESH_PAGES,
     refresh_request_id: str | None = None,
+    schedule_config_id: str | None = None,
     **kwargs,
 ):
     tenant_id, connection_id = str(uuid.UUID(tenant_id)), str(uuid.UUID(connection_id))
@@ -26,7 +27,32 @@ def solidus_sync(
 
     async def run():
         async with worker_async_session() as db:
-            return await sync_solidus_orders(db, tenant_id, connection_id, max_pages=min(MAX_PAGES, pages_remaining))
+            if refresh_request_id and schedule_config_id is None:
+                from sqlalchemy import select
+
+                from app.core.database import set_tenant_context
+                from app.models.audit import AuditEvent
+
+                await set_tenant_context(db, tenant_id)
+                event = await db.scalar(
+                    select(AuditEvent)
+                    .where(
+                        AuditEvent.tenant_id == uuid.UUID(tenant_id),
+                        AuditEvent.action == "sync.trigger",
+                        AuditEvent.resource_id == connection_id,
+                        AuditEvent.payload["task_id"].astext == request_id,
+                    )
+                    .limit(1)
+                )
+                if event and event.payload.get("origin") == "schedule":
+                    raise SolidusImportError("legacy_scheduled_refresh_requires_requeue")
+            return await sync_solidus_orders(
+                db,
+                tenant_id,
+                connection_id,
+                max_pages=min(MAX_PAGES, pages_remaining),
+                schedule_config_id=schedule_config_id,
+            )
 
     summary = asyncio.run(run())
     remaining = pages_remaining - max(1, summary["pages_read"])
@@ -42,6 +68,7 @@ def solidus_sync(
                     "connection_id": connection_id,
                     "pages_remaining": remaining,
                     "refresh_request_id": request_id,
+                    "schedule_config_id": schedule_config_id,
                     "correlation_id": request_id,
                 },
             )

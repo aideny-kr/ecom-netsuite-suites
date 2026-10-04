@@ -380,7 +380,7 @@ async def create_run(
             raise StateError("invalid_run_continuation")
         initial_progress = _bounded_json(previous.progress_json)
         for field in list(initial_progress):
-            if field.startswith("continuation_"):
+            if field.startswith("continuation_") or field == "reason":
                 initial_progress.pop(field)
         if human_retry:
             attempt = initial_progress.get("review_attempt", 0)
@@ -649,8 +649,24 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
         from app.services.transaction_ops.scheduled_detection import receipt
 
         config = await get_config(db, tenant_id, run.config_id)
-        detection = await receipt(db, tenant_id, run, config, request.report_json, now=now)
-        request = request.model_copy(update={"report_json": {**request.report_json, "scheduled_detection": detection}})
+        try:
+            detection = await receipt(db, tenant_id, run, config, request.report_json, now=now)
+        except StateError as exc:
+            if exc.code == "scheduled_detection_access_revoked":
+                run.progress_json = {**run.progress_json, "reason": exc.code}
+                await _finish_audited(db, tenant_id, run, "stall", now)
+                await _commit(db, tenant_id)
+            raise
+        body = {**request.report_json, "scheduled_detection": detection}
+        if isinstance(body.get("balance"), dict):
+            # Existing tables, filters and exports consume balance.status. Keep
+            # amounts intact, but never expose an unverified observation as matched.
+            body["balance"] = {**body["balance"], "evidence_status": detection["outcome"]}
+            if detection["outcome"] in {"timing_difference", "incomplete_evidence"}:
+                body["balance"]["status"] = "incomplete"
+            elif detection["reason"] == "source_lifecycle_requires_review":
+                body["balance"]["status"] = "incomplete"
+        request = request.model_copy(update={"report_json": body})
     if run.origin == "recovery" and run.params_json.get("approval_message_id"):
         from app.services.transaction_ops.accounting_recheck import bound_report
 
@@ -728,6 +744,8 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
         raise StateError("stale_evidence")
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
+    if not await _scheduled_access(db, tenant_id, run, now):
+        raise StateError("scheduled_detection_access_revoked", 403)
     if run.origin == "recovery":
         raise StateError("read_only_verification_run")
     config = await get_config(db, tenant_id, run.config_id, lock=True)

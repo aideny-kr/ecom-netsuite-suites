@@ -47,6 +47,8 @@ import {
 const input = "h-10 rounded-md border bg-background px-3 text-[13px]";
 const verdicts: Record<string, string> = {
   matched: "Matched",
+  timing_difference: "Timing difference · recheck needed",
+  incomplete_evidence: "Evidence incomplete",
   difference: "Needs review",
   mismatch: "Needs review",
   missing_in_netsuite: "Missing in NetSuite",
@@ -693,7 +695,9 @@ function Workspace({ view, onViewChange }: WorkspaceNavigation) {
                       <Variance balance={c.latest_report_json.balance} />
                     </td>
                     <td className="p-4">
-                      {objectValue(c.latest_report_json.balance).status ===
+                      {objectValue(c.latest_report_json.balance).evidence_status === "timing_difference"
+                        ? verdicts.timing_difference
+                        : objectValue(c.latest_report_json.balance).status ===
                       "matched"
                         ? "Amounts agree · detail needs review"
                         : verdicts[
@@ -883,7 +887,7 @@ function ResultRow({
       )}
       <td className="p-4">
         <span className="whitespace-nowrap rounded-full border px-2.5 py-1 text-xs">
-          {verdicts[String(balance.status)] || "Not verified"}
+          {verdicts[String(balance.evidence_status)] || verdicts[String(balance.status)] || "Not verified"}
         </span>
       </td>
       <td className="whitespace-nowrap p-4">

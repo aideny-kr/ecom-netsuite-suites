@@ -50,6 +50,12 @@ async def seed_config(db, tenant_id, actor, **config_changes):
     )
     db.add(step)
     await db.flush()
+    await db.execute(
+        text(
+            "UPDATE connections SET metadata_json=jsonb_build_object('account_id',CAST(:account AS text)) WHERE id=:id"
+        ),
+        {"id": netsuite_id, "account": config_changes.get("netsuite_account_id", "6738075_SB1")},
+    )
     return await state.create_config(
         db,
         tenant_id,

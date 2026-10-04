@@ -16,7 +16,7 @@ from app.services.ingestion.sync_status import solidus_sync_status
 from app.workers.celery_app import celery_app
 
 
-def publish_refresh(tenant_id, connection_id, task_id):
+def publish_refresh(tenant_id, connection_id, task_id, schedule_config_id=None):
     with celery_app.connection_for_write(
         connect_timeout=1,
         transport_options={
@@ -37,8 +37,37 @@ def publish_refresh(tenant_id, connection_id, task_id):
                 "connection_id": str(connection_id),
                 "refresh_request_id": task_id,
                 "correlation_id": task_id,
+                "schedule_config_id": str(schedule_config_id) if schedule_config_id else None,
             },
         )
+
+
+async def refresh_sponsor(db, tenant_id, connection_id):
+    from app.services.transaction_ops import state_service as state
+    from app.services.transaction_ops.scheduled_detection import authorize_config
+
+    await set_tenant_context(db, tenant_id)
+    configs = (
+        await db.scalars(
+            select(TransactionConfig)
+            .where(
+                TransactionConfig.tenant_id == tenant_id,
+                TransactionConfig.source_connection_id == connection_id,
+                TransactionConfig.enabled.is_(True),
+                TransactionConfig.schedule_enabled.is_(True),
+            )
+            .order_by(TransactionConfig.id)
+            .limit(100)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    for config in configs:
+        try:
+            await authorize_config(db, tenant_id, config)
+            return config
+        except state.StateError:
+            continue
+    return None
 
 
 async def queue_refresh(db, tenant_id, connection_id, *, actor_id=None, daily=False, now=None):
@@ -87,12 +116,19 @@ async def queue_refresh(db, tenant_id, connection_id, *, actor_id=None, daily=Fa
         if len(attempts) >= 3 or (attempts and now - attempts[0] < timedelta(minutes=15)):
             await db.commit()
             return {"status": "deferred"}
+    sponsor = await refresh_sponsor(db, tenant_id, connection_id) if daily else None
+    if daily and sponsor is None:
+        await db.commit()
+        return {"status": "unavailable", "reason": "scheduled_detection_access_revoked"}
+    schedule_config_id = sponsor.id if sponsor else None
+    actor_id = sponsor.created_by if sponsor else actor_id
     task_id = str(uuid4())
     payload = {
         "provider": "solidus",
         "task_id": task_id,
         "requested_at": now.isoformat(),
         "origin": "schedule" if daily else "manual",
+        "schedule_config_id": str(schedule_config_id) if schedule_config_id else None,
     }
     await audit_service.log_event(
         db=db,
@@ -107,7 +143,9 @@ async def queue_refresh(db, tenant_id, connection_id, *, actor_id=None, daily=Fa
     )
     await db.commit()
     try:
-        await asyncio.wait_for(asyncio.to_thread(publish_refresh, tenant_id, connection_id, task_id), timeout=4)
+        await asyncio.wait_for(
+            asyncio.to_thread(publish_refresh, tenant_id, connection_id, task_id, schedule_config_id), timeout=4
+        )
     except Exception:
         await set_tenant_context(db, tenant_id)
         await audit_service.log_event(

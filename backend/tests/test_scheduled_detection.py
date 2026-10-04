@@ -26,6 +26,7 @@ def evidence():
         subsidiary_id="5",
         updated_at=(NOW - timedelta(hours=1)).isoformat(),
         currency="USD",
+        status="confirmed",
     )
     body["lookup"].update(
         source_system="framework",
@@ -44,6 +45,7 @@ def evidence():
         order_reference=REF,
         subsidiary_id="5",
         record_type="salesorder",
+        updated_at=NOW.isoformat(),
         currency="USD",
     )
     return body
@@ -65,7 +67,7 @@ def test_missing_timing_and_matched_are_distinct_without_inventing_sync_policy()
     assert result["financial_approval"] is None
 
 
-@pytest.mark.parametrize("variant", ["partial", "stale", "foreign", "currency", "unknown", "future"])
+@pytest.mark.parametrize("variant", ["partial", "stale", "foreign", "currency", "unknown", "future", "future_target"])
 def test_unproven_evidence_cannot_assert_match_or_absence(variant):
     from app.services.transaction_ops.scheduled_detection import classify
 
@@ -80,6 +82,8 @@ def test_unproven_evidence_cannot_assert_match_or_absence(variant):
         body["targets"][0]["currency"] = "EUR"
     elif variant == "unknown":
         body["source"].pop("updated_at")
+    elif variant == "future_target":
+        body["targets"][0]["updated_at"] = (NOW + timedelta(seconds=1)).isoformat()
     else:
         body["source"]["observed_at"] = (NOW + timedelta(seconds=1)).isoformat()
     assert classify(body, now=NOW)["outcome"] == "incomplete_evidence"
@@ -156,6 +160,9 @@ async def test_timing_gap_does_not_resolve_an_existing_case(db, admin_user):
     body["source"]["updated_at"] = (NOW - timedelta(seconds=5)).isoformat()
     row = await state.record_finding(db, actor.tenant_id, run.id, REF, body, lease_token=token, now=NOW)
     assert row.report_json["scheduled_detection"]["outcome"] == "timing_difference"
+    assert row.report_json["scheduled_detection"]["observed_balance_status"] == "matched"
+    assert row.report_json["balance"]["status"] == "incomplete"
+    assert row.report_json["balance"]["amounts"]["order_total"]["delta"] == "0.00"
     assert (await case_service.list_cases(db, actor.tenant_id))[0].status == "open"
 
 
@@ -169,3 +176,80 @@ async def test_disabled_schedule_stops_midrun_without_spending(db, admin_user):
     assert not await state.reserve_budget(db, actor.tenant_id, run.id, lease_token=token, api_calls=2, now=NOW)
     assert run.api_calls_used == 0
     assert run.termination_reason == "stall"
+
+
+async def test_context_authorization_revoked_between_checks_does_not_publish(db, admin_user, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.services.transaction_ops import context_provenance
+
+    actor = admin_user[0]
+    _, run = await scheduled(db, actor)
+    token = await state.claim_run(db, actor.tenant_id, run.id, now=NOW)
+    monkeypatch.setattr(
+        context_provenance,
+        "context_manifest",
+        AsyncMock(return_value={"status": "unavailable", "reason": "permission_denied"}),
+    )
+    with pytest.raises(state.StateError, match="scheduled_detection_access_revoked"):
+        await state.record_finding(db, actor.tenant_id, run.id, REF, evidence(), lease_token=token, now=NOW)
+    assert not await state.list_findings(db, actor.tenant_id, run.id)
+    assert not await case_service.list_cases(db, actor.tenant_id)
+    assert run.termination_reason == "stall"
+
+
+async def test_rebound_connection_cannot_publish_old_account_evidence(db, admin_user):
+    from app.models.connection import Connection
+
+    actor = admin_user[0]
+    config, run = await scheduled(db, actor)
+    token = await state.claim_run(db, actor.tenant_id, run.id, now=NOW)
+    conn = await db.get(Connection, config.netsuite_connection_id)
+    conn.metadata_json = {"account_id": "9999999_SB1"}
+    await db.flush()
+    with pytest.raises(state.StateError, match="scheduled_detection_access_revoked"):
+        await state.record_finding(db, actor.tenant_id, run.id, REF, evidence(), lease_token=token, now=NOW)
+    assert not await state.list_findings(db, actor.tenant_id, run.id)
+
+
+def test_fresh_reads_of_older_destination_version_are_timing():
+    from app.services.transaction_ops.scheduled_detection import classify
+
+    body = evidence()
+    body["targets"][0]["updated_at"] = (NOW - timedelta(hours=2)).isoformat()
+    result = classify(body, now=NOW)
+    assert result["outcome"] == "timing_difference"
+    assert result["reason"] == "destination_version_precedes_source_version"
+
+
+def test_missing_cancelled_order_requires_lifecycle_review():
+    from app.services.transaction_ops.scheduled_detection import classify
+
+    body = evidence()
+    body["targets"] = []
+    body["source"]["status"] = "cancelled"
+    assert classify(body, now=NOW)["outcome"] == "needs_review"
+
+
+@pytest.mark.parametrize(
+    "field,value", [("netsuite_account_id", "9999999"), ("subsidiary_id", "7"), ("record_type", "invoice")]
+)
+def test_receipt_rejects_out_of_scope_evidence(field, value):
+    from app.services.transaction_ops.scheduled_detection import classify
+
+    scope = {"netsuite_account_id": "1234567_SB1", "subsidiary_id": "5", "record_type": "salesorder", field: value}
+    assert classify(evidence(), now=NOW, scope=scope)["outcome"] == "incomplete_evidence"
+
+
+async def test_current_role_removal_blocks_scheduled_publication(db, admin_user):
+    from sqlalchemy import delete
+
+    from app.models.user import UserRole
+
+    actor = admin_user[0]
+    _, run = await scheduled(db, actor)
+    token = await state.claim_run(db, actor.tenant_id, run.id, now=NOW)
+    await db.execute(delete(UserRole).where(UserRole.tenant_id == actor.tenant_id, UserRole.user_id == actor.id))
+    with pytest.raises(state.StateError, match="scheduled_detection_access_revoked"):
+        await state.record_finding(db, actor.tenant_id, run.id, REF, evidence(), lease_token=token, now=NOW)
+    assert not await state.list_findings(db, actor.tenant_id, run.id)

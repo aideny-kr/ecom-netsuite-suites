@@ -199,7 +199,22 @@ async def _restart_scan(db, connection_id, state, calls):
     }
 
 
-async def _sync_page(db, tenant_id, connection_id, now):
+async def _scheduled_authority(db, tenant_id, connection_id, config_id):
+    if config_id is None:
+        return
+    from app.services.transaction_ops import state_service as state
+    from app.services.transaction_ops.scheduled_detection import authorize_config
+
+    try:
+        config = await state.get_config(db, tenant_id, UUID(str(config_id)))
+        if config.source_connection_id != connection_id:
+            raise state.StateError("source_unavailable")
+        await authorize_config(db, tenant_id, config)
+    except state.StateError:
+        raise SolidusImportError("scheduled_detection_access_revoked") from None
+
+
+async def _sync_page(db, tenant_id, connection_id, now, schedule_config_id=None):
     await set_tenant_context(db, tenant_id)
     # Serialize import cursors independently of connection availability checks.
     # Shared connection locks still block revocation, but allow investigations to
@@ -250,6 +265,7 @@ async def _sync_page(db, tenant_id, connection_id, now):
                 "api_calls": 0,
             }
         raise SolidusImportError("source_unavailable")
+    await _scheduled_authority(db, tenant_id, connection_id, schedule_config_id)
     cursor = await db.scalar(
         select(CursorState.cursor_value).where(
             CursorState.connection_id == connection_id,
@@ -272,6 +288,7 @@ async def _sync_page(db, tenant_id, connection_id, now):
         after_id=int(state.get("last_source_id", "0")),
         updated_before=_time(state["started_at"]),
     )
+    await _scheduled_authority(db, tenant_id, connection_id, schedule_config_id)
     calls = 1
     observed = _time(evidence["read_at"])
     rows = [project_canonical_order(order, tenant_id, connection_id, observed) for order in evidence["orders"]]
@@ -314,7 +331,7 @@ async def _sync_page(db, tenant_id, connection_id, now):
     }
 
 
-async def sync_solidus_orders(db, tenant_id, connection_id, *, now=None, max_pages=MAX_PAGES):
+async def sync_solidus_orders(db, tenant_id, connection_id, *, now=None, max_pages=MAX_PAGES, schedule_config_id=None):
     tenant_id, connection_id = UUID(str(tenant_id)), UUID(str(connection_id))
     now = now or datetime.now(timezone.utc)
     if now.utcoffset() is None or type(max_pages) is not int or not 1 <= max_pages <= MAX_PAGES:
@@ -323,7 +340,7 @@ async def sync_solidus_orders(db, tenant_id, connection_id, *, now=None, max_pag
     try:
         async with asyncio.timeout(DEADLINE_SECONDS):
             for _ in range(max_pages):
-                result = await _sync_page(db, tenant_id, connection_id, now)
+                result = await _sync_page(db, tenant_id, connection_id, now, schedule_config_id)
                 records += result["records_synced"]
                 calls += result["api_calls"]
                 pages_read += 1

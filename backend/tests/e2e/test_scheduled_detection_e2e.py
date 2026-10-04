@@ -22,15 +22,21 @@ from tests.test_transaction_ops_state_db import seed_config
 def provider_evidence(now, variant):
     source, target, _, _, _ = evidence()
     source["read_at"] = now.isoformat()
-    source["orders"][0].update(business_entity="Synthetic Company", updated_at=(now - timedelta(minutes=1)).isoformat())
+    source["orders"][0].update(
+        business_entity="Synthetic Company",
+        state="complete",
+        requires_review=False,
+        updated_at=(now - timedelta(minutes=1)).isoformat(),
+    )
     target["scope"] = {"account_id": "1234567-sb1", "subsidiary_id": "5"}
     target["observed_at"] = now.isoformat()
     target["orders"][0]["header"].update(total="120.00", taxTotal="20.00", subsidiary={"id": "5"})
-    if variant in {"missing", "timing"}:
+    target["orders"][0]["version"] = now.isoformat()
+    if variant == "missing":
         target["orders"] = []
         target["lookup"].update(count=0, complete=True)
     if variant == "timing":
-        target["observed_at"] = (now - timedelta(minutes=2)).isoformat()
+        target["orders"][0]["version"] = (now - timedelta(minutes=2)).isoformat()
     return source, target
 
 
@@ -86,6 +92,7 @@ async def test_collector_to_case_records_distinct_outcomes_and_replay(
         _refund_page_reader=AsyncMock(return_value={"page_complete": True, "orders": [], "next_after_id": None}),
     )
     assert result["termination_reason"] == "done"
+    assert result["matched"] == (1 if expected == "no_discrepancy" else 0)
     findings = await state.list_findings(db, actor.tenant_id, run_id)
     assert len(findings) == 1
     receipt = findings[0].report_json["scheduled_detection"]

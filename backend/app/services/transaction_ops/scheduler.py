@@ -339,6 +339,16 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             stats["skipped"] += 1
                             await db.commit()
                             continue
+                        from app.services.transaction_ops.scheduled_detection import authorize_config
+
+                        try:
+                            await authorize_config(db, tenant_id, config)
+                        except state.StateError:
+                            stats["stalled"].append(
+                                {"config_id": str(config.id), "reason": "scheduled_detection_access_revoked"}
+                            )
+                            await db.commit()
+                            continue
                         scope, resume_id, reason = _scope(config, latest, now)
                         if reason == "waiting_for_daily_cutoff":
                             stats["skipped"] += 1
