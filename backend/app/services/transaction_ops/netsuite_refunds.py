@@ -7,7 +7,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from app.schemas.transaction_ops import _decimal
-from app.services.transaction_ops.netsuite_reader import _account, _collection, _id, _sublist, authenticated_reader
+from app.services.transaction_ops.netsuite_reader import (
+    REFUND_QUERY_READ_TIMEOUT_SECONDS,
+    _account,
+    _collection,
+    _id,
+    _sublist,
+    authenticated_reader,
+)
 from app.services.transaction_ops.netsuite_refund_requests import read_request_links, verify_request_allocations
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile, read_tax_adjustments
 
@@ -52,7 +59,13 @@ async def read_netsuite_refunds(
     )
     async with asyncio.timeout(160):
         async with authenticated_reader(
-            db, tenant_id, connection_id, account, client=client, max_api_calls=MAX_REFUND_CALLS
+            db,
+            tenant_id,
+            connection_id,
+            account,
+            client=client,
+            max_api_calls=MAX_REFUND_CALLS,
+            query_read_timeout_seconds=REFUND_QUERY_READ_TIMEOUT_SECONDS,
         ) as reader:
             result = await collect_refunds(
                 reader,

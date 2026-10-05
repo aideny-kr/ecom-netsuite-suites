@@ -139,6 +139,10 @@ def run_snapshot(run, now):
             "resolved": failure.get("resolved") if type(failure.get("resolved")) is bool else None,
             "blocking": bool(scheduled_read_stop(run) or _error_stopped_run(run, failure)),
         }
+        from app.services.transaction_ops.native_read_context import safe_context
+
+        if context := safe_context(failure.get("provider_read_context")):
+            diagnostic["provider_read_context"] = context
     return {
         "run_id": str(run.id),
         "origin": run.origin,
