@@ -18,9 +18,12 @@ connection status, and a newer sufficiently valid credential. Recovery retains
 the original window, pending references, cursors and evidence root. Config
 locks, work keys, publication reservations and worker leases prevent duplicate
 ownership. Only one authentication resume is allowed in a lineage; existing
-part, elapsed-cycle and cost limits remain in force. A hard stop or expired
-lineage stays blocked and is visible in Ops status; this change does not grant
-unlimited retries or automatic financial writes.
+part, elapsed-cycle and cost limits remain in force. An expired/exhausted
+continuation stays blocked. For the two pre-HTTP failure codes, the existing
+new bounded daily-cycle retry at the next cutoff is preserved; it rereads the
+failed window rather than reviving an exhausted continuation. Native HTTP401
+retains its existing hard-stop contract. Ops status distinguishes those paths.
+This change does not grant unlimited continuations or automatic financial writes.
 
 ## Acceptance
 
@@ -32,6 +35,8 @@ unlimited retries or automatic financial writes.
 - Repeated/concurrent recovery creates one child. New daily work, paused
   schedules, foreign tenants, changed scopes, expired credentials, rejected
   tokens, 403 responses and exhausted limits remain fenced.
+- For both pre-HTTP failure codes, expired cycles, used authentication allowance
+  and part limits do not permanently disable the next daily scheduled cycle.
 - The resumed reader must validate evidence before resolving the diagnostic;
   credential recovery alone does not mark any date verified.
 - Seeded lifecycle, financial approval/audit and tenant isolation checks pass.

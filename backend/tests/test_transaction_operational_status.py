@@ -192,6 +192,32 @@ def test_pre_http_auth_stop_reports_connection_check_instead_of_tomorrow(code):
     )
 
 
+@pytest.mark.parametrize("code", ["netsuite_invalid_connection", "netsuite_authentication_failed"])
+@pytest.mark.parametrize("limit", ["cycle_expired", "auth_retry_limit", "part_limit"])
+def test_pre_http_auth_limits_report_next_daily_cycle_instead_of_permanent_stop(code, limit):
+    from app.services.transaction_ops.scheduler import _schedule_key
+
+    c = config(mapping_json={}, interval_minutes=1440)
+    r = run(termination_reason="error")
+    r.progress_json = {
+        "schedule_cycle_key": _schedule_key(c, NOW),
+        "last_read_failure": {"code": code, "resolved": False, "observed_at": r.finished_at.isoformat()},
+        **{
+            "cycle_expired": {"continuation_started_at": (NOW - timedelta(days=2)).isoformat()},
+            "auth_retry_limit": {"auth_resume_count": 1},
+            "part_limit": {"continuation_part": 96},
+        }[limit],
+    }
+    recovery = status.continuation_status(r, NOW)
+    assert recovery["state"] == "blocked" and recovery["reason"] == limit
+    assert status._next_action(c, r, [], {}, status.schedule(c, NOW), recovery, NOW)["kind"] == "scheduled_check"
+    tomorrow = NOW + timedelta(days=1)
+    assert (
+        status._next_action(c, r, [], {}, status.schedule(c, tomorrow), recovery, tomorrow)["kind"]
+        == "new_schedule_cycle"
+    )
+
+
 @pytest.mark.parametrize("reason", ["error", "stall", "done"])
 def test_interval_schedule_does_not_promise_a_second_dispatch_in_same_bucket(reason):
     c = config(mapping_json={})

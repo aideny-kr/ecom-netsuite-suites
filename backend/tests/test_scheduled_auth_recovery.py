@@ -68,6 +68,8 @@ async def failed_auth(db, actor, monkeypatch, *, progress_guard=None, code="nets
         prior.progress_json["auth_resume_count"] = 1
     elif progress_guard == "expired_cycle":
         prior.progress_json["continuation_started_at"] = (now - timedelta(days=2)).isoformat()
+    elif progress_guard == "part_limit":
+        prior.progress_json["continuation_part"] = cont.SCHEDULE_MAX_PARTS
     elif progress_guard == "same_rejected_token":
         prior.progress_json["last_read_failure"].update(
             auth_token_sha256=hashlib.sha256(b"new-token").hexdigest(),
@@ -210,6 +212,21 @@ async def test_second_401_after_recovery_cannot_reset_allowance_at_cutoff(db, ad
     await db.flush()
     assert (await scheduler.collect_due_runs(db, now + timedelta(days=1)))["created"] == 0
     assert (await state.get_run(db, actor.tenant_id, child.id)).progress_json["auth_resume_count"] == 1
+
+
+@pytest.mark.parametrize("code", ["netsuite_invalid_connection", "netsuite_authentication_failed"])
+@pytest.mark.parametrize("limit", ["expired_cycle", "exhausted", "part_limit"])
+async def test_pre_http_stop_keeps_next_daily_cycle_after_resume_limit(db, admin_user, monkeypatch, code, limit):
+    actor = admin_user[0]
+    config, prior, _, _, now = await failed_auth(db, actor, monkeypatch, code=code, progress_guard=limit)
+    assert (await scheduler.collect_due_runs(db, now))["created"] == 0
+    assert (await scheduler.collect_due_runs(db, now + timedelta(days=1)))["created"] == 1
+    _, latest = await scheduler._schedule_history(db, actor.tenant_id, config.id)
+    assert latest.id != prior.id and latest.status == "pending"
+    assert latest.params_json["window_start"] == prior.params_json["window_start"]
+    assert latest.params_json["window_end"] == prior.params_json["window_end"]
+    assert "continuation_of" not in latest.progress_json
+    assert (await scheduler.collect_due_runs(db, now + timedelta(days=1, minutes=1)))["created"] == 0
 
 
 @pytest.fixture
