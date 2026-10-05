@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from app.services.transaction_ops.call_meter import observed_calls
 from app.services.transaction_ops.netsuite_reader import (
+    REFUND_QUERY_READ_TIMEOUT_SECONDS,
     NetSuiteEvidenceError,
     _account,
     _collection,
@@ -277,6 +278,7 @@ async def read_refunds(db, tenant_id, connection_id, account_id, subsidiary_id, 
                 account,
                 max_api_calls=MAX_CALLS,
                 max_concurrent_calls=MAX_CONCURRENT_CALLS,
+                query_read_timeout_seconds=REFUND_QUERY_READ_TIMEOUT_SECONDS,
             ) as reader:
                 batch = await RefundGraphBatch.collect(reader, {ref: scope[0] for ref, scope in scopes.items()})
 

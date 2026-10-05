@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
@@ -30,6 +31,7 @@ from app.services.transaction_ops.call_meter import note_call
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_API_CALLS = 7  # identity + (record, currency, period) for at most two orders
 READ_TIMEOUT_SECONDS = 120
+REFUND_QUERY_READ_TIMEOUT_SECONDS = 60
 _TIMEOUT = httpx.Timeout(connect=5, read=25, write=10, pool=5)
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _ACCOUNT = re.compile(r"[0-9]+(?:[-_](?:SB[0-9]+|RP))?", re.IGNORECASE)
@@ -227,6 +229,7 @@ class _Reader:
         max_api_calls=None,
         read_scope=None,
         max_concurrent_calls=1,
+        query_read_timeout_seconds=25,
     ):
         self.read_scope = read_scope
         if max_api_calls is None:
@@ -237,6 +240,9 @@ class _Reader:
         if type(max_concurrent_calls) is not int or not 1 <= max_concurrent_calls <= 7:
             raise NetSuiteEvidenceError("invalid_read_concurrency")
         self.max_concurrent_calls = max_concurrent_calls
+        if type(query_read_timeout_seconds) is not int or query_read_timeout_seconds not in {25, 60}:
+            raise NetSuiteEvidenceError("invalid_read_timeout")
+        self.query_timeout = httpx.Timeout(connect=5, read=query_read_timeout_seconds, write=10, pool=5)
         self.slots = asyncio.Semaphore(max_concurrent_calls)
         self.active_calls = self.peak_concurrency = 0
         self.throttled = False
@@ -286,6 +292,14 @@ class _Reader:
         metadata_read = method == "GET" and bool(
             re.fullmatch(r"/record/v1/metadata-catalog/[A-Za-z][A-Za-z0-9_]{0,127}", path)
         )
+        timeout = (
+            httpx.Timeout(120, connect=10, pool=10)
+            if metadata_read
+            else self.query_timeout
+            if method == "POST" and path == "/query/v1/suiteql"
+            else _TIMEOUT
+        )
+        started = time.monotonic()
         try:
             async with self.client.stream(
                 method,
@@ -293,7 +307,7 @@ class _Reader:
                 headers={**self.headers, **({"Accept": "application/schema+json"} if metadata_read else {})},
                 params=params,
                 json=body,
-                timeout=httpx.Timeout(120, connect=10, pool=10) if metadata_read else _TIMEOUT,
+                timeout=timeout,
                 follow_redirects=False,
             ) as response:
                 if response.status_code != 200:
@@ -316,7 +330,15 @@ class _Reader:
         except httpx.ReadTimeout:
             # Preserve size-sensitive query timeouts for dependency batch splitting.
             # Other transport failures retain ordinary bounded retry behavior.
-            raise NetSuiteEvidenceError("read_timeout") from None
+            from app.services.transaction_ops.native_read_context import operation
+
+            error = NetSuiteEvidenceError("read_timeout")
+            error.native_read_context = {
+                "operation": operation(method, path, body),
+                "elapsed_ms": min(300_000, max(0, round((time.monotonic() - started) * 1000))),
+                "idle_timeout_seconds": int(timeout.read),
+            }
+            raise error from None
         except (
             httpx.TimeoutException,
             httpx.ConnectError,
@@ -462,7 +484,15 @@ class _Reader:
 
 @asynccontextmanager
 async def authenticated_reader(
-    db, tenant_id, connection_id, account_id, *, client=None, max_api_calls=None, max_concurrent_calls=1
+    db,
+    tenant_id,
+    connection_id,
+    account_id,
+    *,
+    client=None,
+    max_api_calls=None,
+    max_concurrent_calls=1,
+    query_read_timeout_seconds=25,
 ):
     """Share selected-connection authorization across fixed native read services."""
     tenant, connection_uuid = _uuid(tenant_id, "tenant"), _uuid(connection_id, "connection")
@@ -473,6 +503,8 @@ async def authenticated_reader(
         raise NetSuiteEvidenceError("invalid_read_budget")
     if type(max_concurrent_calls) is not int or not 1 <= max_concurrent_calls <= 7:
         raise NetSuiteEvidenceError("invalid_read_concurrency")
+    if type(query_read_timeout_seconds) is not int or query_read_timeout_seconds not in {25, 60}:
+        raise NetSuiteEvidenceError("invalid_read_timeout")
     await set_tenant_context(db, str(tenant))
     connection = (
         await db.execute(
@@ -542,6 +574,7 @@ async def authenticated_reader(
             max_api_calls=max_api_calls,
             read_scope=read_scope,
             max_concurrent_calls=max_concurrent_calls,
+            query_read_timeout_seconds=query_read_timeout_seconds,
         )
         worker.credential_fingerprint = hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest()
         yield worker
@@ -554,6 +587,7 @@ async def authenticated_reader(
                 max_api_calls=max_api_calls,
                 read_scope=read_scope,
                 max_concurrent_calls=max_concurrent_calls,
+                query_read_timeout_seconds=query_read_timeout_seconds,
             )
             worker.credential_fingerprint = hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest()
             yield worker

@@ -71,6 +71,7 @@ def safe_read_code(exc):
         "response_budget",
         "api_call_budget",
         "invalid_read_budget",
+        "invalid_read_timeout",
         "identity_result_budget",
         "invalid_identity_result",
         "currency_identity_mismatch",
@@ -130,6 +131,10 @@ def read_failure(exc, progress, *, stage, reference=None):
         },
         "observed_at": datetime.now(timezone.utc).isoformat(),
     }
+    from app.services.transaction_ops.native_read_context import safe_context
+
+    if context := safe_context(getattr(exc, "native_read_context", None)):
+        failure["provider_read_context"] = context
     scope = getattr(exc, "auth_read_scope", None)
     if isinstance(exc, NetSuiteEvidenceError) and str(exc) == "upstream_http_401" and scope is not None:
         failure.update(auth_connection_id=scope[1], auth_account_id=scope[2], auth_token_sha256=scope[3])
