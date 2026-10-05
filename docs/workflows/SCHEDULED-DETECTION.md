@@ -16,14 +16,14 @@ record references, source observations, comparison and completeness limits.
 
 The detector is deterministic. It does not invoke a language model or claim
 that the available skill was applied. An order timestamp cannot select an
-accounting book or posting period: context is recorded as requiring scope, with
+accounting book or posting period: context defaults to requiring scope, with
 `policy_applied: false`. An observed amount difference needs review; it is not a
 newly approved accounting treatment.
 
 | Outcome | Meaning |
 | --- | --- |
 | `observed_missing` | A fresh, authoritative, complete exact lookup found no destination record. This is an observation, not a breached synchronization SLA or permission to backfill. |
-| `timing_difference` | The destination observation or record version predates the observed source version. Fresh reads of an older destination version can produce this outcome. Collect comparable evidence before deciding whether the record is missing or incorrect. |
+| `timing_difference` | The destination observation predates the observed source version. Collect a new destination observation before deciding whether the record is missing or incorrect. Native modification clocks alone do not prove timing or sync delay. |
 | `no_discrepancy` | Fresh scoped order-total, tax and completed-refund evidence agrees under the existing case-verification contract. Detail and repair limitations still apply. |
 | `needs_review` | Multiple exact matches or observed financial differences require investigation. |
 | `incomplete_evidence` | Scope, identity, freshness, currency or coverage could not be established. Unknown values remain unknown. |
@@ -66,3 +66,24 @@ Full accounting-policy diagnosis is still outside this foundation: a chosen
 book/period and approved scoped context must be bound and used before claiming
 an actual accounting error. Older destination versions indicate incomparable
 versions, not proof of a breached synchronization SLA.
+
+An optional `mapping_json.scheduled_context` pins a reviewed advisory entry by
+`key`, `revision`, `content_sha256`, and explicit `scope` (accounting book ID,
+currency and posting period ID). The current manifest must still approve this
+exact entry in the selected scope with the unchanged connector/configuration
+binding. Unavailable, draft, invalidated, stale, conflicting or revised context
+and currency disagreement produce `incomplete_evidence`; they cannot clear a
+case. The receipt records `scope_applied` only when these checks pass, without
+copying policy prose. Omitted selection retains the evidence-only pilot.
+
+Selected book/period IDs are reviewed human scope, not native GL verification.
+Sales orders are non-posting: `native_posting_scope_verified` and
+`policy_applied` remain false. No generic evaluator turns free-form policy into
+accounting treatment or declares a posted accounting error. That acceptance
+still requires supported posting evidence and an approved executable contract.
+
+Receipt schema/detector version 2 records independent native-clock semantics.
+An older destination modification time does not invalidate fresh matching
+order metrics, and cannot turn a financial difference into proven sync lag.
+Legacy schema-1 receipts remain historical evidence; detection does not rewrite
+prior case observations.

@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
+from app.schemas.accounting_context import ContextScope
 from app.schemas.transaction_ops import (
     EvidenceModel,
     ExactDecimal,
@@ -101,7 +102,15 @@ class NetSuiteLegacyTaxMapping(EvidenceModel):
         return _account(value)
 
 
+class ScheduledContextSelection(EvidenceModel):
+    scope: ContextScope
+    key: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    revision: int = Field(strict=True, ge=1)
+    content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class TransactionMapping(EvidenceModel):
+    scheduled_context: ScheduledContextSelection | None = None
     sales_credit_profile: SalesCreditProfile | None = None
     refund_adjustments: RefundAdjustmentProfile | None = None
     metabase_replica: ReplicaBinding | None = None

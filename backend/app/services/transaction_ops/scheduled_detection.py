@@ -98,8 +98,8 @@ def classify(report, *, now, scope=None):
                 return result
         if clock(lookup["observed_at"]) < clock(source["updated_at"]):
             return {**result, "outcome": "timing_difference", "reason": "destination_observed_before_source_version"}
-        if targets and any(clock(target["updated_at"]) < clock(source["updated_at"]) for target in targets):
-            return {**result, "outcome": "timing_difference", "reason": "destination_version_precedes_source_version"}
+        # Native modification clocks describe different business events. Their
+        # ordering cannot prove sync lag or invalidate fresh matching metrics.
         if not targets and source["status"] not in {"confirmed", "fulfilled"}:
             return {**result, "outcome": "needs_review", "reason": "source_lifecycle_requires_review"}
         if not targets:
@@ -121,18 +121,46 @@ async def receipt(db, tenant_id, run, config, report, *, now):
     from app.services.chat.execution_provenance import load_skill_snapshot
     from app.services.transaction_ops import context_provenance
     from app.services.transaction_ops import state_service as state
+    from app.services.transaction_ops.normalization import TransactionMapping
 
-    # No book/period is inferred from an order timestamp. The manifest records
-    # available revisions, not permission to apply a policy to this observation.
-    manifest = await context_provenance.context_manifest(db, tenant_id, config, actor_id=config.created_by)
+    selection = TransactionMapping.model_validate(run.config_snapshot["mapping_json"]).scheduled_context
+    manifest = await context_provenance.context_manifest(
+        db, tenant_id, config, actor_id=config.created_by, scope=selection.scope if selection else None
+    )
     if manifest.get("status") == "unavailable":
         raise state.StateError("scheduled_detection_access_revoked", 403)
     skill = load_skill_snapshot("accounting_operations")
+    verdict = classify(report, now=now, scope=run.config_snapshot)
+    context_status = "scope_required"
+    if selection:
+        selected = next((entry for entry in manifest.get("entries", []) if entry["key"] == selection.key), None)
+        context_status = "selected_context_unavailable"
+        if selected:
+            context_status = selected["status"]
+            if (
+                not selected.get("usable_as_policy")
+                or selected["revision"] != selection.revision
+                or selected["content_sha256"] != selection.content_sha256
+            ):
+                context_status = "selected_context_requires_review"
+            elif report.get("source", {}).get("currency") != selection.scope.currency:
+                context_status = "selected_currency_conflict"
+            else:
+                context_status = "approved_advisory"
+        if context_status != "approved_advisory":
+            verdict = {**verdict, "outcome": "incomplete_evidence", "reason": context_status}
+    # The selected scope is human supplied; non-posting order headers cannot
+    # verify a GL book/period or interpret free-form policy as treatment rules.
     return {
-        **classify(report, now=now, scope=run.config_snapshot),
+        **verdict,
         "observed_balance_status": report.get("balance", {}).get("status"),
-        "schema_version": 1,
-        "detector": "scheduled_order_evidence_v1",
+        "schema_version": 2,
+        "detector": "scheduled_order_evidence_v2",
+        "version_semantics": {
+            "status": "independent_native_clocks",
+            "sync_delay_proven": False,
+            "reason": "record_modification_order_does_not_establish_sync_causation",
+        },
         "run_id": str(run.id),
         "principal_id": str(config.created_by),
         "rules": {
@@ -150,7 +178,10 @@ async def receipt(db, tenant_id, run, config, report, *, now):
             "version": manifest.get("version"),
             "audit_id": manifest.get("audit_id"),
             "binding_sha256": manifest.get("binding_sha256"),
-            "status": manifest.get("status", "scope_required"),
+            "status": context_status,
+            "selection": selection.model_dump(mode="json") if selection else None,
+            "scope_applied": context_status == "approved_advisory",
+            "native_posting_scope_verified": False,
             "policy_applied": False,
             "entries": [
                 {key: entry[key] for key in ("key", "revision", "content_sha256", "scope", "status")}

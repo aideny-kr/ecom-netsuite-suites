@@ -212,14 +212,14 @@ async def test_rebound_connection_cannot_publish_old_account_evidence(db, admin_
     assert not await state.list_findings(db, actor.tenant_id, run.id)
 
 
-def test_fresh_reads_of_older_destination_version_are_timing():
+def test_older_native_version_does_not_invalidate_matching_financial_evidence():
     from app.services.transaction_ops.scheduled_detection import classify
 
     body = evidence()
     body["targets"][0]["updated_at"] = (NOW - timedelta(hours=2)).isoformat()
     result = classify(body, now=NOW)
-    assert result["outcome"] == "timing_difference"
-    assert result["reason"] == "destination_version_precedes_source_version"
+    assert result["outcome"] == "no_discrepancy"
+    assert result["reason"] == "order_total_tax_refunds_match"
 
 
 def test_missing_cancelled_order_requires_lifecycle_review():
@@ -253,3 +253,86 @@ async def test_current_role_removal_blocks_scheduled_publication(db, admin_user)
     with pytest.raises(state.StateError, match="scheduled_detection_access_revoked"):
         await state.record_finding(db, actor.tenant_id, run.id, REF, evidence(), lease_token=token, now=NOW)
     assert not await state.list_findings(db, actor.tenant_id, run.id)
+
+
+def test_native_version_order_cannot_turn_amount_difference_into_sync_delay():
+    from app.services.transaction_ops.scheduled_detection import classify
+
+    body = evidence()
+    body["balance"] = report("difference", NOW)["balance"]
+    body["targets"][0]["updated_at"] = (NOW - timedelta(hours=2)).isoformat()
+    assert classify(body, now=NOW) == {
+        "outcome": "needs_review",
+        "reason": "observed_amount_difference",
+        "financial_approval": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "variant", ["approved", "missing", "draft", "invalidated", "revision", "hash", "currency", "scope"]
+)
+async def test_selected_context_is_pinned_scoped_and_current_without_treatment_authority(db, admin_user, variant):
+    from app.schemas.transaction_runs import ConfigControl, RunCreate
+    from app.services.transaction_ops import context_provenance
+    from tests.test_context_provenance import SCOPE, approve, decision, draft, propose, read
+    from tests.test_transaction_ops_state import config_input
+
+    actor = admin_user[0]
+    request = draft(scope={**SCOPE.model_dump(), "currency": "EUR"}) if variant == "currency" else draft()
+    content = request.model_dump(mode="json", exclude={"expected_version", "key"})
+    selection = {
+        "scope": request.scope.model_dump(),
+        "key": request.key,
+        "revision": 2 if variant == "revision" else 1,
+        "content_sha256": "b" * 64 if variant == "hash" else state.business_digest(content),
+    }
+    if variant == "scope":
+        selection["scope"]["posting_period_id"] = "101"
+    config = await seed_config(
+        db,
+        actor.tenant_id,
+        actor,
+        netsuite_account_id="1234567_SB1",
+        mapping_json={**config_input().mapping_json, "scheduled_context": selection},
+    )
+    await state.control_config(
+        db, actor.tenant_id, config.id, ConfigControl(enabled=True, schedule_enabled=True), actor=actor
+    )
+    if variant != "missing":
+        await propose(db, actor, config, request)
+    if variant not in {"missing", "draft"}:
+        await approve(db, actor, config)
+    if variant == "invalidated":
+        await context_provenance.decide_context(
+            db,
+            actor.tenant_id,
+            config.id,
+            request.key,
+            decision(await read(db, actor, config), kind="invalidate"),
+            actor=actor,
+        )
+    run = await state.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(origin="schedule", evaluation_key="selected-context", order_references=[REF]),
+        now=NOW,
+    )
+    token = await state.claim_run(db, actor.tenant_id, run.id, now=NOW)
+    finding = await state.record_finding(db, actor.tenant_id, run.id, REF, evidence(), lease_token=token, now=NOW)
+    receipt = finding.report_json["scheduled_detection"]
+    context = receipt["accounting_context"]
+    assert context["selection"] == selection
+    assert context["scope_applied"] is (variant == "approved")
+    assert context["policy_applied"] is False
+    assert context["native_posting_scope_verified"] is False
+    assert receipt["outcome"] == ("no_discrepancy" if variant == "approved" else "incomplete_evidence")
+    assert receipt["version_semantics"]["sync_delay_proven"] is False
+    assert receipt["financial_approval"] is None
+    assert receipt["skill"]["applied"] is False
+    assert "Synthetic reviewed policy example" not in str(receipt)
+    assert not (await db.scalars(select(TransactionProposal))).all()
+    assert not (await db.scalars(select(TransactionOperation))).all()
+    if variant != "approved":
+        assert finding.report_json["balance"]["status"] == "incomplete"
+        assert (await case_service.list_cases(db, actor.tenant_id))[0].status == "open"

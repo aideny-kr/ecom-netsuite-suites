@@ -1,5 +1,6 @@
 """Real PostgreSQL transaction/tenant/approval regression coverage."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -19,10 +20,18 @@ async def seed_config(db, tenant_id, actor, **config_changes):
     for identifier, provider in ((celigo_id, "celigo"), (netsuite_id, "netsuite")):
         await db.execute(
             text(
-                "INSERT INTO connections (id,tenant_id,provider,label,status,encrypted_credentials,encryption_key_version) "
-                "VALUES (:id,:tenant,:provider,'Transaction tests','active','not-read',1)"
+                "INSERT INTO connections (id,tenant_id,provider,label,status,encrypted_credentials,"
+                "encryption_key_version,metadata_json) "
+                "VALUES (:id,:tenant,:provider,'Transaction tests','active','not-read',1,CAST(:metadata AS json))"
             ),
-            {"id": identifier, "tenant": tenant_id, "provider": provider},
+            {
+                "id": identifier,
+                "tenant": tenant_id,
+                "provider": provider,
+                "metadata": json.dumps({"account_id": config_changes.get("netsuite_account_id", "6738075_SB1")})
+                if provider == "netsuite"
+                else None,
+            },
         )
     integration = CeligoIntegration(
         tenant_id=tenant_id, celigo_connection_id=celigo_id, celigo_id=uuid4().hex[:24], name="Source", raw_json={}
@@ -50,12 +59,6 @@ async def seed_config(db, tenant_id, actor, **config_changes):
     )
     db.add(step)
     await db.flush()
-    await db.execute(
-        text(
-            "UPDATE connections SET metadata_json=jsonb_build_object('account_id',CAST(:account AS text)) WHERE id=:id"
-        ),
-        {"id": netsuite_id, "account": config_changes.get("netsuite_account_id", "6738075_SB1")},
-    )
     return await state.create_config(
         db,
         tenant_id,

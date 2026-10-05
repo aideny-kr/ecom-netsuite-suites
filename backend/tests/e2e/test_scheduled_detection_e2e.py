@@ -36,7 +36,8 @@ def provider_evidence(now, variant):
         target["orders"] = []
         target["lookup"].update(count=0, complete=True)
     if variant == "timing":
-        target["orders"][0]["version"] = (now - timedelta(minutes=2)).isoformat()
+        target["observed_at"] = (now - timedelta(minutes=2)).isoformat()
+        target["orders"][0]["version"] = (now - timedelta(minutes=3)).isoformat()
     return source, target
 
 
