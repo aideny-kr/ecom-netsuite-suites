@@ -269,7 +269,7 @@ def test_native_version_order_cannot_turn_amount_difference_into_sync_delay():
 
 
 @pytest.mark.parametrize(
-    "variant", ["approved", "missing", "draft", "invalidated", "revision", "hash", "currency", "scope"]
+    "variant", ["approved", "missing", "draft", "invalidated", "revision", "hash", "currency", "scope", "expired"]
 )
 async def test_selected_context_is_pinned_scoped_and_current_without_treatment_authority(db, admin_user, variant):
     from app.schemas.transaction_runs import ConfigControl, RunCreate
@@ -319,11 +319,20 @@ async def test_selected_context_is_pinned_scoped_and_current_without_treatment_a
         now=NOW,
     )
     token = await state.claim_run(db, actor.tenant_id, run.id, now=NOW)
+    if variant == "expired":
+        from app.services.transaction_ops.scheduled_detection import receipt as build_receipt
+
+        observed = request.review_by + timedelta(seconds=1)
+        receipt = await build_receipt(db, actor.tenant_id, run, config, evidence(), now=observed)
+        assert receipt["accounting_context"]["status"] == "selected_context_requires_review"
+        assert receipt["accounting_context"]["entries"][0]["status"] == "stale"
+        assert receipt["outcome"] == "incomplete_evidence"
+        return
     finding = await state.record_finding(db, actor.tenant_id, run.id, REF, evidence(), lease_token=token, now=NOW)
     receipt = finding.report_json["scheduled_detection"]
     context = receipt["accounting_context"]
     assert context["selection"] == selection
-    assert context["scope_applied"] is (variant == "approved")
+    assert context["selection_current"] is (variant == "approved")
     assert context["policy_applied"] is False
     assert context["native_posting_scope_verified"] is False
     assert receipt["outcome"] == ("no_discrepancy" if variant == "approved" else "incomplete_evidence")

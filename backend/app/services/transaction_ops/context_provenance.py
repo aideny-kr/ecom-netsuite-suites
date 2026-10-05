@@ -162,7 +162,7 @@ async def read_context(db, tenant_id, config_id, *, actor, scope: ContextScope |
     return await context_manifest(db, tenant_id, config, actor_id=actor.id, scope=scope)
 
 
-async def context_manifest(db, tenant_id, config, *, actor_id=None, scope: ContextScope | None = None):
+async def context_manifest(db, tenant_id, config, *, actor_id=None, scope: ContextScope | None = None, now=None):
     """Every surface rechecks the human reader before exposing context metadata."""
     await set_tenant_context(db, str(tenant_id))
     if config.tenant_id != tenant_id:
@@ -176,7 +176,7 @@ async def context_manifest(db, tenant_id, config, *, actor_id=None, scope: Conte
     binding = await _binding(db, tenant_id, current)
     if binding is None:
         return {"status": "unavailable", "entries": [], "authority": AUTHORITY}
-    result = _project(await _latest(db, tenant_id, current.id), binding, scope.model_dump() if scope else None)
+    result = _project(await _latest(db, tenant_id, current.id), binding, scope.model_dump() if scope else None, now=now)
     return {**result, "config_id": str(current.id), "company_scope": config_scope(current), "binding_sha256": binding}
 
 

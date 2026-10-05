@@ -73,7 +73,7 @@ currency and posting period ID). The current manifest must still approve this
 exact entry in the selected scope with the unchanged connector/configuration
 binding. Unavailable, draft, invalidated, stale, conflicting or revised context
 and currency disagreement produce `incomplete_evidence`; they cannot clear a
-case. The receipt records `scope_applied` only when these checks pass, without
+case. The receipt records `selection_current` only when these checks pass, without
 copying policy prose. Omitted selection retains the evidence-only pilot.
 
 Selected book/period IDs are reviewed human scope, not native GL verification.
@@ -87,3 +87,18 @@ An older destination modification time does not invalidate fresh matching
 order metrics, and cannot turn a financial difference into proven sync lag.
 Legacy schema-1 receipts remain historical evidence; detection does not rewrite
 prior case observations.
+
+A pinned advisory selection expires at its reviewed `review_by` deadline.
+Plan renewal before that date: pause the schedule, create a successor config
+with the intended new scope/revision/content hash, propose and review its
+context there, then enable the reviewed successor. Existing config mappings
+are immutable, and context is keyed by config ID; approval does not transfer.
+Until renewed, each observation remains incomplete and can open a case even
+when amounts agree. No selection is enabled by this feature. A dedicated
+readiness alert/preflight remains a release requirement before real selection.
+
+The current native readers observe the source before the destination. Their
+fresh-read path therefore does not normally produce historical observation
+timing; seeded timing tests exercise an explicitly older destination snapshot.
+A fresh empty lookup means observed absence, not proof of breached sync SLA.
+Do not advertise automatic sync-delay diagnosis from this adapter.

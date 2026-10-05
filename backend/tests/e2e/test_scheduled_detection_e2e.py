@@ -106,7 +106,7 @@ async def test_collector_to_case_records_distinct_outcomes_and_replay(
     await runner.run_investigation(db, actor.tenant_id, run_id)
     again = await scheduler.collect_due_runs(db, now)
     assert again["created"] == 0
-    assert len((await db.scalars(select(TransactionRun))).all()) == 1
+    assert len((await db.scalars(select(TransactionRun).where(TransactionRun.tenant_id == actor.tenant_id))).all()) == 1
     assert len(await state.list_findings(db, actor.tenant_id, run_id)) == 1
     if cases:
         case = (await case_service.list_cases(db, actor.tenant_id))[0]

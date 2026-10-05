@@ -125,7 +125,7 @@ async def receipt(db, tenant_id, run, config, report, *, now):
 
     selection = TransactionMapping.model_validate(run.config_snapshot["mapping_json"]).scheduled_context
     manifest = await context_provenance.context_manifest(
-        db, tenant_id, config, actor_id=config.created_by, scope=selection.scope if selection else None
+        db, tenant_id, config, actor_id=config.created_by, scope=selection.scope if selection else None, now=now
     )
     if manifest.get("status") == "unavailable":
         raise state.StateError("scheduled_detection_access_revoked", 403)
@@ -180,7 +180,7 @@ async def receipt(db, tenant_id, run, config, report, *, now):
             "binding_sha256": manifest.get("binding_sha256"),
             "status": context_status,
             "selection": selection.model_dump(mode="json") if selection else None,
-            "scope_applied": context_status == "approved_advisory",
+            "selection_current": context_status == "approved_advisory",
             "native_posting_scope_verified": False,
             "policy_applied": False,
             "entries": [
