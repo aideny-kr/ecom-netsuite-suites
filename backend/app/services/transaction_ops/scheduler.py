@@ -160,6 +160,7 @@ async def _recovery_ids(db, tenant_id, now):
 
 
 async def _candidate_ids(db, tenant_id, now):
+    from app.services.transaction_ops.auth_recovery import AUTH_STOP_CODES
     from app.services.transaction_ops.continuation import MAX_PARTS
 
     state, _, config, run = _dependencies()
@@ -207,7 +208,7 @@ async def _candidate_ids(db, tenant_id, now):
             run.origin == "schedule",
             run.status == "finished",
             run.termination_reason == "error",
-            run.progress_json["last_read_failure"]["code"].astext == "netsuite_upstream_http_401",
+            run.progress_json["last_read_failure"]["code"].astext.in_(AUTH_STOP_CODES),
         )
     )
     query = (
@@ -464,14 +465,14 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             and latest is not None
                             and latest.termination_reason == "done"
                         )
-                        from app.services.transaction_ops.auth_recovery import auth_stop
                         from app.services.transaction_ops.continuation import (
+                            auth_resume_due,
                             continue_budget_run,
                             read_retry_due,
                             scheduled_part_resume_candidate,
                         )
 
-                        resume_due = auth_stop(latest) or (
+                        resume_due = auth_resume_due(latest, now) or (
                             already_due
                             and (read_retry_due(latest, now) or scheduled_part_resume_candidate(latest, now))
                         )

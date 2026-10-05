@@ -164,17 +164,58 @@ def test_backoff_does_not_claim_eligibility_after_cycle_expiry():
     assert status.continuation_status(r, NOW, blocked={"reason": "no_progress"})["state"] == "waiting_for_retry"
 
 
-def test_auth_reconnect_is_not_claimed_to_bypass_finite_caps():
+@pytest.mark.parametrize(
+    "code", ["netsuite_upstream_http_401", "netsuite_invalid_connection", "netsuite_authentication_failed"]
+)
+def test_auth_reconnect_is_not_claimed_to_bypass_finite_caps(code):
     r = run(termination_reason="error")
     r.progress_json = {
         "continuation_part": 96,
         "last_read_failure": {
-            "code": "netsuite_upstream_http_401",
+            "code": code,
             "resolved": False,
             "observed_at": (NOW - timedelta(minutes=3)).isoformat(),
         },
     }
     assert status.continuation_status(r, NOW)["reason"] == "part_limit"
+
+
+@pytest.mark.parametrize("code", ["netsuite_invalid_connection", "netsuite_authentication_failed"])
+def test_pre_http_auth_stop_reports_connection_check_instead_of_tomorrow(code):
+    r = run(termination_reason="error")
+    r.progress_json = {"last_read_failure": {"code": code, "resolved": False, "observed_at": r.finished_at.isoformat()}}
+    check = status.continuation_status(r, NOW)
+    assert check["state"] == "connection_check_required"
+    assert (
+        status._next_action(config(), r, [], {"status": "behind"}, status.schedule(config(), NOW), check, NOW)["kind"]
+        == "check_connection"
+    )
+
+
+@pytest.mark.parametrize("code", ["netsuite_invalid_connection", "netsuite_authentication_failed"])
+@pytest.mark.parametrize("limit", ["cycle_expired", "auth_retry_limit", "part_limit"])
+def test_pre_http_auth_limits_report_next_daily_cycle_instead_of_permanent_stop(code, limit):
+    from app.services.transaction_ops.scheduler import _schedule_key
+
+    c = config(mapping_json={}, interval_minutes=1440)
+    r = run(termination_reason="error")
+    r.progress_json = {
+        "schedule_cycle_key": _schedule_key(c, NOW),
+        "last_read_failure": {"code": code, "resolved": False, "observed_at": r.finished_at.isoformat()},
+        **{
+            "cycle_expired": {"continuation_started_at": (NOW - timedelta(days=2)).isoformat()},
+            "auth_retry_limit": {"auth_resume_count": 1},
+            "part_limit": {"continuation_part": 96},
+        }[limit],
+    }
+    recovery = status.continuation_status(r, NOW)
+    assert recovery["state"] == "blocked" and recovery["reason"] == limit
+    assert status._next_action(c, r, [], {}, status.schedule(c, NOW), recovery, NOW)["kind"] == "scheduled_check"
+    tomorrow = NOW + timedelta(days=1)
+    assert (
+        status._next_action(c, r, [], {}, status.schedule(c, tomorrow), recovery, tomorrow)["kind"]
+        == "new_schedule_cycle"
+    )
 
 
 @pytest.mark.parametrize("reason", ["error", "stall", "done"])

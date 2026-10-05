@@ -15,6 +15,7 @@ from app.services.transaction_ops.continuation import (
     MAX_PARTS,
     READ_RETRY_DELAYS,
     SCHEDULE_MAX_PARTS,
+    auth_resume_due,
     continuation_result,
     next_metadata,
     read_retry_due,
@@ -198,9 +199,10 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
             return _action("continue_checkpoint", continuation["reason"], continuation["eligible_at"])
         if continuation["state"] == "connection_check_required":
             return _action("check_connection", continuation["reason"])
-        if auth_stop(latest) or continuation["reason"] not in {
+        if auth_resume_due(latest, now) or continuation["reason"] not in {
             "part_limit",
             "cycle_expired",
+            "auth_retry_limit",
             "no_progress",
             "read_retry_limit",
             "paused",

@@ -63,6 +63,25 @@ def read_retry_due(previous, now):
     return True
 
 
+def auth_resume_due(previous, now):
+    """Wake recoverable auth checkpoints without trapping new pre-HTTP failures.
+
+    Native 401 retains its established hard-stop contract. Pre-HTTP failures
+    historically earned a new bounded daily run at the next cutoff; when their
+    immediate continuation is exhausted, preserve that fallback, not a new
+    permanent schedule stop. No continuation allowance is reset here.
+    """
+    if not auth_stop(previous):
+        return False
+    if previous.progress_json["last_read_failure"]["code"] == "netsuite_upstream_http_401":
+        return True
+    try:
+        next_metadata(previous, now)
+    except (ValueError, TypeError) as exc:
+        return str(exc) not in {"cycle_expired", "part_limit", "auth_retry_limit"}
+    return True
+
+
 def scheduled_part_resume_candidate(previous, now):
     """Reconsider the former scheduled cap; creation still checks all blocks."""
     if (
