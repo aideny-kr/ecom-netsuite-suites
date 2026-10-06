@@ -37,7 +37,7 @@ function Controls({ config }: { config: Scope }) {
       <p className="text-[13px] font-medium">Administrator controls</p>
       {readiness.data?.status === "execution_access_unavailable" && (
         <p role="status" className="text-[13px]">
-          Scheduled reads are blocked. Check the schedule owner's permissions
+          Scheduled reads are blocked. Check the schedule owner&apos;s permissions
           and source connections before resuming.
         </p>
       )}
