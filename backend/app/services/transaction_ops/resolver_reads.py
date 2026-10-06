@@ -11,8 +11,10 @@ agent yet (B9).
   deposit applications). It uses only the form known to work on this connector, a
   `transactionline.createdfrom` join on the main line, bounded by an explicit id list.
   An open createdfrom join fails here, and the link tables return 500. It reads at most
-  `MAX_CHAIN_DOCUMENTS` documents; `complete` is false when a page or the cap cut it, and
-  `unread_below_depth` says when deeper levels exist that were not read.
+  `MAX_CHAIN_DOCUMENTS` documents, and the starting document and its ancestors are always
+  among them. `complete` is false when a page, the cap or the hop limit cut the chain;
+  `unread_above` names a parent above the hop limit, and `unread_below_depth` says when
+  deeper levels exist that were not read.
 - `netsuite_query(sql)`: SuiteQL as written, with a row bound. SuiteQL cannot write: the
   engine enforces that, so there is no text check to get wrong.
 - `netsuite_schema(record_type)`: a record type's fields from the REST metadata catalog,
@@ -116,7 +118,12 @@ async def chain_read(reader, record_id) -> dict:
             walked.add(parent)
             path.append(rows[0])
         top = path[-1]
-        documents = {_id(top.get("id")): (top, 0)}
+        above = _id(top.get("createdfrom"))
+        unread_above = above if above is not None and above not in walked else None
+        if unread_above is not None:
+            complete = False  # the hop limit (or an unreadable parent) stopped the walk below the real top
+        # The starting document and its ancestors go in first, so the cap can never drop them.
+        documents = {_id(row.get("id")): (row, distance) for distance, row in enumerate(reversed(path))}
         frontier, depth = [_id(top.get("id"))], 0
         while frontier and depth < MAX_DEPTH_DOWN:
             depth += 1
@@ -125,18 +132,18 @@ async def chain_read(reader, record_id) -> dict:
             frontier = []
             for row in rows:
                 identifier = _id(row.get("id"))
-                if identifier is None or identifier in documents:
+                if identifier is None:
+                    continue
+                if identifier in documents:
+                    # An ancestor met at its own level is already listed, but its children still count.
+                    if documents[identifier][1] == depth and identifier not in frontier:
+                        frontier.append(identifier)
                     continue
                 if len(documents) >= MAX_CHAIN_DOCUMENTS:
                     complete = False
                     break
                 documents[identifier] = (row, depth)
                 frontier.append(identifier)
-        # The walk up can pass documents deeper than the walk down reaches.
-        for distance, row in enumerate(reversed(path)):
-            identifier = _id(row.get("id"))
-            if identifier not in documents and len(documents) < MAX_CHAIN_DOCUMENTS:
-                documents[identifier] = (row, distance)
     except NetSuiteEvidenceError as exc:
         return {"root": root, "error": str(exc)}
     ordered = sorted(documents.values(), key=lambda pair: (pair[1], int(_id(pair[0].get("id")) or 0)))
@@ -145,6 +152,7 @@ async def chain_read(reader, record_id) -> dict:
         "top": _id(top.get("id")),
         "documents": [_document(row, depth) for row, depth in ordered],
         "complete": complete,
+        "unread_above": unread_above,
         "unread_below_depth": MAX_DEPTH_DOWN if frontier else None,
     }
 

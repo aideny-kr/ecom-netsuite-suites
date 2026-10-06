@@ -170,3 +170,25 @@ async def test_a_schema_name_must_be_a_record_type_name(bad):
     with pytest.raises(ValueError):
         await reads.netsuite_schema(reader, bad)
     assert reader.calls == []
+
+
+# --- review round 1 (gpt-6-astra on b9ee6d91) ---------------------------------------------
+
+
+async def test_r1_the_cap_never_drops_the_starting_document_or_its_ancestors():
+    world = [
+        row(1, "SalesOrd", "S1"),
+        row(2, "CustInvc", "I2", 1),
+        row(3, "CustCred", "C3", 2),
+        row(4, "CustRfnd", "R4", 3),
+    ]
+    world += [row(100 + i, "CustCred", f"X{i}", 2) for i in range(37)]
+    result = await reads.chain_read(FakeReader(world), "4")
+    ids = {d["id"] for d in result["documents"]}
+    assert {"1", "2", "3", "4"} <= ids and len(ids) == reads.MAX_CHAIN_DOCUMENTS and result["complete"] is False
+
+
+async def test_r1_an_unread_parent_above_the_hop_limit_is_named_and_marks_the_chain_incomplete():
+    world = [row(1, "SalesOrd", "S1")] + [row(i, "CustCred", f"D{i}", i - 1) for i in range(2, 6)]
+    result = await reads.chain_read(FakeReader(world), "5")
+    assert result["top"] == "2" and result["unread_above"] == "1" and result["complete"] is False
