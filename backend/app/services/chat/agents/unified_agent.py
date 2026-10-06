@@ -946,6 +946,34 @@ class UnifiedAgent(BaseSpecialistAgent):
                 self._metabase_evidence = MetabaseEvidence(names)
                 self._tool_defs = [*(self._tool_defs or []), CALCULATOR_TOOL]
 
+    def _apply_plan_mode_tools(self, *, clarify_only: bool, offer_clarify: bool, resume_source: str | None) -> None:
+        """Plan Mode's tool changes after ``_setup_context``, shared by ``run`` and ``run_streaming``.
+
+        ``_setup_context`` rebuilds ``_tool_defs`` via ``build_all_tool_definitions`` WITHOUT
+        ``plan_mode_enabled=True``, so the rebuild may not include clarify:
+        - clarify_only (a forced card): the canonical clarify schema is the ONLY tool. A naive
+          filter would yield ``[]`` and the provider would get ``tool_choice=clarify`` with no
+          clarify schema, silently disabling the gate.
+        - offer_clarify (an ambiguous follow-up in a chat that already settled a source): clarify
+          is added next to the normal tools, never forced (#394 review R1).
+        - resume_source: only the chosen source's tools (plus cross-source tools) on the turn after
+          the user picks a clarification option.
+        """
+        from app.services.chat.plan_mode.clarify_tool import CLARIFY_TOOL_SCHEMA
+
+        if clarify_only:
+            self._tool_defs = [dict(CLARIFY_TOOL_SCHEMA)]
+        elif offer_clarify and not any(t.get("name") == "clarify" for t in self._tool_defs or []):
+            self._tool_defs = [*(self._tool_defs or []), dict(CLARIFY_TOOL_SCHEMA)]
+        if resume_source:
+            from app.services.chat.plan_mode.short_circuit import filter_tools_for_chosen_source
+
+            self._tool_defs = filter_tools_for_chosen_source(
+                self._tool_defs or [],
+                resume_source,
+                active_connectors=self._connectors,
+            )
+
     def _plan_source_selection(self, source):
         from app.services.chat.request_routing import RequestContext
         from app.services.chat.source_selection import SourceSelection
@@ -1027,6 +1055,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
         plan_mode_clarify_only: bool = False,
+        plan_mode_offer_clarify: bool = False,
         plan_mode_resume_source: str | None = None,
         thinking_level: str | None = None,
     ):
@@ -1046,25 +1075,11 @@ class UnifiedAgent(BaseSpecialistAgent):
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
-        if plan_mode_clarify_only:
-            # Inject the canonical clarify schema unconditionally. ``_setup_context``
-            # rebuilds ``_tool_defs`` via ``build_all_tool_definitions`` WITHOUT
-            # ``plan_mode_enabled=True``, so the rebuild may not include clarify.
-            # A naive filter would yield ``[]`` and the provider would receive
-            # ``tool_choice=clarify`` with no clarify schema → silent gate failure.
-            from app.services.chat.plan_mode.clarify_tool import CLARIFY_TOOL_SCHEMA
-
-            self._tool_defs = [dict(CLARIFY_TOOL_SCHEMA)]
-        if plan_mode_resume_source:
-            from app.services.chat.plan_mode.short_circuit import (
-                filter_tools_for_chosen_source,
-            )
-
-            self._tool_defs = filter_tools_for_chosen_source(
-                self._tool_defs or [],
-                plan_mode_resume_source,
-                active_connectors=self._connectors,
-            )
+        self._apply_plan_mode_tools(
+            clarify_only=plan_mode_clarify_only,
+            offer_clarify=plan_mode_offer_clarify,
+            resume_source=plan_mode_resume_source,
+        )
         selection = (
             await self._select_analytics_source(task, context, adapter, model)
             if not (plan_mode_clarify_only or plan_mode_resume_source)
@@ -1103,6 +1118,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
         plan_mode_clarify_only: bool = False,
+        plan_mode_offer_clarify: bool = False,
         plan_mode_resume_source: str | None = None,
         tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
@@ -1124,23 +1140,11 @@ class UnifiedAgent(BaseSpecialistAgent):
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
-        if plan_mode_clarify_only:
-            # Inject the canonical clarify schema unconditionally. See ``run`` above
-            # for the full rationale — TL;DR ``_setup_context``'s rebuild may not
-            # include clarify, so a naive filter would silently disable the gate.
-            from app.services.chat.plan_mode.clarify_tool import CLARIFY_TOOL_SCHEMA
-
-            self._tool_defs = [dict(CLARIFY_TOOL_SCHEMA)]
-        if plan_mode_resume_source:
-            from app.services.chat.plan_mode.short_circuit import (
-                filter_tools_for_chosen_source,
-            )
-
-            self._tool_defs = filter_tools_for_chosen_source(
-                self._tool_defs or [],
-                plan_mode_resume_source,
-                active_connectors=self._connectors,
-            )
+        self._apply_plan_mode_tools(
+            clarify_only=plan_mode_clarify_only,
+            offer_clarify=plan_mode_offer_clarify,
+            resume_source=plan_mode_resume_source,
+        )
         selection = (
             await self._select_analytics_source(task, context, adapter, model, conversation_history)
             if not (plan_mode_clarify_only or plan_mode_resume_source)
