@@ -7,8 +7,10 @@ already chosen in the same chat. The histories below are the real message shapes
 """
 
 import inspect
+import uuid
 
-from app.services.chat.plan_mode.ambiguity_signal import build_augmentation_prompt, plan_mode_should_fire
+from app.services.chat.agents.unified_agent import UnifiedAgent
+from app.services.chat.plan_mode.ambiguity_signal import build_augmentation_prompt, plan_mode_decision
 
 
 def _ctx(sources, pending=False):
@@ -56,19 +58,23 @@ def _user(text):
     return {"role": "user", "content": text, "structured_output": None}
 
 
-def fires(query, history, **kw):
-    return plan_mode_should_fire(
+def decide(query, history, **kw):
+    return plan_mode_decision(
         query, plan_mode_enabled=kw.get("enabled", True), resume_active=kw.get("resume", False), history=history
     )
 
 
 def test_a_first_revenue_question_still_gets_the_card():
-    assert fires("what was revenue last quarter?", [_user("what was revenue last quarter?")])
+    assert decide("what was revenue last quarter?", [_user("what was revenue last quarter?")]) == "force"
 
 
 def test_a_follow_up_after_an_answer_on_a_chosen_source_does_not():
     history = [_user("since yucca launched ..."), SOURCE_QUESTION, _user("NetSuite"), ANSWER_ON_NETSUITE]
-    assert not fires("break down country and total revenue", history + [_user("break down country and total revenue")])
+    # Not forced, but the model may still ask (#394 review R1: offering keeps the fallback).
+    assert (
+        decide("break down country and total revenue", history + [_user("break down country and total revenue")])
+        == "offer"
+    )
 
 
 def test_a_follow_up_after_a_chosen_card_and_a_cancel_does_not():
@@ -82,18 +88,20 @@ def test_a_follow_up_after_a_chosen_card_and_a_cancel_does_not():
         CANCELLED,
     ]
     query = "break down country and total revenue from sales order"
-    assert not fires(query, history + [_user(query)])
+    assert decide(query, history + [_user(query)]) == "offer"
 
 
 def test_an_unanswered_source_question_does_not_count_as_a_choice():
     history = [_user("hello"), SOURCE_QUESTION]
-    assert fires("and the revenue?", history + [_user("and the revenue?")])
+    assert decide("and the revenue?", history + [_user("and the revenue?")]) == "force"
 
 
 def test_the_flag_resume_and_wording_gates_still_apply():
-    assert not fires("revenue last quarter", [], enabled=False)
-    assert not fires("revenue last quarter", [], resume=True)
-    assert not fires("how many orders yesterday", [])
+    assert decide("revenue last quarter", [], enabled=False) == "off"
+    assert decide("revenue last quarter", [], resume=True) == "off"
+    # A turn the regex does not match is untouched, whatever the history.
+    assert decide("how many orders yesterday", []) == "off"
+    assert decide("how many orders yesterday", [ANSWER_ON_NETSUITE]) == "off"
 
 
 def test_the_default_follows_the_basis_the_user_or_conversation_names():
@@ -110,6 +118,42 @@ def test_the_orchestrator_decides_once_and_both_sites_use_it():
     from app.services.chat import orchestrator
 
     source = inspect.getsource(orchestrator.run_chat_turn)
-    assert source.count("plan_mode_should_fire(") == 1
+    assert source.count("plan_mode_decision(") == 1
     assert "is_financial_ambiguous(sanitized_input)" not in source
-    assert source.count("_plan_mode_fires") >= 3  # initialised, decided, read by both sites
+    # The augmentation and the forced tool choice both read the decision.
+    assert 'if _plan_mode_decision == "force"\n                            else None' in source
+    assert 'if not _is_chitchat and _plan_mode_decision == "force":' in source
+    assert 'plan_mode_offer_clarify=_plan_mode_decision == "offer"' in source
+
+
+def _agent_with_tools():
+    agent = UnifiedAgent(tenant_id=uuid.uuid4(), user_id=uuid.uuid4(), correlation_id="t")
+    agent._tool_defs = [{"name": "netsuite_suiteql"}, {"name": "present_result"}]
+    return agent
+
+
+def test_an_offer_turn_gives_the_model_clarify_alongside_its_tools():
+    """The agent rebuilds its tools without the Plan Mode flag, so clarify must be added back."""
+    agent = _agent_with_tools()
+    agent._apply_plan_mode_tools(clarify_only=False, offer_clarify=True, resume_source=None)
+    names = [t["name"] for t in agent._tool_defs]
+    assert names[:2] == ["netsuite_suiteql", "present_result"] and names.count("clarify") == 1
+    agent._apply_plan_mode_tools(clarify_only=False, offer_clarify=True, resume_source=None)
+    assert [t["name"] for t in agent._tool_defs].count("clarify") == 1  # never twice
+
+
+def test_a_forced_turn_keeps_only_clarify_and_an_off_turn_adds_nothing():
+    agent = _agent_with_tools()
+    agent._apply_plan_mode_tools(clarify_only=True, offer_clarify=False, resume_source=None)
+    assert [t["name"] for t in agent._tool_defs] == ["clarify"]
+    agent = _agent_with_tools()
+    agent._apply_plan_mode_tools(clarify_only=False, offer_clarify=False, resume_source=None)
+    assert [t["name"] for t in agent._tool_defs] == ["netsuite_suiteql", "present_result"]
+
+
+def test_both_agent_entry_points_use_the_one_helper():
+    run_src = inspect.getsource(UnifiedAgent.run)
+    stream_src = inspect.getsource(UnifiedAgent.run_streaming)
+    for src in (run_src, stream_src):
+        assert "self._apply_plan_mode_tools(" in src
+        assert "CLARIFY_TOOL_SCHEMA" not in src  # the schema is handled in the helper only

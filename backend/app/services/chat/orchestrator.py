@@ -3334,9 +3334,9 @@ async def run_chat_turn(
     # re-fire the clarify-gate / augmentation". Set after the short-circuit
     # below; consumed by the augmentation guard and the gate-arm guard.
     _plan_mode_resume_active = False
-    # Whether THIS turn gets the forced clarification card; decided once (plan_mode_should_fire)
-    # and read by both the augmentation and the forced tool choice so they cannot disagree.
-    _plan_mode_fires = False
+    # How Plan Mode treats THIS turn ("force" | "offer" | "off"); decided once by
+    # plan_mode_decision and read by the augmentation, the forced tool choice and the offer.
+    _plan_mode_decision = "off"
     if plan_mode_choice and isinstance(plan_mode_choice, dict):
         from app.services.chat.plan_mode.short_circuit import (
             PlanModeChoiceError,
@@ -4230,7 +4230,7 @@ async def run_chat_turn(
                         # flag here. Imported here to keep the import close to use.
                         from app.services.chat.plan_mode.ambiguity_signal import (
                             maybe_augment_for_plan_mode,
-                            plan_mode_should_fire,
+                            plan_mode_decision,
                             try_force_tool_choice,
                         )
 
@@ -4242,14 +4242,14 @@ async def run_chat_turn(
                         # first action is `clarify`" — but the resume tool
                         # filter has stripped `clarify` from the inventory.
                         # Contradictory instructions ⇒ undefined behavior.
-                        _plan_mode_fires = plan_mode_should_fire(
+                        _plan_mode_decision = plan_mode_decision(
                             sanitized_input,
                             plan_mode_enabled=plan_mode_enabled,
                             resume_active=_plan_mode_resume_active,
                             history=msg_dicts,
                         )
                         _plan_mode_connected_sources: list[str] = []
-                        if _plan_mode_fires:
+                        if _plan_mode_decision == "force":
                             # Resolve connected sources so the augmentation can
                             # require options to span distinct sources when ≥2
                             # are connected. Mirrors the post-call resolution
@@ -4282,7 +4282,7 @@ async def run_chat_turn(
                                 plan_mode_enabled=plan_mode_enabled,
                                 connected_sources=_plan_mode_connected_sources,
                             )
-                            if _plan_mode_fires
+                            if _plan_mode_decision == "force"
                             else None
                         )
 
@@ -4482,9 +4482,9 @@ async def run_chat_turn(
                         yield {"type": "drive_sources", "sources": context["drive_sources"]}
 
                     # ── Plan Mode hard gate ─────────────────────────────────
-                    # When `_plan_mode_fires` (flag on, not a resume, ambiguity regex
-                    # matches, and the conversation has not already settled a source —
-                    # see plan_mode_should_fire) AND clarify is in the inventory, pass
+                    # When `_plan_mode_decision == "force"` (flag on, not a resume, ambiguity
+                    # regex matches, and the conversation has not already settled a source —
+                    # see plan_mode_decision) AND clarify is in the inventory, pass
                     # `plan_mode_clarify_only=True`
                     # to run_streaming (it filters _tool_defs to clarify-only AFTER
                     # _setup_context, so we don't fight the rebuild) and force
@@ -4496,7 +4496,7 @@ async def run_chat_turn(
                     # (source-pick or manual clarify), the user already
                     # disambiguated. Re-firing the new-clarify gate would
                     # force another card on top of the resumed turn.
-                    if not _is_chitchat and _plan_mode_fires:
+                    if not _is_chitchat and _plan_mode_decision == "force":
                         _has_clarify = any(t.get("name") == "clarify" for t in (tool_definitions or []))
                         if _has_clarify:
                             _plan_mode_tool_choice = try_force_tool_choice(
@@ -4517,6 +4517,7 @@ async def run_chat_turn(
                         conversation_history=history_messages,
                         tool_choice=_plan_mode_tool_choice,
                         plan_mode_clarify_only=_plan_mode_active,
+                        plan_mode_offer_clarify=_plan_mode_decision == "offer",
                         plan_mode_resume_source=plan_mode_resume_source,
                         tool_result_interceptor=_make_tool_interceptor(
                             context_need,

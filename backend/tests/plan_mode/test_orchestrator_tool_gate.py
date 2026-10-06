@@ -156,7 +156,7 @@ def test_resume_turn_skips_clarify_augmentation():
     assert (
         "plan_mode_resume_source is None" in window
         or "not _plan_mode_resume_active" in window
-        or "if _plan_mode_fires" in window
+        or 'if _plan_mode_decision == "force"' in window
     ), (
         "On resume turns the orchestrator must skip the clarify augmentation. "
         "Either gate is acceptable — `plan_mode_resume_source is None` for "

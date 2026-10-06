@@ -29,22 +29,26 @@ def is_financial_ambiguous(query: str | None) -> bool:
     return bool(_FINANCIAL_AMBIGUITY_RE.search(query))
 
 
-def plan_mode_should_fire(
-    query: str | None, *, plan_mode_enabled: bool, resume_active: bool, history: list[dict]
-) -> bool:
-    """Whether this turn gets the forced clarification card (augmentation + clarify-only tools).
+def plan_mode_decision(query: str | None, *, plan_mode_enabled: bool, resume_active: bool, history: list[dict]) -> str:
+    """How Plan Mode treats this turn: "force", "offer" or "off".
 
-    The orchestrator decides this ONCE and both the augmentation and the forced tool choice
-    read the result, so they cannot disagree. A conversation that already settled a source
-    does not get the card again: on 2026-10-06 a follow-up on Framework was asked twice after
-    the user had picked NetSuite, and 5 of the tenant's 9 forced cards in 30 days came after
-    a source was chosen. The model can still call `clarify` itself when it is unsure.
+    - "force": the forced clarification card (augmentation + clarify-only tools).
+    - "offer": the question is financially ambiguous but the conversation already settled a
+      source, so nothing is forced; the clarify tool is offered next to the normal tools and
+      the model asks only if it is genuinely unsure (the agent rebuilds its tools without the
+      Plan Mode flag, so an offer must add clarify back, #394 review R1).
+    - "off": everything else, unchanged.
+
+    The orchestrator decides this ONCE and the augmentation, the forced tool choice and the
+    offer all read the result, so they cannot disagree. 2026-10-06 on Framework: a follow-up was
+    forced into a card twice after the user had picked NetSuite; 5 of the tenant's 9 forced
+    cards in 30 days came after a source was already chosen in the same chat.
     """
     from app.services.chat.source_selection import conversation_has_chosen_source
 
     if not plan_mode_enabled or resume_active or not is_financial_ambiguous(query):
-        return False
-    return not conversation_has_chosen_source(history)
+        return "off"
+    return "offer" if conversation_has_chosen_source(history) else "force"
 
 
 _AUGMENTATION_PREAMBLE = """## CLARIFICATION REQUIRED
