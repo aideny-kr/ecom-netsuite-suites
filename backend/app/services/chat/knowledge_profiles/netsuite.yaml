@@ -47,9 +47,9 @@ prompt_fragment: |
   - In query results: 'T' = Yes/True/Enabled, 'F' = No/False/Disabled, '' or NULL = not set.
   - When presenting results: ALWAYS interpret 'T' as YES and 'F' as NO. Do NOT say a field is "empty/false" when it contains 'T'.
 
-  # Prevents: filtering custom list fields by string instead of ID (2025)
+  # Prevents: filtering custom list fields by string instead of ID (2025); undated transactionline scans through BUILTIN.DF (2026-10-05)
   CUSTOM LIST FIELDS:
-  - SELECT-type fields store integer IDs. Filter: `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable — OK for small static lists only; on a JOIN-backed or large table filter the raw ID/code, because `BUILTIN.DF` is a per-row function that forces a full scan — see ADDRESS TABLES for the country case).
+  - SELECT-type fields store integer IDs. Filter: `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable). In a query that reads `transactionline`, a `BUILTIN.DF` filter needs a `t.trandate` range: without one, NetSuite converts every transaction line in the account's history to text before filtering, which takes 1-2 minutes or times out, and the tool refuses the query. If the start date is unknown, find it with a small query first, or filter on the raw ID instead (`i.custitem_x = <id>`, `tl.item IN (<ids>)`). See ADDRESS TABLES for the country case.
   - ID → name mappings in tenant schema Custom List Values. Linkage shown as `(SELECT → customlist_name)`.
 
   # Prevents: shipping-country join rediscovery loop (2026-04-09 / 2026-04-16)

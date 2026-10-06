@@ -275,6 +275,86 @@ class TestDetectPerfAntiPatterns:
         assert "unbounded_address_join" in detect_perf_anti_patterns(sql)
 
 
+class TestUnboundedDfLineScan:
+    """A BUILTIN.DF filter in a transactionline query with no trandate range scans every line in
+    the account's history. Measured on Framework 2026-10-05: the chat's Yucca daily count took
+    65-116 s per query (7-minute turn) and timed out on the MCP; the same filter with a trandate
+    floor returned the same rows in seconds. Rewriting it as an item subquery timed out too."""
+
+    CHAT_QUERY = (
+        "SELECT TRUNC(t.trandate) AS order_date, COUNT(DISTINCT t.id) AS orders FROM transaction t "
+        "JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item "
+        "WHERE t.type = 'SalesOrd' AND BUILTIN.DF(i.custitem_fw_platform) = 'Yucca' AND tl.mainline = 'F' "
+        "GROUP BY TRUNC(t.trandate) ORDER BY TRUNC(t.trandate)"
+    )
+
+    def test_the_chat_query_is_flagged(self):
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(self.CHAT_QUERY)
+
+    def test_a_trandate_range_bounds_it(self):
+        bounded = self.CHAT_QUERY.replace(
+            "AND tl.mainline", "AND t.trandate >= TO_DATE('2026-09-01', 'YYYY-MM-DD') AND tl.mainline"
+        )
+        assert detect_perf_anti_patterns(bounded) == []
+
+    def test_the_item_subquery_rewrite_is_flagged_too(self):
+        sql = (
+            "SELECT COUNT(DISTINCT t.id) FROM transaction t JOIN transactionline tl ON tl.transaction = t.id "
+            "WHERE tl.item IN (SELECT i.id FROM item i WHERE BUILTIN.DF(i.custitem_fw_platform) = 'Yucca')"
+        )
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+
+    def test_wrapped_and_reversed_filters_are_flagged(self):
+        for predicate in (
+            "UPPER(BUILTIN.DF(i.custitem_fw_platform)) LIKE '%YUCCA%'",
+            "'Yucca' = BUILTIN.DF(i.custitem_fw_platform)",
+            "BUILTIN.DF(t.status) IN ('Pending Fulfillment')",
+        ):
+            sql = f"SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id WHERE {predicate}"
+            assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql), predicate
+
+    def test_display_only_df_and_raw_id_filters_are_not_flagged(self):
+        sql = (
+            "SELECT BUILTIN.DF(i.custitem_fw_platform) AS platform, COUNT(*) FROM transaction t "
+            "JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item "
+            "WHERE i.custitem_fw_platform = 39 GROUP BY BUILTIN.DF(i.custitem_fw_platform)"
+        )
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_df_filters_without_transaction_lines_are_not_flagged(self):
+        sql = "SELECT i.id FROM item i WHERE UPPER(BUILTIN.DF(i.custitem_fw_platform)) LIKE '%YUCCA%'"
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_it_lowers_the_efficiency_score(self):
+        assert score_efficiency(self.CHAT_QUERY) <= 0.75
+
+    def test_a_case_label_in_the_select_list_is_not_a_filter(self):
+        # #390 review R1: a display-only CASE compares BUILTIN.DF but never filters rows.
+        sql = (
+            "SELECT CASE WHEN BUILTIN.DF(i.custitem_fw_platform) = 'Yucca' THEN 'Yucca' ELSE 'Other' END AS p "
+            "FROM transaction t JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item "
+            "WHERE t.id = 123"
+        )
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_a_reversed_trandate_range_bounds_it(self):
+        # #390 review R2: `TO_DATE(...) <= t.trandate` is the same range written the other way round.
+        bounded = self.CHAT_QUERY.replace(
+            "AND tl.mainline", "AND TO_DATE('2026-09-01', 'YYYY-MM-DD') <= t.trandate AND tl.mainline"
+        )
+        assert detect_perf_anti_patterns(bounded) == []
+        # A not-equal comparison is still not a range.
+        unbounded = self.CHAT_QUERY.replace("AND tl.mainline", "AND SYSDATE <> t.trandate AND tl.mainline")
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(unbounded)
+
+    def test_a_two_argument_wrapper_is_flagged(self):
+        # #390 review R3: NVL/COALESCE with a default must not slip past the check.
+        sql = self.CHAT_QUERY.replace(
+            "BUILTIN.DF(i.custitem_fw_platform) = 'Yucca'", "NVL(BUILTIN.DF(i.custitem_fw_platform), 'None') = 'Yucca'"
+        )
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+
+
 class TestCompositeScore:
     def test_weighted_composite(self):
         # Weights: accuracy 30%, syntax 30%, efficiency 15%, sql_match 25%

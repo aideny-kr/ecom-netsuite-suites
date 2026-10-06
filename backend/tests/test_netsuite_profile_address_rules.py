@@ -54,7 +54,12 @@ def test_custom_list_rule_has_perf_caveat():
     # it no longer contradicts the ADDRESS TABLES "NEVER BUILTIN.DF in WHERE" rule
     # (grill: the blanket allowance was the seed template for the country anti-pattern).
     text = _netsuite_yaml()
-    assert "small static lists only" in text.lower()
+    # 2026-10-05: "OK for small static lists" read as permission to filter a platform list
+    # through BUILTIN.DF on an undated transactionline scan (65-116 s per query, a 7-minute
+    # turn). The caveat must name what actually makes it slow: the undated line scan.
+    rule = next(line for line in text.splitlines() if "SELECT-type fields store integer IDs" in line)
+    assert "small static lists" not in rule.lower()
+    assert "transactionline" in rule and "trandate" in rule
 
 
 def test_join_patterns_doc_drops_both_work_country_framing():
