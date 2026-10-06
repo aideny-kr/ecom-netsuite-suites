@@ -234,7 +234,10 @@ def test_membership_calendar_bins_preserve_dst_and_missing_aggregate_proof_falls
     assert not store.active  # MAX(modified) cannot prove every day of activity.
 
 
-async def test_collector_seals_empty_provider_scan_in_its_actual_leased_checkpoint(db, admin_user, monkeypatch):
+@pytest.mark.parametrize("connection_status", ["active", "error"])
+async def test_collector_seals_empty_provider_scan_in_its_actual_leased_checkpoint(
+    db, admin_user, monkeypatch, connection_status
+):
     from app.services.transaction_ops import metabase_reader
 
     actor = admin_user[0]
@@ -258,6 +261,8 @@ async def test_collector_seals_empty_provider_scan_in_its_actual_leased_checkpoi
         ),
         actor=actor,
     )
+    connection.status = connection_status
+    await db.flush()
     monkeypatch.setattr(
         metabase_reader,
         "read_order_page",
@@ -293,8 +298,11 @@ async def test_collector_seals_empty_provider_scan_in_its_actual_leased_checkpoi
     )
     assert result["termination_reason"] == "done"
     marker = await db.scalar(select(Batch).where(Batch.id == root.id, Batch.tenant_id == actor.tenant_id))
-    assert marker.evidence_json["value"]["complete"] is True
-    assert marker.evidence_json["value"]["batches"] == 0
+    if connection_status == "active":
+        assert marker.evidence_json["value"]["complete"] is True
+        assert marker.evidence_json["value"]["batches"] == 0
+    else:
+        assert marker is None and root.progress_json[KEY]["supported"] is False
     assert daily_evidence.scan_complete(root)
     financial_read.assert_not_awaited()
 

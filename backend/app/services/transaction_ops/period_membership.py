@@ -20,6 +20,7 @@ from app.models.transaction_evidence_batch import TransactionEvidenceBatch as Ba
 from app.models.transaction_ops import TransactionRun as Run
 from app.services.transaction_ops.evidence_batch import MAX_BYTES, context_hash, fingerprint
 from app.services.transaction_ops.netsuite_changes import _REFERENCE
+from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
 
 KEY = "period_membership"
 MAX_PENDING_EVENTS = 5000
@@ -201,12 +202,19 @@ class Membership:
             self.unsupported()
             return False
         if self.credential is None:
-            self.credential = await fingerprint(
-                self.db,
-                self.tenant,
-                self.run.config_snapshot["netsuite_connection_id"],
-                self.run.config_snapshot["netsuite_account_id"],
-            )
+            try:
+                self.credential = await fingerprint(
+                    self.db,
+                    self.tenant,
+                    self.run.config_snapshot["netsuite_connection_id"],
+                    self.run.config_snapshot["netsuite_account_id"],
+                )
+            except NetSuiteEvidenceError:
+                # Optional candidate metadata must not preempt the original
+                # reader's dispatchable-error / reactive auth recovery path.
+                # Missing pages permanently disable this scan's extra proof.
+                self.unsupported()
+                return False
         now = self.clock()
         result = await self.db.execute(
             insert(Batch)
