@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import uuid
 from collections.abc import Sequence
@@ -12,7 +13,8 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select
+from sqlalchemy import JSON, case, cast, literal, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.oauth_callback_page import js_string, render_callback
@@ -166,6 +168,25 @@ def _select_connection_for_account(
         switched_from = previous if previous and previous != account_id else None
 
     return selected, switched_from
+
+
+def _callback_metadata(fresh: dict):
+    """The metadata a callback writes: the fresh identity over the row's stored settings.
+
+    Settings stored on the connection (the restlet URL, accounting profiles) describe the
+    NetSuite account the row is bound to. A token re-auth of that same account keeps them:
+    replacing the dict on 2026-10-04 erased Framework's accounting profile and every
+    credit-memo approval card stopped. A row that changes accounts keeps none of them.
+
+    Returned as a SQL expression so Postgres merges inside the UPDATE, against the row as
+    committed when the UPDATE runs: a settings write that committed while the callback ran
+    is kept. Merging from the callback's own earlier read wrote that stale copy back
+    (review round 1), and locking the rows to protect the read added lock orders that
+    could deadlock with other connection writers (rounds 2 and 3).
+    """
+    stored = cast(Connection.metadata_json, JSONB)
+    kept = case((stored["account_id"].astext == fresh["account_id"], stored), else_=cast(literal("{}"), JSONB))
+    return cast(kept.op("||", return_type=JSONB)(cast(literal(json.dumps(fresh)), JSONB)), JSON)
 
 
 def _supersede_other_connections(
@@ -456,7 +477,7 @@ async def callback(
         connection.auth_type = "oauth2"
         connection.status = "active"
         connection.error_reason = None
-        connection.metadata_json = metadata_json
+        connection.metadata_json = _callback_metadata(metadata_json)
         # Only on a genuine account switch. The label used to be written on create
         # only, so a row that changed accounts kept advertising the old one -- but
         # rewriting it on EVERY callback clobbers a name the user set through
