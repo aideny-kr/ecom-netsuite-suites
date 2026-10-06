@@ -144,3 +144,65 @@ def test_a_malformed_skill_file_fails_loudly(tmp_path, replace, why):
 def test_an_approved_skill_names_who_approved_it(tmp_path):
     with pytest.raises(ValueError, match="approved_by"):
         skills.load_library(_write(tmp_path, GOOD.replace("status: proposed", "status: approved")))
+
+
+# --- review round 1 (gpt-6-astra on 14f16c69) ---------------------------------------------
+
+
+def test_r1_a_chain_from_another_order_never_matches():
+    chain = copy.deepcopy(CHAIN)
+    chain["documents"][0]["number"] = "R999999999"
+    result = _find(chain=chain)
+    assert result["match"] is None
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda c, ch: ch["documents"][2].update(id=None),  # invoice without an id
+        lambda c, ch: c["case"].update(order=None),  # no order number for the memo
+        lambda c, ch: c["facts"].update(adjustments_equal_to_difference=[None]),  # a label that is not text
+        lambda c, ch: c["comparison"]["metrics"]["order_total"].update(difference="0"),
+    ],
+)
+def test_r1_resolution_needs_its_own_evidence_whatever_the_checks_say(mutate):
+    case, chain = copy.deepcopy(CASE_FILE), copy.deepcopy(CHAIN)
+    mutate(case, chain)
+    assert _find(case, chain)["match"] is None
+
+
+def test_r1_a_skill_with_few_checks_cannot_crash_on_missing_evidence(tmp_path):
+    library = _approved(skills.load_library(_write(tmp_path, GOOD)))
+    library["x"].update(approved_by="a", approved_at="t")
+    result = skills.skill_find({"comparison": {"metrics": {"order_total": {"difference": "-1"}}}}, {}, library=library)
+    assert result["match"] is None
+
+
+@pytest.mark.parametrize(
+    "replace, why",
+    [
+        (
+            (
+                'lines: [{item: "1471", amount: difference}]',
+                'lines: [{item: "1471", amount: difference}, {item: "1471", amount: difference}]',
+            ),
+            "exactly one line",
+        ),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order[0]} {adjustment_label}"'), "memo"),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order!s}"'), "memo"),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order:>9}"'), "memo"),
+        (('memo: "{order} {adjustment_label}"', "memo: 123"), "memo"),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order"'), "memo"),
+        (("  created_from: invoice\n", ""), "created_from"),
+        (("action: create", "action: explain_close"), "change"),
+        (("action: create", "action: update"), "update"),
+    ],
+)
+def test_r1_the_loader_rejects_every_shape_it_cannot_resolve_safely(tmp_path, replace, why):
+    with pytest.raises(ValueError, match=why):
+        skills.load_library(_write(tmp_path, GOOD.replace(*replace)))
+
+
+def test_r1_an_explain_skill_carries_no_change(tmp_path):
+    front = GOOD.replace("action: create", "action: explain_close").split("change:")[0] + "verify: [v]\nevidence: [e]\n"
+    assert skills.load_library(_write(tmp_path, front))["x"].get("change") is None

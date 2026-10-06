@@ -5,20 +5,26 @@ agent. The front matter says:
 - `checks`: when it applies. These are names from `CHECKS`, a closed set of code
   functions over the case file (`case_file`, B5) and the live chain (`resolver_reads`,
   B6), so a skill can only use checks that exist and are tested.
-- `change`: the change it proposes. A template: the record and item are fixed, while the
-  amount, source document and memo come from the case, never from the skill.
+- `change` (a `create` only): the change it proposes. A template with one line: the
+  record and item are fixed, while the amount, source document and memo come from the
+  case, never from the skill. Update skills are refused until there is a validator for
+  them, and other actions carry no change.
 - `verify`: how the result is checked after approval.
 - `evidence`: the verified bookings it was written from.
 
 `status` is `proposed` until Aiden approves (`approved_by`, `approved_at`). Only approved
 skills are ever applied; a proposed skill whose checks pass is reported as awaiting
-approval. A malformed file fails at load. `skill_find` never writes: it returns the
-resolved change for an approval card, or the checks that failed.
+approval. A malformed file fails at load. Whatever checks a skill lists, two always
+hold: the chain must be this case's own order, and the change must resolve from the
+case's own evidence (one invoice with an id, a non-zero difference, an order number and
+one text label for the memo). `skill_find` never writes: it returns the resolved change
+for an approval card, or the checks that failed.
 """
 
 from __future__ import annotations
 
 import re
+import string
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -67,6 +73,8 @@ class _Case:
         self.top = chain.get("top")
         docs = [d for d in chain.get("documents") or [] if isinstance(d, dict)]
         self.top_doc = next((d for d in docs if d.get("id") == self.top), None)
+        # The chain must be this case's own order; nothing else may supply its documents.
+        self.same_order = bool(self.order) and (self.top_doc or {}).get("number") == self.order
         self.invoices = [d for d in docs if d.get("type") == "invoice" and d.get("created_from") == self.top]
         invoice_ids = {d.get("id") for d in self.invoices}
         self.credits_from_invoice = [
@@ -142,18 +150,35 @@ def _validate(skill: dict, source: Path) -> dict:
     for key in ("verify", "evidence"):
         _require(isinstance(skill.get(key), list) and skill[key], name, f"{key} is required")
     change = skill.get("change")
-    if skill["action"] in {"create", "update"}:
-        _require(isinstance(change, dict), name, "a create or update needs a change")
-        _require(isinstance(change.get("record_type"), str), name, "change.record_type is required")
-        _require(change.get("created_from") in CREATED_FROM | {None}, name, "unknown change.created_from")
-        lines = change.get("lines")
-        _require(isinstance(lines, list) and lines, name, "change.lines are required")
-        for line in lines:
-            _require(isinstance(line, dict) and _ITEM.match(str(line.get("item", ""))), name, "a line needs an item id")
-            # Amounts come from the case, never from the skill.
-            _require(line.get("amount") == "difference", name, "a line amount must be 'difference'")
-        fields = set(re.findall(r"{(\w+)}", str(change.get("memo") or "")))
-        _require(fields <= MEMO_FIELDS, name, f"memo may only use {sorted(MEMO_FIELDS)}")
+    _require(skill["action"] != "update", name, "update skills are not supported yet (no validator for an update)")
+    if skill["action"] != "create":
+        _require(change is None, name, f"a {skill['action']} skill carries no change")
+        return skill
+    _require(isinstance(change, dict), name, "a create needs a change")
+    _require(isinstance(change.get("record_type"), str), name, "change.record_type is required")
+    origins = sorted(CREATED_FROM)
+    _require(change.get("created_from") in CREATED_FROM, name, f"change.created_from must be one of {origins}")
+    lines = change.get("lines")
+    # The whole difference goes to one line; two lines would each carry it.
+    _require(isinstance(lines, list) and len(lines) == 1, name, "a change has exactly one line")
+    line = lines[0]
+    _require(isinstance(line, dict) and _ITEM.match(str(line.get("item", ""))), name, "a line needs an item id")
+    # Amounts come from the case, never from the skill.
+    _require(line.get("amount") == "difference", name, "a line amount must be 'difference'")
+    memo = change.get("memo")
+    _require(memo is None or isinstance(memo, str), name, "memo must be text")
+    try:
+        parts = list(string.Formatter().parse(memo or ""))
+    except ValueError:
+        parts = None
+    _require(parts is not None, name, "memo is not a valid template")
+    for _literal, field, spec, conversion in parts:
+        if field is not None:
+            _require(
+                field in MEMO_FIELDS and not spec and conversion is None,
+                name,
+                f"memo may only use plain {{order}} and {{adjustment_label}}, not {{{field}}}",
+            )
     return skill
 
 
@@ -171,17 +196,27 @@ def load_library(directory: Path | None = None) -> dict[str, dict]:
     return library
 
 
-def _resolve(change: dict, c: _Case) -> dict:
+def _resolve(change: dict, c: _Case) -> tuple[dict | None, str | None]:
+    """The change for this case, or why it cannot be resolved, whatever checks the skill chose."""
+    if c.difference is None or c.difference == 0:
+        return None, "the case has no non-zero order-total difference"
     out = {"record_type": change["record_type"]}
     if change.get("created_from") == "invoice":
-        invoice = c.invoices[0]
-        out["created_from"] = {"type": "invoice", "id": invoice.get("id"), "number": invoice.get("number")}
+        invoice_id = c.invoices[0].get("id") if len(c.invoices) == 1 else None
+        if not isinstance(invoice_id, str) or not _ITEM.match(invoice_id):
+            return None, "exactly one invoice with an id is needed"
+        out["created_from"] = {"type": "invoice", "id": invoice_id, "number": c.invoices[0].get("number")}
     out["lines"] = [{"item": str(line["item"]), "amount": f"{abs(c.difference):.2f}"} for line in change["lines"]]
-    if change.get("memo"):
-        out["memo"] = (
-            change["memo"].format(order=c.order or "", adjustment_label=(c.adjustment_labels or [""])[0]).strip()
-        )
-    return out
+    memo = change.get("memo")
+    if memo:
+        fields = {field for _l, field, _s, _c in string.Formatter().parse(memo) if field}
+        label = c.adjustment_labels[0] if len(c.adjustment_labels) == 1 else None
+        values = {"order": c.order, "adjustment_label": label}
+        missing = [f for f in sorted(fields) if not (isinstance(values[f], str) and values[f].strip())]
+        if missing:
+            return None, f"the memo needs {', '.join(missing)}"
+        out["memo"] = memo.format(**{f: values[f].strip() for f in fields}).strip()
+    return out, None
 
 
 def skill_find(case_file: dict, chain: dict, *, library: dict | None = None) -> dict:
@@ -192,28 +227,41 @@ def skill_find(case_file: dict, chain: dict, *, library: dict | None = None) -> 
     for name, skill in sorted(library.items()):
         if skill["status"] == "retired":
             continue
-        results = []
+        results = [
+            {
+                "check": "chain_belongs_to_case",
+                "passed": c.same_order,
+                "detail": "the chain's top document is this case's order"
+                if c.same_order
+                else "the chain is not this case's order",
+            }
+        ]
         for check in skill["checks"]:
             passed, detail = CHECKS[check](c)
             results.append({"check": check, "passed": bool(passed), "detail": detail})
+        change = None
+        if skill.get("change") and all(r["passed"] for r in results):
+            change, problem = _resolve(skill["change"], c)
+            if problem:
+                results.append({"check": "change_resolves", "passed": False, "detail": problem})
         failed = [r for r in results if not r["passed"]]
         if failed:
             near.append({"skill": name, "failed": failed})
         elif skill["status"] == "proposed":
             awaiting.append(name)
         else:
-            matches.append((name, skill, results))
+            matches.append((name, skill, results, change))
     if len(matches) != 1:
         # None, or more than one: never guess between skills.
         return {"match": None, "near": near, "awaiting_approval": awaiting, "ambiguous": [m[0] for m in matches]}
-    name, skill, results = matches[0]
+    name, skill, results, change = matches[0]
     return {
         "match": {
             "skill": name,
             "version": skill["version"],
             "diagnosis": skill["diagnosis"],
             "action": skill["action"],
-            "change": _resolve(skill["change"], c) if skill.get("change") else None,
+            "change": change,
             "checks": results,
             "verify": skill["verify"],
         },
