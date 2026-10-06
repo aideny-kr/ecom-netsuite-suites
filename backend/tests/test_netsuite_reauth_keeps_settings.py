@@ -9,13 +9,16 @@ them, and a row that changes accounts keeps none of them.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.api.v1 import netsuite_auth
 from app.api.v1.oauth_state import encode_state
+from app.core.config import settings
 from app.models.connection import Connection
 from tests.conftest import create_test_tenant, create_test_user
 
@@ -136,3 +139,52 @@ async def test_a_reauth_never_overwrites_the_fresh_identity_with_a_stored_one(db
 
     assert row.metadata_json["auth_type"] == "oauth2"
     assert row.metadata_json["account_id"] == PROD
+
+
+@pytest.mark.asyncio
+async def test_a_settings_write_committed_during_the_callback_is_not_lost(monkeypatch):
+    """Review round 1 (F1): the callback read the row unlocked and wrote its stale copy back.
+
+    configure_sales_credit_profile locks the connection row while it writes. A callback
+    that started meanwhile read the old metadata, waited on its UPDATE, then overwrote
+    the newly committed profile with the old one. Real commits on separate connections.
+    """
+    engine = create_async_engine(settings.DATABASE_URL_DIRECT or settings.DATABASE_URL)
+    restored = {"digest": {"schema_version": 1, "sales_credit_profile": {"item_id": "9999"}}}
+    moved = RESTLET.replace("deploy=1", "deploy=2")
+    tenant_id = None
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as setup:
+            tenant = await create_test_tenant(setup)
+            user, _ = await create_test_user(setup, tenant)
+            row = await _bound_row(setup, tenant, PROD, extra=SETTINGS)
+            await setup.commit()
+            tenant_id, row_id = tenant.id, row.id
+        async with AsyncSession(engine, expire_on_commit=False) as writer, AsyncSession(engine) as reauth:
+            locked = await writer.scalar(select(Connection).where(Connection.id == row_id).with_for_update())
+            locked.metadata_json = {**locked.metadata_json, "transaction_accounting_profiles": restored}
+            await writer.flush()
+            callback = asyncio.create_task(_reauthorize(reauth, monkeypatch, tenant, user, PROD, restlet_url=moved))
+            await asyncio.sleep(0.5)
+            await writer.commit()
+            await asyncio.wait_for(callback, 10)
+        async with AsyncSession(engine) as check:
+            stored = await check.scalar(select(Connection.metadata_json).where(Connection.id == row_id))
+        assert stored["transaction_accounting_profiles"] == restored
+        assert stored["restlet_url"] == moved
+    finally:
+        if tenant_id is not None:
+            async with AsyncSession(engine) as cleanup:
+                # Plain SQL: the Celigo write guard refuses bulk ORM deletes on connections.
+                for table in (
+                    "audit_events",
+                    "connections",
+                    "user_roles",
+                    "users",
+                    "tenant_feature_flags",
+                    "tenant_configs",
+                ):
+                    await cleanup.execute(text(f"DELETE FROM {table} WHERE tenant_id = :t"), {"t": tenant_id})
+                await cleanup.execute(text("DELETE FROM tenants WHERE id = :t"), {"t": tenant_id})
+                await cleanup.commit()
+        await engine.dispose()

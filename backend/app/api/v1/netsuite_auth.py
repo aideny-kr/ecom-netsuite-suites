@@ -438,6 +438,10 @@ async def callback(
     # those call sites choosing between accounts arbitrarily, so we update in place
     # and let _select_connection_for_account decide WHICH row and whether the tenant
     # just repointed itself at a different NetSuite account.
+    #
+    # Locked, like the settings writers (accounting_profiles, native_accounting_profile):
+    # the callback writes the row's stored settings back, so an unlocked read let a
+    # settings write that committed meanwhile be overwritten by the stale copy.
     result = await db.execute(
         select(Connection)
         .where(
@@ -446,6 +450,8 @@ async def callback(
             Connection.status != "revoked",
         )
         .order_by(Connection.updated_at.desc())
+        .execution_options(populate_existing=True)
+        .with_for_update()
     )
     candidates = list(result.scalars().all())
     connection, switched_from = _select_connection_for_account(candidates, account_id)
