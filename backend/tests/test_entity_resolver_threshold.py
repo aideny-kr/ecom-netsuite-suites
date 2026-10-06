@@ -24,43 +24,30 @@ def _make_adapter(extracted_entities: list[str]) -> AsyncMock:
     return adapter
 
 
-def _make_db_with_matches(matches: list[dict]) -> AsyncMock:
-    """Build a mock db that returns entity matches with given scores.
+def _match_row(ord_: int, m: dict | None) -> MagicMock:
+    """One row of the batched lookup: entity position plus its best natural_name match
+    (n_*) and best script_id match (s_*); these tests match on the display name only."""
+    row = MagicMock()
+    row.ord = ord_
+    row.n_script_id = m["script_id"] if m else None
+    row.n_entity_type = m["entity_type"] if m else None
+    row.n_description = m.get("description", "") if m else None
+    row.n_sim = m["sim"] if m else None
+    row.s_script_id = row.s_entity_type = row.s_description = row.s_sim = None
+    return row
 
-    Each match dict: {name, script_id, entity_type, sim, description}
-    The resolver does TWO db.execute calls per entity (name_query + script_query).
-    We return the match on the name_query and None on the script_query.
-    After all entity lookups, a final execute() returns empty learned rules.
-    """
+
+def _make_db_with_matches(matches: list[dict | None]) -> AsyncMock:
+    """Build a mock db: ONE batched entity lookup (one row per entity, in order),
+    then the learned-rules query, which returns no rules."""
     db = AsyncMock()
-    results = []
-    for m in matches:
-        row = MagicMock()
-        entity = MagicMock()
-        entity.script_id = m["script_id"]
-        entity.entity_type = m["entity_type"]
-        entity.description = m.get("description", "")
-        row.TenantEntityMapping = entity
-        row.sim = m["sim"]
-
-        # name_query result — returns the match
-        name_result = MagicMock()
-        name_result.first.return_value = row
-        results.append(name_result)
-
-        # script_query result — no match
-        script_result = MagicMock()
-        script_result.first.return_value = None
-        results.append(script_result)
-
-    # Learned rules query — empty
+    lookup = MagicMock()
+    lookup.all.return_value = [_match_row(i + 1, m) for i, m in enumerate(matches)]
     rules_result = MagicMock()
-    rules_result.first.return_value = None
     rules_scalars = MagicMock()
     rules_scalars.all.return_value = []
     rules_result.scalars.return_value = rules_scalars
-
-    db.execute = AsyncMock(side_effect=[*results, rules_result])
+    db.execute = AsyncMock(side_effect=[lookup, rules_result])
     return db
 
 
@@ -130,46 +117,23 @@ class TestEntityResolverThreshold:
     async def test_mixed_confidence_filters_correctly(self):
         """Only high-confidence matches pass; low ones are dropped."""
         adapter = _make_adapter(["Panurgy", "rush"])
-        # Each entity does TWO db.execute calls (name_query + script_query),
-        # then one final call for learned rules = 2*2 + 1 = 5 calls
-        db = AsyncMock()
-
-        high_row = MagicMock()
-        high_entity = MagicMock()
-        high_entity.script_id = "location_panurgy"
-        high_entity.entity_type = "location"
-        high_entity.description = "Panurgy location"
-        high_row.TenantEntityMapping = high_entity
-        high_row.sim = 0.92
-        high_result = MagicMock()
-        high_result.first.return_value = high_row
-
-        # No script_id match for "Panurgy"
-        no_match_result = MagicMock()
-        no_match_result.first.return_value = None
-
-        low_row = MagicMock()
-        low_entity = MagicMock()
-        low_entity.script_id = "custbody_rush_flag"
-        low_entity.entity_type = "custom_field"
-        low_entity.description = "Rush flag"
-        low_row.TenantEntityMapping = low_entity
-        low_row.sim = 0.55
-        low_result = MagicMock()
-        low_result.first.return_value = low_row
-
-        # No script_id match for "rush"
-        no_match_result2 = MagicMock()
-        no_match_result2.first.return_value = None
-
-        # Learned rules: empty
-        rules_result = MagicMock()
-        rules_scalars = MagicMock()
-        rules_scalars.all.return_value = []
-        rules_result.scalars.return_value = rules_scalars
-
-        # Order: name("Panurgy"), script("Panurgy"), name("rush"), script("rush"), learned_rules
-        db.execute = AsyncMock(side_effect=[high_result, no_match_result, low_result, no_match_result2, rules_result])
+        # One batched lookup for both entities, then the learned-rules query.
+        db = _make_db_with_matches(
+            [
+                {
+                    "script_id": "location_panurgy",
+                    "entity_type": "location",
+                    "sim": 0.92,
+                    "description": "Panurgy location",
+                },
+                {
+                    "script_id": "custbody_rush_flag",
+                    "entity_type": "custom_field",
+                    "sim": 0.55,
+                    "description": "Rush flag",
+                },
+            ]
+        )
 
         result = await TenantEntityResolver.resolve_entities("RMAs at Panurgy rush", TENANT_ID, db, adapter, "haiku")
 
