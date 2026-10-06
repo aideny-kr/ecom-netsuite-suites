@@ -15,10 +15,12 @@ agent. The front matter says:
 `status` is `proposed` until Aiden approves (`approved_by`, `approved_at`). Only approved
 skills are ever applied; a proposed skill whose checks pass is reported as awaiting
 approval. A malformed file fails at load. Whatever checks a skill lists, two always
-hold: the chain must be this case's own order, and the change must resolve from the
-case's own evidence (one invoice with an id, a non-zero difference, an order number and
-one text label for the memo). `skill_find` never writes: it returns the resolved change
-for an approval card, or the checks that failed.
+hold: the chain's top document must be this case's own sales order (and an invoice
+counts only when created from it), and the change must resolve from the case's own
+evidence (one invoice with an id, a non-zero difference, and each field the memo uses:
+an order number, and one text label when the memo names the adjustment). `skill_find`
+never writes: it returns the resolved change for an approval card, or the checks that
+failed.
 """
 
 from __future__ import annotations
@@ -48,8 +50,13 @@ DIAGNOSES = frozenset(
 )
 ACTIONS = frozenset({"explain_close", "create", "update", "fix_source", "escalate"})
 CREATED_FROM = frozenset({"invoice"})
+RECORD_TYPES = frozenset({"creditMemo"})  # widened only with a resolver and validator for the new type
 MEMO_FIELDS = frozenset({"order", "adjustment_label"})
-_ITEM = re.compile(r"^[1-9][0-9]{0,11}$")
+_ITEM = re.compile(r"[1-9][0-9]{0,11}")
+
+
+def _internal_id(value) -> bool:
+    return isinstance(value, str) and _ITEM.fullmatch(value) is not None
 
 
 def _amount(value):
@@ -70,12 +77,20 @@ class _Case:
         self.order = (case_file.get("case") or {}).get("order")
         self.adjustment_labels = list((case_file.get("facts") or {}).get("adjustments_equal_to_difference") or [])
         self.chain_complete = chain.get("complete") is True
-        self.top = chain.get("top")
+        self.top = chain.get("top") if _internal_id(chain.get("top")) else None
         docs = [d for d in chain.get("documents") or [] if isinstance(d, dict)]
-        self.top_doc = next((d for d in docs if d.get("id") == self.top), None)
-        # The chain must be this case's own order; nothing else may supply its documents.
-        self.same_order = bool(self.order) and (self.top_doc or {}).get("number") == self.order
-        self.invoices = [d for d in docs if d.get("type") == "invoice" and d.get("created_from") == self.top]
+        self.top_doc = next((d for d in docs if self.top and d.get("id") == self.top), None)
+        # The chain must be this case's own sales order; nothing else may supply its documents.
+        self.same_order = (
+            isinstance(self.order, str)
+            and bool(self.order)
+            and self.top_doc is not None
+            and self.top_doc.get("type") == "sales order"
+            and self.top_doc.get("number") == self.order
+        )
+        self.invoices = [
+            d for d in docs if self.top and d.get("type") == "invoice" and d.get("created_from") == self.top
+        ]
         invoice_ids = {d.get("id") for d in self.invoices}
         self.credits_from_invoice = [
             d for d in docs if d.get("type") == "credit memo" and d.get("created_from") in invoice_ids
@@ -155,14 +170,15 @@ def _validate(skill: dict, source: Path) -> dict:
         _require(change is None, name, f"a {skill['action']} skill carries no change")
         return skill
     _require(isinstance(change, dict), name, "a create needs a change")
-    _require(isinstance(change.get("record_type"), str), name, "change.record_type is required")
+    records = sorted(RECORD_TYPES)
+    _require(change.get("record_type") in RECORD_TYPES, name, f"change.record_type must be one of {records}")
     origins = sorted(CREATED_FROM)
     _require(change.get("created_from") in CREATED_FROM, name, f"change.created_from must be one of {origins}")
     lines = change.get("lines")
     # The whole difference goes to one line; two lines would each carry it.
     _require(isinstance(lines, list) and len(lines) == 1, name, "a change has exactly one line")
     line = lines[0]
-    _require(isinstance(line, dict) and _ITEM.match(str(line.get("item", ""))), name, "a line needs an item id")
+    _require(isinstance(line, dict) and _internal_id(line.get("item")), name, "a line needs an item id")
     # Amounts come from the case, never from the skill.
     _require(line.get("amount") == "difference", name, "a line amount must be 'difference'")
     memo = change.get("memo")
@@ -203,7 +219,7 @@ def _resolve(change: dict, c: _Case) -> tuple[dict | None, str | None]:
     out = {"record_type": change["record_type"]}
     if change.get("created_from") == "invoice":
         invoice_id = c.invoices[0].get("id") if len(c.invoices) == 1 else None
-        if not isinstance(invoice_id, str) or not _ITEM.match(invoice_id):
+        if not _internal_id(invoice_id):
             return None, "exactly one invoice with an id is needed"
         out["created_from"] = {"type": "invoice", "id": invoice_id, "number": c.invoices[0].get("number")}
     out["lines"] = [{"item": str(line["item"]), "amount": f"{abs(c.difference):.2f}"} for line in change["lines"]]
@@ -231,9 +247,9 @@ def skill_find(case_file: dict, chain: dict, *, library: dict | None = None) -> 
             {
                 "check": "chain_belongs_to_case",
                 "passed": c.same_order,
-                "detail": "the chain's top document is this case's order"
+                "detail": "the chain's top document is this case's sales order"
                 if c.same_order
-                else "the chain is not this case's order",
+                else "the chain is not this case's sales order",
             }
         ]
         for check in skill["checks"]:

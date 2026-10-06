@@ -206,3 +206,42 @@ def test_r1_the_loader_rejects_every_shape_it_cannot_resolve_safely(tmp_path, re
 def test_r1_an_explain_skill_carries_no_change(tmp_path):
     front = GOOD.replace("action: create", "action: explain_close").split("change:")[0] + "verify: [v]\nevidence: [e]\n"
     assert skills.load_library(_write(tmp_path, front))["x"].get("change") is None
+
+
+# --- review round 2 ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda ch: ch.update(top=None),
+        lambda ch: ch["documents"][0].update(type="customer deposit"),
+        lambda ch: ch["documents"][2].update(created_from=None),
+        lambda ch: ch["documents"][0].update(id=None),
+    ],
+)
+def test_r2_the_chain_must_link_the_invoice_to_this_cases_sales_order(mutate):
+    chain = copy.deepcopy(CHAIN)
+    mutate(chain)
+    assert _find(chain=chain)["match"] is None
+
+
+def test_r2_identity_holds_for_a_skill_with_few_checks(tmp_path):
+    library = _approved(skills.load_library(_write(tmp_path, GOOD)))
+    library["x"].update(approved_by="a", approved_at="t")
+    chain = copy.deepcopy(CHAIN)
+    chain["documents"][0]["type"] = "customer deposit"
+    assert skills.skill_find(CASE_FILE, chain, library=library)["match"] is None
+
+
+@pytest.mark.parametrize(
+    "replace, why",
+    [
+        (("record_type: creditMemo", 'record_type: ""'), "record_type"),
+        (("record_type: creditMemo", "record_type: journalEntry"), "record_type"),
+        (('item: "1471"', 'item: "1471\\n"'), "item"),
+    ],
+)
+def test_r2_record_types_are_allow_listed_and_ids_match_whole(tmp_path, replace, why):
+    with pytest.raises(ValueError, match=why):
+        skills.load_library(_write(tmp_path, GOOD.replace(*replace)))
