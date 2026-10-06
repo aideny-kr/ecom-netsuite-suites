@@ -6,9 +6,12 @@ only function `execute_tool_call` dispatches through. `installed()` replaces it 
 run. Names are compared in the registry's dotted form, so the model's underscore
 spelling and the registry's spelling classify alike. Each tool is one of four kinds:
 
-- read: recorded once and replayed after. `record` mode runs a miss for real (in the
-  staging container only). Environment failures (authorization, rate limits, timeouts)
-  are never taped. `replay` mode never runs anything: a miss returns `not_recorded`.
+- read: recorded once and replayed after. Only sources whose engine forbids writes
+  qualify (SuiteQL, NetSuite record reads, the app's case reads). `record` mode runs a
+  miss for real (in the staging container only). A result is taped only when it is
+  clean or carries one of the agent's own deterministic query errors; any other error
+  or blocker is never taped. `replay` mode never runs anything: a miss returns
+  `not_recorded`.
 - local: in-process computation over earlier results (present, compare, a pivot over a
   `result_id`, skills). It runs live because it touches no outside system.
 - write: never runs, in any mode. A write reaching the dispatcher inside a run means it
@@ -21,17 +24,19 @@ Two rules keep a replay from silently differing from what it recorded:
 
 - A read that leaves session state in `db.info` (a prepared correction the agent later
   turns into a card, with a five-minute freshness stamp) is never served from the tape.
+  The known ones are named (`STATEFUL_READS`); any other read seen changing `db.info` is
+  marked too, and the mark is never cleared.
   Record mode runs it live every time; replay returns its result but counts the trial
   `unreplayable`, because the state is not restored. Today's agent, whose cards depend
   on that state, is therefore measured live in record mode.
-- Replay blocks every outbound HTTP request (httpx and requests, which carry every
-  NetSuite, Solidus and BigQuery call and token refresh) except to the model's hosts.
+- Replay blocks every outbound HTTP request (httpx at its transports, so redirects are
+  checked too, and requests) except to the model's hosts.
   A path that bypasses the dispatcher fails and is counted, instead of reading live. This
   also protects the app's single-use NetSuite refresh tokens.
 
 A tape entry is keyed by tenant, the exact tool name (an external tool's name carries
-its connector) and the input. The model's free-text `description` is dropped, and SQL
-whitespace is collapsed outside quoted literals only.
+its connector) and the input, with SQL exactly as written. Only the model's free-text
+`description` is dropped.
 """
 
 from __future__ import annotations
@@ -48,7 +53,10 @@ from app.services.chat.mutation_guard import classify_mutation
 
 Kind = Literal["read", "local", "write", "refused"]
 
-# Registry (dotted) names.
+# Registry (dotted) names. Only sources whose ENGINE forbids writes are readable: SuiteQL,
+# NetSuite record reads, and the app's own case reads. BigQuery and cross-source SQL can
+# hide a write behind a leading SELECT, so they are refused, as are sources a resolve
+# task does not need.
 READ_TOOLS = frozenset(
     {
         "netsuite.suiteql",
@@ -62,14 +70,15 @@ READ_TOOLS = frozenset(
         "transaction_ops.groups",
         "transaction_ops.group_breakdown",
         "rag.search",
-        "web.search",
-        "bigquery.sql",
-        "bigquery.schema",
-        "cross_source.query",
-        "celigo.integrations",
-        "celigo.flows",
-        "celigo.flow_steps",
-        "celigo.flow_errors",
+    }
+)
+# Reads that leave a prepared correction or group selection in db.info for the agent to
+# turn into a card. Named, not inferred, so an unchanged-looking call is still stateful.
+STATEFUL_READS = frozenset(
+    {
+        "transaction_ops.accounting_evidence",
+        "transaction_ops.accounting_group",
+        "transaction_ops.propose_credit_reallocation",
     }
 )
 LOCAL_TOOLS = frozenset(
@@ -102,27 +111,11 @@ EXTERNAL_READ_VERBS = frozenset(
     }
 )
 VOLATILE_INPUT_KEYS = frozenset({"description"})  # the model's free text, never part of what a read returns
-SQL_KEYS = frozenset({"query", "sqlQuery"})
-ENVIRONMENT_ERRORS = (
-    "actor_unavailable",
-    "permission",
-    "forbidden",
-    "not entitled",
-    "feature_disabled",
-    "rate limit",
-    "rate_limit",
-    "timed out",
-    "timeout",
-    "temporarily",
-    "401",
-    "403",
-    "429",
-    "502",
-    "503",
-    "504",
-)
+# The only errors a tape may hold: the agent's own query mistakes, which replay the same.
+# (The dispatcher memoizes exactly these per turn.) Any other error or blocker is never
+# taped, so a replay of it is a miss rather than a degraded environment passed off as real.
+DETERMINISTIC_QUERY_ERRORS = ("failed to parse", "invalid search query", "unknown identifier", "field was not found")
 _EXTERNAL = re.compile(r"^ext__[0-9a-f]{32}__(.+)$")
-_SQL_LITERAL = re.compile(r"('(?:[^']|'')*')")
 
 
 class LiveNetworkBlockedError(RuntimeError):
@@ -143,18 +136,18 @@ def classify(tool_name: str, tool_input=None) -> Kind:
         return "read" if match.group(1) in EXTERNAL_READ_VERBS else "refused"
     name = canonical_name(tool_name)
     if name == "pivot.query_result":  # over an earlier result it computes; with a query it reads a source
-        return "local" if isinstance(tool_input, dict) and "result_id" in tool_input else "read"
+        params = tool_input if isinstance(tool_input, dict) else {}
+        if "result_id" in params:
+            return "local"
+        from app.mcp.tools.pivot_tool import _detect_dialect
+
+        query = params.get("query") if isinstance(params.get("query"), str) else ""
+        return "read" if _detect_dialect(query, params.get("dialect", "suiteql")) == "suiteql" else "refused"
     if name in READ_TOOLS:
         return "read"
     if name in LOCAL_TOOLS:
         return "local"
     return "refused"
-
-
-def _collapse_sql(sql: str) -> str:
-    """Collapse whitespace outside single-quoted literals; a literal's own spacing is data."""
-    parts = _SQL_LITERAL.split(sql)
-    return "".join(part if part.startswith("'") else re.sub(r"\s+", " ", part) for part in parts).strip()
 
 
 def _canonical_input(tool_input):
@@ -164,7 +157,7 @@ def _canonical_input(tool_input):
     for key, value in tool_input.items():
         if key in VOLATILE_INPUT_KEYS:
             continue
-        out[key] = _collapse_sql(value) if key in SQL_KEYS and isinstance(value, str) else value
+        out[key] = value  # SQL stays exact: any normalizing can merge queries that differ
     return out
 
 
@@ -209,7 +202,10 @@ class Tape:
         return self.entries.get(key)
 
     def put(self, key: str, tool_name: str, tool_input, result: str, *, tenant_id=None, state_keys=()) -> None:
-        self.entries[key] = {"result": result, "state_keys": list(state_keys)}
+        # A stateful mark is sticky: a later call that happened to change nothing never clears it.
+        previous = (self.entries.get(key) or {}).get("state_keys") or []
+        state_keys = sorted(set(previous) | set(state_keys))
+        self.entries[key] = {"result": result, "state_keys": state_keys}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "key": key,
@@ -229,14 +225,17 @@ def _refusal(message: str, **extra) -> str:
 
 
 def _environment_error(result: str) -> bool:
+    """True for any error or blocker except the agent's own deterministic query mistakes."""
     try:
         body = json.loads(result)
     except (TypeError, ValueError):
         return False
-    if not isinstance(body, dict) or not body.get("error"):
+    if not isinstance(body, dict) or not (body.get("error") or body.get("blockers")):
         return False
+    if body.get("blockers"):
+        return True
     text = " ".join(str(body.get(k) or "") for k in ("error", "message", "reason", "detail", "code")).lower()
-    return any(term in text for term in ENVIRONMENT_ERRORS)
+    return not any(term in text for term in DETERMINISTIC_QUERY_ERRORS)
 
 
 class TapedDispatcher:
@@ -272,10 +271,10 @@ class TapedDispatcher:
             if recorded is None:
                 self.misses += 1
                 return _refusal("benchmark: no recorded result for this exact call", not_recorded=True)
-            if recorded["state_keys"]:
+            if recorded["state_keys"] or canonical_name(tool_name) in STATEFUL_READS:
                 self.unreplayable += 1  # its session state is not restored, so what follows may differ
             return recorded["result"]
-        if recorded is not None and not recorded["state_keys"]:
+        if recorded is not None and not recorded["state_keys"] and canonical_name(tool_name) not in STATEFUL_READS:
             return recorded["result"]
         before = {k: _fingerprint(v) for k, v in info.items()} if isinstance(info, dict) else {}
         result = await self.live(tool_name, tool_input, **kwargs)
@@ -283,6 +282,8 @@ class TapedDispatcher:
             self.environment_errors += 1
             return result
         state_keys = _state_keys(before, info) if isinstance(info, dict) else []
+        if canonical_name(tool_name) in STATEFUL_READS:
+            state_keys = sorted(set(state_keys) | {"<stateful read>"})
         self.tape.put(key, tool_name, tool_input, result, tenant_id=kwargs.get("tenant_id"), state_keys=state_keys)
         return result
 
@@ -303,43 +304,84 @@ def _allowed(host: str | None, allow_hosts) -> bool:
     return bool(host) and any(host == h or host.endswith("." + h) for h in allow_hosts)
 
 
+def _refuse(dispatcher: TapedDispatcher, host):
+    dispatcher.network_blocked += 1
+    raise LiveNetworkBlockedError(f"benchmark replay: no live request to {host}")
+
+
+def guarded_transport(transport, dispatcher: TapedDispatcher, allow_hosts=MODEL_HOSTS):
+    """Wrap a custom httpx transport so every hop, redirects included, is checked."""
+    import httpx
+
+    class Guarded(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if not _allowed(request.url.host, allow_hosts):
+                _refuse(dispatcher, request.url.host)
+            return await transport.handle_async_request(request)
+
+    return Guarded()
+
+
 @contextmanager
 def _network_guard(dispatcher: TapedDispatcher, allow_hosts):
-    """Block every outbound HTTP request except to `allow_hosts`, counting each block."""
+    """Block every outbound HTTP request except to `allow_hosts`, counting each block.
+
+    httpx is checked at its default transports, which every hop passes through (so a
+    redirect cannot leave the allowed hosts), and at `send` for custom transports.
+    requests re-enters `Session.send` for each redirect.
+    """
     import httpx
     import requests
 
-    def refuse(host):
-        dispatcher.network_blocked += 1
-        raise LiveNetworkBlockedError(f"benchmark replay: no live request to {host}")
+    originals = {
+        (httpx.AsyncClient, "send"): httpx.AsyncClient.send,
+        (httpx.Client, "send"): httpx.Client.send,
+        (httpx.AsyncHTTPTransport, "handle_async_request"): httpx.AsyncHTTPTransport.handle_async_request,
+        (httpx.HTTPTransport, "handle_request"): httpx.HTTPTransport.handle_request,
+        (requests.Session, "send"): requests.Session.send,
+    }
 
-    async_send, sync_send, requests_send = httpx.AsyncClient.send, httpx.Client.send, requests.Session.send
+    def check(host):
+        if not _allowed(host, allow_hosts):
+            _refuse(dispatcher, host)
 
-    async def guarded_async(self, request, *args, **kwargs):
-        if not _allowed(request.url.host, allow_hosts):
-            refuse(request.url.host)
-        return await async_send(self, request, *args, **kwargs)
+    async def async_send(self, request, *args, **kwargs):
+        check(request.url.host)
+        return await originals[(httpx.AsyncClient, "send")](self, request, *args, **kwargs)
 
-    def guarded_sync(self, request, *args, **kwargs):
-        if not _allowed(request.url.host, allow_hosts):
-            refuse(request.url.host)
-        return sync_send(self, request, *args, **kwargs)
+    def sync_send(self, request, *args, **kwargs):
+        check(request.url.host)
+        return originals[(httpx.Client, "send")](self, request, *args, **kwargs)
 
-    def guarded_requests(self, request, *args, **kwargs):
+    async def async_transport(self, request):
+        check(request.url.host)
+        return await originals[(httpx.AsyncHTTPTransport, "handle_async_request")](self, request)
+
+    def sync_transport(self, request):
+        check(request.url.host)
+        return originals[(httpx.HTTPTransport, "handle_request")](self, request)
+
+    def requests_send(self, request, *args, **kwargs):
         from urllib.parse import urlsplit
 
-        host = urlsplit(request.url).hostname
-        if not _allowed(host, allow_hosts):
-            refuse(host)
-        return requests_send(self, request, *args, **kwargs)
+        check(urlsplit(request.url).hostname)
+        return originals[(requests.Session, "send")](self, request, *args, **kwargs)
 
-    for fn in (guarded_async, guarded_sync, guarded_requests):
+    replacements = {
+        (httpx.AsyncClient, "send"): async_send,
+        (httpx.Client, "send"): sync_send,
+        (httpx.AsyncHTTPTransport, "handle_async_request"): async_transport,
+        (httpx.HTTPTransport, "handle_request"): sync_transport,
+        (requests.Session, "send"): requests_send,
+    }
+    for (owner, name), fn in replacements.items():
         fn._bench_guard = True
-    httpx.AsyncClient.send, httpx.Client.send, requests.Session.send = guarded_async, guarded_sync, guarded_requests
+        setattr(owner, name, fn)
     try:
         yield
     finally:
-        httpx.AsyncClient.send, httpx.Client.send, requests.Session.send = async_send, sync_send, requests_send
+        for (owner, name), fn in originals.items():
+            setattr(owner, name, fn)
 
 
 @contextmanager

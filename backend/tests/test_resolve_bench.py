@@ -119,13 +119,6 @@ def test_tools_are_read_write_or_refused(name, kind):
     assert tape.classify(name) == kind
 
 
-def test_the_key_ignores_free_text_descriptions_and_sql_layout():
-    a = tape.tape_key(EXT + "ns_runCustomSuiteQL", {"sqlQuery": "SELECT id\nFROM transaction", "description": "x"})
-    b = tape.tape_key(EXT + "ns_runCustomSuiteQL", {"sqlQuery": "SELECT  id FROM transaction"})
-    c = tape.tape_key(EXT + "ns_runCustomSuiteQL", {"sqlQuery": "SELECT tranid FROM transaction"})
-    assert a == b != c
-
-
 class _Live:
     def __init__(self):
         self.calls = []
@@ -457,14 +450,6 @@ def test_f7_tape_entries_are_bound_to_the_tenant_and_the_connector():
     assert tape.tape_key(EXT + "ns_runCustomSuiteQL", q, tenant_id="t1") != tape.tape_key(other, q, tenant_id="t1")
 
 
-def test_f8_whitespace_inside_sql_literals_is_kept():
-    k = lambda sql: tape.tape_key("netsuite_suiteql", {"query": sql})  # noqa: E731
-    assert k("SELECT id FROM customer WHERE companyname = 'A  B'") != k(
-        "SELECT id FROM customer WHERE companyname = 'A B'"
-    )
-    assert k("SELECT id\n  FROM customer WHERE x = 'it''s  ok'") == k("SELECT id FROM customer WHERE x = 'it''s  ok'")
-
-
 @pytest.mark.parametrize(
     "name, kind",
     [
@@ -766,3 +751,136 @@ def test_r2_summary_has_the_median_amount_count():
         {"ref": "A", "outcome_ok": True, "model_amounts": []},
     ]
     assert report.summarize(rows, trials=2)["g4_median_amounts"] == 1
+
+
+# --- review round 3: exact rules instead of judgements ----------------------------------
+
+
+def test_r3_keys_drop_only_the_description_and_keep_sql_exact():
+    k = lambda sql, **extra: tape.tape_key(EXT + "ns_runCustomSuiteQL", {"sqlQuery": sql, **extra})  # noqa: E731
+    assert k("SELECT id FROM t", description="a") == k("SELECT id FROM t", description="b")
+    assert k("SELECT id FROM t -- f\nWHERE id = 1") != k("SELECT id FROM t -- f WHERE id = 1")
+    assert k("SELECT  id FROM t") != k("SELECT id FROM t")
+
+
+@pytest.mark.parametrize(
+    "name, tool_input, kind",
+    [
+        ("bigquery_sql", {"query": "SELECT 1; DELETE FROM d.orders WHERE TRUE"}, "refused"),
+        ("cross_source_query", {"query": "SELECT 1"}, "refused"),
+        ("pivot_query_result", {"query": "SELECT a FROM `p.d.t`", "dialect": "bigquery"}, "refused"),
+        ("pivot_query_result", {"query": "SELECT a FROM transaction"}, "read"),
+        ("celigo_flows", {}, "refused"),
+    ],
+)
+def test_r3_only_sources_whose_engine_forbids_writes_are_readable(name, tool_input, kind):
+    assert tape.classify(name, tool_input) == kind
+
+
+@pytest.mark.parametrize(
+    "body, taped",
+    [
+        ({"error": "Invalid search query: unknown identifier 'x'"}, True),  # the agent's own mistake: replays the same
+        ({"success": True, "rows": []}, True),
+        ({"success": True, "blockers": ["source_refresh:source_rate_limited"]}, False),
+        ({"error": "Invalid search query", "blockers": ["source_refresh:source_rate_limited"]}, False),
+        ({"error": "Accounting case or scoped configuration unavailable.", "reason": "source_transport_failed"}, False),
+        ({"error": "something new"}, False),
+    ],
+)
+async def test_r3_only_clean_results_and_deterministic_query_errors_are_taped(tmp_path, body, taped):
+    async def live(tool_name, tool_input, **kwargs):
+        return json.dumps(body)
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    await d("netsuite_suiteql", {"query": "SELECT 1"}, tenant_id="t")
+    assert (len(d.tape.entries) == 1) is taped and d.environment_errors == (0 if taped else 1)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "transaction_ops_accounting_evidence",
+        "transaction_ops_accounting_group",
+        "transaction_ops_propose_credit_reallocation",
+    ],
+)
+async def test_r3_known_stateful_reads_are_unreplayable_even_when_state_looked_unchanged(tmp_path, name):
+    async def live(tool_name, tool_input, **kwargs):
+        return '{"ok": 1}'  # touched nothing visible this time
+
+    recorder = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    await recorder(name, {"case_id": "c"}, tenant_id="t", db=_DB())
+    player = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    await player(name, {"case_id": "c"}, tenant_id="t", db=_DB())
+    assert player.unreplayable == 1
+
+
+async def test_r3_a_stateful_mark_is_never_cleared(tmp_path):
+    db = _DB()
+
+    async def live(tool_name, tool_input, **kwargs):
+        kwargs["db"].info["accounting_group_selection"] = {"group_id": "g"}  # the same value every time
+        return '{"ok": 1}'
+
+    recorder = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    for _ in range(3):
+        await recorder("netsuite_suiteql", {"query": "SELECT 1"}, tenant_id="t", db=db)
+    player = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    await player("netsuite_suiteql", {"query": "SELECT 1"}, tenant_id="t", db=_DB())
+    assert player.unreplayable == 1
+
+
+@pytest.mark.parametrize("review", [{"invoice_id": "77"}, {}])
+def test_r3_an_untypable_applied_document_is_unknown(review):
+    card = {
+        **SALES_CREDIT_CARD,
+        "accounting_review": review,
+        "proposed_fields": {
+            **SALES_CREDIT_CARD["proposed_fields"],
+            "apply": {"items": [{"doc": {"id": "99"}, "apply": True}]},
+        },
+    }
+    p = graders.proposal_from_card(card)
+    assert p.created_from == "unknown"
+    assert "created_from" in graders.grade(_task(_gold(created_from="None")), _attempt(proposals=[p])).payload_diff
+
+
+@pytest.mark.parametrize(
+    "terminal", [{"invariant_errors": ["posting_period_closed"]}, {"unfillable_line_fields": ["item"]}]
+)
+def test_r3_a_card_production_refuses_to_approve_cannot_pass(terminal):
+    p = graders.proposal_from_card({**SALES_CREDIT_CARD, **terminal})
+    g = graders.grade(_task(_gold(item="1471 → 40050")), _attempt(proposals=[p]))
+    assert p.approvable is False and not g.action_ok and not g.outcome_ok
+
+
+async def test_r3_a_redirect_cannot_carry_a_replay_off_the_model_host(tmp_path):
+    import httpx
+
+    hits = []
+
+    def handler(request):
+        hits.append(request.url.host)
+        if request.url.host == "api.anthropic.com":
+            return httpx.Response(302, headers={"location": "https://solidus.example.com/api/orders"})
+        return httpx.Response(200, json={"live": True})
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    with tape.installed(d):
+        async with httpx.AsyncClient(
+            transport=tape.guarded_transport(httpx.MockTransport(handler), d), follow_redirects=True
+        ) as client:
+            with pytest.raises(tape.LiveNetworkBlockedError):
+                await client.get("https://api.anthropic.com/v1/x")
+    assert hits == ["api.anthropic.com"] and d.network_blocked == 1
+
+
+def test_r3_the_default_transports_are_guarded_during_replay(tmp_path):
+    import httpx
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    with tape.installed(d):
+        assert getattr(httpx.AsyncHTTPTransport.handle_async_request, "_bench_guard", False)
+        assert getattr(httpx.HTTPTransport.handle_request, "_bench_guard", False)
+    assert not getattr(httpx.AsyncHTTPTransport.handle_async_request, "_bench_guard", False)

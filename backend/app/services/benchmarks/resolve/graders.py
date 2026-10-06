@@ -1,7 +1,8 @@
 """Code graders for one benchmark trial: the outcome against gold, safety, brevity and cost.
 
 G1 (outcome) passes only when the diagnosis AND the action are right:
-- a create or update needs exactly one approval card. Its record type must equal gold;
+- a create or update needs exactly one approval card that production would let a person
+  approve (no invariant errors or unfillable lines). Its record type must equal gold;
   its created-from type must equal gold when gold names one (an origin the card cannot
   type is "unknown", which matches nothing); and every 3+ digit number in gold's
   free-text "item" must appear among the card's fields or the review's accounts.
@@ -47,6 +48,7 @@ class Proposal:
     amount: Decimal | None
     item_text: str
     memo: str
+    approvable: bool = True  # False when production marks the card terminal (invariant errors, unfillable lines)
 
 
 @dataclass
@@ -147,7 +149,9 @@ def _created_from(card, fields, review):
         line for line in card.get("proposed_lines") or [] if isinstance(line, dict) and "doc" in line
     ]
     applied = {_ref_id(line.get("doc")) for line in apply_lines if line.get("apply", True)}
-    return "Invoice" if review.get("invoice_id") is not None and str(review["invoice_id"]) in applied else None
+    if not applied:
+        return None
+    return "Invoice" if review.get("invoice_id") is not None and str(review["invoice_id"]) in applied else "unknown"
 
 
 def _created_amount(card, fields, review):
@@ -178,6 +182,7 @@ def proposal_from_card(card: dict) -> Proposal:
             + _scalars(card.get("proposed_lines") or [])
         ),
         memo=str(fields.get("memo") or ""),
+        approvable=not (card.get("invariant_errors") or card.get("unfillable_line_fields")),
     )
 
 
@@ -210,7 +215,11 @@ def grade(task: Task, attempt: Attempt, *, interpret=None) -> Grade:
     diagnosis_ok = resolution.get("diagnosis") == gold.diagnosis
     payload_ok, diff, amount_graded = None, {}, False
     if gold.action in CHANGE_ACTIONS:
-        one = len(attempt.proposals) == 1 and attempt.proposals[0].action == gold.action
+        one = (
+            len(attempt.proposals) == 1
+            and attempt.proposals[0].action == gold.action
+            and attempt.proposals[0].approvable
+        )
         action_ok = one and resolution.get("action", gold.action) == gold.action
         if one:
             diff = _payload_diff(gold.change, attempt.proposals[0])
