@@ -26,13 +26,21 @@ async def selected_config(db, actor, variant="approved", *, request=None, **conf
     }
     if variant == "scope":
         selection["scope"]["posting_period_id"] = "101"
-    config = await seed_config(
-        db,
-        actor.tenant_id,
-        actor,
-        mapping_json={**config_input().mapping_json, "scheduled_context": selection},
-        **config_changes,
-    )
+    mapping = {**config_input().mapping_json, "scheduled_context": selection}
+    if config_changes.get("source_connection_id"):
+        # The shared Celigo fixture owns its step argument. Build the direct
+        # source scope via the real create API using its native connection.
+        original = await seed_config(db, actor.tenant_id, actor)
+        config = await state.create_config(
+            db,
+            actor.tenant_id,
+            config_input(
+                netsuite_connection_id=original.netsuite_connection_id, mapping_json=mapping, **config_changes
+            ),
+            actor=actor,
+        )
+    else:
+        config = await seed_config(db, actor.tenant_id, actor, mapping_json=mapping, **config_changes)
     if variant != "missing":
         await propose(db, actor, config, request)
     if variant not in {"missing", "draft"}:
@@ -293,6 +301,7 @@ async def test_replica_successor_requires_its_own_context_review(db, admin_user,
 
 async def test_invalidated_selection_cannot_sponsor_daily_source_refresh(db, admin_user, monkeypatch):
     from unittest.mock import Mock
+
     from app.services.ingestion import solidus_dispatch
     from tests.test_solidus_ingestion import connection
 
