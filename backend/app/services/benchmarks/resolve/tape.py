@@ -224,16 +224,26 @@ def _refusal(message: str, **extra) -> str:
     return json.dumps({"error": message, "benchmark": True, **extra})
 
 
+def _has_blockers(value) -> bool:
+    if isinstance(value, dict):
+        return bool(value.get("blockers")) or any(_has_blockers(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_blockers(v) for v in value)
+    return False
+
+
 def _environment_error(result: str) -> bool:
     """True for any error or blocker except the agent's own deterministic query mistakes."""
     try:
         body = json.loads(result)
     except (TypeError, ValueError):
         return False
-    if not isinstance(body, dict) or not (body.get("error") or body.get("blockers")):
+    if not isinstance(body, dict):
         return False
-    if body.get("blockers"):
+    if _has_blockers(body):  # tools report source failures as blockers at any depth, even on success
         return True
+    if not body.get("error"):
+        return False
     text = " ".join(str(body.get(k) or "") for k in ("error", "message", "reason", "detail", "code")).lower()
     return not any(term in text for term in DETERMINISTIC_QUERY_ERRORS)
 

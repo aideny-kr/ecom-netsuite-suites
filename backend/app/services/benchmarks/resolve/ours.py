@@ -25,11 +25,32 @@ from app.services.benchmarks.resolve.tape import TapedDispatcher, installed
 WALL_CLOCK_SECONDS = 600.0
 
 
+class _ChargedAdapter:
+    """The model adapter for setup calls (entity resolution), adding their usage to the trial."""
+
+    def __init__(self, adapter):
+        self._adapter, self.usage = adapter, []
+
+    def __getattr__(self, name):
+        return getattr(self._adapter, name)
+
+    async def create_message(self, **kwargs):
+        response = await self._adapter.create_message(**kwargs)
+        self.usage.append(getattr(response, "usage", None))
+        return response
+
+
 def _usage(results, field_name):
     return sum(int(getattr(getattr(r, "tokens_used", None), field_name, 0) or 0) for r in results)
 
 
-def attempt_from_run(events, dispatcher: TapedDispatcher, *, wall_ms: int, error: str | None = None) -> Attempt:
+def _setup(usages, field_name):
+    return sum(int(getattr(u, field_name, 0) or 0) for u in usages if u is not None)
+
+
+def attempt_from_run(
+    events, dispatcher: TapedDispatcher, *, wall_ms: int, error: str | None = None, setup_usage=()
+) -> Attempt:
     """Every turn's usage and tool calls are charged; the reply graded is the last turn's."""
     cards = [payload for kind, payload in events if kind == "confirmation_required" and isinstance(payload, dict)]
     results = [payload for kind, payload in events if kind == "response"]
@@ -54,9 +75,12 @@ def attempt_from_run(events, dispatcher: TapedDispatcher, *, wall_ms: int, error
         unreplayable=dispatcher.unreplayable,
         network_blocked=dispatcher.network_blocked,
         refused_tools=len(dispatcher.refused),
-        input_tokens=_usage(results, "input_tokens"),
-        output_tokens=_usage(results, "output_tokens"),
-        cache_tokens=_usage(results, "cache_creation_input_tokens") + _usage(results, "cache_read_input_tokens"),
+        input_tokens=_usage(results, "input_tokens") + _setup(setup_usage, "input_tokens"),
+        output_tokens=_usage(results, "output_tokens") + _setup(setup_usage, "output_tokens"),
+        cache_tokens=_usage(results, "cache_creation_input_tokens")
+        + _usage(results, "cache_read_input_tokens")
+        + _setup(setup_usage, "cache_creation_input_tokens")
+        + _setup(setup_usage, "cache_read_input_tokens"),
         tool_calls=sum(len(getattr(r, "tool_calls_log", None) or []) for r in results),
         wall_ms=wall_ms,
         error=error
@@ -75,15 +99,17 @@ async def run_ours(
     start = time.monotonic()
     events: list = []
     error = None
+    setup = None
     try:
         adapter = agent_runner._build_adapter(provider="anthropic", api_key=settings.ANTHROPIC_API_KEY)
         metadata = await agent_runner.get_active_metadata(db, tenant_id)
         tenant_config = await agent_runner._load_tenant_config(db, tenant_id)
+        setup = _ChargedAdapter(adapter)  # entity resolution calls the model before the agent runs
         context = await agent_runner._assemble_context(
             db=db,
             tenant_id=tenant_id,
             question=task.prompt,
-            adapter=adapter,
+            adapter=setup,
             entity_resolver_model=model,
             tenant_config=tenant_config,
         )
@@ -134,4 +160,10 @@ async def run_ours(
         error = f"timeout after {WALL_CLOCK_SECONDS:.0f}s"
     except Exception as exc:  # a crashed trial is graded as failed, never dropped
         error = f"{type(exc).__name__}: {exc}"
-    return attempt_from_run(events, dispatcher, wall_ms=int((time.monotonic() - start) * 1000), error=error)
+    return attempt_from_run(
+        events,
+        dispatcher,
+        wall_ms=int((time.monotonic() - start) * 1000),
+        error=error,
+        setup_usage=setup.usage if setup is not None else (),
+    )

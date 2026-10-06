@@ -884,3 +884,90 @@ def test_r3_the_default_transports_are_guarded_during_replay(tmp_path):
         assert getattr(httpx.AsyncHTTPTransport.handle_async_request, "_bench_guard", False)
         assert getattr(httpx.HTTPTransport.handle_request, "_bench_guard", False)
     assert not getattr(httpx.AsyncHTTPTransport.handle_async_request, "_bench_guard", False)
+
+
+# --- review round 4 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body, taped",
+    [
+        ({"success": True, "accounting_evidence": {"blockers": ["source_refresh:source_rate_limited"]}}, False),
+        ({"success": True, "accounting_evidence": {"blockers": []}}, True),
+    ],
+)
+async def test_r4_nested_blockers_are_never_taped(tmp_path, body, taped):
+    async def live(tool_name, tool_input, **kwargs):
+        return json.dumps(body)
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    await d("netsuite_suiteql", {"query": "SELECT 1"}, tenant_id="t")
+    assert (len(d.tape.entries) == 1) is taped
+
+
+def test_r4_one_untypable_applied_document_makes_the_origin_unknown():
+    fields = {
+        **SALES_CREDIT_CARD["proposed_fields"],
+        "apply": {"items": [{"doc": {"id": "77"}, "apply": True}, {"doc": {"id": "99"}, "apply": True}]},
+    }
+    p = graders.proposal_from_card({**SALES_CREDIT_CARD, "proposed_fields": fields})
+    assert p.created_from == "unknown"
+
+
+async def test_r4_setup_model_calls_are_charged(tmp_path, monkeypatch):
+    from app.core.config import settings
+    from app.services.benchmarks import agent_runner
+    from app.services.benchmarks.resolve import ours
+    from app.services.chat.llm_adapter import LLMResponse
+
+    class FakeAdapter:
+        async def create_message(self, **kwargs):
+            return LLMResponse(usage=TokenUsage(input_tokens=100, output_tokens=10))
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_streaming(self, **kwargs):
+            yield "response", AgentResult(success=True, data="ok", tokens_used=TokenUsage(input_tokens=2))
+
+    async def _none(*args, **kwargs):
+        return None
+
+    async def _context(**kwargs):
+        await kwargs["adapter"].create_message(model="m", max_tokens=1, messages=[])
+        return {}
+
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "test-key", raising=False)
+    monkeypatch.setattr(agent_runner, "_build_adapter", lambda **kwargs: FakeAdapter())
+    monkeypatch.setattr(agent_runner, "get_active_metadata", _none)
+    monkeypatch.setattr(agent_runner, "_load_tenant_config", _none)
+    monkeypatch.setattr(agent_runner, "_assemble_context", _context)
+    monkeypatch.setattr(agent_runner, "UnifiedAgent", FakeAgent)
+    monkeypatch.setattr(agent_runner, "_asks_for_source", lambda result: False)
+
+    task = tasks.Task(ref="R100000000", case_id="c", prompt="p", gold=None)
+    a = await ours.run_ours(
+        task, 0, db=None, tenant_id="t", actor_id="u", tape=tape.Tape(tmp_path / "t.jsonl"), mode="replay", model="m"
+    )
+    assert (a.input_tokens, a.output_tokens) == (102, 10)
+
+
+async def test_r4_a_failed_save_keeps_the_previous_results(tmp_path, monkeypatch):
+    out = tmp_path / "run.json"
+    bench = [tasks.Task(ref=f"R10000000{i}", case_id="c", prompt="p", gold=_gold()) for i in range(2)]
+    real_replace, calls = report.os.replace, []
+
+    def flaky_replace(src, dst):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    async def agent(task, trial):
+        return _attempt()
+
+    monkeypatch.setattr(report.os, "replace", flaky_replace)
+    with pytest.raises(OSError):
+        await report.run(bench, agent, trials=1, out_path=out)
+    assert len(json.loads(out.read_text())["trials"]) == 1

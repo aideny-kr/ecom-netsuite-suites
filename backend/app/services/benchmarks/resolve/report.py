@@ -13,6 +13,7 @@ the repository: transcripts carry real customer data.
 from __future__ import annotations
 
 import json
+import os
 import statistics
 from dataclasses import asdict
 from pathlib import Path
@@ -52,9 +53,12 @@ def summarize(rows: list[dict], *, trials: int) -> dict:
 def _save(out_path, meta, rows, trials) -> dict:
     summary = summarize(rows, trials=trials)
     if out_path is not None:
-        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        target = Path(out_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
         body = {"meta": meta or {}, "summary": summary, "trials": rows}
-        Path(out_path).write_text(json.dumps(body, indent=2, default=str))
+        partial = target.with_name(target.name + ".partial")
+        partial.write_text(json.dumps(body, indent=2, default=str))
+        os.replace(partial, target)  # atomic: a failed save leaves the previous results whole
     return summary
 
 

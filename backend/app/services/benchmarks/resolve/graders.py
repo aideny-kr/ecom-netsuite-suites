@@ -151,7 +151,8 @@ def _created_from(card, fields, review):
     applied = {_ref_id(line.get("doc")) for line in apply_lines if line.get("apply", True)}
     if not applied:
         return None
-    return "Invoice" if review.get("invoice_id") is not None and str(review["invoice_id"]) in applied else "unknown"
+    # Every applied document must be typed; one untypable application makes the origin unknown.
+    return "Invoice" if review.get("invoice_id") is not None and applied == {str(review["invoice_id"])} else "unknown"
 
 
 def _created_amount(card, fields, review):
