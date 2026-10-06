@@ -43,7 +43,21 @@ def _dates(column, lower, upper):
     )
 
 
-def change_query(stream, subsidiary_id, reference_field, start, end, after):
+def _membership_projection(column, windows):
+    result = []
+    for i, (start, end) in enumerate(windows):
+        lower, upper = _window(start, end)
+        result.append(
+            ",MAX(CASE WHEN "
+            + _utc(column)
+            + f">=TO_TIMESTAMP('{lower}','YYYY-MM-DD HH24:MI:SS.FF6') AND "
+            + _utc(column)
+            + f"<TO_TIMESTAMP('{upper}','YYYY-MM-DD HH24:MI:SS.FF6') THEN 1 ELSE 0 END) AS membership_{i}"
+        )
+    return "".join(result)
+
+
+def change_query(stream, subsidiary_id, reference_field, start, end, after, *, membership_windows=()):
     lower, upper = _window(start, end)
     width = 2 if stream == "transaction_links" else 1
     if (
@@ -58,6 +72,16 @@ def change_query(stream, subsidiary_id, reference_field, start, end, after):
     ):
         raise NetSuiteEvidenceError("invalid_dependency_change_scope")
     subsidiary = int(subsidiary_id)
+    if len(membership_windows) > 7 or (
+        membership_windows
+        and (
+            membership_windows[0][0] != start
+            or membership_windows[-1][1] != end
+            or any(a >= b or a.utcoffset() is None or b.utcoffset() is None for a, b in membership_windows)
+            or any(left[1] != right[0] for left, right in zip(membership_windows, membership_windows[1:]))
+        )
+    ):
+        raise NetSuiteEvidenceError("invalid_dependency_change_scope")
     if stream == "transactions":
         return (
             f"SELECT DISTINCT t.id,t.type,t.{reference_field} AS order_reference,m.subsidiary,"
@@ -73,8 +97,10 @@ def change_query(stream, subsidiary_id, reference_field, start, end, after):
         # work. DISTINCT retains the old grouping's duplicate-mainline collapse.
         return (
             f"SELECT DISTINCT t.id,t.type,t.{reference_field} AS order_reference,m.subsidiary,"
-            f"{_stamp('l.modified_utc')} "
-            f"FROM (SELECT l.transaction AS transaction_id,MAX({_utc('l.linelastmodifieddate')}) AS modified_utc "
+            f"{_stamp('l.modified_utc')}" + "".join(f",l.membership_{i}" for i in range(len(membership_windows))) + " "
+            f"FROM (SELECT l.transaction AS transaction_id,MAX({_utc('l.linelastmodifieddate')}) AS modified_utc"
+            + _membership_projection("l.linelastmodifieddate", membership_windows)
+            + " "
             f"FROM transactionline l WHERE l.transaction>{after[0]} "
             f"AND {_dates('l.linelastmodifieddate', lower, upper)} GROUP BY l.transaction) l "
             "JOIN transaction t ON t.id=l.transaction_id "
@@ -83,7 +109,9 @@ def change_query(stream, subsidiary_id, reference_field, start, end, after):
         )
     if stream == "transaction_links":
         return (
-            f"SELECT l.previousdoc,l.nextdoc,{_stamp('MAX(' + _utc('l.lastmodifieddate') + ')')} "
+            f"SELECT l.previousdoc,l.nextdoc,{_stamp('MAX(' + _utc('l.lastmodifieddate') + ')')}"
+            + _membership_projection("l.lastmodifieddate", membership_windows)
+            + " "
             "FROM NextTransactionLineLink l "
             f"WHERE (l.previousdoc>{after[0]} OR (l.previousdoc={after[0]} AND l.nextdoc>{after[1]})) "
             f"AND {_dates('l.lastmodifieddate', lower, upper)} "
@@ -149,10 +177,13 @@ async def read_change_page(
     after=None,
     page_size=20,
     client=None,
+    membership_windows=(),
 ):
     account = _account(account_id)
     after = after if after is not None else ([0, 0] if stream == "transaction_links" else [0])
-    query = change_query(stream, subsidiary_id, reference_field, start, end, after)
+    query = change_query(
+        stream, subsidiary_id, reference_field, start, end, after, membership_windows=membership_windows
+    )
     if type(page_size) is not int or not 1 <= page_size <= 250:
         raise NetSuiteEvidenceError("invalid_dependency_change_scope")
     try:
@@ -218,6 +249,17 @@ async def read_change_page(
                     "order_reference": row.get("order_reference"),
                 }
             )
+            if membership_windows and stream in {"transaction_lines", "transaction_links"}:
+                flags = [str(row.get(f"membership_{i}")) for i in range(len(membership_windows))]
+                changes[-1]["membership_windows"] = (
+                    [
+                        [lower.isoformat(), upper.isoformat()]
+                        for flag, (lower, upper) in zip(flags, membership_windows)
+                        if flag == "1"
+                    ]
+                    if all(flag in {"0", "1"} for flag in flags) and "1" in flags
+                    else None
+                )
             previous = identity
     except (KeyError, ValueError, TypeError, AttributeError):
         raise NetSuiteEvidenceError("dependency_change_page_incomplete") from None

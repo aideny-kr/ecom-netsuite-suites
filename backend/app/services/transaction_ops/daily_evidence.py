@@ -70,6 +70,15 @@ def compatible_scope(root):
 
 def compatible_observation_runs(root, span):
     r = TransactionRun
+    lower = cast(r.params_json["window_start"].astext, DateTime(timezone=True))
+    upper = cast(r.params_json["window_end"].astext, DateTime(timezone=True))
+    contained = and_(lower >= span.start, upper <= span.end)
+    window_scope = contained
+    if root.params_json.get("evidence_mode") == "saved" and getattr(root, "origin", None) != "schedule":
+        from app.services.transaction_ops.period_membership import calendar_aligned, sealed_membership
+
+        if calendar_aligned(root, span):
+            window_scope = or_(contained, and_(lower < span.end, upper > span.start, sealed_membership(r)))
     return [
         *compatible_scope(root),
         # Exact-order/recovery work is not complete period discovery.
@@ -78,8 +87,7 @@ def compatible_observation_runs(root, span):
             r.origin.in_(("manual", "chat")) & r.params_json["review"].astext.is_not(None),
         ),
         func.coalesce(r.params_json["order_references"], cast("[]", JSONB)) == [],
-        cast(r.params_json["window_start"].astext, DateTime(timezone=True)) >= span.start,
-        cast(r.params_json["window_end"].astext, DateTime(timezone=True)) <= span.end,
+        window_scope,
         cast(r.params_json["window_start"].astext, DateTime(timezone=True))
         < cast(r.params_json["window_end"].astext, DateTime(timezone=True)),
     ]

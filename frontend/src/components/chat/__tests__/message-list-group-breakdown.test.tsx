@@ -71,4 +71,44 @@ describe("MessageList — saved group breakdown", () => {
     show({ type: "data_table", data: { columns: [], rows: [] }, group_breakdown: breakdown });
     expect(screen.getByText("Solidus adjustment never reached NetSuite")).toBeInTheDocument();
   });
+
+  // Packet review of #360: "Prepare fixes" asks for the breakdown and then the group's
+  // fix, so the turn ends on an approval card. The card and clarification branches
+  // returned before the saved breakdown was rendered, and it vanished once the turn ended.
+  it("keeps the card when the turn ended on an approval card", () => {
+    show({
+      type: "write_confirmation",
+      mutation_type: "create",
+      record_type: "customer",
+      record_id: null,
+      proposed_fields: { companyname: "test ai customer" },
+      proposed_lines: [],
+      current_record: null,
+      tool_name: "ext__aaa__ns_createRecord",
+      tool_input: {},
+      confirmation_token: "tok-1",
+      editable_slots: [],
+      unvalidated: false,
+      status: "pending",
+      group_breakdown: breakdown,
+    });
+    expect(screen.getByText("Solidus adjustment never reached NetSuite")).toBeInTheDocument();
+  });
+
+  it("keeps the card when the turn ended on a clarification", () => {
+    show({
+      type: "clarification",
+      status: "pending",
+      options: [
+        { id: "A", title: "NetSuite GL", rationale: "GL", source: "netsuite", is_default: true },
+        { id: "B", title: "BigQuery", rationale: "checkout", source: "bigquery", is_default: false },
+      ],
+      default_id: "A",
+      ambiguity_summary: "Revenue can mean two things.",
+      confirmation_token: "deadbeef",
+      expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+      group_breakdown: breakdown,
+    });
+    expect(screen.getByText("Solidus adjustment never reached NetSuite")).toBeInTheDocument();
+  });
 });

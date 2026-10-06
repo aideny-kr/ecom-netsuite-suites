@@ -85,15 +85,15 @@ function OperationsContent() {
         <p className="text-[13px] text-muted-foreground">
           Framework → NetSuite
         </p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">
-          Transaction operations
-        </h1>
+        <h2 className="mt-2 text-xl font-medium tracking-tight">
+          Investigations
+        </h2>
         <p className="mt-2 max-w-3xl text-muted-foreground">
           Investigate order differences and track their resolution. Review the
           evidence and exact proposed changes before approving an action.
         </p>
         <Button asChild variant="outline" className="mt-4">
-          <Link href="/tables/orders">Open Transactions</Link>
+          <Link href="/tables/orders?view=records">Browse records</Link>
         </Button>
       </header>
       {configs.isLoading ? (
@@ -109,12 +109,12 @@ function OperationsContent() {
             Start with your transactions
           </h2>
           <p className="max-w-2xl text-muted-foreground">
-            Open Transactions to refresh your connected orders or start a
+            Browse records to refresh your connected orders or start a
             reconciliation. Verified connection settings are applied
             automatically in the backend.
           </p>
           <Button asChild variant="outline">
-            <Link href="/connections">Open Connections</Link>
+            <Link href="/settings#connections">Open Connections</Link>
           </Button>
         </section>
       ) : (
