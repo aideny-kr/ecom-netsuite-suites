@@ -42,33 +42,51 @@ def summarize(rows: list[dict], *, trials: int) -> dict:
         # The target is zero, so the total (stricter than a median) is reported, with how many trials had any.
         "g4_model_amounts": sum(len(row.get("model_amounts", [])) for row in rows),
         "g4_trials_with_amounts": sum(1 for row in rows if row.get("model_amounts")),
+        "g4_median_amounts": statistics.median(len(row.get("model_amounts", [])) for row in rows) if rows else None,
         "g5_median_tokens_resolved": statistics.median(resolved_tokens) if resolved_tokens else None,
         "environment_incomplete_trials": incomplete,
         "comparable": incomplete == 0,
     }
 
 
+def _save(out_path, meta, rows, trials) -> dict:
+    summary = summarize(rows, trials=trials)
+    if out_path is not None:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        body = {"meta": meta or {}, "summary": summary, "trials": rows}
+        Path(out_path).write_text(json.dumps(body, indent=2, default=str))
+    return summary
+
+
 async def run(tasks, agent, *, trials: int = 3, out_path=None, meta: dict | None = None, interpret=None) -> dict:
     """`agent(task, trial) -> Attempt`. Trials run one after another so tokens and wall time stay honest.
 
-    `interpret(reply_text) -> {diagnosis, action} | None` (async) reads a reply whose agent
-    declared no resolution; the grade records that the resolution was interpreted.
+    `interpret(text) -> {diagnosis, action} | None` (async) reads what the person saw when
+    the agent declared no resolution. A failed interpretation is recorded on that trial
+    (which then has no diagnosis) and the run goes on. Results are saved after every
+    trial, so a crash keeps the work done.
     """
     rows = []
     for task in tasks:
         for trial in range(trials):
             attempt = await agent(task, trial)
-            reading = None
+            reading, interpret_error = None, None
             if attempt.resolution is None and interpret is not None:
-                reading = await interpret(attempt.reply_text)
-            graded = asdict(grade(task, attempt, interpret=(lambda _text: reading) if interpret is not None else None))
+                try:
+                    reading = await interpret(attempt.shown_text or attempt.reply_text)
+                except Exception as exc:  # noqa: BLE001 - one provider failure must not lose the run
+                    interpret_error = f"{type(exc).__name__}: {exc}"
+            hook = (lambda _text: reading) if interpret is not None else None
+            graded = asdict(grade(task, attempt, interpret=hook))
             rows.append(
-                {"ref": task.ref, "trial": trial, **graded, "reply_text": attempt.reply_text, "error": attempt.error}
+                {
+                    "ref": task.ref,
+                    "trial": trial,
+                    **graded,
+                    "reply_text": attempt.reply_text,
+                    "error": attempt.error,
+                    "interpret_error": interpret_error,
+                }
             )
-    summary = summarize(rows, trials=trials)
-    if out_path is not None:
-        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_path).write_text(
-            json.dumps({"meta": meta or {}, "summary": summary, "trials": rows}, indent=2, default=str)
-        )
-    return summary
+            _save(out_path, meta, rows, trials)
+    return _save(out_path, meta, rows, trials)

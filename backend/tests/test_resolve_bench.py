@@ -176,18 +176,6 @@ async def test_installed_routes_every_tool_call_through_the_tape(tmp_path):
     assert tools._execute_tool_call_once is not d  # restored on exit
 
 
-async def test_replay_blocks_netsuite_token_refresh(tmp_path):
-    from app.services import netsuite_oauth_service as oauth
-
-    original = oauth.refresh_tokens
-    with tape.installed(tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")):
-        with pytest.raises(tape.LiveNetSuiteBlockedError):
-            await oauth.refresh_tokens("acct", "token")
-        with pytest.raises(tape.LiveNetSuiteBlockedError):
-            await oauth.refresh_tokens_with_client("acct", "token", "client")
-    assert oauth.refresh_tokens is original
-
-
 # --- graders ------------------------------------------------------------------------
 
 
@@ -504,41 +492,6 @@ class _DB:
         self.info = {}
 
 
-async def test_f3_session_state_a_read_leaves_is_restored_on_replay(tmp_path):
-    import uuid as _uuid
-
-    candidate = {"amount": Decimal("4.82"), "case": _uuid.UUID(int=7), "lines": [{"rate": Decimal("1.5")}]}
-
-    async def live(tool_name, tool_input, **kwargs):
-        kwargs["db"].info["accounting_correction_candidate"] = candidate
-        kwargs["db"].info.pop("stale", None)
-        return '{"ok": 1}'
-
-    recording_db = _DB()
-    recording_db.info["stale"] = 1
-    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
-    await d("transaction_ops_accounting_evidence", {"case_id": "c"}, tenant_id="t", db=recording_db)
-
-    replay_db = _DB()
-    replay_db.info["stale"] = 1
-    player = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
-    assert (
-        await player("transaction_ops_accounting_evidence", {"case_id": "c"}, tenant_id="t", db=replay_db)
-        == '{"ok": 1}'
-    )
-    assert replay_db.info == {"accounting_correction_candidate": candidate}
-
-
-async def test_f3_state_that_cannot_be_recorded_fails_loudly(tmp_path):
-    async def live(tool_name, tool_input, **kwargs):
-        kwargs["db"].info["accounting_correction_candidate"] = object()
-        return "{}"
-
-    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
-    with pytest.raises(tape.TapeStateError):
-        await d("transaction_ops_accounting_evidence", {}, tenant_id="t", db=_DB())
-
-
 async def test_f2_environment_errors_are_never_taped(tmp_path):
     live = _Live()
 
@@ -679,3 +632,137 @@ def test_f12_summary_counts_trials_with_amounts():
     ]
     s = report.summarize(rows, trials=2)
     assert (s["g4_model_amounts"], s["g4_trials_with_amounts"]) == (2, 1)
+
+
+# --- review round 2: nothing leaves the process in replay; stateful reads stay live ------
+
+
+async def test_r2_a_read_that_leaves_session_state_is_live_in_record_and_unreplayable_in_replay(tmp_path):
+    calls = []
+
+    async def live(tool_name, tool_input, **kwargs):
+        calls.append(tool_name)
+        kwargs["db"].info["accounting_correction_candidate"] = {"observed_at": "now"}
+        return '{"ok": 1}'
+
+    recorder = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    for _ in range(2):
+        await recorder("transaction_ops_accounting_evidence", {"case_id": "c"}, tenant_id="t", db=_DB())
+    assert len(calls) == 2  # a stateful read is never served from the tape, so its state is always fresh
+
+    player = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    db = _DB()
+    assert await player("transaction_ops_accounting_evidence", {"case_id": "c"}, tenant_id="t", db=db) == '{"ok": 1}'
+    assert db.info == {} and player.unreplayable == 1  # stale state is never restored; the trial is not comparable
+
+
+async def test_r2_replay_blocks_every_outbound_host_but_the_model(tmp_path):
+    import httpx
+    import requests
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    with tape.installed(d, allow_hosts={"api.anthropic.com"}):
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(tape.LiveNetworkBlockedError):
+                await client.get("https://1234567.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql")
+        with pytest.raises(tape.LiveNetworkBlockedError):
+            httpx.Client().get("https://solidus.example.com/api/orders/R1")
+        with pytest.raises(tape.LiveNetworkBlockedError):
+            requests.Session().get("https://bigquery.googleapis.com/bigquery/v2/projects/p/queries")
+        allowed = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        assert tape._allowed(allowed.url.host, {"api.anthropic.com"})
+    assert d.network_blocked == 3
+    assert httpx.AsyncClient.send is not None and not getattr(httpx.AsyncClient.send, "_bench_guard", False)
+
+
+async def test_r2_netsuite_token_refresh_cannot_leave_a_replay(tmp_path):
+    from app.services import netsuite_oauth_service as oauth
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    with tape.installed(d):
+        with pytest.raises(tape.LiveNetworkBlockedError):
+            await oauth.refresh_tokens("1234567", "token")
+    assert d.network_blocked == 1
+
+
+@pytest.mark.parametrize(
+    "tool_input, kind", [({"result_id": "r1", "row_field": "a"}, "local"), ({"query": "SELECT 1"}, "read")]
+)
+def test_r2_pivot_is_local_only_over_an_earlier_result(tool_input, kind):
+    assert tape.classify("pivot_query_result", tool_input) == kind
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": "Accounting case or scoped configuration unavailable.", "reason": "actor_unavailable"},
+        {"error": "Accounting case or scoped configuration unavailable.", "reason": "upstream_http_429"},
+        {"error": "Accounting case or scoped configuration unavailable.", "reason": "read_timeout"},
+        {"error": "x", "detail": "permission_denied"},
+    ],
+)
+def test_r2_environment_errors_are_found_in_any_reason_field(body):
+    assert tape._environment_error(json.dumps(body))
+
+
+def test_r2_a_server_prepared_card_is_interpreted_from_what_the_person_saw(tmp_path):
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    note = "This order needs a credit memo for the unbooked adjustment. Approve below."
+    result = AgentResult(success=True, data=note, tokens_used=TokenUsage())
+    a = attempt_from_run([("text", "\n\n" + note), ("confirmation_required", CARD), ("response", result)], d, wall_ms=1)
+    assert a.reply_text == "" and note in a.shown_text
+
+
+async def test_r2_the_runner_interprets_the_shown_text_and_survives_interpreter_failure(tmp_path):
+    gold = _gold()
+    bench = [tasks.Task(ref=f"R10000000{i}", case_id="c", prompt="p", gold=gold) for i in range(2)]
+    seen = []
+
+    async def agent(task, trial):
+        return _attempt(resolution=None, reply_text="", shown_text=f"needs a credit memo {task.ref}")
+
+    async def interpret(text):
+        seen.append(text)
+        if text.endswith("1"):
+            raise RuntimeError("provider down")
+        return {"diagnosis": "needs_credit_memo", "action": "create"}
+
+    out = tmp_path / "run.json"
+    summary = await report.run(bench, agent, trials=1, out_path=out, interpret=interpret)
+    rows = json.loads(out.read_text())["trials"]
+    assert seen == ["needs a credit memo R100000000", "needs a credit memo R100000001"]
+    assert summary["g1_pass_at_1"] == 0.5 and rows[1]["interpret_error"] == "RuntimeError: provider down"
+
+
+async def test_r2_results_are_saved_after_every_trial(tmp_path):
+    out = tmp_path / "run.json"
+    bench = [tasks.Task(ref=f"R10000000{i}", case_id="c", prompt="p", gold=_gold()) for i in range(2)]
+
+    async def agent(task, trial):
+        if task.ref.endswith("1"):
+            raise KeyboardInterrupt
+        return _attempt()
+
+    with pytest.raises(KeyboardInterrupt):
+        await report.run(bench, agent, trials=1, out_path=out)
+    assert len(json.loads(out.read_text())["trials"]) == 1
+
+
+def test_r2_normalized_apply_lines_type_the_origin():
+    card = {
+        **SALES_CREDIT_CARD,
+        "proposed_fields": {"item": {"items": SALES_CREDIT_CARD["proposed_fields"]["item"]["items"]}},
+        "proposed_lines": [
+            {"item": {"id": "40050"}, "amount": -4.82},
+            {"doc": {"id": "77"}, "apply": True, "amount": 4.82},
+        ],
+    }
+    assert graders.proposal_from_card(card).created_from == "Invoice"
+
+
+def test_r2_summary_has_the_median_amount_count():
+    rows = [
+        {"ref": "A", "outcome_ok": True, "model_amounts": ["$1.00", "2.00"]},
+        {"ref": "A", "outcome_ok": True, "model_amounts": []},
+    ]
+    assert report.summarize(rows, trials=2)["g4_median_amounts"] == 1

@@ -6,10 +6,15 @@
         [--mode record] [--limit 3]
 
 `run` drives today's agent and needs the platform model key, so it runs in the staging
-container. The first run on new tasks uses `--mode record`, which saves every read to the
-tape. Scoring runs use the default `--mode replay`, which never reaches NetSuite. Each
-trial uses its own database session and rolls it back; a tool that commits its own audit
-rows does so exactly as it would in chat.
+container. `--mode record` reads live and saves every read to the tape. `--mode replay`
+(the default) never reaches an outside system, and marks a trial not comparable when it
+needed something the tape cannot give.
+
+Measure TODAY'S agent with `--mode record`: its approval cards come from session state
+that some reads leave behind, which replay deliberately does not restore (see `tape`).
+Replay is for agents whose reads all go through tools (the reference runner, the
+resolver). Each trial uses its own database session and rolls it back; a tool that
+commits its own audit rows does so exactly as it would in chat.
 
 Tasks, labels, tape and results hold customer data, so the results file must sit outside
 the repository.

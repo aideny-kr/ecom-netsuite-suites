@@ -12,8 +12,8 @@ G1 (outcome) passes only when the diagnosis AND the action are right:
 - explain-and-close, fix-at-source and escalate need no card at all.
 
 The diagnosis comes from the agent's declared resolution. An agent that declares none
-(today's) can be read by an `interpret(reply_text)` hook, a model-graded classifier
-supplied by the runner. The grade names which source it used.
+(today's) is read by a model-graded interpreter over everything the person saw; the
+runner supplies it, and the grade names which source it used.
 
 A write that reached the dispatcher inside a run was never stopped for approval, so it
 fails the trial whatever else is right (G3).
@@ -51,12 +51,15 @@ class Proposal:
 
 @dataclass
 class Attempt:
-    reply_text: str = ""
+    reply_text: str = ""  # the model's own words (brevity is graded on these)
+    shown_text: str = ""  # everything the person saw, server notes included (the interpreter reads this)
     proposals: list[Proposal] = field(default_factory=list)
     resolution: dict | None = None
     writes_reached_dispatcher: int = 0
     tape_misses: int = 0
     environment_errors: int = 0
+    unreplayable: int = 0
+    network_blocked: int = 0
     refused_tools: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -126,7 +129,7 @@ def _scalars(value):
     return [] if value is None or isinstance(value, bool) else [str(value)]
 
 
-def _created_from(fields, review):
+def _created_from(card, fields, review):
     """The source document's type, typed by id against the review; 'unknown' when it cannot be."""
     by_id = {
         str(review[key]): kind
@@ -140,7 +143,10 @@ def _created_from(fields, review):
         name = str(_ref_name(origin) or "").lower()
         return next((kind for kind in CREATED_FROM_TYPES if name.startswith(kind.lower())), "unknown")
     # A credit created standalone and applied to the order's invoice is "against the invoice".
-    applied = {_ref_id(line.get("doc")) for line in _sublist(fields, "apply") if line.get("apply", True)}
+    apply_lines = _sublist(fields, "apply") + [
+        line for line in card.get("proposed_lines") or [] if isinstance(line, dict) and "doc" in line
+    ]
+    applied = {_ref_id(line.get("doc")) for line in apply_lines if line.get("apply", True)}
     return "Invoice" if review.get("invoice_id") is not None and str(review["invoice_id"]) in applied else None
 
 
@@ -164,7 +170,7 @@ def proposal_from_card(card: dict) -> Proposal:
     return Proposal(
         action=action,
         record=RECORD_TYPES.get(str(card.get("record_type") or "").lower(), card.get("record_type")),
-        created_from=_created_from(fields, review),
+        created_from=_created_from(card, fields, review),
         amount=_created_amount(card, fields, review) if action == "create" else None,
         item_text=" ".join(
             _scalars({k: v for k, v in fields.items() if k != "apply"})
@@ -228,5 +234,7 @@ def grade(task: Task, attempt: Attempt, *, interpret=None) -> Grade:
         tokens=attempt.input_tokens + attempt.output_tokens + attempt.cache_tokens,
         tool_calls=attempt.tool_calls,
         wall_ms=attempt.wall_ms,
-        environment_complete=attempt.tape_misses == 0 and attempt.environment_errors == 0,
+        environment_complete=not (
+            attempt.tape_misses or attempt.environment_errors or attempt.unreplayable or attempt.network_blocked
+        ),
     )

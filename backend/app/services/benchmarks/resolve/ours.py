@@ -40,15 +40,19 @@ def attempt_from_run(events, dispatcher: TapedDispatcher, *, wall_ms: int, error
         for (kind, text), (next_kind, _) in zip(events, events[1:], strict=False)
         if kind == "text" and next_kind == "confirmation_required" and isinstance(text, str) and text.strip()
     ]
+    shown = "".join(text for kind, text in events if kind == "text" and isinstance(text, str)).strip() or reply
     for note in notes:
         reply = reply.replace(note, "")
     return Attempt(
         reply_text=reply.strip(),
+        shown_text=shown,
         proposals=[proposal_from_card(card) for card in cards],
         resolution=None,  # today's agent declares no structured resolution
         writes_reached_dispatcher=len(dispatcher.writes),
         tape_misses=dispatcher.misses,
         environment_errors=dispatcher.environment_errors,
+        unreplayable=dispatcher.unreplayable,
+        network_blocked=dispatcher.network_blocked,
         refused_tools=len(dispatcher.refused),
         input_tokens=_usage(results, "input_tokens"),
         output_tokens=_usage(results, "output_tokens"),
