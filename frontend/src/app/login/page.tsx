@@ -2,13 +2,12 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Zap } from "lucide-react";
+import { OrbitalLoginShell } from "@/components/auth/orbital-login-shell";
 import dynamic from "next/dynamic";
 const GoogleLogin = dynamic(
   () => import("@react-oauth/google").then((m) => m.GoogleLogin),
@@ -20,7 +19,6 @@ import { Loader2 } from "lucide-react";
 export default function LoginPage() {
   const { login } = useAuth();
   const { toast } = useToast();
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -44,98 +42,62 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen dark bg-[#0e0e0e]">
-      {/* Left Panel - Branding */}
-      <div className="hidden lg:flex lg:w-[480px] lg:flex-col lg:justify-between bg-zinc-950 p-10 text-white border-r border-zinc-800/50">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-sm bg-[#ff7936]">
-            <Zap className="h-5 w-5 text-black" />
-          </div>
-          <span className="text-lg font-bold tracking-tight">
-            Suite Studio AI
-          </span>
-        </div>
-        <div>
-          <h2 className="text-4xl font-black leading-none tracking-tight">
-            STREAMLINE
-            <br />
-            <span className="text-[#ff7936]">YOUR OPS_</span>
-          </h2>
-          <p className="mt-6 text-[15px] leading-relaxed text-zinc-500">
-            Connect Shopify, Stripe, and NetSuite in one unified platform.
-            Automate data syncing, reconciliation, and journal postings.
-          </p>
-        </div>
-        <p className="text-[10px] text-zinc-700 uppercase tracking-widest">
-          © Suite Studio AI — Modular Precision
-        </p>
-      </div>
-
-      {/* Right Panel - Form */}
-      <div className="flex flex-1 items-center justify-center px-6 bg-[#0e0e0e]">
-        <div className="w-full max-w-[380px]">
-          {/* Mobile logo */}
-          <div className="mb-8 flex items-center gap-3 lg:hidden">
-            <div className="flex h-9 w-9 items-center justify-center rounded-sm bg-[#ff7936]">
-              <Zap className="h-5 w-5 text-black" />
-            </div>
-            <span className="text-lg font-bold tracking-tight text-white">
-              Suite Studio AI
-            </span>
-          </div>
-
+    <OrbitalLoginShell>
           <div className="mb-8">
-            <h1 className="text-2xl font-bold tracking-tight text-white">
+            <h1 className="text-3xl font-medium tracking-tight text-foreground">
               Sign in
             </h1>
-            <p className="mt-1.5 text-[15px] text-zinc-500">
-              Enter your credentials to access your account
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              Welcome back. Your workspace is ready.
             </p>
           </div>
 
           <form onSubmit={onSubmit} className="space-y-5">
             <div className="space-y-2">
-              <Label htmlFor="email" className="text-[13px] font-medium text-zinc-400 uppercase tracking-wider">
+              <Label htmlFor="email" className="text-[13px] font-medium text-foreground">
                 Email
               </Label>
               <Input
                 id="email"
                 type="email"
+                autoComplete="username"
                 placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
-                className="h-11 bg-zinc-900 border-zinc-800 text-white rounded-sm placeholder:text-zinc-600 focus:ring-[#ff7936] focus:border-[#ff7936]"
+                className="h-12 rounded-md border-input bg-background text-foreground placeholder:text-muted-foreground focus-visible:ring-ring focus-visible:border-primary"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password" className="text-[13px] font-medium text-zinc-400 uppercase tracking-wider">
+              <Label htmlFor="password" className="text-[13px] font-medium text-foreground">
                 Password
               </Label>
               <Input
                 id="password"
                 type="password"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="h-11 bg-zinc-900 border-zinc-800 text-white rounded-sm placeholder:text-zinc-600 focus:ring-[#ff7936] focus:border-[#ff7936]"
+                className="h-12 rounded-md border-input bg-background text-foreground placeholder:text-muted-foreground focus-visible:ring-ring focus-visible:border-primary"
               />
             </div>
             <button
               type="submit"
-              className="h-11 w-full text-[14px] font-bold uppercase tracking-widest bg-[#ff7936] text-black rounded-sm hover:bg-[#ff915d] transition-all disabled:opacity-50"
+              className="h-12 w-full rounded-md bg-primary text-[14px] font-semibold text-primary-foreground hover:bg-primary/85 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:opacity-50"
               disabled={isLoading}
             >
               {isLoading ? "Signing in..." : "Sign in"}
             </button>
           </form>
 
+          {process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID && <>
           <div className="relative my-6">
             <div className="absolute inset-0 flex items-center">
-              <span className="w-full border-t border-zinc-800" />
+              <span className="w-full border-t border-border" />
             </div>
             <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-[#0e0e0e] px-2 text-zinc-600 tracking-widest">or</span>
+              <span className="bg-card px-3 text-muted-foreground tracking-widest">or</span>
             </div>
           </div>
 
@@ -181,22 +143,21 @@ export default function LoginPage() {
                 }}
                 text="signin_with"
                 shape="rectangular"
-                width={380}
               />
             </div>
           )}
 
-          <p className="mt-6 text-center text-[13px] text-zinc-500">
+          </>}
+
+          <p className="mt-6 text-center text-[13px] text-muted-foreground">
             Don&apos;t have an account?{" "}
             <Link
               href="/register"
-              className="font-medium text-[#ff7936] hover:underline"
+              className="font-medium text-primary hover:underline"
             >
               Create one
             </Link>
           </p>
-        </div>
-      </div>
-    </div>
+    </OrbitalLoginShell>
   );
 }

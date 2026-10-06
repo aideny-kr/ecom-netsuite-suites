@@ -4,82 +4,59 @@
 
 @layer base {
   :root {
-    /* Base Monochrome Background - Pearl White */
-    --background: 0 0% 98.0%;
-    --foreground: 240 10% 3.9%;
-
+    --background: 210 25% 97%;
+    --foreground: 215 28% 15%;
     --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
+    --card-foreground: 215 28% 15%;
     --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
-
-    /* Primary Punch - Matrix Green */
-    --primary: 142 70% 45%;
+    --popover-foreground: 215 28% 15%;
+    --primary: 207 66% 36%;
     --primary-foreground: 0 0% 100%;
-
-    /* Secondary Punch - Hot Coral */
-    --accent: 354.8 100% 63.9%;
-    --accent-foreground: 0 0% 100%;
-    --destructive: 354.8 100% 63.9%;
+    --accent: 209 32% 92%;
+    --accent-foreground: 215 28% 20%;
+    --destructive: 0 65% 48%;
     --destructive-foreground: 0 0% 100%;
-
-    /* Monochrome Muted / Secondary */
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 142 70% 45%;
+    --secondary: 210 24% 94%;
+    --secondary-foreground: 215 28% 20%;
+    --muted: 210 24% 94%;
+    --muted-foreground: 215 14% 43%;
+    --border: 213 22% 87%;
+    --input: 213 22% 83%;
+    --ring: 207 66% 42%;
     --radius: 0.5rem;
-
-    --sidebar-bg: 240 11% 4%;
-    --sidebar-foreground: 240 5% 65%;
-    --sidebar-active: 20 100% 61%;
-    --sidebar-hover: 240 6% 10%;
-    --sidebar-border: 240 6% 12%;
-    --sidebar-muted: 240 5% 40%;
-
-    --success: 142 71% 45%;
-    --warning: 38 92% 50%;
-
-    /* Neubrutalist tokens for the report app-chrome wrapper (the rendered
-       report artifact carries its own inline CSS; brand_color_hsl is inlined
-       server-side into the artifact, not here). */
-    --report-bg: 0 0% 98%;
-    --report-border: 0 0% 0%;
-    --report-shadow: 4px 4px 0 0 hsl(0 0% 0%);
-    --report-accent: 142 70% 45%;
+    --sidebar-bg: 216 30% 8%;
+    --sidebar-foreground: 215 18% 76%;
+    --sidebar-active: 205 80% 79%;
+    --sidebar-hover: 207 32% 22%;
+    --sidebar-border: 215 22% 19%;
+    --sidebar-muted: 215 15% 60%;
+    --success: 148 48% 40%;
+    --warning: 38 82% 48%;
+    --report-bg: var(--background);
+    --report-border: var(--border);
+    --report-shadow: 0 4px 20px hsl(215 30% 10% / 0.04);
+    --report-accent: var(--primary);
   }
-
   .dark {
-    --background: 240 10% 6%;
-    --foreground: 0 0% 95%;
-    --card: 240 10% 8%;
-    --card-foreground: 0 0% 95%;
-    --popover: 240 10% 8%;
-    --popover-foreground: 0 0% 95%;
-    --primary: 20 100% 61%;
-    --primary-foreground: 0 0% 100%;
-    --accent: 354.8 100% 63.9%;
-    --accent-foreground: 0 0% 100%;
-    --destructive: 354.8 100% 63.9%;
+    --background: 213.3 23.1% 7.6%;
+    --foreground: 212.7 22.4% 90.4%;
+    --card: 212.7 20.8% 10.4%;
+    --card-foreground: 212.7 22.4% 90.4%;
+    --popover: 211.8 23.9% 13.9%;
+    --popover-foreground: 212.7 22.4% 90.4%;
+    --primary: 201.8 79.4% 81.0%;
+    --primary-foreground: 204.3 53.8% 15.3%;
+    --accent: 206.3 36.3% 22.2%;
+    --accent-foreground: 202.2 100.0% 94.7%;
+    --destructive: 0 65% 57%;
     --destructive-foreground: 0 0% 100%;
-    --secondary: 240 4% 14%;
-    --secondary-foreground: 0 0% 95%;
-    --muted: 240 4% 14%;
-    --muted-foreground: 240 5% 65%;
-    --border: 240 4% 16%;
-    --input: 240 4% 16%;
-    --ring: 20 100% 61%;
-
-    --sidebar-bg: 240 11% 4%;
-    --sidebar-foreground: 240 5% 65%;
-    --sidebar-active: 20 100% 61%;
-    --sidebar-hover: 240 6% 12%;
-    --sidebar-border: 240 4% 12%;
-    --sidebar-muted: 240 5% 40%;
+    --secondary: 211.8 23.9% 13.9%;
+    --secondary-foreground: 208.4 29.2% 87.3%;
+    --muted: 211.8 23.9% 13.9%;
+    --muted-foreground: 212.7 12.6% 65.9%;
+    --border: 213.8 15.7% 20.0%;
+    --input: 210.0 21.3% 29.4%;
+    --ring: 201.8 79.4% 81.0%;
   }
 }
 
@@ -197,75 +174,105 @@
   animation: table-appear 0.3s ease-out;
 }
 
-/* Cyan breathing glow on focus rings (#00F0FF) */
-@keyframes ring-breathe {
-  0%, 100% { box-shadow: 0 0 0 2px rgba(0, 240, 255, 0.5); }
-  50% { box-shadow: 0 0 8px 2px rgba(0, 240, 255, 0.3); }
+/* Stable focus is legible while reading and does no perpetual paint work. */
+:where(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 3px;
 }
 
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible,
-[role="combobox"]:focus-visible {
-  animation: ring-breathe 2.5s ease-in-out infinite;
-}
-
-/* ── Chat Terminal Theme — LIGHT mode ── */
+/* Work surfaces inherit tenant branding and the selected light/dark theme. */
 .chat-container {
-  --chat-accent: #FF6600;
-  --chat-accent-hover: #e65c00;
-  --chat-accent-dim: #FF6600;
-  --chat-accent-glow: rgba(255, 102, 0, 0.06);
-
-  --chat-surface: #F5F5F7;
-  --chat-surface-low: #fafafa;
-  --chat-surface-mid: #ebebed;
-  --chat-surface-high: #e5e5e7;
-  --chat-surface-variant: #f0f0f2;
-
-  /* Override standard light-mode tokens inside chat */
-  --background: 240 5% 96%;
-  --card: 0 0% 100%;
-  --muted: 240 5% 96%;
-  --border: 240 6% 90%;
-  --foreground: 240 6% 12%;
-  --muted-foreground: 240 4% 39%;
+  --chat-accent: hsl(var(--primary));
+  --chat-accent-hover: hsl(var(--primary) / .85);
+  --chat-accent-dim: hsl(var(--primary) / .7);
+  --chat-accent-glow: hsl(var(--primary) / .04);
+  --chat-surface: hsl(var(--background));
+  --chat-surface-low: hsl(var(--card));
+  --chat-surface-mid: hsl(var(--input));
+  --chat-surface-high: hsl(var(--secondary));
+  --chat-surface-variant: hsl(var(--border));
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--border)) transparent;
 }
-
-/* Light mode scrollbar */
-.chat-container ::-webkit-scrollbar { width: 4px; }
-.chat-container ::-webkit-scrollbar-track { background: #F5F5F7; }
-.chat-container ::-webkit-scrollbar-thumb { background: #d1d1d6; }
-.chat-container ::-webkit-scrollbar-thumb:hover { background: var(--chat-accent); }
-.chat-container { scrollbar-width: thin; scrollbar-color: #d1d1d6 #F5F5F7; }
-
-/* ── Chat Terminal Theme — DARK mode ── */
-.dark .chat-container {
-  --chat-accent: #ff7936;
-  --chat-accent-hover: #ff915d;
-  --chat-accent-dim: #ff742d;
-  --chat-accent-glow: rgba(255, 102, 0, 0.04);
-
-  --chat-surface: #0e0e0e;
-  --chat-surface-low: #131313;
-  --chat-surface-mid: #1a1919;
-  --chat-surface-high: #201f1f;
-  --chat-surface-variant: #262626;
-
-  /* Override standard dark-mode tokens to be darker inside chat */
-  --background: 0 0% 5.5%;
-  --card: 0 0% 7.5%;
-  --muted: 0 0% 10%;
-  --border: 0 0% 15%;
-  --foreground: 0 0% 95%;
-  --muted-foreground: 240 5% 65%;
-}
-
-/* Dark mode scrollbar */
-.dark .chat-container ::-webkit-scrollbar-track { background: var(--chat-surface); }
-.dark .chat-container ::-webkit-scrollbar-thumb { background: var(--chat-surface-variant); }
-.dark .chat-container ::-webkit-scrollbar-thumb:hover { background: var(--chat-accent); }
-.dark .chat-container { scrollbar-color: var(--chat-surface-variant) var(--chat-surface); }
+.chat-container ::-webkit-scrollbar { width: 5px; }
+.chat-container ::-webkit-scrollbar-thumb { background: hsl(var(--border)); }
 
 /* Headline font utility */
 .font-headline { font-family: var(--font-headline, 'Space Grotesk'), sans-serif; }
+
+/* Shared Orbital materials: approved abstract composition, calm working surfaces. */
+.orbital-eyebrow { font-size: 10px; text-transform: uppercase; letter-spacing: .18em; font-weight: 600; color: hsl(var(--muted-foreground)); }
+.orbital-shell h2 { letter-spacing: -.035em; }
+.orbital-shell .shadow-soft { box-shadow: 0 3px 18px hsl(215 35% 4% / .04); }
+.orbital-shell .font-headline { font-family: inherit; }
+.orbital-shell .chat-container button:focus-visible { outline-color: hsl(var(--primary)); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+/* Entrance motion must not move buttons while users or browser agents click.
+   Keep the arrival fade; remove the old page-wide translateY transition. */
+@keyframes orbital-arrive {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.orbital-shell .animate-fade-in { animation-name: orbital-arrive; }
+
+/* A single set of surface, status and interaction rules across the application. */
+.orbital-shell { font-size: 13px; }
+.orbital-eyebrow { font-family: ui-monospace, SFMono-Regular, monospace; font-weight: 500; }
+.orbital-shell :is(h1, h2).text-2xl { font-size: 29px; font-weight: 500; letter-spacing: -.035em; }
+.orbital-shell .rounded-xl { border-radius: 8px; }
+.orbital-shell .rounded-2xl { border-radius: 10px; }
+.orbital-shell .shadow-soft { box-shadow: none; }
+.orbital-shell :is(a, button, summary) { -webkit-tap-highlight-color: hsl(var(--primary) / .2); }
+.orbital-shell :is(a, button, summary):focus-visible { outline: 2px solid hsl(var(--primary)); outline-offset: 3px; }
+.orbital-shell :is([aria-current="page"], [aria-current="location"]), .orbital-shell [data-state="active"] { box-shadow: inset 3px 0 hsl(var(--primary)); }
+.orbital-entry { transition: background .18s ease, border-color .18s ease, box-shadow .18s ease; }
+.orbital-entry:hover, .orbital-entry:focus-visible { background: hsl(var(--accent)); border-color: hsl(var(--primary) / .8); box-shadow: inset 0 0 0 1px hsl(var(--primary) / .16); }
+.orbital-entry:nth-child(2) > div > svg:first-child { color: #b9bde7; }
+.orbital-entry:nth-child(3) > div > svg:first-child { color: #ddbd9f; }
+.orbital-hero { position: relative; isolation: isolate; overflow: hidden; background: linear-gradient(115deg, hsl(var(--accent) / .55), hsl(var(--card)) 68%); border-color: hsl(var(--primary) / .35); }
+.orbital-composer { border-color: hsl(var(--input)); transition: border-color .18s, box-shadow .18s; }
+.orbital-composer:focus-within { border-color: hsl(var(--primary)); box-shadow: 0 0 0 2px hsl(var(--primary) / .18); }
+.metal-orbits { pointer-events: none; color: hsl(var(--primary)); }
+.metal-orbits svg { width: 100%; height: 100%; overflow: visible; animation: metal-drift 18s ease-in-out infinite; transform-origin: 53% 51%; }
+.metal-orbit-plane { transform: rotate(-34deg); transform-origin: 0 0; animation: metal-precession 28s ease-in-out infinite; }
+.metal-orbit-traveler { offset-path: path('M 145 0 A 145 59 0 1 1 -145 0 A 145 59 0 1 1 145 0'); offset-rotate: 0deg; animation: metal-travel 24s linear infinite; fill: #bedff4; }
+.metal-orbit-secondary { animation-duration: 37s; animation-direction: reverse; fill: #c7c4e8; }
+[data-motion-paused="true"] :is(.metal-orbits svg, .metal-orbit-plane, .metal-orbit-traveler) { animation-play-state: paused; }
+.workbench-orbits { position: absolute; width: 420px; height: 357px; right: 1%; top: 6px; }
+.orbital-shortcuts { position: absolute; right: 4%; top: 40px; width: 335px; height: 270px; }
+.orbital-shortcuts a { position: absolute; display: flex; align-items: center; gap: 7px; padding: 7px 10px; font-size: 11px; border: 1px solid hsl(var(--input)); border-radius: 5px; background: hsl(var(--card)); color: hsl(var(--primary)); }
+.orbital-shortcuts a:hover, .orbital-shortcuts a:focus-visible { background: hsl(var(--accent)); border-color: hsl(var(--primary)); box-shadow: 0 0 0 2px hsl(var(--primary) / .15); }
+.orbital-shortcuts a:nth-child(1) { top: 6px; left: 25px; }
+.orbital-shortcuts a:nth-child(2) { top: 120px; right: 0; }
+.orbital-shortcuts a:nth-child(3) { bottom: 0; left: 30px; }
+.orbital-notice { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid hsl(var(--input)); border-radius: 7px; background: hsl(var(--card)); color: hsl(var(--foreground)); font-size: 13px; line-height: 1.6; }
+.orbital-notice > svg { width: 17px; height: 17px; flex-shrink: 0; color: hsl(var(--primary)); }
+.orbital-notice[data-tone="warning"] { border-color: hsl(38 30% 45% / .55); background: hsl(38 28% 50% / .07); }
+.orbital-notice[data-tone="warning"] > svg { color: hsl(38 48% 60%); }
+.orbital-notice[data-tone="error"] { border-color: hsl(var(--destructive) / .45); background: hsl(var(--destructive) / .06); }
+.orbital-notice[data-tone="error"] > svg { color: hsl(var(--destructive)); }
+.orbital-notice a { color: hsl(var(--primary)); text-decoration: underline; text-underline-offset: 3px; }
+.orbital-notice button { border-radius: 5px; padding: 6px; color: hsl(var(--muted-foreground)); }
+.orbital-notice button:hover { background: hsl(var(--accent)); color: hsl(var(--foreground)); }
+@keyframes metal-drift { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-5px) rotate(2deg); } }
+@keyframes metal-precession { 0%, 100% { transform: rotate(-34deg); } 50% { transform: rotate(-24deg); } }
+@keyframes metal-travel { to { offset-distance: 100%; } }
+@media (max-width: 1279px) { .workbench-orbits { right: -60px; opacity: .4; } .orbital-shortcuts { display: none; } }
+@media (max-width: 767px) { .workbench-orbits { width: 280px; right: -120px; opacity: .22; } }
+@media (prefers-reduced-motion: reduce) { .metal-orbits svg, .metal-orbit-plane, .metal-orbit-traveler { animation: none !important; } }
+
+/* Semantic status colors retain meaning on the shared dark surfaces. */
+.dark .orbital-shell :is(.bg-amber-50, .bg-yellow-50) { background-color: hsl(38 35% 40% / .12); }
+.dark .orbital-shell :is(.text-amber-800, .text-amber-700, .text-yellow-800) { color: hsl(38 48% 70%); }
+.dark .orbital-shell :is(.border-amber-200, .border-yellow-200) { border-color: hsl(38 30% 45% / .55); }
+.dark .orbital-shell .bg-red-50 { background-color: hsl(var(--destructive) / .1); }
+.dark .orbital-shell :is(.text-red-700, .text-red-800) { color: hsl(0 65% 75%); }
+.dark .orbital-shell .bg-green-50 { background-color: hsl(148 25% 35% / .16); }
+.dark .orbital-shell :is(.text-green-700, .text-green-800) { color: hsl(148 35% 70%); }
+
+/* Decorative only; Chat action targets and its single composer remain stationary. */
+.chat-welcome-orbits { position: absolute; width: 330px; right: -65px; top: 0; opacity: .35; pointer-events: none; }
+@media (max-width: 767px) { .chat-welcome-orbits { width: 260px; right: -100px; opacity: .22; } }

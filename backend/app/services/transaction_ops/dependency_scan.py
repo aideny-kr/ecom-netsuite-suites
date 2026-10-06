@@ -22,7 +22,7 @@ def _advance_page(scan, page):
         scan.pop(key, None)
 
 
-async def advance(progress, *, read_page, read_owners, indexed_owners, unobserved, staging=None):
+async def advance(progress, *, read_page, read_owners, indexed_owners, unobserved, staging=None, membership=None):
     async def put(value):
         return await staging.put(value) if staging else value
 
@@ -125,6 +125,14 @@ async def advance(progress, *, read_page, read_owners, indexed_owners, unobserve
         # Keep raw owner-query rows outside the 64 KiB progress checkpoint.
         inventory = result.get("inventory", []) if keys and stream != "deletions" else []
         stored = {"order_references": sorted(set(owners)), "inventory": inventory}
+        if membership is not None and membership.active and owners:
+            from app.services.transaction_ops.netsuite_change_owners import candidate_membership
+
+            associations = candidate_membership(changes, inventory, membership.run.config_snapshot["subsidiary_id"])
+            if set(owners) != {ref for _, refs in associations for ref in refs}:
+                membership.unsupported()
+            for change, refs in associations:
+                membership.change(refs, change, stream)
         try:
             stored_owners = await put(stored) if staging else stored["order_references"]
         except NetSuiteEvidenceError as exc:
@@ -145,6 +153,18 @@ async def advance(progress, *, read_page, read_owners, indexed_owners, unobserve
         scan["owner_position"] = min(position + 100, len(owners))
         if not scan["index_complete"]:
             indexed = await indexed_owners(keys, after_reference=scan["index_after"], page_size=100)
+            if membership is not None and membership.active:
+                by_key = {tuple(key): [] for key in keys}
+                for ref in indexed["order_references"]:
+                    associations = indexed.get("memberships", {}).get(ref)
+                    if not associations:
+                        membership.unsupported()
+                        break
+                    for key in associations:
+                        by_key[tuple(key)].append(ref)
+                for change in changes:
+                    refs_for_change = {ref for key in change["record_keys"] for ref in by_key[tuple(key)]}
+                    membership.change(refs_for_change, change, stream)
             refs += indexed["order_references"]
             scan["index_complete"] = not indexed["has_more"]
             scan["index_after"] = indexed["next_after_reference"] or scan["index_after"]

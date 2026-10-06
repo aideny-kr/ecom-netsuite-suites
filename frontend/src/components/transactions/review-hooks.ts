@@ -23,6 +23,7 @@ export type TransactionCase = {
   latest_report_json: JsonObject;
 };
 export type ReviewRow = {
+  reconciled?: boolean;
   id: string;
   review_run_id?: string;
   config_id?: string;
@@ -32,8 +33,6 @@ export type ReviewRow = {
   observed_at: string;
   balance: JsonObject | null;
   action?: string;
-  /** The order's case is reconciled; it stays reconciled whatever a later scan read. */
-  reconciled?: boolean;
 };
 export type ReviewResults = {
   items: ReviewRow[];

@@ -311,6 +311,7 @@ export default function InviteAcceptPage() {
                 )}
               </Button>
 
+              {process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID && <>
               {/* Divider */}
               <div className="relative flex items-center py-1">
                 <div className="flex-1 border-t" />
@@ -348,6 +349,7 @@ export default function InviteAcceptPage() {
                   shape="rectangular"
                 />
               </div>
+              </>}
             </form>
 
             <p className="mt-6 text-center text-[13px] text-muted-foreground">

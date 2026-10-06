@@ -58,7 +58,7 @@ export const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
 export interface Connection {
   id: string;
   tenant_id: string;
-  provider: "shopify" | "stripe" | "netsuite" | "celigo" | "typesafe";
+  provider: "shopify" | "stripe" | "netsuite" | "celigo";
   label: string;
   status: "active" | "inactive" | "error" | "revoked";
   auth_type: string | null;
@@ -330,7 +330,11 @@ export interface ToolCallStep {
   params: Record<string, unknown>;
   result_summary: string;
   result_payload?: ToolCallResultPayload | null;
+  /** Conversation-wide id (r1, r2, …) a result card can reference. */
+  result_id?: string | null;
   duration_ms: number;
+  /** Set by the backend when the call failed; older messages may lack it. */
+  error?: boolean;
 }
 
 export interface ToolCallTableResultPayload {

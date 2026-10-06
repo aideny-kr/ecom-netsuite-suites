@@ -22,6 +22,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/api-client", () => ({
   apiClient: { get: vi.fn().mockResolvedValue({ valid: true }) },
 }));
+vi.mock("@/components/transactions/section", () => ({ TransactionsSection: ({children}: {children: React.ReactNode}) => <>{children}</> }));
 vi.mock("@/components/sidebar", () => ({
   Sidebar: ({
     collapsed,
@@ -93,3 +94,4 @@ it("reacts when an open desktop viewport becomes narrow", () => {
     "true",
   );
 });
+vi.mock("@/components/transaction-ops/freshness-alert-banner", () => ({ FreshnessAlertBanner: () => null }));

@@ -5,10 +5,10 @@ import { DashboardEmptyState } from "@/app/(dashboard)/dashboard/dashboard-empty
 
 it("shows the empty-state heading and body copy verbatim", () => {
   render(<DashboardEmptyState />);
-  expect(screen.getByText("No dashboard on the wall yet")).toBeInTheDocument();
+  expect(screen.getByText("No reports in Command Center yet")).toBeInTheDocument();
   expect(
     screen.getByText(
-      "Compose a report, then choose Publish to dashboard to put it here. You can publish several and switch between them anytime."
+      "Compose a report, then publish it to Command Center. You can publish several and switch between them anytime."
     )
   ).toBeInTheDocument();
 });
