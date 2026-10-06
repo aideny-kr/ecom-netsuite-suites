@@ -73,6 +73,16 @@ def _owner_query(frontier):
     )
 
 
+def _ownership_edges(previous, following, before, after):
+    """The verified native parent orientations used by discovery and provenance."""
+    if before in _PARENTS.get(after, set()):
+        yield following, previous, before
+    if before == "CustRfnd" and after in {"DepAppl", "CustCred"}:
+        yield previous, following, after
+    if after == "CustRfnd" and before in {"DepAppl", "CustCred"}:
+        yield following, previous, before
+
+
 async def collect_order_candidates(
     request, subsidiary_id, reference_field, document_ids, order_ids, references, *, bulk=False
 ):
@@ -184,17 +194,12 @@ async def collect_order_candidates(
                 or (previous not in frontier and following not in frontier)
             ):
                 raise NetSuiteEvidenceError("dependency_owner_identity_unproven")
-            if following in frontier and before in _PARENTS.get(after, set()):
-                if before == "SalesOrd":
-                    native_roots.add(previous)
-                else:
-                    parents.add(previous)
-            # Native customer refunds also appear on the reverse side of the
-            # application edge. Follow both supported orientations to parents.
-            if previous in frontier and before == "CustRfnd" and after in {"DepAppl", "CustCred"}:
-                parents.add(following)
-            if following in frontier and after == "CustRfnd" and before in {"DepAppl", "CustCred"}:
-                parents.add(previous)
+            for child, parent, kind in _ownership_edges(previous, following, before, after):
+                if child in frontier:
+                    if kind == "SalesOrd":
+                        native_roots.add(parent)
+                    else:
+                        parents.add(parent)
         visited.update(frontier)
         frontier = parents - visited
         if len(visited | frontier | native_roots) > document_limit:
@@ -252,10 +257,8 @@ def candidate_membership(changes, inventory, subsidiary_id):
         for row in rows:
             before, after = row.get("previoustype"), row.get("nexttype")
             previous, following = str(row.get("previousdoc")), str(row.get("nextdoc"))
-            if before in _PARENTS.get(after, set()):
-                ancestors.setdefault(following, set()).add(previous)
-            if before == "CustRfnd" and after in {"DepAppl", "CustCred"}:
-                ancestors.setdefault(previous, set()).add(following)
+            for child, parent, _ in _ownership_edges(previous, following, before, after):
+                ancestors.setdefault(child, set()).add(parent)
             if "order_id" in row:
                 for field in ("credit_memo_id", "refund_id", "deposit_id"):
                     if row.get(field):

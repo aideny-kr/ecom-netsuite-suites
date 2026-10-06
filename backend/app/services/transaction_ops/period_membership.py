@@ -6,6 +6,7 @@ fallback; final order snapshots cannot reconstruct original discovery dates.
 """
 
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -45,7 +46,14 @@ def _time(value):
 
 class Membership:
     def __init__(self, db, tenant, run, progress, clock):
-        self.db, self.tenant, self.run, self.progress, self.clock = db, tenant, run, progress, clock
+        # SQLAlchemy rollback expires ORM attributes even with expire_on_commit=False.
+        # Candidate metadata must never perform implicit DB IO during error cleanup.
+        self.run = SimpleNamespace(
+            id=run.id,
+            config_snapshot=deepcopy(run.config_snapshot),
+            params_json=deepcopy(run.params_json),
+        )
+        self.db, self.tenant, self.progress, self.clock = db, tenant, progress, clock
         self.pending = []
         self.credential = None
         original = run.progress_json or {}

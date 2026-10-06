@@ -329,3 +329,172 @@ async def test_identical_source_and_refund_nominations_do_not_overcount_immutabl
         await store.flush()
     pages = list(await db.scalars(select(Batch).where(Batch.tenant_id == actor.tenant_id, Batch.run_id == root.id)))
     assert len(pages) == progress[KEY]["batches"] == 1
+
+
+@pytest.mark.parametrize(
+    "kind,direction", [("DepAppl", "forward"), ("DepAppl", "reverse"), ("CustCred", "forward"), ("CustCred", "reverse")]
+)
+async def test_each_refund_nomination_preserves_both_native_link_directions_and_original_day(kind, direction):
+    reader = Reader()
+    reader.limit = 1000
+    reader.records = [record(1, "SalesOrd"), record(3, kind), record(4, "CustRfnd")]
+    reader.edges = [edge(4, 3, "CustRfnd", kind) if direction == "reverse" else edge(3, 4, kind, "CustRfnd")]
+    reader.requests = [{"id": "20", "order_id": "1", "credit_id": "3", "refund_id": None}]
+    result = await collect_order_candidates(
+        reader.request, "2", "custbody_fw_order_number", ["3", "4"], [], [], bulk=True
+    )
+    changes = [
+        {"record_keys": [["transaction", identifier]], "modified_at": stamp}
+        for identifier, stamp in [("3", "2026-10-03T12:00:00Z"), ("4", "2026-10-04T12:00:00Z")]
+    ]
+    calls = len(reader.calls)
+    associations = candidate_membership(changes, result["inventory"], "2")
+    assert len(reader.calls) == calls  # Local provenance adds no provider reads.
+    assert [refs for _, refs in associations] == [["R000000001"], ["R000000001"]]
+    for change, refs in associations:
+        single = Reader()
+        single.limit, single.records, single.edges, single.requests = (
+            1000,
+            reader.records,
+            reader.edges,
+            reader.requests,
+        )
+        expected = await collect_order_candidates(
+            single.request, "2", "custbody_fw_order_number", [change["record_keys"][0][1]], [], [], bulk=True
+        )
+        assert refs == expected["order_references"]
+
+
+@pytest.mark.parametrize("failure", ["owner_staging", "membership_insert"])
+async def test_collector_records_error_after_rollback_with_queued_membership(db, admin_user, monkeypatch, failure):
+    from app.services.transaction_ops import metabase_reader
+    from app.services.transaction_ops.dependency_staging import DependencyStaging
+    from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
+
+    actor = admin_user[0]
+    config = await ready(db, actor, monkeypatch)
+    config.max_api_calls = 100
+    connection = await db.scalar(select(Connection).where(Connection.id == config.netsuite_connection_id))
+    connection.encrypted_credentials = encrypt_credentials(
+        {"account_id": config.netsuite_account_id, "access_token": "test"}
+    )
+    await db.flush()
+    root = await period_review.create_review(
+        db,
+        actor.tenant_id,
+        config.id,
+        period_review.PeriodReview(
+            evaluation_key=uuid4(),
+            period="custom",
+            evidence_mode="saved",
+            start_date="2026-08-02",
+            end_date="2026-08-02",
+        ),
+        actor=actor,
+    )
+    root = TransactionRun(
+        tenant_id=actor.tenant_id,
+        config_id=config.id,
+        origin="manual",
+        work_key=uuid4().hex,
+        config_snapshot={**root.config_snapshot, "destination_discovery_version": 2},
+        params_json=RunCreate(
+            origin="manual",
+            evaluation_key=uuid4().hex,
+            window_start="2026-08-02T07:00:00Z",
+            window_end="2026-08-03T07:00:00Z",
+            window_basis="updated_at",
+        ).model_dump(mode="json", exclude={"review"}),
+        progress_json={},
+        status="pending",
+        max_api_calls=100,
+        max_orders=100,
+        deadline_at=root.deadline_at,
+    )
+    db.add(root)
+    await db.flush()
+    tenant_id, run_id, start, end = (
+        actor.tenant_id,
+        root.id,
+        root.params_json["window_start"],
+        root.params_json["window_end"],
+    )
+    monkeypatch.setattr(
+        metabase_reader,
+        "read_order_page",
+        AsyncMock(return_value={"orders": [], "page_complete": True, "scan_complete": True, "next_after_id": None}),
+    )
+    monkeypatch.setattr(
+        metabase_reader,
+        "read_changed_refund_orders",
+        AsyncMock(return_value={"orders": [], "refunds": [], "page_complete": True, "next_after_id": None}),
+    )
+    captured, failed = [], []
+    original_change, original_put, original_membership_put = Membership.change, DependencyStaging.put, Membership._put
+
+    def capture(self, refs, change, stream):
+        original_change(self, refs, change, stream)
+        captured.extend(self.pending)
+
+    async def put(self, value):
+        if failure == "owner_staging" and value.get("inventory"):
+            failed.append(True)
+            raise NetSuiteEvidenceError("invalid_connection")
+        return await original_put(self, value)
+
+    async def membership_put(self, value, identifier):
+        if failure == "membership_insert" and value.get("events"):
+            failed.append(True)
+            raise RuntimeError("membership insert failed")
+        return await original_membership_put(self, value, identifier)
+
+    monkeypatch.setattr(Membership, "change", capture)
+    monkeypatch.setattr(DependencyStaging, "put", put)
+    monkeypatch.setattr(Membership, "_put", membership_put)
+
+    async def changes(*args, **kwargs):
+        return {
+            "stream": args[6],
+            "changes": [{"record_keys": [["transaction", "1"]], "modified_at": start}],
+            "page_complete": True,
+            "scan_complete": True,
+            "next_cursor": None,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "scope": {"window_end": end},
+        }
+
+    from app.services.transaction_ops import netsuite_change_owners, netsuite_dependency_changes
+
+    monkeypatch.setattr(netsuite_dependency_changes, "read_change_page", changes)
+    monkeypatch.setattr(
+        netsuite_change_owners,
+        "read_order_candidates",
+        AsyncMock(
+            return_value={
+                "order_references": ["R000000001"],
+                "inventory": [[record(1, "SalesOrd", root.config_snapshot["subsidiary_id"])]],
+            }
+        ),
+    )
+    financial_read = AsyncMock(side_effect=AssertionError("Failure must occur before financial reads"))
+    result = await runner.run_investigation(
+        db,
+        tenant_id,
+        run_id,
+        _enabled=AsyncMock(return_value=True),
+        _source_reader=financial_read,
+        _target_reader=financial_read,
+        _dependency_seed=AsyncMock(return_value={"complete": True}),
+    )
+    await db.refresh(root)
+    assert captured == [{"reference": "R000000001", "at": start.replace("Z", "+00:00")}], (
+        result,
+        failed,
+        root.progress_json.get(KEY),
+    )
+    assert failed == [True]
+    assert result["termination_reason"] == "error"
+    await db.refresh(root)
+    assert root.status == "finished" and root.termination_reason == "error"
+    assert await db.scalar(select(Batch.id).where(Batch.id == run_id, Batch.tenant_id == tenant_id)) is None
+    financial_read.assert_not_awaited()

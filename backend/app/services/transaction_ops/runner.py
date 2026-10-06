@@ -466,6 +466,9 @@ async def run_investigation(
         if batch_baseline is not None:
             progress.clear()
             progress.update(batch_baseline)
+        # These events belonged to the rolled-back checkpoint, not a completed
+        # discovery page. Never flush them from a terminal/lease-loss handler.
+        membership.unsupported()
         finding_batch.clear()
         batch_baseline = None
 
