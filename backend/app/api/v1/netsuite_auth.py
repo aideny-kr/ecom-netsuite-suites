@@ -442,6 +442,9 @@ async def callback(
     # Locked, like the settings writers (accounting_profiles, native_accounting_profile):
     # the callback writes the row's stored settings back, so an unlocked read let a
     # settings write that committed meanwhile be overwritten by the stale copy.
+    # Locks are taken in primary-key order, the order a flush updates rows in (the
+    # health worker updates every live NetSuite row), so the two cannot deadlock; the
+    # newest-first order the selection policy expects is applied afterwards.
     result = await db.execute(
         select(Connection)
         .where(
@@ -449,11 +452,11 @@ async def callback(
             Connection.provider == "netsuite",
             Connection.status != "revoked",
         )
-        .order_by(Connection.updated_at.desc())
+        .order_by(Connection.id)
         .execution_options(populate_existing=True)
         .with_for_update()
     )
-    candidates = list(result.scalars().all())
+    candidates = sorted(result.scalars().all(), key=lambda c: c.updated_at, reverse=True)
     connection, switched_from = _select_connection_for_account(candidates, account_id)
 
     superseded = _supersede_other_connections(candidates, connection, account_id)

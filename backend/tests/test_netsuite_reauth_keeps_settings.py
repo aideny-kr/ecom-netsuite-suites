@@ -165,7 +165,21 @@ async def test_a_settings_write_committed_during_the_callback_is_not_lost(monkey
             locked.metadata_json = {**locked.metadata_json, "transaction_accounting_profiles": restored}
             await writer.flush()
             callback = asyncio.create_task(_reauthorize(reauth, monkeypatch, tenant, user, PROD, restlet_url=moved))
-            await asyncio.sleep(0.5)
+            # Commit only once the callback is blocked behind the writer's row lock (at its
+            # read when locked, at its UPDATE when not), so the race is forced, not timed.
+            async with AsyncSession(engine) as probe:
+                waiting = 0
+                for _ in range(200):
+                    waiting = await probe.scalar(
+                        text(
+                            "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                            "AND datname = current_database() AND query ILIKE '%connections%'"
+                        )
+                    )
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.05)
+            assert waiting, "the callback never waited on the writer's row lock"
             await writer.commit()
             await asyncio.wait_for(callback, 10)
         async with AsyncSession(engine) as check:
