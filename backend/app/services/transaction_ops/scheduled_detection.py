@@ -5,7 +5,7 @@ distinguishes observations made at different times from proven contemporaneous
 absence. It deliberately defines no company sync SLA or accounting treatment.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -13,7 +13,7 @@ from app.models.tenant import Tenant
 from app.models.user import User
 
 
-async def authorize_config(db, tenant_id, config):
+async def authorize_config(db, tenant_id, config, *, now=None):
     from app.services.transaction_ops import state_service as state
 
     if (
@@ -37,15 +37,68 @@ async def authorize_config(db, tenant_id, config):
 
     if await _binding(db, tenant_id, config) is None:
         raise state.StateError("scheduled_detection_access_revoked", 403)
+    await require_context_ready(db, tenant_id, config, now=now)
     return actor
 
 
-async def authorize(db, tenant_id, run, config):
+async def authorize(db, tenant_id, run, config, *, now=None):
     from app.services.transaction_ops import state_service as state
 
     if config.config_key != run.config_snapshot.get("config_key"):
         raise state.StateError("scheduled_detection_access_revoked", 403)
-    return await authorize_config(db, tenant_id, config)
+    return await authorize_config(db, tenant_id, config, now=now)
+
+
+def selected_context_status(manifest, selection):
+    """One exact-pin check for preflight and the post-read evidence receipt."""
+    selected = next((entry for entry in manifest.get("entries", []) if entry["key"] == selection.key), None)
+    if selected is None:
+        return "selected_context_unavailable", None
+    if (
+        not selected.get("usable_as_policy")
+        or selected["revision"] != selection.revision
+        or selected["content_sha256"] != selection.content_sha256
+    ):
+        return "selected_context_requires_review", selected
+    return "approved_advisory", selected
+
+
+async def context_readiness(db, tenant_id, config, *, now=None):
+    from app.services.transaction_ops import context_provenance
+    from app.services.transaction_ops.normalization import TransactionMapping
+
+    now = now or datetime.now(timezone.utc)
+    if now.utcoffset() is None:
+        raise ValueError("An aware clock is required")
+    selection = TransactionMapping.model_validate(config.mapping_json).scheduled_context
+    result = {"ready": True, "status": "no_selection", "review_by": None, "renewal_needed": False}
+    if selection is None:
+        return result
+    if not config.enabled:
+        return {**result, "ready": False, "status": "scope_paused"}
+    manifest = await context_provenance.context_manifest(
+        db, tenant_id, config, actor_id=config.created_by, scope=selection.scope, now=now
+    )
+    status, selected = selected_context_status(manifest, selection)
+    ready = status == "approved_advisory"
+    review_by = selected.get("review_by") if selected else None
+    # This is a renewal reminder, not a company accounting or sync policy.
+    expiring = ready and datetime.fromisoformat(review_by) <= now + timedelta(days=1)
+    return {
+        **result,
+        "ready": ready,
+        "status": "expiring" if expiring else status,
+        "review_by": review_by,
+        "renewal_needed": not ready or expiring,
+    }
+
+
+async def require_context_ready(db, tenant_id, config, *, now=None):
+    from app.services.transaction_ops import state_service as state
+
+    readiness = await context_readiness(db, tenant_id, config, now=now)
+    if not readiness["ready"]:
+        raise state.StateError("scheduled_context_requires_review", 409)
 
 
 def classify(report, *, now, scope=None):
@@ -133,20 +186,12 @@ async def receipt(db, tenant_id, run, config, report, *, now):
     verdict = classify(report, now=now, scope=run.config_snapshot)
     context_status = "scope_required"
     if selection:
-        selected = next((entry for entry in manifest.get("entries", []) if entry["key"] == selection.key), None)
-        context_status = "selected_context_unavailable"
-        if selected:
-            context_status = selected["status"]
-            if (
-                not selected.get("usable_as_policy")
-                or selected["revision"] != selection.revision
-                or selected["content_sha256"] != selection.content_sha256
-            ):
-                context_status = "selected_context_requires_review"
-            elif report.get("source", {}).get("currency") != selection.scope.currency:
-                context_status = "selected_currency_conflict"
-            else:
-                context_status = "approved_advisory"
+        context_status, _ = selected_context_status(manifest, selection)
+        if (
+            context_status == "approved_advisory"
+            and report.get("source", {}).get("currency") != selection.scope.currency
+        ):
+            context_status = "selected_currency_conflict"
         if context_status != "approved_advisory":
             verdict = {**verdict, "outcome": "incomplete_evidence", "reason": context_status}
     # The selected scope is human supplied; non-posting order headers cannot

@@ -295,6 +295,10 @@ async def create_config(db: AsyncSession, tenant_id, request: ConfigCreate, *, a
     if existing:
         await _commit(db, tenant_id)
         return existing
+    if request.schedule_enabled and TransactionMapping.model_validate(request.mapping_json).scheduled_context:
+        # Approval belongs to a persisted config. Create it paused, then review
+        # the context before using the existing schedule-control endpoint.
+        raise StateError("scheduled_context_requires_setup", 409)
     row = TransactionConfig(tenant_id=tenant_id, config_key=key, created_by=actor.id, **request.model_dump())
     db.add(row)
     await db.flush()
@@ -314,6 +318,10 @@ async def control_config(db, tenant_id, config_id, request: ConfigControl, *, ac
         raise StateError("config_superseded", 409)
     if request.schedule_enabled and not request.enabled:
         raise StateError("disabled_config_cannot_schedule", 422)
+    if request.schedule_enabled:
+        from app.services.transaction_ops.scheduled_detection import require_context_ready
+
+        await require_context_ready(db, tenant_id, row)
     row.enabled, row.schedule_enabled = request.enabled, request.schedule_enabled
     await _audit(db, tenant_id, "config.control", row, actor, request.model_dump())
     await _commit(db, tenant_id)
@@ -539,9 +547,14 @@ async def _scheduled_access(db, tenant_id, run, now, *, config=None):
 
     config = config or await get_config(db, tenant_id, run.config_id)
     try:
-        await authorize(db, tenant_id, run, config)
-    except StateError:
-        run.progress_json = {**run.progress_json, "reason": "scheduled_detection_access_revoked"}
+        await authorize(db, tenant_id, run, config, now=now)
+    except StateError as exc:
+        reason = (
+            "scheduled_context_requires_review"
+            if exc.code == "scheduled_context_requires_review"
+            else "scheduled_detection_access_revoked"
+        )
+        run.progress_json = {**run.progress_json, "reason": reason}
         await _finish_audited(db, tenant_id, run, "stall", now)
         await _commit(db, tenant_id)
         return False

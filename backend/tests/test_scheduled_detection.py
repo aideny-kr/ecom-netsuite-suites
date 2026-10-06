@@ -272,8 +272,9 @@ def test_native_version_order_cannot_turn_amount_difference_into_sync_delay():
     "variant", ["approved", "missing", "draft", "invalidated", "revision", "hash", "currency", "scope", "expired"]
 )
 async def test_selected_context_is_pinned_scoped_and_current_without_treatment_authority(db, admin_user, variant):
-    from app.schemas.transaction_runs import ConfigControl, RunCreate
+    from app.schemas.transaction_runs import RunCreate
     from app.services.transaction_ops import context_provenance
+    from app.services.transaction_ops.scheduled_detection import receipt as build_receipt
     from tests.test_context_provenance import SCOPE, approve, decision, draft, propose, read
     from tests.test_transaction_ops_state import config_input
 
@@ -295,9 +296,6 @@ async def test_selected_context_is_pinned_scoped_and_current_without_treatment_a
         netsuite_account_id="1234567_SB1",
         mapping_json={**config_input().mapping_json, "scheduled_context": selection},
     )
-    await state.control_config(
-        db, actor.tenant_id, config.id, ConfigControl(enabled=True, schedule_enabled=True), actor=actor
-    )
     if variant != "missing":
         await propose(db, actor, config, request)
     if variant not in {"missing", "draft"}:
@@ -315,21 +313,20 @@ async def test_selected_context_is_pinned_scoped_and_current_without_treatment_a
         db,
         actor.tenant_id,
         config.id,
-        RunCreate(origin="schedule", evaluation_key="selected-context", order_references=[REF]),
+        RunCreate(evaluation_key="selected-context", order_references=[REF]),
+        actor=actor,
         now=NOW,
     )
-    token = await state.claim_run(db, actor.tenant_id, run.id, now=NOW)
     if variant == "expired":
-        from app.services.transaction_ops.scheduled_detection import receipt as build_receipt
-
         observed = request.review_by + timedelta(seconds=1)
         receipt = await build_receipt(db, actor.tenant_id, run, config, evidence(), now=observed)
         assert receipt["accounting_context"]["status"] == "selected_context_requires_review"
         assert receipt["accounting_context"]["entries"][0]["status"] == "stale"
         assert receipt["outcome"] == "incomplete_evidence"
         return
-    finding = await state.record_finding(db, actor.tenant_id, run.id, REF, evidence(), lease_token=token, now=NOW)
-    receipt = finding.report_json["scheduled_detection"]
+    # Exercise the post-read guard independently; invalid selections cannot
+    # now be activated for scheduled provider reads.
+    receipt = await build_receipt(db, actor.tenant_id, run, config, evidence(), now=NOW)
     context = receipt["accounting_context"]
     assert context["selection"] == selection
     assert context["selection_current"] is (variant == "approved")
@@ -342,6 +339,3 @@ async def test_selected_context_is_pinned_scoped_and_current_without_treatment_a
     assert "Synthetic reviewed policy example" not in str(receipt)
     assert not (await db.scalars(select(TransactionProposal))).all()
     assert not (await db.scalars(select(TransactionOperation))).all()
-    if variant != "approved":
-        assert finding.report_json["balance"]["status"] == "incomplete"
-        assert (await case_service.list_cases(db, actor.tenant_id))[0].status == "open"

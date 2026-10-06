@@ -114,6 +114,18 @@ async def control_config(config_id: UUID, request: ConfigControl, user: Manager,
         raise _http_error(exc) from None
 
 
+@router.get("/configs/{config_id}/schedule-readiness")
+async def schedule_readiness(config_id: UUID, user: Reader, db: Database):
+    from app.services.transaction_ops.scheduled_detection import context_readiness
+
+    try:
+        await service._human(db, user.tenant_id, user, "recon.run")
+        config = await service.get_config(db, user.tenant_id, config_id)
+        return await context_readiness(db, user.tenant_id, config)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 class AccountingProfileUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # A required null explicitly disables the current treatment.
