@@ -13,6 +13,9 @@ from app.models.transaction_ops import TransactionCase, TransactionCaseObservati
 
 def _cleared(report, now):
     try:
+        detection = report.get("scheduled_detection")
+        if detection is not None and detection.get("outcome") != "no_discrepancy":
+            return False
         balance = report["balance"]
         # Financial matching is independent of repair readiness. Detail-only
         # limits and write restrictions remain in the report and planner.

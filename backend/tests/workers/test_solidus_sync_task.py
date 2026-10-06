@@ -73,3 +73,11 @@ def test_source_failure_propagates_to_instrumented_failed_job(monkeypatch):
     with pytest.raises(SolidusImportError, match="source_rate_limited"):
         worker.solidus_sync(tenant_id=str(uuid.uuid4()), connection_id=str(uuid.uuid4()))
     send.assert_not_called()
+
+
+def test_scheduled_refresh_continuation_keeps_exact_sponsor(monkeypatch):
+    sync, send = mocks(monkeypatch, {"termination_reason": "budget", "complete": False, "pages_read": 1})
+    config_id = str(uuid.uuid4())
+    worker.solidus_sync(tenant_id=str(uuid.uuid4()), connection_id=str(uuid.uuid4()), schedule_config_id=config_id)
+    assert sync.call_args.kwargs["schedule_config_id"] == config_id
+    assert send.call_args.kwargs["kwargs"]["schedule_config_id"] == config_id

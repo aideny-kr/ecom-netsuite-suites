@@ -39,7 +39,10 @@ def previous(reason="done", **changes):
 
 @pytest.fixture
 def dependencies(monkeypatch):
-    state = SimpleNamespace(get_config=AsyncMock(), create_run=AsyncMock())
+    from app.services.transaction_ops import scheduled_detection, state_service
+
+    monkeypatch.setattr(scheduled_detection, "authorize_config", AsyncMock())
+    state = SimpleNamespace(get_config=AsyncMock(), create_run=AsyncMock(), StateError=state_service.StateError)
 
     def request(**values):
         return SimpleNamespace(**values)

@@ -467,3 +467,22 @@ it("closes the portaled case drawer on view navigation without submitting a deci
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(apiClient.post).not.toHaveBeenCalled();
 });
+
+it("shows a timing verdict without claiming a match or missing transaction", async () => {
+  const get = vi.mocked(apiClient.get).getMockImplementation()!;
+  vi.mocked(apiClient.get).mockImplementation(async (...args) => {
+    const data = await get(...args);
+    if (String(args[0]).includes("/review-results?")) {
+      return {
+        ...(data as object),
+        items: [{ id: "timing", run_id: run.id, review_run_id: run.id, config_id: run.config_id,
+          order_reference: "R123456789", case_id: "case-a",
+          balance: { ...balance, status: "incomplete", evidence_status: "timing_difference" } }],
+      } as never;
+    }
+    return data;
+  });
+  mount();
+  expect(await screen.findByText("Timing difference · recheck needed")).toBeInTheDocument();
+  expect(screen.queryByText("Missing in NetSuite")).not.toBeInTheDocument();
+});

@@ -68,6 +68,7 @@ class State:
         )
         self.run = SimpleNamespace(
             id=self.run_id,
+            origin="manual",
             config_id=uuid4(),
             params_json=params,
             progress_json={},
@@ -119,6 +120,7 @@ class State:
     async def record_finding(self, *args, lease_token=None, **kwargs):
         assert lease_token == self.token
         self.reports[args[3]] = deepcopy(args[4])
+        return SimpleNamespace(report_json=self.reports[args[3]])
 
     async def unseen_references(self, db, tenant_id, run_id, references):
         return [reference for reference in references if reference not in self.reports]
@@ -437,7 +439,7 @@ async def test_oversize_evidence_is_flagged_without_stalling_the_scan():
     class BoundedState(State):
         async def record_finding(self, *args, **kwargs):
             _bounded_json(args[4])
-            await super().record_finding(*args, **kwargs)
+            return await super().record_finding(*args, **kwargs)
 
     state = BoundedState()
     source = source_order()

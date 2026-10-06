@@ -1,6 +1,7 @@
 "use client";
 import {
   useInfiniteQuery,
+  useQuery,
   useMutation,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -31,6 +32,21 @@ interface SetupOptions {
   connection_has_more: boolean;
 }
 const base = "/api/v1/transaction-ops";
+export function useScheduleReadiness(id: string) {
+  const access = useTransactionAccess();
+  return useQuery({
+    queryKey: ["transaction-ops", access.tenantId, "schedule-readiness", id],
+    queryFn: () =>
+      apiClient.get<{
+        ready: boolean;
+        status: string;
+        review_by: string | null;
+        renewal_needed: boolean;
+      }>(`${base}/configs/${encodeURIComponent(id)}/schedule-readiness`),
+    enabled: access.allowed && access.canManage && !!id,
+    refetchInterval: 60_000,
+  });
+}
 export function useTransactionSetupOptions() {
   const access = useTransactionAccess();
   return useInfiniteQuery({

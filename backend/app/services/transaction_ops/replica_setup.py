@@ -63,6 +63,10 @@ async def bind_verified_replica(db, tenant_id, config_ids, binding, *, actor, po
         TransactionMapping.model_validate(mapping)
         values = {name: getattr(old, name) for name in ConfigCreate.model_fields}
         values["mapping_json"] = mapping
+        if TransactionMapping.model_validate(mapping).scheduled_context:
+            # Context approval belongs to the predecessor config, not its
+            # successor. Review the new binding before scheduling reads.
+            values["schedule_enabled"] = False
         request = ConfigCreate.model_validate(values)
         await state._check_bindings(db, tenant_id, request)
         # Include predecessor in identity: a revision cannot silently reuse a

@@ -26,9 +26,35 @@ async def test_daily_refresh_is_durable_and_does_not_duplicate_a_manual_refresh(
     assert len(events) == 1
 
 
+async def sponsor(db, user, source):
+    from app.schemas.transaction_runs import ConfigControl, ConfigCreate
+    from app.services.transaction_ops import state_service as state
+    from tests.test_transaction_ops_state_db import seed_config
+
+    original = await seed_config(db, user.tenant_id, user)
+    config = await state.create_config(
+        db,
+        user.tenant_id,
+        ConfigCreate(
+            name="Synthetic direct schedule",
+            source_connection_id=source.id,
+            netsuite_connection_id=original.netsuite_connection_id,
+            netsuite_account_id=original.netsuite_account_id,
+            subsidiary_id=original.subsidiary_id,
+            mapping_json=original.mapping_json,
+        ),
+        actor=user,
+    )
+    await state.control_config(
+        db, user.tenant_id, config.id, ConfigControl(enabled=True, schedule_enabled=True), actor=user
+    )
+    return config
+
+
 async def test_failed_daily_publications_have_backoff_and_finite_attempts(db, admin_user, monkeypatch):
     user, _ = admin_user
     source = await connection(db, user.tenant_id, metadata_json={"api_profile": "framework_sync"})
+    await sponsor(db, user, source)
     publish = Mock(side_effect=OSError("private broker URL"))
     monkeypatch.setattr(dispatch, "publish_refresh", publish)
     # Keep the injected scheduler clock AND inserted audit timestamps on the
@@ -71,3 +97,54 @@ async def test_daily_queue_cannot_access_another_tenants_connection(db, admin_us
     result = await dispatch.queue_refresh(db, admin_user[0].tenant_id, source.id, daily=True)
     assert result["status"] == "unavailable"
     publish.assert_not_called()
+
+
+async def test_revoked_creator_cannot_refresh_or_create_repeated_runs(db, admin_user, monkeypatch):
+    from app.models.transaction_ops import TransactionRun
+    from app.services.transaction_ops import scheduler
+    from tests.conftest import enable_feature_flag
+
+    user = admin_user[0]
+    source = await connection(db, user.tenant_id, metadata_json={"api_profile": "framework_sync"})
+    config = await sponsor(db, user, source)
+    for flag in ("celigo", "reconciliation"):
+        await enable_feature_flag(db, user.tenant_id, flag)
+    user.is_active = False
+    await db.commit()
+    publish = Mock()
+    monkeypatch.setattr(dispatch, "publish_refresh", publish)
+    now = datetime.now(timezone.utc)
+    for delta in (0, 61):
+        stats = await scheduler.collect_due_runs(db, now + timedelta(minutes=delta))
+        assert stats["created"] == stats["source_refreshes"] == 0
+        assert stats["stalled"] == [{"config_id": str(config.id), "reason": "scheduled_detection_access_revoked"}]
+    publish.assert_not_called()
+    assert not (await db.scalars(select(TransactionRun))).all()
+
+
+async def test_scheduled_refresh_rechecks_after_provider_read_without_persisting(db, admin_user, monkeypatch):
+    import pytest
+
+    from app.models.canonical import Order
+    from app.services.ingestion import solidus_sync as sync
+    from tests.test_solidus_ingestion import source_order
+
+    user = admin_user[0]
+    source = await connection(db, user.tenant_id, metadata_json={"api_profile": "framework_sync"})
+    config = await sponsor(db, user, source)
+    now = datetime.now(timezone.utc)
+
+    async def read(*args, **kwargs):
+        user.is_active = False
+        await db.flush()
+        return {
+            "read_at": now.isoformat(),
+            "orders": [source_order(updated_at=now.isoformat())],
+            "next_page": None,
+            "total_count": 1,
+        }
+
+    monkeypatch.setattr(sync, "read_framework_orders_page", read)
+    with pytest.raises(sync.SolidusImportError, match="scheduled_detection_access_revoked"):
+        await sync.sync_solidus_orders(db, user.tenant_id, source.id, now=now, schedule_config_id=config.id)
+    assert not (await db.scalars(select(Order))).all()

@@ -42,6 +42,9 @@ def build_header_report(source_evidence, target_evidence, config, mapping, *, no
         observed_at=_time(source_evidence["read_at"]),
         updated_at=_time(order.get("updated_at")),
         authoritative=True,
+        status=(
+            "confirmed" if order.get("state") == "complete" and order.get("requires_review") is False else "unknown"
+        ),
         amount_basis="transaction",
         total=_amount(order.get("total")),
         subtotal=_amount(order.get("item_total")),
@@ -60,6 +63,7 @@ def build_header_report(source_evidence, target_evidence, config, mapping, *, no
                 record_type="salesorder",
                 order_reference=item["order_reference"],
                 observed_at=_time(target_evidence["observed_at"]),
+                updated_at=_time(item.get("version")) if proven else None,
                 authoritative=proven and target_evidence.get("provider") == "netsuite",
                 amount_basis="transaction",
                 subsidiary_id=str((header.get("subsidiary") or {}).get("id")) if proven else None,
