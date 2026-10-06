@@ -1,14 +1,14 @@
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from xml.sax.saxutils import escape as _xml_escape
 from xml.sax.saxutils import quoteattr as _xml_quoteattr
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import ARRAY, Text, bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.tenant_entity_mapping import TenantEntityMapping
 from app.models.tenant_learned_rule import TenantLearnedRule
 from app.services.chat.llm_adapter import BaseLLMAdapter
 from app.services.chat.llm_purpose import with_llm_purpose
@@ -26,6 +26,70 @@ logger = structlog.get_logger(__name__)
 _NON_QUERYABLE_ENTITY_TYPES = frozenset(
     {"customlistvalue", "customlist", "savedsearch", "script", "scriptdeployment", "workflow"}
 )
+
+
+@dataclass(frozen=True)
+class EntityMatch:
+    script_id: str
+    entity_type: str
+    description: str | None
+    sim: float
+
+
+# For every entity (kept in order by WITH ORDINALITY): the best pg_trgm match on
+# natural_name and the best on script_id -- the two lookups that used to run per entity.
+_BEST_MATCHES_SQL = text(
+    """
+    SELECT e.ord,
+           n.script_id AS n_script_id, n.entity_type AS n_entity_type, n.description AS n_description, n.sim AS n_sim,
+           s.script_id AS s_script_id, s.entity_type AS s_entity_type, s.description AS s_description, s.sim AS s_sim
+    FROM unnest(CAST(:entities AS text[])) WITH ORDINALITY AS e(term, ord)
+    LEFT JOIN LATERAL (
+        SELECT m.script_id, m.entity_type, m.description, similarity(m.natural_name, e.term) AS sim
+        FROM tenant_entity_mapping m
+        WHERE m.tenant_id = :tenant_id AND m.natural_name % e.term
+        ORDER BY similarity(m.natural_name, e.term) DESC
+        LIMIT 1
+    ) n ON true
+    LEFT JOIN LATERAL (
+        SELECT m.script_id, m.entity_type, m.description, similarity(m.script_id, e.term) AS sim
+        FROM tenant_entity_mapping m
+        WHERE m.tenant_id = :tenant_id AND m.script_id % e.term
+        ORDER BY similarity(m.script_id, e.term) DESC
+        LIMIT 1
+    ) s ON true
+    ORDER BY e.ord
+    """
+).bindparams(bindparam("entities", type_=ARRAY(Text)))
+
+
+async def best_entity_matches(db: AsyncSession, tenant_id: uuid.UUID, entities: list[str]) -> list[EntityMatch | None]:
+    """The best mapping for each entity, in one query (it was two per entity).
+
+    Users can name a field by its display name ("FW Platform") or its script ID
+    ("custbody_fw_platform"), so both columns are searched; the stronger match wins and
+    a tie goes to the display name, exactly as the per-entity lookup chose.
+    """
+    if not entities:
+        return []
+    rows = (await db.execute(_BEST_MATCHES_SQL, {"entities": entities, "tenant_id": tenant_id})).all()
+    matches: list[EntityMatch | None] = [None] * len(entities)
+    for row in rows:
+        name = (
+            EntityMatch(row.n_script_id, row.n_entity_type, row.n_description, float(row.n_sim))
+            if row.n_sim is not None
+            else None
+        )
+        script = (
+            EntityMatch(row.s_script_id, row.s_entity_type, row.s_description, float(row.s_sim))
+            if row.s_sim is not None
+            else None
+        )
+        if name and script:
+            matches[row.ord - 1] = name if name.sim >= script.sim else script
+        else:
+            matches[row.ord - 1] = name or script
+    return matches
 
 
 def _esc(value: object) -> str:
@@ -110,42 +174,10 @@ class TenantEntityResolver:
 
         resolved = []
         advisory = []  # non-queryable matches (list values, scripts) — surfaced as caution, not filters
-        for entity in extracted_entities:
-            # High-speed pg_trgm lookup — search BOTH natural_name and script_id,
-            # take the best match. This allows users to reference fields by either
-            # display name ("FW Platform") or script ID ("custbody_fw_platform").
-            name_query = (
-                select(TenantEntityMapping, func.similarity(TenantEntityMapping.natural_name, entity).label("sim"))
-                .where(TenantEntityMapping.tenant_id == tenant_id)
-                .where(TenantEntityMapping.natural_name.op("%")(entity))
-                .order_by(func.similarity(TenantEntityMapping.natural_name, entity).desc())
-                .limit(1)
-            )
-            name_result = await db.execute(name_query)
-            name_row = name_result.first()
-
-            # Also search script_id (e.g., "custbody_fw_platform")
-            script_query = (
-                select(TenantEntityMapping, func.similarity(TenantEntityMapping.script_id, entity).label("sim"))
-                .where(TenantEntityMapping.tenant_id == tenant_id)
-                .where(TenantEntityMapping.script_id.op("%")(entity))
-                .order_by(func.similarity(TenantEntityMapping.script_id, entity).desc())
-                .limit(1)
-            )
-            script_result = await db.execute(script_query)
-            script_row = script_result.first()
-
-            # Pick the best match
-            row = None
-            if name_row and script_row:
-                row = name_row if name_row.sim >= script_row.sim else script_row
-            elif name_row:
-                row = name_row
-            elif script_row:
-                row = script_row
-            if row:
-                match = row.TenantEntityMapping
-                score = row.sim
+        entities = [str(entity) for entity in extracted_entities]
+        for entity, match in zip(entities, await best_entity_matches(db, tenant_id, entities), strict=True):
+            if match:
+                score = match.sim
                 logger.info(
                     "tenant_resolver.match_found",
                     user_term=entity,
