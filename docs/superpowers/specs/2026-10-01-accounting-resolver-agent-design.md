@@ -70,7 +70,7 @@ of the document chain, a human approving exact writes, and terse output.
              ┌───────────────▼──────────── HANDS ─────────┐   ▼
              │ Ops MCP server (ours; tenant-scoped)       │  SESSION / CASE FILE
              │  case_open · evidence_read · chain_read    │  durable append-only log:
-             │  netsuite_query · schema · precedent_find  │  evidence refs, findings,
+             │  netsuite_query · schema · skill_find      │  evidence refs, findings,
              │  propose_change · close_as_explained       │  hypotheses, cards, outcomes
              │  ── guardrails live HERE, at the tool ──   │  (survives compaction,
              │  NetSuite REST/SuiteQL · Solidus/BigQuery  │   resumes after approval)
@@ -123,8 +123,8 @@ prompt. The in-app orchestrator stays the product's brain.
 | `evidence_read(case, part)` | read | The full saved evidence for one part, paginated. |
 | `chain_read(record)` | read | Live NetSuite document chain around a record, using the SuiteQL forms known to work (memory: `transactionline.createdfrom`; not the link tables that return 500). |
 | `netsuite_query(sql)` / `netsuite_schema(table)` | read | Bounded read-only SuiteQL (engine-checked, never regex). Schema is loaded on demand, not injected. |
-| `precedent_find(situation)` | read | How the team booked the same situation before, e.g. a Solidus adjustment → credit memo from the invoice, item 1471 "Sales Adjustments" → 40050, memo "<order> <Solidus label>". Comes from verified fixes only (§5.5). |
-| `propose_change(record_type, op, payload, rationale, evidence_refs)` | **high**: never executes | Runs the 08-19 validator and repair, does a dry run, and returns **one exact card**: before/after, environment, accounts, amounts from the server. It replaces the per-kind menu; the 7 existing kinds become precedents and validators. |
+| `skill_find(case)` | read | The skill for this case's cause (§5.5), with its checks run on the case's own evidence: the skill and its change template, or no skill with the failed check named. Seeded from how the team books each situation, e.g. a Solidus adjustment → credit memo against the invoice, item 1471 → 40050. |
+| `propose_change(record_type, op, payload, rationale, evidence_refs)` | **high**: never executes | Runs the 08-19 validator and repair, does a dry run, and returns **one exact card**: before/after, environment, accounts, amounts from the server. It replaces the per-kind menu; the 7 existing kinds become skills (§5.5) and validators. |
 | `close_as_explained(case, reason, evidence_refs)` | **high**: never executes | A card. The user decided closing a case asks first (2026-09-30). |
 | `verify_after(write)` | read | Independent readback and re-comparison after an approved write. |
 
@@ -161,14 +161,31 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
   - "Here is the change" with a change card;
   - "I need X" with exactly one question.
 
-### 5.5 Learning (precedents)
+### 5.5 Skills (learned procedures; decided 2026-10-05, D5)
 
-- A precedent is saved only after an **approved write whose readback verified**, or an
-  approved close-as-explained.
-- It is keyed by situation (cause, record types, subsidiary) and stores the payload shape,
-  not the amounts.
-- **Promotion is reviewed.** This keeps the 2026-04-09 rule that nothing is learned from
-  live sessions automatically. It follows the 09-15 plan's "learned repairs".
+A **skill** is a proven fix for one cause, written down so the agent can apply it to every
+case with that cause. Example: "a Solidus adjustment never reached NetSuite → a credit memo
+against the invoice". It replaces today's fixed menu of fix kinds, one of the measured
+reasons the agent failed (§2).
+
+- **What a skill holds:**
+  - **when it applies:** checks on the case file and the live chain (`case_open`,
+    `chain_read`), e.g. "an order adjustment equals the difference, and no credit memo
+    created from the invoice already covers it";
+  - **the change it proposes:** a payload template whose amounts, items and accounts come
+    from that case's evidence, never from the skill;
+  - **how to verify:** the readback after approval, and what "resolved" means.
+- **Format:** a versioned file per skill, loaded on demand like Claude's skills. It is
+  not injected into every prompt.
+- **Where skills come from:**
+  - seeded from the team's booking conventions (e.g. item 1471 → 40050, memo
+    "<order> <label>");
+  - then drafted by the agent once the same cause has been resolved **and verified**
+    several times (an approved write whose readback verified, or an approved
+    close-as-explained).
+- **Aiden approves every new skill or skill change.** This keeps the 2026-04-09 rule
+  that nothing is learned from live sessions automatically. It follows the 09-15 plan's
+  "learned repairs"; "precedents" in earlier drafts are this skill evidence.
 
 ### 5.6 Guardrails (where the side effect happens)
 
@@ -184,6 +201,25 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
 - **Prerequisite, decided 2026-08-27 but NOT built:** environment binding enforced at the
   dispatcher. `tools.netsuite_environment_of` is display only today. Framework staging's
   NetSuite is PRODUCTION, so this lands before the resolver can propose writes there.
+
+### 5.7 Group resolution (decided 2026-10-05, D5)
+
+The agent resolves a whole issue group, not one case at a time. The Inc "Order
+differences" group is 46 orders but four problems; the eight $59 touchpad gaps are one fix,
+eight times.
+
+1. **Split by cause.** The group breakdown (#356) partitions the members.
+2. **Apply the cause's skill to every member, on that member's own evidence.** The
+   skill's checks run per member. A member that is already credited, or whose amounts,
+   tax or documents differ, **drops out with its reason** and is handled on its own. A
+   batch never carries a member whose evidence does not fit.
+3. **One approval card per batch** lists every line: order, document, amount and
+   account. The HITL invariants hold unchanged: nothing posts without approval, every
+   line is audited, and period freeze and environment binding apply per line. Amounts are
+   computed in code, never by the model.
+4. **After approval, each line is verified on its own** (readback). A line that fails
+   does not mark the batch resolved; it reopens alone.
+5. **Each verified line is skill evidence** (§5.5).
 
 ## 6. What stays decided (do not reopen)
 
@@ -209,9 +245,15 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
   - Tax-only refunds blocked by refund_audit (34).
   - Reopened-then-locked cases.
   - Sandbox (SB1) write tasks with a gold payload.
-- **Gold labels:** Aiden labels every task (decided §9 D4). The builder prepares a labelling
-  sheet per task: the saved evidence, the NetSuite chain and the breakdown cause. It carries
-  **no suggested answer**, so the labels stay independent of the agent being measured.
+- **Gold labels, per cause (§9 D4, amended 2026-10-05):**
+  - The builder groups tasks by **fact signature**, never by the app's diagnosis: the
+    difference amount, an order adjustment equal to it, customer type, invoice total, and
+    credits already in the chain.
+  - Aiden labels one or two cases per group directly, then confirms which members share
+    the label. Members that differ are labelled on their own.
+  - Each inherited label records which label it came from.
+  - The sheet still carries **no suggested answer**, so the labels stay independent of the
+    agent being measured.
 - **Gold label per task:**
   - the diagnosis category;
   - the expected action: explain/close, change (record type, op, key fields, accounts,
@@ -224,6 +266,10 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
     wall time.
   - **A model-graded rubric** for clarity.
   - **Weekly human read of failing transcripts.**
+- **Group tasks (§5.7):** a group passes only when:
+  - every member is right;
+  - every member that differs was caught as an exception;
+  - the group needed one approval per batch.
 - **Trials:** 3 per task; report pass@1 and pass^3.
 - **Reference:** Claude in a plain loop with the same Ops MCP and NetSuite MCP. This replaces
   the toolless baseline problem (#205) for this domain.
@@ -235,11 +281,10 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
 |---|---|---|
 | S0 | Environment binding at the dispatcher; risk ratings (blocked on a sandbox connector, which needs Aiden's OAuth; must land before S4, not before reads) | Tests prove a write to the unchosen environment is refused |
 | S1 | Resolve benchmark on "Order differences" first: tasks, labelling sheet, Aiden's gold labels, graders, runner; baseline runs of today's agent and the Claude+MCP reference | Numbers for both on the held-in set |
-| S2 | Ops MCP server: read tools first (`case_open`, `evidence_read`, `chain_read`, `netsuite_query/schema`, `precedent_find`) | Reference agent on the new tools ≥ reference on raw tools |
+| S2 | Ops MCP server: read tools first (`case_open`, `evidence_read`, `chain_read`, `netsuite_query/schema`, `skill_find`) | Reference agent on the new tools ≥ reference on raw tools |
 | S3 | Resolver profile in the orchestrator: ≤10 tools + tool search, skills, output contract, case file log, budgets | Our agent's G1 on held-in ≥ reference; G4, G5 met |
 | S4 | `propose_change` + `close_as_explained` cards through validator/kernel; `verify_after` | SB1 end state matches gold; G3 = 0 |
-| S5 | Precedent capture and review | Repeat situations resolve with fewer tool calls |
-| S6 | Group mode: one approval card per proven situation over a group, intermediate math in code | Only if S3–S5 data show per-case work is the bottleneck |
+| S5 | Skills and group resolution (§5.5, §5.7): skill format seeded from booking conventions; group runner (split by cause, per-member checks, exceptions out, one card per batch, per-line verify); agent-drafted skills reviewed by Aiden | Held-in group tasks pass (every member right, exceptions caught, one approval per batch); G3 = 0 |
 
 ## 9. Decisions (Aiden, 2026-10-01)
 
@@ -248,14 +293,15 @@ The external NetSuite AI Connector MCP stays available. On accounting turns it i
 | D1 | **Our orchestrator** as the brain, with our capabilities built as an **Ops MCP server** | Claude Agent SDK harness; Anthropic Managed Agents | It keeps multi-provider models, our approval cards and tenant scoping. Claude Code or Codex can drive the same MCP later, and it is the benchmark's reference. |
 | D2 | **Claude Opus 5.5 at high thinking for complex issues** (a turn started from a case or issue group, or with a case open); other turns keep the tenant default | Fable 5.1; a benchmark-picked model; Sonnet 5 for everything | Aiden's call: Opus 5.5 high is the resolver brain. Cost is measured by G5. |
 | D3 | **"Order differences" first**: the Inc group (46 orders, four situations) and the 20 "adjustment never reached NetSuite" orders | Tax-only refunds first; a mix | The answers are mostly known, so gold labels are cheap and trustworthy. |
-| D4 | **Aiden labels every task** | The builder labels and Aiden spot-checks; agent labels | Independent gold labels; the labelling sheet carries no suggested answer. |
+| D4 | **Aiden labels every task**; amended 2026-10-05: **per cause** (one or two per fact-signature group directly, then confirms members; differing members on their own) | The builder labels and Aiden spot-checks; agent labels; every task one by one | Independent gold labels, with no suggested answer on the sheet. Per cause matches how the agent will resolve (D5). |
+| D5 | **The agent resolves whole groups with skills** (2026-10-05): a skill per proven cause, applied to every member on that member's own evidence, one approval card per batch | One case at a time; a fixed fix-kind menu | 46 Inc orders are four problems. Per-member checks and per-line verification keep it safe; Aiden approves every skill. |
 
 ## 10. Not building
 
 - New specialist agents, a router, or a framework rewrite.
 - Autonomous writes or auto-close.
 - Learning from unverified sessions.
-- More fix kinds: precedents replace the menu.
+- More fix kinds: skills (§5.5) replace the menu.
 - A second write path that bypasses the kernel.
 
 ## Sources

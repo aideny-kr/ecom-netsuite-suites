@@ -27,8 +27,9 @@ no brain or hands block merges without benchmark numbers to compare against.
 | Block | Builds | Owner | Depends | Acceptance |
 |---|---|---|---|---|
 | **B1 Task set + labelling sheets** | ~60 "Order differences" cases (the Inc group and the 20 adjustment orders, deduped). For each: saved evidence, the NetSuite chain and the breakdown cause. No suggested answer. Delivered as a labelling page that saves each label. | builder | — | Every task has a complete evidence pack; held-out 25% split fixed by stable hash |
-| **B2 Gold labels** | For each task: diagnosis category, expected action (explain/close · exact change · escalate), proving evidence | **Aiden** | B1 | ≥ 40 labelled |
+| **B2 Gold labels, per cause** (D4 amended 10-05) | Tasks grouped by fact signature (difference amount, adjustment equal to it, customer type, invoice total, credits in the chain), never by the app's diagnosis. Aiden labels one or two per group directly and confirms which members share it; differing members are labelled on their own; inherited labels record their source | **Aiden** | B1 | Every task labelled (directly or inherited); ≥ 1 direct label per group |
 | **B3 Resolve-bench harness** | Task loader; **record-once, replay-after** NetSuite reads (fixtures, so runs never hit production or rotate the app's single-use token); our-agent runner (headless orchestrator); graders: diagnosis, action, payload diff, safety, brevity, model-written amounts, tokens; 3 trials, pass@1/pass^3; persisted results | builder | B1 | Runs end to end on 3 sample tasks; graders unit-tested |
+| **B3b Group grading** | Group tasks in the harness: a group passes only when every member is right, every differing member was caught, and one approval covered each batch | builder | B3 | Graders unit-tested on synthetic groups |
 | **B4 Reference runner + first numbers** | Claude Opus 5.5 (high) in a plain loop with the same tools, same tasks. Baseline today's agent. | builder | B2, B3 | Numbers for both on held-in |
 
 ## Phase B: Hands (read tools)
@@ -37,7 +38,7 @@ no brain or hands block merges without benchmark numbers to compare against.
 |---|---|---|---|---|
 | **B5 `case_open`** | Compact case file from saved evidence: Solidus order and adjustments, NetSuite chain summary with names, balance and deltas, breakdown cause, prior fixes, related cases | builder | — | Fixture tests on real-shaped reports; ≤ 4k tokens per case |
 | **B6 `chain_read` + `netsuite_query`/`netsuite_schema`** | Live chain via the SuiteQL forms known to work; engine-checked read-only SQL; schema on demand | builder | — | Tests; R000227174's chain matches the hand reading |
-| **B7 `precedent_find`** | Seeded with the team's booking conventions (e.g. Solidus adjustment → credit memo from the invoice, item 1471 → 40050, memo "<order> <label>"); later fed by B14 | builder | — | Returns the convention for an adjustment case |
+| **B7 Skill format + `skill_find`** (D5) | A versioned skill file per cause: when it applies (checks on `case_open` + `chain_read`), the change template (amounts from the case, never the skill), how to verify. Seeded from the team's booking conventions (Solidus adjustment → credit memo against the invoice, item 1471 → 40050, memo "<order> <label>"); loaded on demand | builder · **Aiden approves seeds** | B5, B6 | Returns the right skill for an adjustment case; a case that fails a check gets no skill, with the reason |
 | **B8 Tools gate** | The reference runner uses B5–B7 instead of raw tools | builder | B4–B7 | Reference G1 on the new tools ≥ on raw tools |
 
 ## Phase C: Brain (resolver profile)
@@ -55,25 +56,27 @@ no brain or hands block merges without benchmark numbers to compare against.
 |---|---|---|---|---|
 | **B13a SB1 connector on staging** | A sandbox NetSuite connection in the app (OAuth) for write tasks | **Aiden** (OAuth) | — | Connector active; account id SB1 |
 | **B13b Environment binding + risk ratings** | 08-27 spec at the dispatcher; risk rating per tool | builder | B13a | Tests: a write to the unchosen environment is refused |
-| **B14a `propose_change` card** | General change card through the existing validator/repair and the kernel; dry run, before/after, environment and server amounts; replaces the 7-kind menu (the kinds become precedents and validators) | builder | B12, B13b | SB1 write tasks: the end state matches gold; G3 = 0 |
+| **B14a `propose_change` card** | General change card through the existing validator/repair and the kernel; dry run, before/after, environment and server amounts; replaces the 7-kind menu (the kinds become skills and validators) | builder | B12, B13b | SB1 write tasks: the end state matches gold; G3 = 0 |
 | **B14b `close_as_explained` + `verify_after`** | Close card (asks first); readback after approved writes | builder | B12 | Tests; held-in explain tasks close correctly |
 
 ## Phase E: Learn, open up, go live
 
 | Block | Builds | Owner | Depends | Acceptance |
 |---|---|---|---|---|
-| **B14c Precedent capture** | Saved only after a verified write or an approved close; review before use | builder · **Aiden reviews** | B14a | Repeat situations use fewer tool calls |
+| **B14c Skill drafting** | After several verified resolutions of one cause, the agent drafts a skill (or a change to one); nothing is used until Aiden approves it | builder · **Aiden approves** | B14a, B16 | A drafted skill matches the hand-written one on held-in |
 | **B15 MCP transport** | Expose the Ops tools over real MCP with tenant auth, so Claude Code or Codex can drive them | builder | B8 | A Claude Code session resolves a held-in task through it |
-| **B16 Group mode** | One card per proven situation over a group; maths in code | builder | B12 | Only if the data shows per-case work is the bottleneck |
+| **B16 Group runner** (D5; promoted 10-05) | Split a group by cause; run the cause's skill on every member's own evidence; exceptions out with reasons; one approval card per batch listing every line (amounts in code; per-line audit, period freeze, environment binding); per-line readback after approval | builder | B7, B12, B14a | Held-in group tasks pass (B3b); G3 = 0 |
 | **B17 Live acceptance (G6)** | 10 real Framework cases resolved end to end on staging | **Aiden** + builder | B14a/b, deploy | 10 cases in the ledger with approved cards and verified readbacks |
 
 ## Critical path and parallel work
 
 ```
-B1 ─► B2 (Aiden) ─► B4 ─► B8 ─► B9 ─► B10/B11 ─► B12 ─► B14a ─► B17
-B3 ───────────────┘     ▲
-B5, B6, B7 ─────────────┘          B13a (Aiden) ─► B13b ─┘
+B1 ─► B2 (Aiden, per cause) ─► B4 ─► B8 ─► B9 ─► B10/B11 ─► B12 ─► B14a ─► B16 ─► B17
+B3, B3b ──────────────────────┘     ▲                                  ▲
+B5, B6 ─► B7 (skills) ──────────────┘          B13a (Aiden) ─► B13b ─┘
 ```
+
+Status 2026-10-05: B1 done (labelling page); B3 = PR #389; B5 = PR #383; B6 = PR #391.
 
 **Start now:** B1, B3, B5 and B6 in parallel. **Aiden:** B13a (sandbox OAuth) any time;
 B2 once B1 delivers the sheets.
