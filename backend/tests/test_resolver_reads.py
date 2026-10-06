@@ -48,7 +48,28 @@ class FakeReader:
         if self.error:
             raise NetSuiteEvidenceError(self.error)
         if path.startswith("/record/v1/metadata-catalog/"):
-            return {"properties": {"entity": {"title": "Customer", "type": "object"}, "memo": {"type": "string"}}}
+            return {
+                "properties": {
+                    "entity": {"title": "Customer", "type": "object"},
+                    "memo": {"type": "string"},
+                    "item": {
+                        "title": "Items",
+                        "type": "object",
+                        "properties": {
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "item": {"title": "Item", "type": "object"},
+                                        "quantity": {"title": "Quantity", "type": "number"},
+                                    },
+                                },
+                            }
+                        },
+                    },
+                }
+            }
         sql = body["q"]
         by_id = re.search(r"t\.id IN \(([\d,]+)\)", sql)
         by_parent = re.search(r"tl\.createdfrom IN \(([\d,]+)\)", sql)
@@ -192,3 +213,32 @@ async def test_r1_an_unread_parent_above_the_hop_limit_is_named_and_marks_the_ch
     world = [row(1, "SalesOrd", "S1")] + [row(i, "CustCred", f"D{i}", i - 1) for i in range(2, 6)]
     result = await reads.chain_read(FakeReader(world), "5")
     assert result["top"] == "2" and result["unread_above"] == "1" and result["complete"] is False
+
+
+# --- review round 2 ----------------------------------------------------------------------------
+
+
+async def test_r2_documents_below_the_depth_limit_make_the_chain_incomplete():
+    world = [
+        row(1, "SalesOrd", "S1"),
+        row(2, "CustInvc", "I2", 1),
+        row(3, "RtnAuth", "R3", 2),
+        row(4, "CustCred", "C4", 3),
+    ]
+    result = await reads.chain_read(FakeReader(world), "1")
+    assert result["complete"] is False and result["unread_below_depth"] == reads.MAX_DEPTH_DOWN
+
+
+async def test_r2_a_chain_with_nothing_below_the_limit_is_proven_complete():
+    result = await reads.chain_read(FakeReader(), "100")
+    assert result["complete"] is True and result["unread_below_depth"] is None
+
+
+async def test_r2_the_schema_lists_each_sublists_line_fields():
+    result = await reads.netsuite_schema(FakeReader(), "invoice")
+    assert result["sublists"] == {
+        "item": [
+            {"name": "item", "label": "Item", "type": "object"},
+            {"name": "quantity", "label": "Quantity", "type": "number"},
+        ]
+    }

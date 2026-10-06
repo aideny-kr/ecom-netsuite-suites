@@ -12,13 +12,14 @@ agent yet (B9).
   `transactionline.createdfrom` join on the main line, bounded by an explicit id list.
   An open createdfrom join fails here, and the link tables return 500. It reads at most
   `MAX_CHAIN_DOCUMENTS` documents, and the starting document and its ancestors are always
-  among them. `complete` is false when a page, the cap or the hop limit cut the chain;
-  `unread_above` names a parent above the hop limit, and `unread_below_depth` says when
-  deeper levels exist that were not read.
+  among them. When the depth limit stops the walk, one bounded probe checks the next
+  level. `complete` is true only when nothing is known to be unread: no page, cap or
+  hop limit cut the chain, and the probe found nothing below. `unread_above` names a
+  parent above the hop limit; `unread_below_depth` says deeper documents exist.
 - `netsuite_query(sql)`: SuiteQL as written, with a row bound. SuiteQL cannot write: the
   engine enforces that, so there is no text check to get wrong.
-- `netsuite_schema(record_type)`: a record type's fields from the REST metadata catalog,
-  on demand. The live catalog carries no requiredness, so `requirements_known` is false;
+- `netsuite_schema(record_type)`: a record type's fields, and each sublist's line fields,
+  from the REST metadata catalog, on demand. The live catalog carries no requiredness, so `requirements_known` is false;
   required fields come from the curated registry when a write is validated.
 
 Ids and record-type names are checked as values before they reach a query or a path.
@@ -144,6 +145,13 @@ async def chain_read(reader, record_id) -> dict:
                     break
                 documents[identifier] = (row, depth)
                 frontier.append(identifier)
+        unread_below = None
+        if frontier:
+            # The depth limit stopped the walk. One bounded probe says whether anything is below,
+            # so `complete` is a checked claim, not an assumption.
+            below, ok = await _rows(reader, "tl.createdfrom", frontier) if complete else ([], False)
+            if not ok or any(_id(r.get("id")) not in documents for r in below):
+                complete, unread_below = False, MAX_DEPTH_DOWN
     except NetSuiteEvidenceError as exc:
         return {"root": root, "error": str(exc)}
     ordered = sorted(documents.values(), key=lambda pair: (pair[1], int(_id(pair[0].get("id")) or 0)))
@@ -153,7 +161,7 @@ async def chain_read(reader, record_id) -> dict:
         "documents": [_document(row, depth) for row, depth in ordered],
         "complete": complete,
         "unread_above": unread_above,
-        "unread_below_depth": MAX_DEPTH_DOWN if frontier else None,
+        "unread_below_depth": unread_below,
     }
 
 
@@ -189,6 +197,24 @@ async def netsuite_schema(reader, record_type) -> dict:
     return {
         "record_type": record_type,
         "fields": [spec(f) for f in metadata.fields],
-        "line_fields": [spec(f) for f in metadata.line_fields],
+        "sublists": _sublists(raw),
         "requirements_known": metadata.requirements_known,
     }
+
+
+def _sublists(raw) -> dict[str, list[dict]]:
+    """Line fields per sublist, read from the catalog's JSON schema (`<name>.items[].<field>`).
+
+    The shared metadata parser keeps only top-level fields, so lines are read here.
+    """
+    out = {}
+    properties = raw.get("properties") if isinstance(raw, dict) else None
+    for name, prop in (properties or {}).items():
+        items = ((prop or {}).get("properties") or {}).get("items") if isinstance(prop, dict) else None
+        fields = ((items or {}).get("items") or {}).get("properties") if isinstance(items, dict) else None
+        if isinstance(items, dict) and items.get("type") == "array" and isinstance(fields, dict):
+            out[name] = [
+                {"name": key, "label": (value or {}).get("title") or key, "type": (value or {}).get("type")}
+                for key, value in fields.items()
+            ]
+    return out
