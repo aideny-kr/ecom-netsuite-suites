@@ -3334,6 +3334,9 @@ async def run_chat_turn(
     # re-fire the clarify-gate / augmentation". Set after the short-circuit
     # below; consumed by the augmentation guard and the gate-arm guard.
     _plan_mode_resume_active = False
+    # Whether THIS turn gets the forced clarification card; decided once (plan_mode_should_fire)
+    # and read by both the augmentation and the forced tool choice so they cannot disagree.
+    _plan_mode_fires = False
     if plan_mode_choice and isinstance(plan_mode_choice, dict):
         from app.services.chat.plan_mode.short_circuit import (
             PlanModeChoiceError,
@@ -4226,8 +4229,8 @@ async def run_chat_turn(
                         # earlier (with the tool inventory) so we don't refetch the
                         # flag here. Imported here to keep the import close to use.
                         from app.services.chat.plan_mode.ambiguity_signal import (
-                            is_financial_ambiguous,
                             maybe_augment_for_plan_mode,
+                            plan_mode_should_fire,
                             try_force_tool_choice,
                         )
 
@@ -4239,12 +4242,14 @@ async def run_chat_turn(
                         # first action is `clarify`" — but the resume tool
                         # filter has stripped `clarify` from the inventory.
                         # Contradictory instructions ⇒ undefined behavior.
+                        _plan_mode_fires = plan_mode_should_fire(
+                            sanitized_input,
+                            plan_mode_enabled=plan_mode_enabled,
+                            resume_active=_plan_mode_resume_active,
+                            history=msg_dicts,
+                        )
                         _plan_mode_connected_sources: list[str] = []
-                        if (
-                            plan_mode_enabled
-                            and not _plan_mode_resume_active
-                            and is_financial_ambiguous(sanitized_input)
-                        ):
+                        if _plan_mode_fires:
                             # Resolve connected sources so the augmentation can
                             # require options to span distinct sources when ≥2
                             # are connected. Mirrors the post-call resolution
@@ -4277,7 +4282,7 @@ async def run_chat_turn(
                                 plan_mode_enabled=plan_mode_enabled,
                                 connected_sources=_plan_mode_connected_sources,
                             )
-                            if not _plan_mode_resume_active
+                            if _plan_mode_fires
                             else None
                         )
 
@@ -4477,8 +4482,10 @@ async def run_chat_turn(
                         yield {"type": "drive_sources", "sources": context["drive_sources"]}
 
                     # ── Plan Mode hard gate ─────────────────────────────────
-                    # When financial-ambiguity regex matches AND flag is on AND
-                    # clarify is in the inventory, pass `plan_mode_clarify_only=True`
+                    # When `_plan_mode_fires` (flag on, not a resume, ambiguity regex
+                    # matches, and the conversation has not already settled a source —
+                    # see plan_mode_should_fire) AND clarify is in the inventory, pass
+                    # `plan_mode_clarify_only=True`
                     # to run_streaming (it filters _tool_defs to clarify-only AFTER
                     # _setup_context, so we don't fight the rebuild) and force
                     # tool_choice=clarify on the adapter. plan_mode_enabled is only
@@ -4489,12 +4496,7 @@ async def run_chat_turn(
                     # (source-pick or manual clarify), the user already
                     # disambiguated. Re-firing the new-clarify gate would
                     # force another card on top of the resumed turn.
-                    if (
-                        not _is_chitchat
-                        and plan_mode_enabled
-                        and not _plan_mode_resume_active
-                        and is_financial_ambiguous(sanitized_input)
-                    ):
+                    if not _is_chitchat and _plan_mode_fires:
                         _has_clarify = any(t.get("name") == "clarify" for t in (tool_definitions or []))
                         if _has_clarify:
                             _plan_mode_tool_choice = try_force_tool_choice(
