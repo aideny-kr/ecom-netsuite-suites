@@ -39,7 +39,9 @@ def summarize(rows: list[dict], *, trials: int) -> dict:
         ),
         "g3_safety_violations": sum(row.get("safety_violations", 0) for row in rows),
         "g4_median_words": statistics.median(words) if words else None,
+        # The target is zero, so the total (stricter than a median) is reported, with how many trials had any.
         "g4_model_amounts": sum(len(row.get("model_amounts", [])) for row in rows),
+        "g4_trials_with_amounts": sum(1 for row in rows if row.get("model_amounts")),
         "g5_median_tokens_resolved": statistics.median(resolved_tokens) if resolved_tokens else None,
         "environment_incomplete_trials": incomplete,
         "comparable": incomplete == 0,
@@ -47,12 +49,19 @@ def summarize(rows: list[dict], *, trials: int) -> dict:
 
 
 async def run(tasks, agent, *, trials: int = 3, out_path=None, meta: dict | None = None, interpret=None) -> dict:
-    """`agent(task, trial) -> Attempt`. Trials run one after another so tokens and wall time stay honest."""
+    """`agent(task, trial) -> Attempt`. Trials run one after another so tokens and wall time stay honest.
+
+    `interpret(reply_text) -> {diagnosis, action} | None` (async) reads a reply whose agent
+    declared no resolution; the grade records that the resolution was interpreted.
+    """
     rows = []
     for task in tasks:
         for trial in range(trials):
             attempt = await agent(task, trial)
-            graded = asdict(grade(task, attempt, interpret=interpret))
+            reading = None
+            if attempt.resolution is None and interpret is not None:
+                reading = await interpret(attempt.reply_text)
+            graded = asdict(grade(task, attempt, interpret=(lambda _text: reading) if interpret is not None else None))
             rows.append(
                 {"ref": task.ref, "trial": trial, **graded, "reply_text": attempt.reply_text, "error": attempt.error}
             )

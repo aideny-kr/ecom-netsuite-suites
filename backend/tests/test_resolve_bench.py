@@ -121,7 +121,7 @@ def test_tools_are_read_write_or_refused(name, kind):
 
 def test_the_key_ignores_free_text_descriptions_and_sql_layout():
     a = tape.tape_key(EXT + "ns_runCustomSuiteQL", {"sqlQuery": "SELECT id\nFROM transaction", "description": "x"})
-    b = tape.tape_key("ext__" + "b" * 32 + "__ns_runCustomSuiteQL", {"sqlQuery": "SELECT  id FROM transaction"})
+    b = tape.tape_key(EXT + "ns_runCustomSuiteQL", {"sqlQuery": "SELECT  id FROM transaction"})
     c = tape.tape_key(EXT + "ns_runCustomSuiteQL", {"sqlQuery": "SELECT tranid FROM transaction"})
     assert a == b != c
 
@@ -162,7 +162,10 @@ async def test_installed_routes_every_tool_call_through_the_tape(tmp_path):
 
     t = tape.Tape(tmp_path / "t.jsonl")
     t.put(
-        tape.tape_key("netsuite_suiteql", {"query": "SELECT 1"}), "netsuite_suiteql", {"query": "SELECT 1"}, '{"ok": 1}'
+        tape.tape_key("netsuite_suiteql", {"query": "SELECT 1"}, tenant_id="t"),
+        "netsuite_suiteql",
+        {"query": "SELECT 1"},
+        '{"ok": 1}',
     )
     d = tape.TapedDispatcher(t, mode="replay")
     with tape.installed(d):
@@ -375,6 +378,8 @@ def test_run_refuses_a_results_file_inside_the_repository(tmp_path):
                 "00000000-0000-0000-0000-000000000000",
                 "--model",
                 "m",
+                "--actor",
+                "00000000-0000-0000-0000-000000000000",
             ]
         )
 
@@ -403,15 +408,18 @@ async def test_run_ours_drives_the_agent_through_the_tape(tmp_path, monkeypatch)
 
     t = tape.Tape(tmp_path / "t.jsonl")
     t.put(
-        tape.tape_key("netsuite_suiteql", {"query": "SELECT 1"}), "netsuite_suiteql", {"query": "SELECT 1"}, '{"ok": 1}'
+        tape.tape_key("netsuite_suiteql", {"query": "SELECT 1"}, tenant_id="t"),
+        "netsuite_suiteql",
+        {"query": "SELECT 1"},
+        '{"ok": 1}',
     )
-    seen = []
+    seen, seen_actors = [], []
 
     class FakeAgent:
         turns = 0
 
         def __init__(self, **kwargs):
-            pass
+            seen_actors.append(kwargs["user_id"])
 
         async def run_streaming(self, *, task, context, db, adapter, model, conversation_history):
             FakeAgent.turns += 1
@@ -442,7 +450,232 @@ async def test_run_ours_drives_the_agent_through_the_tape(tmp_path, monkeypatch)
     monkeypatch.setattr(agent_runner, "_asks_for_source", lambda result: result is not None and "source" in result.data)
 
     task = tasks.Task(ref="R100000000", case_id="c", prompt="p", gold=None)
-    a = await ours.run_ours(task, 0, db=None, tenant_id="t", tape=t, mode="replay", model="m")
+    a = await ours.run_ours(task, 0, db=None, tenant_id="t", actor_id="u", tape=t, mode="replay", model="m")
     assert seen[0] == '{"ok": 1}' and json.loads(seen[1])["benchmark"] is True
     assert a.writes_reached_dispatcher == 1 and [p.record for p in a.proposals] == ["Credit memo"]
     assert (a.reply_text, a.input_tokens, a.error) == ("Prepared it.", 3, None)
+    assert seen_actors == ["u", "u"]  # both turns act as the given tenant user
+
+
+# --- review round 1 (gpt-6-astra on 71b274ca) ------------------------------------------
+
+
+def test_f7_tape_entries_are_bound_to_the_tenant_and_the_connector():
+    q = {"sqlQuery": "SELECT id FROM transaction"}
+    assert tape.tape_key(EXT + "ns_runCustomSuiteQL", q, tenant_id="t1") != tape.tape_key(
+        EXT + "ns_runCustomSuiteQL", q, tenant_id="t2"
+    )
+    other = "ext__" + "b" * 32 + "__ns_runCustomSuiteQL"
+    assert tape.tape_key(EXT + "ns_runCustomSuiteQL", q, tenant_id="t1") != tape.tape_key(other, q, tenant_id="t1")
+
+
+def test_f8_whitespace_inside_sql_literals_is_kept():
+    k = lambda sql: tape.tape_key("netsuite_suiteql", {"query": sql})  # noqa: E731
+    assert k("SELECT id FROM customer WHERE companyname = 'A  B'") != k(
+        "SELECT id FROM customer WHERE companyname = 'A B'"
+    )
+    assert k("SELECT id\n  FROM customer WHERE x = 'it''s  ok'") == k("SELECT id FROM customer WHERE x = 'it''s  ok'")
+
+
+@pytest.mark.parametrize(
+    "name, kind",
+    [
+        ("transaction_ops_accounting_group", "read"),
+        ("transaction_ops_propose_credit_reallocation", "read"),  # reads, then prepares a card; no writes
+        ("transaction_ops.propose_credit_reallocation", "read"),
+        ("netsuite_refresh_metadata", "refused"),
+        ("tenant_save_learned_rule", "refused"),
+        ("present_result", "local"),
+    ],
+)
+def test_f6_model_names_and_registry_names_classify_alike(name, kind):
+    assert tape.classify(name) == kind
+
+
+def test_f6_every_allow_listed_name_is_a_real_tool():
+    from app.mcp.registry import TOOL_REGISTRY
+
+    unknown = {n for n in tape.READ_TOOLS | tape.LOCAL_TOOLS if n not in TOOL_REGISTRY and n not in tape.AGENT_TOOLS}
+    assert unknown == set()
+
+
+class _DB:
+    def __init__(self):
+        self.info = {}
+
+
+async def test_f3_session_state_a_read_leaves_is_restored_on_replay(tmp_path):
+    import uuid as _uuid
+
+    candidate = {"amount": Decimal("4.82"), "case": _uuid.UUID(int=7), "lines": [{"rate": Decimal("1.5")}]}
+
+    async def live(tool_name, tool_input, **kwargs):
+        kwargs["db"].info["accounting_correction_candidate"] = candidate
+        kwargs["db"].info.pop("stale", None)
+        return '{"ok": 1}'
+
+    recording_db = _DB()
+    recording_db.info["stale"] = 1
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    await d("transaction_ops_accounting_evidence", {"case_id": "c"}, tenant_id="t", db=recording_db)
+
+    replay_db = _DB()
+    replay_db.info["stale"] = 1
+    player = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    assert (
+        await player("transaction_ops_accounting_evidence", {"case_id": "c"}, tenant_id="t", db=replay_db)
+        == '{"ok": 1}'
+    )
+    assert replay_db.info == {"accounting_correction_candidate": candidate}
+
+
+async def test_f3_state_that_cannot_be_recorded_fails_loudly(tmp_path):
+    async def live(tool_name, tool_input, **kwargs):
+        kwargs["db"].info["accounting_correction_candidate"] = object()
+        return "{}"
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    with pytest.raises(tape.TapeStateError):
+        await d("transaction_ops_accounting_evidence", {}, tenant_id="t", db=_DB())
+
+
+async def test_f2_environment_errors_are_never_taped(tmp_path):
+    live = _Live()
+
+    async def unauthorized(tool_name, tool_input, **kwargs):
+        live.calls.append(tool_name)
+        return json.dumps({"error": "actor_unavailable"})
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=unauthorized)
+    await d("transaction_ops_accounting_evidence", {"case_id": "c"}, tenant_id="t")
+    await d("transaction_ops_accounting_evidence", {"case_id": "c"}, tenant_id="t")
+    assert live.calls == ["transaction_ops_accounting_evidence"] * 2 and d.environment_errors == 2
+    assert not (tmp_path / "t.jsonl").exists() or (tmp_path / "t.jsonl").read_text() == ""
+
+
+SALES_CREDIT_CARD = {
+    "type": "write_confirmation",
+    "mutation_type": "create",
+    "record_type": "creditmemo",
+    "proposed_fields": {
+        "entity": {"id": "5"},
+        "account": {"id": "1471"},
+        "memo": "R100000000 Fix Order Status",
+        "item": {"items": [{"item": {"id": "40050"}, "rate": -4.82, "amount": -4.82, "isTaxable": False}]},
+        "apply": {"items": [{"doc": {"id": "77"}, "apply": True, "amount": 4.82}]},
+    },
+    "proposed_lines": [],
+    "accounting_review": {
+        "kind": "sales_adjustment_credit",
+        "invoice_id": "77",
+        "expected_after": {"credit_total": "-4.82"},
+    },
+    "tool_name": EXT + "ns_createRecord",
+    "tool_input": {},
+    "confirmation_token": "tok2",
+}
+
+
+def test_f4_a_real_sales_credit_card_is_read_from_its_sublists():
+    p = graders.proposal_from_card(SALES_CREDIT_CARD)
+    assert (p.action, p.record, p.created_from, p.amount) == ("create", "Credit memo", "Invoice", Decimal("4.82"))
+    assert "40050" in p.item_text and "1471" in p.item_text
+    g = graders.grade(_task(_gold(item="1471 → 40050")), _attempt(proposals=[p]))
+    assert g.payload_ok and g.outcome_ok
+
+
+def test_f4_update_amounts_are_not_graded_from_the_card():
+    card = {**SALES_CREDIT_CARD, "mutation_type": "update", "accounting_review": {"kind": "credit_tax_reallocation"}}
+    p = graders.proposal_from_card(card)
+    g = graders.grade(
+        _task(_gold(action="update", diagnosis="netsuite_wrong_other", item="", created_from="")),
+        _attempt(proposals=[p], resolution={"diagnosis": "netsuite_wrong_other", "action": "update"}),
+    )
+    assert g.payload_ok and "amount" not in g.payload_diff and g.amount_graded is False
+
+
+@pytest.mark.parametrize(
+    "origin, expected",
+    [({"id": "77"}, "Invoice"), ({"id": "99"}, "unknown"), ({"id": "1", "refName": "invoice #INV9"}, "Invoice")],
+)
+def test_f5_created_from_is_typed_by_id_and_unknown_is_not_none(origin, expected):
+    card = {
+        **CARD,
+        "proposed_fields": {**CARD["proposed_fields"], "createdFrom": origin},
+        "accounting_review": {"invoice_id": "77"},
+    }
+    p = graders.proposal_from_card(card)
+    assert p.created_from == expected
+    if expected == "unknown":
+        for gold_origin in ("Invoice", "None"):
+            assert (
+                "created_from"
+                in graders.grade(_task(_gold(created_from=gold_origin)), _attempt(proposals=[p])).payload_diff
+            )
+
+
+def test_f9_held_in_never_reads_held_out_label_files(tmp_path):
+    tasks_path, root = _write_bench(tmp_path)
+    for ref in tasks.held_out_refs(REFS):
+        (root / f"{ref}.json").write_text("{not json")
+    assert len(tasks.load_tasks(tasks_path, root)) == 6
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"action": "create", "change": {"record": "Credit memo", "amount": "NaN"}},
+        {"action": "create", "change": {"record": "Credit memo", "amount": "Infinity"}},
+        {"action": "create", "change": {"record": "Credit memo", "amount": "1", "created_from": "Bogus"}},
+        {"confidence": "maybe"},
+    ],
+)
+def test_f10_more_invalid_labels_fail_loudly(tmp_path, bad):
+    tasks_path, root = _write_bench(tmp_path, {REFS[0]: _label(REFS[0], **bad)})
+    with pytest.raises(ValueError, match=REFS[0]):
+        tasks.load_tasks(tasks_path, root, split="all")
+
+
+def test_f11_server_written_approval_text_is_not_the_models(tmp_path):
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    note = "Approve the credit memo for $4.82 against INV1."
+    result = AgentResult(success=True, data=note, tokens_used=TokenUsage())
+    a = attempt_from_run([("text", "\n\n" + note), ("confirmation_required", CARD), ("response", result)], d, wall_ms=1)
+    assert a.reply_text == "" and len(a.proposals) == 1
+
+
+async def test_f1_the_runner_interprets_an_undeclared_reply():
+    gold = _gold()
+
+    async def agent(task, trial):
+        return _attempt(resolution=None)
+
+    async def interpret(text):
+        return {"diagnosis": "needs_credit_memo", "action": "create"}
+
+    bench = [tasks.Task(ref="R100000000", case_id="c", prompt="p", gold=gold)]
+    assert (await report.run(bench, agent, trials=1))["g1_pass_at_1"] == 0
+    assert (await report.run(bench, agent, trials=1, interpret=interpret))["g1_pass_at_1"] == 1
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ('{"diagnosis": "credited", "action": "explain_close"}', {"diagnosis": "credited", "action": "explain_close"}),
+        ('{"diagnosis": "made_up", "action": "explain_close"}', None),
+        ("not json", None),
+    ],
+)
+def test_f1_the_interpreter_accepts_only_the_label_vocabularies(raw, expected):
+    from app.services.benchmarks.resolve.interpret import parse_interpretation
+
+    assert parse_interpretation(raw) == expected
+
+
+def test_f12_summary_counts_trials_with_amounts():
+    rows = [
+        {"ref": "A", "outcome_ok": True, "model_amounts": ["$1.00", "2.00"]},
+        {"ref": "A", "outcome_ok": True, "model_amounts": []},
+    ]
+    s = report.summarize(rows, trials=2)
+    assert (s["g4_model_amounts"], s["g4_trials_with_amounts"]) == (2, 1)

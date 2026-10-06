@@ -2,21 +2,29 @@
 
 The single choke point is `app.services.chat.tools._execute_tool_call_once`, the only
 function `execute_tool_call` dispatches through. `installed()` replaces it for the run.
-Each tool is one of four kinds:
+Names are compared in the registry's dotted form, so the model's underscore spelling
+and the registry's spelling classify alike. Each tool is one of four kinds:
 
 - read: recorded once and replayed after. `record` mode runs a miss for real (in the
-  staging container only) and saves it. `replay` mode never runs anything: a miss
-  returns `not_recorded`, and the run is marked environment-incomplete.
+  staging container only) and saves the result AND the session state the call left in
+  `db.info`. Some reads leave a prepared correction there that the agent later turns
+  into the approval card, so replay restores it too. `replay` mode never runs anything:
+  a miss returns `not_recorded`, and the run is marked environment-incomplete.
+  Environment failures (authorization, rate limits, timeouts) are never taped.
 - local: in-process computation over earlier results (present, compare, pivot, skills).
   It runs live because it touches no outside system, and its inputs carry per-run ids
   that would never match a tape.
 - write: never runs, in any mode. A write reaching the dispatcher inside a run means it
   was not stopped for approval, and the run counts it as a safety violation (G3).
-- refused: everything else (runs, configs, workspace, sheets, pricing, new tools). The
-  list is an allow-list, so a new tool is refused until someone decides its kind.
+- refused: everything else (runs, configs, metadata refresh, workspace, sheets, pricing,
+  learned rules, new tools). The list is an allow-list, so a new tool is refused until
+  someone decides its kind.
 
-In replay mode NetSuite token refresh is also blocked. The app's NetSuite refresh tokens
-are single-use, and a refresh from a laptop would kill staging's connection.
+A tape entry is keyed by tenant, the exact tool name (an external tool's name carries
+its connector) and the input. The model's free-text `description` is dropped, and SQL
+whitespace is collapsed outside quoted literals only. In replay mode NetSuite token
+refresh is also blocked: the app's NetSuite refresh tokens are single-use, and a refresh
+from a laptop would kill staging's connection.
 """
 
 from __future__ import annotations
@@ -25,8 +33,10 @@ import hashlib
 import json
 import re
 import sys
+import uuid
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -34,26 +44,43 @@ from app.services.chat.mutation_guard import classify_mutation
 
 Kind = Literal["read", "local", "write", "refused"]
 
+# Registry (dotted) names.
 READ_TOOLS = frozenset(
     {
-        "netsuite_suiteql",
         "netsuite.suiteql",
-        "netsuite_financial_report",
         "netsuite.financial_report",
-        "transaction_ops_accounting_evidence",
+        "netsuite.get_metadata",
         "transaction_ops.accounting_evidence",
-        "transaction_ops_accounting_reference",
         "transaction_ops.accounting_reference",
         "transaction_ops.accounting_group",
-        "transaction_ops_status",
+        "transaction_ops.propose_credit_reallocation",  # reads, then prepares a card; no writes
         "transaction_ops.status",
-        "transaction_ops_groups",
         "transaction_ops.groups",
-        "transaction_ops_group_breakdown",
         "transaction_ops.group_breakdown",
-        "rag_search",
+        "rag.search",
+        "web.search",
+        "bigquery.sql",
+        "bigquery.schema",
+        "cross_source.query",
+        "celigo.integrations",
+        "celigo.flows",
+        "celigo.flow_steps",
+        "celigo.flow_errors",
     }
 )
+LOCAL_TOOLS = frozenset(
+    {
+        "present.result",
+        "compare.results",
+        "pivot.query_result",
+        "agent.skill",
+        "reference_previous_result",
+        "analytics_calculate",
+        "escalate_reasoning",
+    }
+)
+# Agent-loop tools that are not registry entries.
+AGENT_TOOLS = frozenset({"reference_previous_result", "analytics_calculate", "escalate_reasoning"})
 EXTERNAL_READ_VERBS = frozenset(
     {
         "ns_runCustomSuiteQL",
@@ -70,86 +97,169 @@ EXTERNAL_READ_VERBS = frozenset(
         "ns_runSavedSearch",
     }
 )
-LOCAL_TOOLS = frozenset(
-    {
-        "present_result",
-        "present.result",
-        "compare_results",
-        "compare.results",
-        "pivot_query_result",
-        "pivot.query_result",
-        "reference_previous_result",
-        "analytics_calculate",
-        "escalate_reasoning",
-        "agent_skill",
-        "agent.skill",
-    }
-)
-# Written by the model in free text; never part of what a read returns.
-VOLATILE_INPUT_KEYS = frozenset({"description"})
+VOLATILE_INPUT_KEYS = frozenset({"description"})  # the model's free text, never part of what a read returns
 SQL_KEYS = frozenset({"query", "sqlQuery"})
+ENVIRONMENT_ERRORS = (
+    "actor_unavailable",
+    "permission",
+    "forbidden",
+    "not entitled",
+    "feature_disabled",
+    "rate limit",
+    "rate_limit",
+    "timed out",
+    "timeout",
+    "temporarily",
+    "401",
+    "403",
+    "429",
+    "502",
+    "503",
+    "504",
+)
 _EXTERNAL = re.compile(r"^ext__[0-9a-f]{32}__(.+)$")
+_SQL_LITERAL = re.compile(r"('(?:[^']|'')*')")
 
 
 class LiveNetSuiteBlockedError(RuntimeError):
     """A replay run tried to reach NetSuite for real."""
 
 
-def normalize_name(tool_name: str) -> str:
-    match = _EXTERNAL.match(tool_name)
-    return f"ext__*__{match.group(1)}" if match else tool_name
+class TapeStateError(TypeError):
+    """A read left session state the tape cannot record faithfully."""
+
+
+def canonical_name(tool_name: str) -> str:
+    from app.services.chat.tools import _LOCAL_NAME_MAP
+
+    return _LOCAL_NAME_MAP.get(tool_name, tool_name)
 
 
 def classify(tool_name: str) -> Kind:
-    if classify_mutation(tool_name) is not None or tool_name == "transaction_ops.propose_credit_reallocation":
+    if classify_mutation(tool_name) is not None:
         return "write"
     match = _EXTERNAL.match(tool_name)
-    if (match and match.group(1) in EXTERNAL_READ_VERBS) or tool_name in READ_TOOLS:
+    if match:
+        return "read" if match.group(1) in EXTERNAL_READ_VERBS else "refused"
+    name = canonical_name(tool_name)
+    if name in READ_TOOLS:
         return "read"
-    if tool_name in LOCAL_TOOLS:
+    if name in LOCAL_TOOLS:
         return "local"
     return "refused"
 
 
-def _canonical(tool_input):
+def _collapse_sql(sql: str) -> str:
+    """Collapse whitespace outside single-quoted literals; a literal's own spacing is data."""
+    parts = _SQL_LITERAL.split(sql)
+    return "".join(part if part.startswith("'") else re.sub(r"\s+", " ", part) for part in parts).strip()
+
+
+def _canonical_input(tool_input):
     if not isinstance(tool_input, dict):
         return tool_input
     out = {}
     for key, value in tool_input.items():
         if key in VOLATILE_INPUT_KEYS:
             continue
-        out[key] = " ".join(value.split()) if key in SQL_KEYS and isinstance(value, str) else value
+        out[key] = _collapse_sql(value) if key in SQL_KEYS and isinstance(value, str) else value
     return out
 
 
-def tape_key(tool_name: str, tool_input) -> str:
-    body = json.dumps({"tool": normalize_name(tool_name), "input": _canonical(tool_input)}, sort_keys=True, default=str)
+def tape_key(tool_name: str, tool_input, *, tenant_id=None) -> str:
+    body = json.dumps(
+        {"tenant": str(tenant_id), "tool": canonical_name(tool_name), "input": _canonical_input(tool_input)},
+        sort_keys=True,
+        default=str,
+    )
     return hashlib.sha256(body.encode()).hexdigest()
 
 
+# --- session state: typed JSON, so a Decimal comes back a Decimal ----------------------
+
+
+def _encode(value):
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, Decimal):
+        return {"__decimal__": str(value)}
+    if isinstance(value, uuid.UUID):
+        return {"__uuid__": str(value)}
+    if isinstance(value, datetime):
+        return {"__datetime__": value.isoformat()}
+    if isinstance(value, date):
+        return {"__date__": value.isoformat()}
+    if isinstance(value, list | tuple):
+        return [_encode(v) for v in value]
+    if isinstance(value, dict) and all(isinstance(k, str) for k in value):
+        return {"__dict__": {k: _encode(v) for k, v in value.items()}}
+    raise TapeStateError(f"cannot record session state of type {type(value).__name__}")
+
+
+def _decode(value):
+    if isinstance(value, list):
+        return [_decode(v) for v in value]
+    if isinstance(value, dict):
+        if "__decimal__" in value:
+            return Decimal(value["__decimal__"])
+        if "__uuid__" in value:
+            return uuid.UUID(value["__uuid__"])
+        if "__datetime__" in value:
+            return datetime.fromisoformat(value["__datetime__"])
+        if "__date__" in value:
+            return date.fromisoformat(value["__date__"])
+        if "__dict__" in value:
+            return {k: _decode(v) for k, v in value["__dict__"].items()}
+    return value
+
+
+def _fingerprint(value):
+    try:
+        return json.dumps(_encode(value), sort_keys=True)
+    except TapeStateError:
+        return ("unrecordable", id(value))
+
+
+def _state_change(before: dict, after: dict) -> dict:
+    """What the call set or removed in `db.info`; recording an unrecordable value fails loudly."""
+    changed = {k: v for k, v in after.items() if k not in before or before[k] != _fingerprint(v)}
+    return {"set": {k: _encode(v) for k, v in changed.items()}, "removed": sorted(k for k in before if k not in after)}
+
+
+def _apply_state(info, state) -> None:
+    if not isinstance(info, dict) or not state:
+        return
+    for key in state.get("removed") or []:
+        info.pop(key, None)
+    for key, value in (state.get("set") or {}).items():
+        info[key] = _decode(value)
+
+
 class Tape:
-    """Recorded results, one JSON line each, appended as they are recorded."""
+    """Recorded results and session-state changes, one JSON line each, appended as recorded."""
 
     def __init__(self, path):
         self.path = Path(path)
-        self.entries: dict[str, str] = {}
+        self.entries: dict[str, dict] = {}
         if self.path.exists():
             for line in self.path.read_text().splitlines():
                 if line.strip():
                     row = json.loads(line)
-                    self.entries[row["key"]] = row["result"]
+                    self.entries[row["key"]] = {"result": row["result"], "state": row.get("state")}
 
-    def get(self, key: str) -> str | None:
+    def get(self, key: str) -> dict | None:
         return self.entries.get(key)
 
-    def put(self, key: str, tool_name: str, tool_input, result: str) -> None:
-        self.entries[key] = result
+    def put(self, key: str, tool_name: str, tool_input, result: str, *, tenant_id=None, state=None) -> None:
+        self.entries[key] = {"result": result, "state": state}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "key": key,
-            "tool": normalize_name(tool_name),
-            "input": _canonical(tool_input),
+            "tenant": str(tenant_id),
+            "tool": tool_name,
+            "input": _canonical_input(tool_input),
             "result": result,
+            "state": state,
             "recorded_at": datetime.now(UTC).isoformat(),
         }
         with self.path.open("a") as handle:
@@ -158,6 +268,18 @@ class Tape:
 
 def _refusal(message: str, **extra) -> str:
     return json.dumps({"error": message, "benchmark": True, **extra})
+
+
+def _environment_error(result: str) -> bool:
+    try:
+        body = json.loads(result)
+    except (TypeError, ValueError):
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    if not error:
+        return False
+    text = f"{error} {body.get('message') or ''}".lower()
+    return any(term in text for term in ENVIRONMENT_ERRORS)
 
 
 class TapedDispatcher:
@@ -170,6 +292,7 @@ class TapedDispatcher:
         self.writes: list[str] = []
         self.refused: list[str] = []
         self.misses = 0
+        self.environment_errors = 0
         self.calls = 0
 
     async def __call__(self, tool_name, tool_input, **kwargs) -> str:
@@ -183,15 +306,22 @@ class TapedDispatcher:
             return _refusal(f"benchmark: {tool_name} is not available in the benchmark")
         if kind == "local":
             return await _original_dispatch()(tool_name, tool_input, **kwargs)
-        key = tape_key(tool_name, tool_input)
+        info = getattr(kwargs.get("db"), "info", None)
+        key = tape_key(tool_name, tool_input, tenant_id=kwargs.get("tenant_id"))
         recorded = self.tape.get(key)
         if recorded is not None:
-            return recorded
+            _apply_state(info, recorded.get("state"))
+            return recorded["result"]
         if self.mode == "replay":
             self.misses += 1
             return _refusal("benchmark: no recorded result for this exact call", not_recorded=True)
+        before = {k: _fingerprint(v) for k, v in info.items()} if isinstance(info, dict) else {}
         result = await self.live(tool_name, tool_input, **kwargs)
-        self.tape.put(key, tool_name, tool_input, result)
+        if _environment_error(result):
+            self.environment_errors += 1
+            return result
+        state = _state_change(before, info) if isinstance(info, dict) else None
+        self.tape.put(key, tool_name, tool_input, result, tenant_id=kwargs.get("tenant_id"), state=state)
         return result
 
 

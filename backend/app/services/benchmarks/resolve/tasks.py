@@ -35,6 +35,8 @@ DIAGNOSES = frozenset(
 ACTIONS = frozenset({"explain_close", "create", "update", "fix_source", "escalate"})
 CHANGE_ACTIONS = frozenset({"create", "update"})
 RECORDS = frozenset({"Credit memo", "Invoice", "Sales order", "Customer refund", "Journal entry", "Other"})
+CREATED_FROM = frozenset({"Invoice", "Sales order", "Return authorization", "None"})
+CONFIDENCE = frozenset({"sure", "unsure"})
 SPLIT_SALT = "resolve-bench:"
 HELD_OUT_FRACTION = 0.25
 PROMPT = "Resolve the reconciliation case {case_id} for order {ref}."
@@ -76,15 +78,20 @@ def _amount(ref, value):
     if value in (None, ""):
         return None
     try:
-        return abs(Decimal(str(value).replace("$", "").replace(",", "").strip()))
+        amount = Decimal(str(value).replace("$", "").replace(",", "").strip())
     except InvalidOperation:
-        raise ValueError(f"{ref}: change amount {value!r} is not a number") from None
+        amount = None
+    if amount is None or not amount.is_finite():
+        raise ValueError(f"{ref}: change amount {value!r} is not a number")
+    return abs(amount)
 
 
 def _gold(ref, label) -> Gold | None:
     if label.get("order_reference") not in (None, ref):
         raise ValueError(f"{ref}: label names order {label.get('order_reference')!r}")
-    if label.get("confidence") != "sure":
+    if label.get("confidence") not in CONFIDENCE:
+        raise ValueError(f"{ref}: unknown confidence {label.get('confidence')!r}")
+    if label.get("confidence") == "unsure":
         return None  # "Not sure: needs a second look" is not gold yet
     diagnosis, action = label.get("diagnosis"), label.get("action")
     if diagnosis not in DIAGNOSES:
@@ -96,6 +103,8 @@ def _gold(ref, label) -> Gold | None:
         raw = label.get("change") or {}
         if raw.get("record") not in RECORDS:
             raise ValueError(f"{ref}: a {action} needs the record it changes")
+        if (raw.get("created_from") or None) not in CREATED_FROM | {None}:
+            raise ValueError(f"{ref}: unknown created-from {raw.get('created_from')!r}")
         change = Change(
             record=raw["record"],
             created_from=raw.get("created_from") or None,
@@ -106,25 +115,26 @@ def _gold(ref, label) -> Gold | None:
     return Gold(diagnosis=diagnosis, action=action, change=change, evidence=(label.get("evidence") or "").strip())
 
 
-def _labels(labels_dir: Path | None) -> dict[str, dict]:
+def _label(labels_dir: Path | None, ref: str) -> dict | None:
+    """One order's label. Only files for orders in the requested split are ever opened."""
     if labels_dir is None:
-        return {}
+        return None
     root = Path(labels_dir)
-    folder = root / "labels" if (root / "labels").is_dir() else root
-    return {path.stem: json.loads(path.read_text()) for path in sorted(folder.glob("*.json"))}
+    path = (root / "labels" if (root / "labels").is_dir() else root) / f"{ref}.json"
+    return json.loads(path.read_text()) if path.is_file() else None
 
 
 def load_tasks(tasks_path, labels_dir=None, *, split: Split = "held_in", require_gold: bool = True) -> list[Task]:
     rows = json.loads(Path(tasks_path).read_text())
     refs = [row["ref"] for row in rows]
     held = held_out_refs(refs)
-    labels = _labels(labels_dir)
     out = []
     for row in rows:
         ref = row["ref"]
         if (split == "held_in" and ref in held) or (split == "held_out" and ref not in held):
             continue
-        gold = _gold(ref, labels[ref]) if ref in labels else None
+        label = _label(labels_dir, ref)
+        gold = _gold(ref, label) if label is not None else None
         if require_gold and gold is None:
             continue
         out.append(

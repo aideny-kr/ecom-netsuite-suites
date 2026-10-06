@@ -3,9 +3,13 @@
 Setup reuses the vs-MCP agent runner's context assembly, so the agent sees what chat
 gives it. Like that runner, it needs the platform's model key, so it runs in the staging
 container only. Approval cards come from `confirmation_required` events and become
-`Proposal`s. The reply graded for brevity is the model's final text (`AgentResult.data`),
-not the stream: the stream also carries server-written card text, which is not the
+`Proposal`s. The reply graded for brevity is the model's final text (`AgentResult.data`)
+less any server-written approval note, which the agent emits just before a card. When
+the server prepares the card itself, its `data` IS that note, and none of it is the
 model's to count.
+
+The agent acts as `actor_id`, a real active user of the tenant. Native accounting tools
+authorize the actor, so a synthetic id would record nothing but refusals.
 """
 
 from __future__ import annotations
@@ -30,12 +34,21 @@ def attempt_from_run(events, dispatcher: TapedDispatcher, *, wall_ms: int, error
     cards = [payload for kind, payload in events if kind == "confirmation_required" and isinstance(payload, dict)]
     results = [payload for kind, payload in events if kind == "response"]
     result = results[-1] if results else None
+    reply = str(getattr(result, "data", "") or "") if result is not None else ""
+    notes = [
+        text.strip()
+        for (kind, text), (next_kind, _) in zip(events, events[1:], strict=False)
+        if kind == "text" and next_kind == "confirmation_required" and isinstance(text, str) and text.strip()
+    ]
+    for note in notes:
+        reply = reply.replace(note, "")
     return Attempt(
-        reply_text=str(getattr(result, "data", "") or "") if result is not None else "",
+        reply_text=reply.strip(),
         proposals=[proposal_from_card(card) for card in cards],
         resolution=None,  # today's agent declares no structured resolution
         writes_reached_dispatcher=len(dispatcher.writes),
         tape_misses=dispatcher.misses,
+        environment_errors=dispatcher.environment_errors,
         refused_tools=len(dispatcher.refused),
         input_tokens=_usage(results, "input_tokens"),
         output_tokens=_usage(results, "output_tokens"),
@@ -47,7 +60,9 @@ def attempt_from_run(events, dispatcher: TapedDispatcher, *, wall_ms: int, error
     )
 
 
-async def run_ours(task, trial, *, db, tenant_id: uuid.UUID, tape, mode: str, model: str) -> Attempt:
+async def run_ours(
+    task, trial, *, db, tenant_id: uuid.UUID, actor_id: uuid.UUID, tape, mode: str, model: str
+) -> Attempt:
     """One trial. `mode` is "replay" (default for scoring) or "record" (staging, first run)."""
     from app.core.config import settings
     from app.services.chat import tools
@@ -70,7 +85,7 @@ async def run_ours(task, trial, *, db, tenant_id: uuid.UUID, tape, mode: str, mo
         )
         agent = agent_runner.UnifiedAgent(
             tenant_id=tenant_id,
-            user_id=agent_runner._BENCHMARK_ACTOR_ID,
+            user_id=actor_id,
             correlation_id=f"resolve-bench:{task.ref}:{trial}",
             metadata=metadata,
             policy=None,
@@ -96,7 +111,7 @@ async def run_ours(task, trial, *, db, tenant_id: uuid.UUID, tape, mode: str, mo
             reply = agent_runner._SOURCE_REPLY
             again = agent_runner.UnifiedAgent(
                 tenant_id=tenant_id,
-                user_id=agent_runner._BENCHMARK_ACTOR_ID,
+                user_id=actor_id,
                 correlation_id=f"resolve-bench:{task.ref}:{trial}",
                 metadata=metadata,
                 policy=None,
