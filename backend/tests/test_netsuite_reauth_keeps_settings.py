@@ -70,7 +70,9 @@ async def _reauthorize(db, monkeypatch, tenant, user, account_id, *, restlet_url
     return (
         (
             await db.execute(
-                select(Connection).where(Connection.tenant_id == tenant.id, Connection.provider == "netsuite")
+                select(Connection)
+                .where(Connection.tenant_id == tenant.id, Connection.provider == "netsuite")
+                .execution_options(populate_existing=True)  # the merge is written by SQL; reload it
             )
         )
         .scalars()
@@ -143,11 +145,12 @@ async def test_a_reauth_never_overwrites_the_fresh_identity_with_a_stored_one(db
 
 @pytest.mark.asyncio
 async def test_a_settings_write_committed_during_the_callback_is_not_lost(monkeypatch):
-    """Review round 1 (F1): the callback read the row unlocked and wrote its stale copy back.
+    """Review round 1 (F1): a callback merging from its own earlier read wrote a stale copy back.
 
     configure_sales_credit_profile locks the connection row while it writes. A callback
     that started meanwhile read the old metadata, waited on its UPDATE, then overwrote
-    the newly committed profile with the old one. Real commits on separate connections.
+    the newly committed profile with the old one. The merge now runs inside the UPDATE
+    against the committed row. Real commits on separate connections.
     """
     engine = create_async_engine(settings.DATABASE_URL_DIRECT or settings.DATABASE_URL)
     restored = {"digest": {"schema_version": 1, "sales_credit_profile": {"item_id": "9999"}}}

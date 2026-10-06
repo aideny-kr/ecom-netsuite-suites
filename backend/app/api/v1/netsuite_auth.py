@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import uuid
 from collections.abc import Sequence
@@ -12,7 +13,8 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select
+from sqlalchemy import JSON, case, cast, literal, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.oauth_callback_page import js_string, render_callback
@@ -168,17 +170,23 @@ def _select_connection_for_account(
     return selected, switched_from
 
 
-def _callback_metadata(stored: dict | None, fresh: dict) -> dict:
-    """Metadata for the row a callback lands on: the fresh identity, plus the row's settings.
+def _callback_metadata(fresh: dict):
+    """The metadata a callback writes: the fresh identity over the row's stored settings.
 
     Settings stored on the connection (the restlet URL, accounting profiles) describe the
     NetSuite account the row is bound to. A token re-auth of that same account keeps them:
     replacing the dict on 2026-10-04 erased Framework's accounting profile and every
     credit-memo approval card stopped. A row that changes accounts keeps none of them.
+
+    Returned as a SQL expression so Postgres merges inside the UPDATE, against the row as
+    committed when the UPDATE runs: a settings write that committed while the callback ran
+    is kept. Merging from the callback's own earlier read wrote that stale copy back
+    (review round 1), and locking the rows to protect the read added lock orders that
+    could deadlock with other connection writers (rounds 2 and 3).
     """
-    stored = stored or {}
-    kept = dict(stored) if stored.get("account_id") == fresh["account_id"] else {}
-    return {**kept, **fresh}
+    stored = cast(Connection.metadata_json, JSONB)
+    kept = case((stored["account_id"].astext == fresh["account_id"], stored), else_=cast(literal("{}"), JSONB))
+    return cast(kept.op("||", return_type=JSONB)(cast(literal(json.dumps(fresh)), JSONB)), JSON)
 
 
 def _supersede_other_connections(
@@ -438,13 +446,6 @@ async def callback(
     # those call sites choosing between accounts arbitrarily, so we update in place
     # and let _select_connection_for_account decide WHICH row and whether the tenant
     # just repointed itself at a different NetSuite account.
-    #
-    # Locked, like the settings writers (accounting_profiles, native_accounting_profile):
-    # the callback writes the row's stored settings back, so an unlocked read let a
-    # settings write that committed meanwhile be overwritten by the stale copy.
-    # Locks are taken in primary-key order, the order a flush updates rows in (the
-    # health worker updates every live NetSuite row), so the two cannot deadlock; the
-    # newest-first order the selection policy expects is applied afterwards.
     result = await db.execute(
         select(Connection)
         .where(
@@ -452,11 +453,9 @@ async def callback(
             Connection.provider == "netsuite",
             Connection.status != "revoked",
         )
-        .order_by(Connection.id)
-        .execution_options(populate_existing=True)
-        .with_for_update()
+        .order_by(Connection.updated_at.desc())
     )
-    candidates = sorted(result.scalars().all(), key=lambda c: c.updated_at, reverse=True)
+    candidates = list(result.scalars().all())
     connection, switched_from = _select_connection_for_account(candidates, account_id)
 
     superseded = _supersede_other_connections(candidates, connection, account_id)
@@ -478,7 +477,7 @@ async def callback(
         connection.auth_type = "oauth2"
         connection.status = "active"
         connection.error_reason = None
-        connection.metadata_json = _callback_metadata(connection.metadata_json, metadata_json)
+        connection.metadata_json = _callback_metadata(metadata_json)
         # Only on a genuine account switch. The label used to be written on create
         # only, so a row that changed accounts kept advertising the old one -- but
         # rewriting it on EVERY callback clobbers a name the user set through
