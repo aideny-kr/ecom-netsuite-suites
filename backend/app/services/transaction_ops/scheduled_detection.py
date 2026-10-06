@@ -13,13 +13,12 @@ from app.models.tenant import Tenant
 from app.models.user import User
 
 
-async def authorize_config(db, tenant_id, config, *, now=None):
+async def _authorize_principal(db, tenant_id, config):
     from app.services.transaction_ops import state_service as state
 
     if (
         config.tenant_id != tenant_id
         or not config.enabled
-        or not config.schedule_enabled
         or not await db.scalar(select(Tenant.is_active).where(Tenant.id == tenant_id))
     ):
         raise state.StateError("scheduled_detection_access_revoked", 403)
@@ -37,7 +36,16 @@ async def authorize_config(db, tenant_id, config, *, now=None):
 
     if await _binding(db, tenant_id, config) is None:
         raise state.StateError("scheduled_detection_access_revoked", 403)
-    await require_context_ready(db, tenant_id, config, now=now)
+    return actor
+
+
+async def authorize_config(db, tenant_id, config, *, now=None):
+    from app.services.transaction_ops import state_service as state
+
+    if not config.schedule_enabled:
+        raise state.StateError("scheduled_detection_access_revoked", 403)
+    actor = await _authorize_principal(db, tenant_id, config)
+    _assert_ready(await _context_readiness(db, tenant_id, config, now=now))
     return actor
 
 
@@ -63,7 +71,7 @@ def selected_context_status(manifest, selection):
     return "approved_advisory", selected
 
 
-async def context_readiness(db, tenant_id, config, *, now=None):
+async def _context_readiness(db, tenant_id, config, *, now=None):
     from app.services.transaction_ops import context_provenance
     from app.services.transaction_ops.normalization import TransactionMapping
 
@@ -93,12 +101,37 @@ async def context_readiness(db, tenant_id, config, *, now=None):
     }
 
 
-async def require_context_ready(db, tenant_id, config, *, now=None):
+async def context_readiness(db, tenant_id, config, *, now=None):
+    from app.services.transaction_ops import state_service as state
+    from app.services.transaction_ops.normalization import TransactionMapping
+
+    selection = TransactionMapping.model_validate(config.mapping_json).scheduled_context
+    if selection and config.enabled:
+        try:
+            await _authorize_principal(db, tenant_id, config)
+        except state.StateError:
+            return {
+                "ready": False,
+                "status": "execution_access_unavailable",
+                "review_by": None,
+                "renewal_needed": False,
+            }
+    return await _context_readiness(db, tenant_id, config, now=now)
+
+
+def _assert_ready(readiness):
     from app.services.transaction_ops import state_service as state
 
-    readiness = await context_readiness(db, tenant_id, config, now=now)
     if not readiness["ready"]:
+        if readiness["status"] == "execution_access_unavailable":
+            raise state.StateError("scheduled_detection_access_revoked", 403)
+        if readiness["status"] == "scope_paused":
+            raise state.StateError("scheduled_scope_paused", 409)
         raise state.StateError("scheduled_context_requires_review", 409)
+
+
+async def require_context_ready(db, tenant_id, config, *, now=None):
+    _assert_ready(await context_readiness(db, tenant_id, config, now=now))
 
 
 def classify(report, *, now, scope=None):

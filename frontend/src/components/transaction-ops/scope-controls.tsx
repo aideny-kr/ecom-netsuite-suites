@@ -35,6 +35,12 @@ function Controls({ config }: { config: Scope }) {
   return (
     <div className="space-y-3 border-t pt-5">
       <p className="text-[13px] font-medium">Administrator controls</p>
+      {readiness.data?.status === "execution_access_unavailable" && (
+        <p role="status" className="text-[13px]">
+          Scheduled reads are blocked. Check the schedule owner's permissions
+          and source connections before resuming.
+        </p>
+      )}
       {readiness.data?.status === "scope_paused" && (
         <p role="status" className="text-[13px]">
           Enable the scope to check selected accounting context before enabling
