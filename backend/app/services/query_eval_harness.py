@@ -121,7 +121,8 @@ def score_accuracy(result_text: str, expected_keywords: list[str]) -> float:
 # Display use — BUILTIN.DF(sa.country) AS country, GROUP BY BUILTIN.DF(sa.country) — has
 # no adjacent operator and is NOT matched. Scoped to .country on purpose:
 # BUILTIN.DF(field) = 'Value' on small static custom lists is a blessed readability
-# pattern (netsuite.yaml CUSTOM LIST FIELDS) and must not be flagged. `BUILTIN\s*\.\s*DF`
+# pattern (netsuite.yaml CUSTOM LIST FIELDS) and must not be flagged by this check (an
+# unbounded transactionline scan is caught by _BUILTIN_DF_FILTER below). `BUILTIN\s*\.\s*DF`
 # also catches a spaced-out `BUILTIN . DF` evasion.
 _DF_COUNTRY = r"BUILTIN\s*\.\s*DF\s*\(\s*(?:\w+\.)?COUNTRY\s*\)"
 _CMP = r"(?:>=|<=|<>|!=|>|<|=|(?:NOT\s+)?IN\b|(?:NOT\s+)?LIKE\b)"
@@ -144,10 +145,16 @@ _TRANDATE_PREDICATE = re.compile(r"\bTRANDATE\s*\)?\s*(?:>=|<=|<(?!>)|>|=|\bBETW
 
 _ADDRESS_TABLES = ("TRANSACTIONSHIPPINGADDRESS", "TRANSACTIONBILLINGADDRESS")
 
+# BUILTIN.DF(<any field>) used as a filter, same operator/wrapper shapes as the country check.
+_DF_ANY = r"BUILTIN\s*\.\s*DF\s*\(\s*[\w.]+\s*\)"
+_BUILTIN_DF_FILTER = re.compile(rf"{_DF_ANY}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_ANY}")
+_TRANSACTION_LINES = re.compile(r"\bTRANSACTIONLINE\b")
+
 # Penalty weight for each perf anti-pattern (subtracted from the efficiency score).
 _PERF_PENALTY = {
     "builtin_df_country_filter": 0.3,
     "unbounded_address_join": 0.2,
+    "unbounded_df_line_scan": 0.3,
 }
 
 
@@ -163,8 +170,18 @@ def detect_perf_anti_patterns(sql: str) -> list[str]:
         ``transactionBillingAddress`` join with no ``t.trandate`` predicate to
         bound the scan.
 
-    Intentionally narrow: a generic ``BUILTIN.DF(field) = 'Value'`` filter on a
-    small static custom list is a blessed readability pattern and is NOT flagged.
+    And one measured on Framework 2026-10-05 (a 7-minute chat turn):
+
+      - ``unbounded_df_line_scan`` — any ``BUILTIN.DF(...)`` filter in a query that
+        reads ``transactionline`` with no trandate range. Each such query took
+        65-116 s and timed out on the MCP; with a trandate floor the same filter
+        returned the same rows in seconds. An item subquery
+        (``tl.item IN (SELECT ... WHERE BUILTIN.DF(...) = ...)``) timed out as well,
+        so the subquery is not exempt.
+
+    A ``BUILTIN.DF(field) = 'Value'`` filter on a small static custom list is
+    still a blessed readability pattern on its own table, or once the scan is
+    bounded by date; only the unbounded transaction-line scan is flagged.
     """
     if not sql or not sql.strip():
         return []
@@ -178,6 +195,12 @@ def detect_perf_anti_patterns(sql: str) -> list[str]:
         reasons.append("builtin_df_country_filter")
     if any(tbl in sql_upper for tbl in _ADDRESS_TABLES) and not _TRANDATE_PREDICATE.search(sql_upper):
         reasons.append("unbounded_address_join")
+    if (
+        _TRANSACTION_LINES.search(sql_upper)
+        and _BUILTIN_DF_FILTER.search(sql_upper)
+        and not _TRANDATE_PREDICATE.search(sql_upper)
+    ):
+        reasons.append("unbounded_df_line_scan")
     return reasons
 
 
