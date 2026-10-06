@@ -141,13 +141,21 @@ _BUILTIN_DF_COUNTRY_FILTER = re.compile(rf"{_DF_COUNTRY}\s*\)*\s*{_CMP}|{_CMP}\s
 # Known residual: this is alias-blind, so a stray `<other>.trandate >=` predicate in the
 # same query would also satisfy the bound — acceptable, since an address-country query
 # scans the transaction it joins and an unrelated trandate predicate is implausible.
-_TRANDATE_PREDICATE = re.compile(r"\bTRANDATE\s*\)?\s*(?:>=|<=|<(?!>)|>|=|\bBETWEEN\b)")
+_TRANDATE_PREDICATE = re.compile(
+    r"\bTRANDATE\s*\)?\s*(?:>=|<=|<(?!>)|>|=|\bBETWEEN\b)"
+    # ...or the same range written the other way round: `TO_DATE(...) <= t.trandate` (#390 review R2).
+    r"|(?:>=|<=|<(?![>=])|(?<![<!])>(?!=)|(?<![<>!])=)\s*(?:TRUNC\s*\(\s*)?(?:\w+\s*\.\s*)?TRANDATE\b"
+)
 
 _ADDRESS_TABLES = ("TRANSACTIONSHIPPINGADDRESS", "TRANSACTIONBILLINGADDRESS")
 
 # BUILTIN.DF(<any field>) used as a filter, same operator/wrapper shapes as the country check.
+# A two-argument wrapper (`NVL(BUILTIN.DF(x), 'NONE') = ...`) is a filter too (#390 review R3).
 _DF_ANY = r"BUILTIN\s*\.\s*DF\s*\(\s*[\w.]+\s*\)"
-_BUILTIN_DF_FILTER = re.compile(rf"{_DF_ANY}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_ANY}")
+_DEFAULT_ARG = r"(?:\s*,\s*(?:'[^']*'|[\w.]+))?"
+_BUILTIN_DF_FILTER = re.compile(rf"{_DF_ANY}{_DEFAULT_ARG}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_ANY}")
+# A CASE label (`CASE WHEN BUILTIN.DF(x) = 'A' THEN ... END`) compares but filters nothing (#390 review R1).
+_CASE_EXPRESSION = re.compile(r"\bCASE\b.*?\bEND\b", re.DOTALL)
 _TRANSACTION_LINES = re.compile(r"\bTRANSACTIONLINE\b")
 
 # Penalty weight for each perf anti-pattern (subtracted from the efficiency score).
@@ -197,7 +205,7 @@ def detect_perf_anti_patterns(sql: str) -> list[str]:
         reasons.append("unbounded_address_join")
     if (
         _TRANSACTION_LINES.search(sql_upper)
-        and _BUILTIN_DF_FILTER.search(sql_upper)
+        and _BUILTIN_DF_FILTER.search(_CASE_EXPRESSION.sub(" ", sql_upper))
         and not _TRANDATE_PREDICATE.search(sql_upper)
     ):
         reasons.append("unbounded_df_line_scan")

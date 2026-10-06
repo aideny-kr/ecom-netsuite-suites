@@ -328,6 +328,32 @@ class TestUnboundedDfLineScan:
     def test_it_lowers_the_efficiency_score(self):
         assert score_efficiency(self.CHAT_QUERY) <= 0.75
 
+    def test_a_case_label_in_the_select_list_is_not_a_filter(self):
+        # #390 review R1: a display-only CASE compares BUILTIN.DF but never filters rows.
+        sql = (
+            "SELECT CASE WHEN BUILTIN.DF(i.custitem_fw_platform) = 'Yucca' THEN 'Yucca' ELSE 'Other' END AS p "
+            "FROM transaction t JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item "
+            "WHERE t.id = 123"
+        )
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_a_reversed_trandate_range_bounds_it(self):
+        # #390 review R2: `TO_DATE(...) <= t.trandate` is the same range written the other way round.
+        bounded = self.CHAT_QUERY.replace(
+            "AND tl.mainline", "AND TO_DATE('2026-09-01', 'YYYY-MM-DD') <= t.trandate AND tl.mainline"
+        )
+        assert detect_perf_anti_patterns(bounded) == []
+        # A not-equal comparison is still not a range.
+        unbounded = self.CHAT_QUERY.replace("AND tl.mainline", "AND SYSDATE <> t.trandate AND tl.mainline")
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(unbounded)
+
+    def test_a_two_argument_wrapper_is_flagged(self):
+        # #390 review R3: NVL/COALESCE with a default must not slip past the check.
+        sql = self.CHAT_QUERY.replace(
+            "BUILTIN.DF(i.custitem_fw_platform) = 'Yucca'", "NVL(BUILTIN.DF(i.custitem_fw_platform), 'None') = 'Yucca'"
+        )
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+
 
 class TestCompositeScore:
     def test_weighted_composite(self):
