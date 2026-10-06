@@ -245,3 +245,21 @@ def test_r2_identity_holds_for_a_skill_with_few_checks(tmp_path):
 def test_r2_record_types_are_allow_listed_and_ids_match_whole(tmp_path, replace, why):
     with pytest.raises(ValueError, match=why):
         skills.load_library(_write(tmp_path, GOOD.replace(*replace)))
+
+
+# --- review round 3 ----------------------------------------------------------------------------
+
+
+def test_r3_no_credit_against_an_invoice_that_already_matches_solidus():
+    chain = copy.deepcopy(CHAIN)
+    chain["documents"][2]["total"] = 95.18  # the invoice already equals the Solidus total
+    result = _find(chain=chain)
+    assert result["match"] is None
+    assert any("invoice" in f["detail"] for n in result["near"] for f in n["failed"])
+
+
+@pytest.mark.parametrize("solidus, difference", [("95.175", "-4.825"), ("99.996", "-0.004")])
+def test_r3_an_amount_is_never_rounded_into_the_proposal(solidus, difference):
+    case = copy.deepcopy(CASE_FILE)
+    case["comparison"]["metrics"]["order_total"].update(solidus=solidus, difference=difference)
+    assert _find(case)["match"] is None

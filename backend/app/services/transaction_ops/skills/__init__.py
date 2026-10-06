@@ -17,7 +17,8 @@ skills are ever applied; a proposed skill whose checks pass is reported as await
 approval. A malformed file fails at load. Whatever checks a skill lists, two always
 hold: the chain's top document must be this case's own sales order (and an invoice
 counts only when created from it), and the change must resolve from the case's own
-evidence (one invoice with an id, a non-zero difference, and each field the memo uses:
+evidence (a non-zero, whole-cent difference, used exactly; one invoice with an id whose
+total less the credit equals the Solidus total; and each field the memo uses:
 an order number, and one text label when the memo names the adjustment). `skill_find`
 never writes: it returns the resolved change for an approval card, or the checks that
 failed.
@@ -74,6 +75,7 @@ class _Case:
         case_file, chain = case_file or {}, chain or {}
         metrics = ((case_file.get("comparison") or {}).get("metrics") or {}).get("order_total") or {}
         self.difference = _amount(metrics.get("difference"))
+        self.solidus_total = _amount(metrics.get("solidus"))
         self.order = (case_file.get("case") or {}).get("order")
         self.adjustment_labels = list((case_file.get("facts") or {}).get("adjustments_equal_to_difference") or [])
         self.chain_complete = chain.get("complete") is True
@@ -216,13 +218,26 @@ def _resolve(change: dict, c: _Case) -> tuple[dict | None, str | None]:
     """The change for this case, or why it cannot be resolved, whatever checks the skill chose."""
     if c.difference is None or c.difference == 0:
         return None, "the case has no non-zero order-total difference"
+    amount = abs(c.difference)
+    # Never rounded: an amount that is not a whole number of cents is declined, not changed.
+    if amount.quantize(Decimal("0.01")) != amount:
+        return None, f"the difference {c.difference} is not a whole-cent amount"
     out = {"record_type": change["record_type"]}
     if change.get("created_from") == "invoice":
-        invoice_id = c.invoices[0].get("id") if len(c.invoices) == 1 else None
-        if not _internal_id(invoice_id):
+        invoice = c.invoices[0] if len(c.invoices) == 1 else {}
+        if not _internal_id(invoice.get("id")):
             return None, "exactly one invoice with an id is needed"
-        out["created_from"] = {"type": "invoice", "id": invoice_id, "number": c.invoices[0].get("number")}
-    out["lines"] = [{"item": str(line["item"]), "amount": f"{abs(c.difference):.2f}"} for line in change["lines"]]
+        # A sales-order difference does not prove the invoice is wrong: credit only when the
+        # invoice less this credit equals what Solidus charged.
+        total = _amount(invoice.get("total"))
+        if total is None or c.solidus_total is None or total - amount != c.solidus_total:
+            return None, (
+                f"the invoice ({invoice.get('total')}) less the credit ({amount}) does not equal "
+                f"the Solidus total ({c.solidus_total})"
+            )
+        out["created_from"] = {"type": "invoice", "id": invoice["id"], "number": invoice.get("number")}
+    exact = f"{amount.quantize(Decimal('0.01'))}"  # equal to amount: checked above
+    out["lines"] = [{"item": str(line["item"]), "amount": exact} for line in change["lines"]]
     memo = change.get("memo")
     if memo:
         fields = {field for _l, field, _s, _c in string.Formatter().parse(memo) if field}
