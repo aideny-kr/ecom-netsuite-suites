@@ -168,6 +168,19 @@ def _select_connection_for_account(
     return selected, switched_from
 
 
+def _callback_metadata(stored: dict | None, fresh: dict) -> dict:
+    """Metadata for the row a callback lands on: the fresh identity, plus the row's settings.
+
+    Settings stored on the connection (the restlet URL, accounting profiles) describe the
+    NetSuite account the row is bound to. A token re-auth of that same account keeps them:
+    replacing the dict on 2026-10-04 erased Framework's accounting profile and every
+    credit-memo approval card stopped. A row that changes accounts keeps none of them.
+    """
+    stored = stored or {}
+    kept = dict(stored) if stored.get("account_id") == fresh["account_id"] else {}
+    return {**kept, **fresh}
+
+
 def _supersede_other_connections(
     candidates: Sequence[Connection], selected: Connection | None, account_id: str
 ) -> list[Connection]:
@@ -456,7 +469,7 @@ async def callback(
         connection.auth_type = "oauth2"
         connection.status = "active"
         connection.error_reason = None
-        connection.metadata_json = metadata_json
+        connection.metadata_json = _callback_metadata(connection.metadata_json, metadata_json)
         # Only on a genuine account switch. The label used to be written on create
         # only, so a row that changed accounts kept advertising the old one -- but
         # rewriting it on EVERY callback clobbers a name the user set through
