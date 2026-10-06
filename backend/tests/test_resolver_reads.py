@@ -242,3 +242,22 @@ async def test_r2_the_schema_lists_each_sublists_line_fields():
             {"name": "quantity", "label": "Quantity", "type": "number"},
         ]
     }
+
+
+# --- review round 3 ----------------------------------------------------------------------------
+
+
+async def test_r3_the_starting_documents_own_children_are_always_read():
+    world = [row(1, "SalesOrd", "S1")] + [row(i, "CustCred", f"D{i}", i - 1) for i in range(2, 6)]
+    result = await reads.chain_read(FakeReader(world), "4")
+    assert "5" in {d["id"] for d in result["documents"]} and result["complete"] is True
+
+
+async def test_r3_complete_means_every_listed_documents_children_were_read_or_proven_empty():
+    # 4 is the start (depth 3); 3 has a second child 6 that only the probe can reveal.
+    world = [row(1, "SalesOrd", "S1"), row(2, "CustInvc", "I2", 1), row(3, "CustCred", "C3", 2)]
+    world += [row(4, "CustRfnd", "R4", 3), row(6, "CustRfnd", "R6", 3), row(7, "CustDep", "X7", 1)]
+    result = await reads.chain_read(FakeReader(world), "4")
+    ids = {d["id"] for d in result["documents"]}
+    assert "6" not in ids or result["complete"] is True
+    assert ("6" in ids) or (result["complete"] is False and result["unread_below_depth"] is not None)

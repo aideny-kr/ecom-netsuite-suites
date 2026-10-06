@@ -12,9 +12,10 @@ agent yet (B9).
   `transactionline.createdfrom` join on the main line, bounded by an explicit id list.
   An open createdfrom join fails here, and the link tables return 500. It reads at most
   `MAX_CHAIN_DOCUMENTS` documents, and the starting document and its ancestors are always
-  among them. When the depth limit stops the walk, one bounded probe checks the next
-  level. `complete` is true only when nothing is known to be unread: no page, cap or
-  hop limit cut the chain, and the probe found nothing below. `unread_above` names a
+  among them. The starting document's own children are always read. Then one bounded
+  probe checks the children of every document the walk did not expand. `complete` is
+  true only when every listed document's children were read or proven empty, and no
+  page, cap or hop limit cut the chain. `unread_above` names a
   parent above the hop limit; `unread_below_depth` says deeper documents exist.
 - `netsuite_query(sql)`: SuiteQL as written, with a row bound. SuiteQL cannot write: the
   engine enforces that, so there is no text check to get wrong.
@@ -125,9 +126,10 @@ async def chain_read(reader, record_id) -> dict:
             complete = False  # the hop limit (or an unreadable parent) stopped the walk below the real top
         # The starting document and its ancestors go in first, so the cap can never drop them.
         documents = {_id(row.get("id")): (row, distance) for distance, row in enumerate(reversed(path))}
-        frontier, depth = [_id(top.get("id"))], 0
+        frontier, depth, expanded = [_id(top.get("id"))], 0, set()
         while frontier and depth < MAX_DEPTH_DOWN:
             depth += 1
+            expanded.update(frontier)
             rows, ok = await _rows(reader, "tl.createdfrom", frontier)
             complete = complete and ok
             frontier = []
@@ -145,11 +147,25 @@ async def chain_read(reader, record_id) -> dict:
                     break
                 documents[identifier] = (row, depth)
                 frontier.append(identifier)
+        if root not in expanded:
+            # The starting document can sit deeper than the walk down reaches; its children matter most.
+            expanded.add(root)
+            rows, ok = await _rows(reader, "tl.createdfrom", [root])
+            complete = complete and ok
+            for row in rows:
+                identifier = _id(row.get("id"))
+                if identifier is None or identifier in documents:
+                    continue
+                if len(documents) >= MAX_CHAIN_DOCUMENTS:
+                    complete = False
+                    break
+                documents[identifier] = (row, documents[root][1] + 1)
+        # `complete` means every listed document's children were read or proven empty: one bounded
+        # probe covers every document whose children the walk did not read.
         unread_below = None
-        if frontier:
-            # The depth limit stopped the walk. One bounded probe says whether anything is below,
-            # so `complete` is a checked claim, not an assumption.
-            below, ok = await _rows(reader, "tl.createdfrom", frontier) if complete else ([], False)
+        unexpanded = [identifier for identifier in documents if identifier not in expanded]
+        if unexpanded:
+            below, ok = await _rows(reader, "tl.createdfrom", unexpanded) if complete else ([], False)
             if not ok or any(_id(r.get("id")) not in documents for r in below):
                 complete, unread_below = False, MAX_DEPTH_DOWN
     except NetSuiteEvidenceError as exc:
