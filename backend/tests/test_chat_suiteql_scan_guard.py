@@ -61,23 +61,15 @@ ADDRESS_ALL_HISTORY = (
 )
 
 
-async def test_an_address_join_over_all_history_is_refused_on_both_tools(monkeypatch):
-    """vs-MCP 2026-10-06: "as of today" became `trandate <= today` over the address join and timed out
-    on both sides (54-60 s per query). A lower date limit, or a lookup of specific orders, runs."""
+async def test_address_joins_stay_scoring_only_in_chat(monkeypatch):
+    """Not refused: on 30 days of real Framework chat SQL (2026-10-06), 2 of 4 undated address joins
+    ran in 2-4 s because a subquery restricted them to specific orders (the Yucca country breakdown)."""
     rpc = AsyncMock(return_value=json.dumps({"rows": []}))
     monkeypatch.setattr(tools, "_execute_tool_call_once", rpc)
-    for name, key in (("netsuite_suiteql", "query"), ("ext__abc__ns_runCustomSuiteQL", "sqlQuery")):
-        result = json.loads(await tools.execute_tool_call(name, {key: ADDRESS_ALL_HISTORY}, **CONTEXT))
-        assert result["perf_anti_patterns"] == ["unbounded_address_join"]
-        assert "lower" in result["next_step"] and "address" in result["error"]
-        # #397 review R1: the hint must not turn "as of today" into "dated today".
-        assert "as of today" not in result["next_step"].lower()
-        assert "state" in result["next_step"] and "ask" in result["next_step"]
-    assert rpc.await_count == 0
-    today = ADDRESS_ALL_HISTORY.replace("t.trandate <=", "TRUNC(t.trandate) =")
-    one_order = ADDRESS_ALL_HISTORY.replace(
-        "t.trandate <= TO_DATE('2026-10-06', 'YYYY-MM-DD')", "t.tranid = 'SO865732'"
+    restricted = ADDRESS_ALL_HISTORY.replace(
+        "AND t.trandate <= TO_DATE('2026-10-06', 'YYYY-MM-DD')",
+        "AND t.id IN (SELECT tl.transaction FROM transactionline tl WHERE tl.item IN (11889, 5323))",
     )
-    for sql in (today, one_order):
+    for sql in (ADDRESS_ALL_HISTORY, restricted):
         await tools.execute_tool_call("netsuite_suiteql", {"query": sql}, **CONTEXT)
     assert rpc.await_count == 2

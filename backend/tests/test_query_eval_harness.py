@@ -503,6 +503,61 @@ class TestReviewRoundOneOn397:
         assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
 
 
+class TestBoundsAndFiltersComeFromStructure:
+    """#397 review round 2: three findings of the same shape (text heuristics misreading SQL
+    structure), so the mechanism changed: filters are read only from FROM/ON, WHERE and HAVING, and
+    a bound counts only as a top-level AND condition of WHERE."""
+
+    LINES = "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id "
+
+    def test_a_key_inside_a_parenthesized_or_branch_does_not_bound(self):
+        # Round 2 R1 (major): every sales order in history stays eligible.
+        sql = (
+            self.LINES
+            + "WHERE BUILTIN.DF(tl.item) = 'Widget' AND (t.type = 'SalesOrd' OR t.type = 'CustInvc' AND t.id = 123)"
+        )
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+
+    def test_a_date_inside_an_or_branch_does_not_bound_either(self):
+        sql = self.LINES + "WHERE BUILTIN.DF(tl.item) = 'Widget' AND (t.type = 'SalesOrd' OR t.trandate >= SYSDATE - 7)"
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+
+    def test_a_case_filter_inside_a_wrapper_is_still_a_filter(self):
+        # Round 2 R2.
+        sql = (
+            "SELECT t.id FROM transaction t JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress "
+            "WHERE t.trandate >= SYSDATE - 30 AND NVL(CASE WHEN BUILTIN.DF(sa.country) = 'Singapore' THEN 1 END, 0) = 1"
+        )
+        assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
+
+    def test_an_unaliased_single_address_lookup_is_bounded(self):
+        # Round 2 R3.
+        assert detect_perf_anti_patterns("SELECT country FROM transactionShippingAddress WHERE nKey = 123") == []
+
+    def test_group_by_and_order_by_labels_are_not_filters(self):
+        sql = (
+            self.LINES + "JOIN item i ON i.id = tl.item WHERE t.trandate >= SYSDATE - 7 "
+            "GROUP BY CASE WHEN BUILTIN.DF(i.custitem_fw_platform) = 'Yucca' THEN 1 END "
+            "ORDER BY CASE WHEN BUILTIN.DF(i.custitem_fw_platform) = 'Yucca' THEN 1 END"
+        )
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_a_bounded_derived_table_is_judged_on_its_own(self):
+        inner = (
+            "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item "
+            "WHERE t.trandate >= SYSDATE - 7 AND BUILTIN.DF(i.custitem_fw_platform) = 'Yucca'"
+        )
+        assert detect_perf_anti_patterns(f"SELECT COUNT(*) FROM ({inner}) x") == []
+        unbounded = inner.replace("t.trandate >= SYSDATE - 7 AND ", "")
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(f"SELECT COUNT(*) FROM ({unbounded}) x")
+
+    def test_each_union_branch_is_judged(self):
+        bounded = self.LINES + "WHERE t.trandate >= SYSDATE - 7 AND BUILTIN.DF(tl.item) = 'Widget'"
+        unbounded = self.LINES + "WHERE BUILTIN.DF(tl.item) = 'Widget'"
+        assert detect_perf_anti_patterns(f"{bounded} UNION ALL {bounded}") == []
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(f"{bounded} UNION ALL {unbounded}")
+
+
 class TestCompositeScore:
     def test_weighted_composite(self):
         # Weights: accuracy 30%, syntax 30%, efficiency 15%, sql_match 25%

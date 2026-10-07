@@ -410,15 +410,6 @@ _SCAN_REFUSALS = {
         "query, e.g. the earliest t.trandate for the item IDs), or filter on raw internal IDs instead of "
         "display text (i.custitem_x = <id>, tl.item IN (<ids>)). Keep BUILTIN.DF in the SELECT list for labels.",
     ),
-    "unbounded_address_join": (
-        "Not run: this query joins the shipping/billing address table with no lower trandate limit, so "
-        "NetSuite reads the address of every transaction in the account's history. Queries like this take "
-        "about a minute or time out.",
-        "Add a t.trandate range with a lower limit that matches the question: for one day, "
-        "TRUNC(t.trandate) = TRUNC(SYSDATE); for a period, t.trandate >= <start>. If the question means "
-        "everything up to a date, state the start date you use in the answer, or ask the user for it; do not "
-        "silently narrow the period. Or look up specific transactions (t.id = <id>, t.tranid = '<number>').",
-    ),
 }
 
 
@@ -427,10 +418,11 @@ def _refuse_unbounded_scan(sql: str) -> str | None:
 
     - unbounded_df_line_scan: measured on Framework 2026-10-05, 65-116 s per query (a 7-minute chat
       turn) and a timeout on the MCP; the same filter with a trandate floor returned in seconds.
-    - unbounded_address_join: the 2026-06 ship-to-country incident, and twice in the 2026-10-06 vs-MCP
-      benchmark (54-60 s, then a timeout on both sides) when "as of today" became `trandate <= today`.
-    A date range needs a lower limit; a lookup of specific transactions also counts as bounded
-    (see query_eval_harness.detect_perf_anti_patterns). The country-filter pattern stays scoring-only.
+    A date range needs a lower limit; a lookup of specific rows also counts as bounded (see
+    query_eval_harness.detect_perf_anti_patterns). The address-join and country-filter patterns stay
+    scoring-only: on 30 days of real Framework chat SQL (2026-10-06), 2 of 4 address joins without a
+    date range ran in 2-4 s because a subquery restricted them to specific orders, so refusing them
+    would break working questions; every refused transactionline scan had taken 63-120 s or failed.
     """
     from app.services.query_eval_harness import detect_perf_anti_patterns
 

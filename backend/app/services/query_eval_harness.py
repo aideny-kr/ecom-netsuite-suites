@@ -138,11 +138,11 @@ _BUILTIN_DF_COUNTRY_FILTER = re.compile(rf"{_DF_COUNTRY}\s*\)*\s*{_CMP}|{_CMP}\s
 # reversed forms `X <= t.trandate` / `X < t.trandate` / `X = t.trandate`. An upper limit alone
 # (`t.trandate <= today`) still reads all history: vs-MCP 2026-10-06, sales_country_canonical
 # read "as of today" that way and timed out on both sides. `<>` / `!=` are not ranges, and
-# FETCH FIRST / ROWNUM cap returned rows, not the scan. Alias-blind on purpose: a query that
-# joins a transaction table has one date that matters.
-_TRANDATE_PREDICATE = re.compile(
-    r"\bTRANDATE\s*\)?\s*(?:>=|>|=|\bBETWEEN\b)"
-    r"|(?:<=|<(?![>=])|(?<![<>!])=)\s*(?:TRUNC\s*\(\s*)?(?:\w+\s*\.\s*)?TRANDATE\b"
+# FETCH FIRST / ROWNUM cap returned rows, not the scan. Matched against ONE top-level AND
+# condition of WHERE (see _bounded), never against free text.
+_TRANDATE_COLUMN = r"(?:TRUNC\s*\(\s*)?(?:\w+\s*\.\s*)?TRANDATE\s*\)?"
+_LOWER_DATE_LIMIT = re.compile(
+    rf"^{_TRANDATE_COLUMN}\s*(?:>=|>|=|BETWEEN\b)|(?:<=|<(?!>)|(?<![<>!])=)\s*{_TRANDATE_COLUMN}\s*$"
 )
 
 _ADDRESS_TABLES = ("TRANSACTIONSHIPPINGADDRESS", "TRANSACTIONBILLINGADDRESS")
@@ -153,10 +153,15 @@ _DF_ANY = r"BUILTIN\s*\.\s*DF\s*\(\s*[\w.]+\s*\)"
 _DEFAULT_ARG = r"(?:\s*,\s*(?:'S'|[\w.]+))?"  # literals are 'S' after _lex
 _BUILTIN_DF_FILTER = re.compile(rf"{_DF_ANY}{_DEFAULT_ARG}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_ANY}")
 _TRANSACTION_LINES = re.compile(r"\bTRANSACTIONLINE\b")
-_CASE_TOKEN = re.compile(r"\b(CASE|END)\b")
-_PREDICATE_BEFORE = re.compile(r"\b(?:WHERE|AND|OR|ON|HAVING|NOT)\s*\(*\s*$")
-_COMPARED_AFTER = re.compile(rf"\s*\)*\s*{_CMP}")
 _NOT_AN_ALIAS = {"WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "ON", "GROUP", "ORDER", "FETCH", "UNION"}
+_CLAUSE_KEYWORD = re.compile(r"\b(SELECT|FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|FETCH|OFFSET)\b")
+_SET_OPERATOR = re.compile(r"\b(?:UNION(?:\s+ALL)?|MINUS|INTERSECT)\b")
+_BOOLEAN = re.compile(r"\b(AND|OR|BETWEEN)\b")
+_LITERAL = r"(?:\d+|'S')"
+# Columns that name specific rows: a handful of rows bound the scan like a date range.
+_ROW_KEYS = (("TRANSACTION", "(?:ID|TRANID)"), ("TRANSACTIONLINE", "TRANSACTION")) + tuple(
+    (table, "NKEY") for table in _ADDRESS_TABLES
+)
 
 
 def _lex(sql: str) -> str:
@@ -190,70 +195,142 @@ def _lex(sql: str) -> str:
     return "".join(out).upper()
 
 
-def _without_case(text: str) -> str:
-    """*text* minus every balanced CASE ... END block used as a VALUE (nested ones included): a
-    display label compares but filters nothing, and its dates bound nothing (#390 review R1/R4).
-    A CASE used as a predicate stays: one that follows WHERE/AND/OR/ON/HAVING/NOT, or is itself
-    compared after its END (#397 review R4). Unbalanced SQL is kept whole, so a malformed query
-    can only be over-checked, never under-checked."""
-    spans, depth, begin = [], 0, 0
-    for m in _CASE_TOKEN.finditer(text):
-        if m.group(1) == "CASE":
-            if depth == 0:
-                begin = m.start()
-            depth += 1
-        elif depth:
-            depth -= 1
-            if depth == 0:
-                spans.append((begin, m.end()))
-    if depth:
-        return text
-    kept, last = [], 0
-    for begin, end in spans:
-        predicate = _PREDICATE_BEFORE.search(text[:begin]) or _COMPARED_AFTER.match(text, end)
-        if not predicate:
-            kept.append(text[last:begin])
-            kept.append(" ")
-            last = end
-    kept.append(text[last:])
-    return "".join(kept)
-
-
-def _aliases(text: str, table: str) -> set[str]:
-    found = re.findall(rf"\b(?:FROM|JOIN)\s+{table}\s+(?:AS\s+)?(\w+)", text)
-    return {a for a in found if a not in _NOT_AN_ALIAS}
-
-
-def _top_level(text: str) -> str:
-    """Only the characters outside every parenthesis."""
-    kept, depth = [], 0
+def _depths(text: str) -> list[int]:
+    """Parenthesis depth of every character (a bracket itself sits at the outer depth)."""
+    depths, depth = [], 0
     for ch in text:
+        if ch == ")":
+            depth = max(depth - 1, 0)
+        depths.append(depth)
         if ch == "(":
             depth += 1
-        elif ch == ")":
-            depth = max(depth - 1, 0)
-        elif depth == 0:
-            kept.append(ch)
-    return "".join(kept)
+    return depths
 
 
-def _is_transaction_lookup(text: str) -> bool:
-    """Specific rows by key read a handful of rows, so they bound the scan like a date range:
-    `t.id = 123`, `t.tranid IN ('SO1')`, `tl.transaction = 987`, or one address by its key
-    (`sa.nKey = 123`, #397 review R2). The key must stand directly after WHERE or AND, and no
-    OR may sit outside parentheses, so an ID in an OR branch does not exempt the rest (#397
-    review R3); a parenthesized OR group such as `(t.custbody1 = 'F' OR ... IS NULL)` is fine."""
-    if re.search(r"\bOR\b", _top_level(text)):
-        return False  # with an OR outside parentheses, precedence decides which branch scans
-    literal = r"(?:=\s*(?:\d+\b|'S')|IN\s*\(\s*(?:\d+|'S')[^)]*\))"
-    keys = [(table, r"(?:ID|TRANID)") for table in ("TRANSACTION",)]
-    keys += [("TRANSACTIONLINE", "TRANSACTION")]
-    keys += [(table, "NKEY") for table in _ADDRESS_TABLES]
-    for table, column in keys:
-        for alias in _aliases(text, table):
-            if re.search(rf"\b(?:WHERE|AND)\s+{alias}\s*\.\s*{column}\s*{literal}", text):
+def _top_level(pattern: re.Pattern, text: str) -> list[re.Match]:
+    depths = _depths(text)
+    return [m for m in pattern.finditer(text) if depths[m.start()] == 0]
+
+
+def _unwrap(expr: str) -> str:
+    """*expr* without parentheses that enclose all of it."""
+    expr = expr.strip()
+    while expr.startswith("(") and expr.endswith(")") and min(_depths(expr)[1:-1] or [1]) >= 1:
+        expr = expr[1:-1].strip()
+    return expr
+
+
+def _clauses(query: str) -> dict[str, str]:
+    """The top-level clause bodies of one SELECT (first occurrence of each keyword)."""
+    found = _top_level(_CLAUSE_KEYWORD, query)
+    bodies: dict[str, str] = {}
+    for i, m in enumerate(found):
+        end = found[i + 1].start() if i + 1 < len(found) else len(query)
+        bodies.setdefault(re.sub(r"\s+", " ", m.group(1)), query[m.end() : end])
+    return bodies
+
+
+def _derived_tables(from_body: str) -> tuple[str, list[str]]:
+    """FROM without its derived tables `(SELECT ...)`, and those subqueries (judged on their own)."""
+    depths, kept, derived, i = _depths(from_body), [], [], 0
+    while i < len(from_body):
+        if from_body[i] == "(" and depths[i] == 0:
+            j = next(
+                (k for k in range(i + 1, len(from_body)) if from_body[k] == ")" and depths[k] == 0), len(from_body)
+            )
+            inner = from_body[i + 1 : j]
+            if re.match(r"\s*SELECT\b", inner):
+                derived.append(inner)
+                kept.append(" DERIVED ")
+            else:
+                kept.append(from_body[i : j + 1])
+            i = j + 1
+        else:
+            kept.append(from_body[i])
+            i += 1
+    return "".join(kept), derived
+
+
+def _row_key_patterns(from_body: str) -> list[re.Pattern]:
+    """A key condition per table reference: `alias.column`, or a bare column for an unaliased table."""
+    patterns = []
+    for table, column in _ROW_KEYS:
+        for m in re.finditer(rf"(?:^|\bJOIN\b|,)\s*{table}\b(?:\s+(?:AS\s+)?(\w+))?", from_body):
+            alias = m.group(1) if m.group(1) and m.group(1) not in _NOT_AN_ALIAS else ""
+            qualifier = rf"{alias}\s*\.\s*" if alias else ""
+            patterns.append(
+                re.compile(
+                    rf"^{qualifier}{column}\s*(?:=\s*{_LITERAL}|IN\s*\(\s*{_LITERAL}(?:\s*,\s*{_LITERAL})*\s*\))$"
+                )
+            )
+    return patterns
+
+
+def _bounded(where: str, keys: list[re.Pattern]) -> bool:
+    """Whether a top-level AND condition of WHERE is a lower date limit or a row-key lookup.
+
+    Any OR at the top level means nothing is credited: precedence decides which branch scans, and
+    a bound inside an OR branch bounds only that branch (#397 review rounds 1-2, R3/R1). A
+    parenthesized condition is unwrapped and judged the same way, so `(t.custbody1 = 'F' OR ...)`
+    next to a key is harmless while `(... OR t.id = 123)` credits nothing."""
+    expr = _unwrap(where)
+    if not expr:
+        return False
+    conditions, last, between = [], 0, False
+    for m in _top_level(_BOOLEAN, expr):
+        if m.group(1) == "OR":
+            return False
+        if m.group(1) == "BETWEEN":
+            between = True
+        elif between:
+            between = False  # the AND of `BETWEEN x AND y`
+        else:
+            conditions.append(expr[last : m.start()])
+            last = m.end()
+    conditions.append(expr[last:])
+    for condition in map(_unwrap, conditions):
+        if _top_level(_BOOLEAN, condition) and condition != expr:
+            if _bounded(condition, keys):
                 return True
+        elif _LOWER_DATE_LIMIT.search(condition) or any(k.match(condition) for k in keys):
+            return True
     return False
+
+
+def _scan(query: str) -> list[str]:
+    """Anti-patterns of one statement: each UNION branch and each derived table judged on its own.
+
+    Filters are read only where filters can be (FROM/ON, WHERE, HAVING; never the SELECT list,
+    GROUP BY or ORDER BY), so a display label - a CASE, a BUILTIN.DF - can't trip a check while a
+    CASE used as a filter, however wrapped, is still seen (#390/#397 review CASE findings)."""
+    reasons: list[str] = []
+    query = _unwrap(query)
+    for branch in _split_top_level(_SET_OPERATOR, query):
+        clauses = _clauses(_unwrap(branch))
+        own_from, derived = _derived_tables(clauses.get("FROM", ""))
+        for inner in derived:
+            reasons += [r for r in _scan(inner) if r not in reasons]
+        where = clauses.get("WHERE", "")
+        filters = " ".join((own_from, where, clauses.get("HAVING", "")))
+        bounded = _bounded(where, _row_key_patterns(own_from))
+        found = []
+        if _BUILTIN_DF_COUNTRY_FILTER.search(filters):
+            found.append("builtin_df_country_filter")
+        if any(table in filters for table in _ADDRESS_TABLES) and not bounded:
+            found.append("unbounded_address_join")
+        if _TRANSACTION_LINES.search(filters) and _BUILTIN_DF_FILTER.search(filters) and not bounded:
+            found.append("unbounded_df_line_scan")
+        reasons += [r for r in found if r not in reasons]
+    return reasons
+
+
+def _split_top_level(pattern: re.Pattern, text: str) -> list[str]:
+    parts, last = [], 0
+    for m in _top_level(pattern, text):
+        parts.append(text[last : m.start()])
+        last = m.end()
+    parts.append(text[last:])
+    return parts
 
 
 # Penalty weight for each perf anti-pattern (subtracted from the efficiency score).
@@ -286,8 +363,10 @@ def detect_perf_anti_patterns(sql: str) -> list[str]:
         (``tl.item IN (SELECT ... WHERE BUILTIN.DF(...) = ...)``) timed out as well,
         so the subquery is not exempt.
 
-    The SQL is lexed first (``_lex`` + ``_without_case``): string literals, comments
-    and CASE labels can neither fake nor hide a filter or a range.
+    The SQL is lexed first (``_lex``) and then read by structure (``_scan``): string
+    literals, comments and display expressions (SELECT list, GROUP BY, ORDER BY) can
+    neither fake nor hide a filter or a range, and a bound counts only as a top-level
+    AND condition of WHERE.
 
     A ``BUILTIN.DF(field) = 'Value'`` filter on a small static custom list is
     still a blessed readability pattern on its own table, or once the scan is
@@ -295,18 +374,10 @@ def detect_perf_anti_patterns(sql: str) -> list[str]:
     """
     if not sql or not sql.strip():
         return []
-    # Read the SQL first: literals, comments and CASE labels can neither fake nor hide a filter
-    # or a range, and a commented-out predicate can't satisfy a scan bound.
-    text = _without_case(_lex(sql))
-    bounded = bool(_TRANDATE_PREDICATE.search(text)) or _is_transaction_lookup(text)
-    reasons: list[str] = []
-    if _BUILTIN_DF_COUNTRY_FILTER.search(text):
-        reasons.append("builtin_df_country_filter")
-    if any(tbl in text for tbl in _ADDRESS_TABLES) and not bounded:
-        reasons.append("unbounded_address_join")
-    if _TRANSACTION_LINES.search(text) and _BUILTIN_DF_FILTER.search(text) and not bounded:
-        reasons.append("unbounded_df_line_scan")
-    return reasons
+    # Read the SQL first (literals and comments can neither fake nor hide syntax), then judge
+    # its structure: filters only from FROM/ON, WHERE and HAVING, bounds only as top-level AND
+    # conditions of WHERE, UNION branches and derived tables each on their own.
+    return _scan(_lex(sql))
 
 
 def score_efficiency(sql: str) -> float:

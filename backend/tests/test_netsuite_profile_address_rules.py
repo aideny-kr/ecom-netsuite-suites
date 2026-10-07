@@ -36,9 +36,9 @@ def test_requires_date_scope_on_address_joins():
 
 def test_address_rule_says_an_upper_limit_alone_is_still_all_history():
     # vs-MCP 2026-10-06: "as of today" became `t.trandate <= today` over the address join and
-    # timed out on both sides. The rule must name the lower limit, and say the tool refuses it.
+    # timed out on both sides. The rule must name the lower limit.
     rule = next(line for line in _netsuite_yaml().splitlines() if "Address-table joins are HEAVY" in line)
-    assert "lower limit" in rule and "t.trandate <=" in rule and "refuses" in rule
+    assert "lower limit" in rule and "t.trandate <=" in rule and "all-time" in rule
     # #397 review R1: "as of today" can mean cumulative-to-date; never silently narrow it to today.
     assert "as of today" not in rule.lower() or "do not narrow" in rule.lower()
 
