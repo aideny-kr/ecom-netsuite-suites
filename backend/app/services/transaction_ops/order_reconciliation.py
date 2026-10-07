@@ -161,6 +161,11 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                     "sales_order_alignment": "required",
                 }
                 adjustments.append(commercial)
+    rounding = _within_rounding(values, config, precision)
+    if rounding:
+        adjustments.append(rounding)
+        for key in ("order_total", "tax"):
+            values[key] = (values[key][0], values[key][0])
     if adjustments:
         result["adjustments"] = adjustments
         result["original_amounts"] = {
@@ -189,5 +194,43 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     elif missing:
         result.update(status="incomplete", reason="amount_evidence_unavailable")
     else:
-        result.update(status="matched", reason="verified_adjustments_agree" if adjustments else "all_amounts_agree")
+        result.update(
+            status="matched",
+            reason="within_rounding_tolerance"
+            if rounding
+            else "verified_adjustments_agree"
+            if adjustments
+            else "all_amounts_agree",
+        )
     return result
+
+
+def _within_rounding(values, config, precision):
+    """The recorded rounding adjustment when a configured tolerance covers what is left.
+
+    Both the order total and the tax must be within it, and refunds must agree exactly.
+    """
+    from app.services.transaction_ops.rounding_tolerance import configured_tolerance
+
+    allowed = configured_tolerance(config, precision)
+    if allowed is None or any(left is None or right is None for left, right in values.values()):
+        return None
+    units, amount = allowed
+    (source_total, target_total), (source_tax, target_tax), (source_refunds, target_refunds) = (
+        values[key] for key in _METRICS
+    )
+    total_delta, tax_delta = source_total - target_total, source_tax - target_tax
+    if (
+        source_refunds != target_refunds
+        or (total_delta == 0 and tax_delta == 0)
+        or abs(total_delta) > amount
+        or abs(tax_delta) > amount
+    ):
+        return None
+    return {
+        "kind": "rounding_tolerance",
+        "minor_units": units,
+        "tolerance": f"{amount:.{precision}f}",
+        "order_total_delta": f"{total_delta:.{precision}f}",
+        "tax_delta": f"{tax_delta:.{precision}f}",
+    }
