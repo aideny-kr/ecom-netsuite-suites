@@ -34,6 +34,8 @@ from tests.test_sales_credit import inputs
         "wrong_department",
         "unexpected_class",
         "line_location_changed",
+        "wrong_memo",  # review round 2 (F4): the posted memo must be the approved one
+        "memo_whitespace",  # NetSuite may trim; surrounding whitespace is not a different memo
     ],
 )
 async def test_credit_readback_requires_exact_native_application_and_gl(variant):
@@ -86,6 +88,10 @@ async def test_credit_readback_requires_exact_native_application_and_gl(variant)
         credit["class"] = {"id": "99"}
     if variant == "line_location_changed":
         credit["line_items"][0]["location"] = {"id": "99"}
+    if variant == "wrong_memo":
+        credit["memo"] = f"{proposal['order_reference']} WRONG MEMO"  # still names the order
+    if variant == "memo_whitespace":
+        credit["memo"] = f" {proposal['proposed_fields']['memo']}  "
     if variant == "source_changed":
         source["total"] = "102"
     if variant == "wrong_gl":
@@ -146,7 +152,9 @@ async def test_credit_readback_requires_exact_native_application_and_gl(variant)
     ):
         result = await verify_after(None, "tenant", proposal, receipt)
     assert result["status"] == (
-        "verified" if variant in {"valid", "lost_receipt", "unpaid", "partial_payment"} else "needs_review"
+        "verified"
+        if variant in {"valid", "lost_receipt", "unpaid", "partial_payment", "memo_whitespace"}
+        else "needs_review"
     ), (
         result.get("reason"),
         result.get("resolution"),

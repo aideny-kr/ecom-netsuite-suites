@@ -723,6 +723,8 @@ async def verify_after(db, tenant_id, proposal, receipt):
         == invoice_gl_signature(proposal["before_gl"])
         and str((cm.get("postingPeriod") or {}).get("id")) == str(proposal["period"]["id"])
         and cm.get("tranDate") == proposal["proposed_fields"]["tranDate"]
+        # The memo approved on the card, as posted (NetSuite may trim surrounding whitespace).
+        and str(cm.get("memo") or "").strip() == str(proposal["proposed_fields"]["memo"]).strip()
         and str((cm.get("entity") or {}).get("id")) == str(proposal["before"]["entity"]["id"])
         and matches_approved(cm, proposal)
     )
