@@ -551,6 +551,11 @@ def _proposal(tenant_id, found, context, result, lines, memo, reason):
             "source": source,
             "support": {"invoice": invoice, "identity": _identity(found, context)},
             "protected_sales_order": context["order"],
+            # The invoice as the human sees it before the credit (shown on the approval card).
+            "before": {k: invoice.get(k) for k in ("tranId", "total", "amountRemaining", "subsidiary")},
+            "accounting_book": next(
+                (str(r.get("accountingbook")) for r in (found["invoices"][0][1] or {}).get("rows") or []), None
+            ),
             "ar_account": fields["account"]["id"],
             "period": dict(found["period"]),
             "sales_adjustment_account": ",".join(
