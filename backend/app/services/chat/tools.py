@@ -401,30 +401,46 @@ async def build_all_tool_definitions(
     return tools
 
 
-def _refuse_unbounded_line_scan(sql: str) -> str | None:
-    """The refusal for a BUILTIN.DF filter on an undated transactionline scan, else None.
+_SCAN_REFUSALS = {
+    "unbounded_df_line_scan": (
+        "Not run: this query reads transactionline and filters with BUILTIN.DF(...) but has no lower "
+        "trandate limit, so NetSuite converts every transaction line in the account's history to text "
+        "before filtering. Queries like this take 1-2 minutes or time out.",
+        "Add a t.trandate range with a lower limit (if the start is unknown, first find it with a small "
+        "query, e.g. the earliest t.trandate for the item IDs), or filter on raw internal IDs instead of "
+        "display text (i.custitem_x = <id>, tl.item IN (<ids>)). Keep BUILTIN.DF in the SELECT list for labels.",
+    ),
+    "unbounded_address_join": (
+        "Not run: this query joins the shipping/billing address table with no lower trandate limit, so "
+        "NetSuite reads the address of every transaction in the account's history. Queries like this take "
+        "about a minute or time out.",
+        "Add a t.trandate range with a lower limit: for 'today' or 'as of today' use "
+        "TRUNC(t.trandate) = TRUNC(SYSDATE); for a period use t.trandate >= <start>. Or look up specific "
+        "transactions (t.id = <id>, t.tranid = '<number>').",
+    ),
+}
 
-    Measured on Framework 2026-10-05: such a query took 65-116 s (a 7-minute chat turn) and
-    timed out on the MCP, while the same filter with a trandate floor returned in seconds.
-    Only this pattern is refused; the older address/country patterns stay scoring-only.
+
+def _refuse_unbounded_scan(sql: str) -> str | None:
+    """The refusal for an undated scan that is proven to time out, else None.
+
+    - unbounded_df_line_scan: measured on Framework 2026-10-05, 65-116 s per query (a 7-minute chat
+      turn) and a timeout on the MCP; the same filter with a trandate floor returned in seconds.
+    - unbounded_address_join: the 2026-06 ship-to-country incident, and twice in the 2026-10-06 vs-MCP
+      benchmark (54-60 s, then a timeout on both sides) when "as of today" became `trandate <= today`.
+    A date range needs a lower limit; a lookup of specific transactions also counts as bounded
+    (see query_eval_harness.detect_perf_anti_patterns). The country-filter pattern stays scoring-only.
     """
     from app.services.query_eval_harness import detect_perf_anti_patterns
 
-    if "unbounded_df_line_scan" not in detect_perf_anti_patterns(sql):
+    refused = [reason for reason in detect_perf_anti_patterns(sql) if reason in _SCAN_REFUSALS]
+    if not refused:
         return None
     return json.dumps(
         {
-            "error": (
-                "Not run: this query reads transactionline and filters with BUILTIN.DF(...) but has no "
-                "trandate range, so NetSuite converts every transaction line in the account's history to "
-                "text before filtering. Queries like this take 1-2 minutes or time out."
-            ),
-            "perf_anti_patterns": ["unbounded_df_line_scan"],
-            "next_step": (
-                "Add a t.trandate range (if the start is unknown, first find it with a small query, e.g. the "
-                "earliest t.trandate for the item IDs), or filter on raw internal IDs instead of display text "
-                "(i.custitem_x = <id>, tl.item IN (<ids>)). Keep BUILTIN.DF in the SELECT list for labels."
-            ),
+            "error": " ".join(_SCAN_REFUSALS[r][0] for r in refused),
+            "perf_anti_patterns": refused,
+            "next_step": " ".join(_SCAN_REFUSALS[r][1] for r in refused),
         }
     )
 
@@ -468,7 +484,7 @@ async def execute_tool_call(
         else (tool_input.get("sqlQuery") if tool_name.endswith("__ns_runCustomSuiteQL") else None)
     )
     if perf_guard and isinstance(sql, str):
-        refused = _refuse_unbounded_line_scan(sql)
+        refused = _refuse_unbounded_scan(sql)
         if refused:
             return refused
     state = None

@@ -34,6 +34,13 @@ def test_requires_date_scope_on_address_joins():
     assert "t.trandate" in text
 
 
+def test_address_rule_says_an_upper_limit_alone_is_still_all_history():
+    # vs-MCP 2026-10-06: "as of today" became `t.trandate <= today` over the address join and
+    # timed out on both sides. The rule must name the lower limit, and say the tool refuses it.
+    rule = next(line for line in _netsuite_yaml().splitlines() if "Address-table joins are HEAVY" in line)
+    assert "lower limit" in rule and "t.trandate <=" in rule and "refuses" in rule
+
+
 def test_warns_shipcountry_is_not_exposed():
     # transaction.shipcountry is NOT_EXPOSED — the rules must flag it, not recommend
     # it as an escape hatch (codex review, 2026-06-05).

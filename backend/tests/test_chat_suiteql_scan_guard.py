@@ -51,3 +51,30 @@ async def test_replays_that_opt_out_run_unchanged(monkeypatch):
     monkeypatch.setattr(tools, "_execute_tool_call_once", rpc)
     await tools.execute_tool_call("netsuite_suiteql", {"query": UNBOUNDED}, perf_guard=False, **CONTEXT)
     assert rpc.await_count == 1
+
+
+ADDRESS_ALL_HISTORY = (
+    "SELECT BUILTIN.DF(sa.country) AS ship_country, COUNT(DISTINCT t.id) AS orders FROM transaction t "
+    "JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress "
+    "WHERE t.type = 'SalesOrd' AND t.trandate <= TO_DATE('2026-10-06', 'YYYY-MM-DD') "
+    "AND sa.country IN ('NO', 'CH', 'NZ', 'SG') GROUP BY BUILTIN.DF(sa.country)"
+)
+
+
+async def test_an_address_join_over_all_history_is_refused_on_both_tools(monkeypatch):
+    """vs-MCP 2026-10-06: "as of today" became `trandate <= today` over the address join and timed out
+    on both sides (54-60 s per query). A lower date limit, or a lookup of specific orders, runs."""
+    rpc = AsyncMock(return_value=json.dumps({"rows": []}))
+    monkeypatch.setattr(tools, "_execute_tool_call_once", rpc)
+    for name, key in (("netsuite_suiteql", "query"), ("ext__abc__ns_runCustomSuiteQL", "sqlQuery")):
+        result = json.loads(await tools.execute_tool_call(name, {key: ADDRESS_ALL_HISTORY}, **CONTEXT))
+        assert result["perf_anti_patterns"] == ["unbounded_address_join"]
+        assert "lower" in result["next_step"] and "address" in result["error"]
+    assert rpc.await_count == 0
+    today = ADDRESS_ALL_HISTORY.replace("t.trandate <=", "TRUNC(t.trandate) =")
+    one_order = ADDRESS_ALL_HISTORY.replace(
+        "t.trandate <= TO_DATE('2026-10-06', 'YYYY-MM-DD')", "t.tranid = 'SO865732'"
+    )
+    for sql in (today, one_order):
+        await tools.execute_tool_call("netsuite_suiteql", {"query": sql}, **CONTEXT)
+    assert rpc.await_count == 2
