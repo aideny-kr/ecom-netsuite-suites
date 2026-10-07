@@ -6,6 +6,7 @@ gross, net and tax to the cent. No per-label or per-cause code: R231821517 is ju
 """
 
 from copy import deepcopy
+from decimal import Decimal
 
 import pytest
 
@@ -245,3 +246,282 @@ def test_an_unconfigured_item_that_posts_to_a_tax_account_is_refused():
     with pytest.raises(cc.RefusalError) as exc:
         cc.assess(lines=[{"item_id": "6000", "amount": "20.00"}], memo="x", **facts)
     assert (exc.value.code, exc.value.detail.get("reason")) == ("item_not_allowed", "unconfigured_item_posts_to_tax")
+
+
+# --- reads (fake NetSuite) ---------------------------------------------------------------------
+
+from contextlib import asynccontextmanager  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from uuid import UUID  # noqa: E402
+
+CASE = UUID("e9c89ea2-e45e-45d0-8dda-e6ca677620f4")
+SCOPE = {
+    "netsuite_account_id": "6738075",
+    "subsidiary_id": "1",
+    "source_connection_id": "s",
+    "record_type": "salesorder",
+}
+
+
+def _netsuite(*, credits=(), named=(), graph_credits=()):
+    """A NetSuite with order R231821517, invoice 16029044 and the given credits."""
+    invoice = {
+        "id": "16029044",
+        "tranId": "INV371382",
+        "total": Decimal("13494.75"),
+        "amountRemaining": Decimal("13494.75"),
+        "account": {"id": "119"},
+        "entity": {"id": "5658593"},
+        "subsidiary": {"id": "1"},
+        "currency": {"id": "1"},
+        "exchangeRate": Decimal("1.0"),
+        "location": {"id": "30"},
+        "department": {"id": "18"},
+    }
+    gl = [
+        {"transaction": 16029044, "account": 119, "accountingbook": 1, "debit": Decimal("13494.75"), "credit": None},
+        {"transaction": 16029044, "account": 54, "accountingbook": 1, "debit": None, "credit": Decimal("13494.75")},
+    ]
+    docs = {}
+    for c in credits:
+        docs[c["id"]] = c
+        gl += [
+            {"transaction": int(c["id"]), "account": 119, "accountingbook": 1, "debit": None, "credit": c["total"]},
+            {"transaction": int(c["id"]), "account": 774, "accountingbook": 1, "debit": c["total"], "credit": None},
+        ]
+    calls = []
+
+    class Reader:
+        async def request(self, method, path, *, params=None, body=None):
+            calls.append((method, path, (body or {}).get("q")))
+            q = (body or {}).get("q") or ""
+            if path == "/query/v1/suiteql":
+                if "t.type = 'SalesOrd'" in q:
+                    rows = [{"id": 15945327, "tranid": "R231821517"}]
+                elif "IN ('CustInvc', 'CashSale')" in q:
+                    rows = [{"id": 16029044}]
+                elif "nexttransactionlinelink" in q:
+                    rows = [{"id": int(c["id"])} for c in credits]
+                elif "tl.createdfrom = 16029044" in q:
+                    rows = []
+                elif "t.memo LIKE" in q:
+                    rows = [{"id": int(i)} for i in named]
+                elif "type = 'CustCred' AND id IN" in q:
+                    rows = [{"id": int(i)} for i in graph_credits]
+                elif "transactionaccountingline" in q:
+                    ids = q.split("IN (")[1].split(")")[0].split(",")
+                    rows = [r for r in gl if str(r["transaction"]) in ids]
+                elif "FROM item" in q:
+                    rows = [
+                        {"id": 1471, "isinactive": "F", "incomeaccount": 774, "itemtype": "Discount"},
+                        {"id": 5005, "isinactive": "F", "incomeaccount": 210, "itemtype": "NonInvtPart"},
+                    ]
+                elif "FROM account " in q:
+                    rows = [
+                        {"id": 119, "accttype": "AcctRec"},
+                        {"id": 54, "accttype": "Income"},
+                        {"id": 774, "accttype": "Income"},
+                    ]
+                elif "FROM accountingperiod" in q:
+                    rows = [{"id": 173}]
+                else:
+                    raise AssertionError(q)
+                return {"items": rows, "count": len(rows), "totalResults": len(rows), "hasMore": False}
+            if path == "/record/v1/invoice/16029044":
+                return invoice
+            if path.startswith("/record/v1/creditMemo/"):
+                return docs[path.rsplit("/", 1)[1]]
+            if path.startswith("/record/v1/accountingPeriod/"):
+                return {"id": "173", "closed": False, "arLocked": False, "allLocked": False}
+            if path.startswith("/record/v1/currency/"):
+                return {"id": "1", "symbol": "USD", "currencyPrecision": 2}
+            if path == "/record/v1/metadata-catalog/creditMemo":
+                return {"properties": {}}
+            raise AssertionError(path)
+
+    return Reader(), calls
+
+
+def _patch_reads(monkeypatch, reader, graph_ids=()):
+    case = SimpleNamespace(id=CASE, order_reference="R231821517", scope_json=SCOPE, latest_report_json={})
+    review = {
+        "configuration_status": "scoped_configuration_found",
+        "connection_active": True,
+        "native_mcp_connector_id": "conn",
+        "scope": SCOPE,
+        "config_id": "fd06b784-9d74-42e8-aa84-d8885fc58005",
+        "netsuite_connection_id": "3871205d-2a4c-4c56-a069-285c5f74836e",
+    }
+    config = SimpleNamespace(
+        mapping_json={
+            "refund_adjustments": {
+                "schema_version": 1,
+                "account_id": "6738075",
+                "subsidiary_id": "1",
+                "tax_reversal_reason_ids": ["4"],
+                "tax_item_accounts": {"5005": "210"},
+                "tax_accounts": ["210"],
+            }
+        }
+    )
+
+    async def get_case(db, tenant_id, case_id):
+        return case
+
+    async def context(db, tenant_id, scope, report):
+        return review
+
+    async def source(db, tenant_id, scope, ref, **kw):
+        return _facts()["source"]
+
+    async def refunds(reader, order_id, subsidiary, currency, *, order_reference):
+        return {"dependency_manifest": {"truncated": False, "transaction_ids": list(graph_ids)}}
+
+    @asynccontextmanager
+    async def authenticated(*args, **kwargs):
+        yield reader
+
+    monkeypatch.setattr("app.services.transaction_ops.case_service.get_case", get_case)
+    monkeypatch.setattr("app.services.transaction_ops.accounting_review.accounting_context", context)
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.refresh_source", source)
+    monkeypatch.setattr("app.services.transaction_ops.netsuite_refunds.collect_refunds", refunds)
+    monkeypatch.setattr("app.services.transaction_ops.netsuite_reader.authenticated_reader", authenticated)
+
+    async def scalar(*a, **k):
+        return config
+
+    return SimpleNamespace(scalar=scalar, info={})
+
+
+def _credit(ident, total, *, applied_to="16029044", unapplied="0", memo="R231821517 other", ext=None):
+    total, unapplied = Decimal(str(total)), Decimal(unapplied)
+    return {
+        "id": ident,
+        "tranId": f"CM{ident}",
+        "total": total,
+        "applied": total - unapplied,
+        "unapplied": unapplied,
+        "account": {"id": "119"},
+        "entity": {"id": "5658593"},
+        "subsidiary": {"id": "1"},
+        "currency": {"id": "1"},
+        "exchangeRate": Decimal("1.0"),
+        "memo": memo,
+        "externalId": ext,
+        "item": {"items": [{"line": 1, "item": {"id": "1471"}, "amount": total, "quantity": 1}]},
+        "apply": {"items": [{"doc": {"id": applied_to}, "apply": True, "amount": total - unapplied}]},
+    }
+
+
+@pytest.mark.asyncio
+async def test_gather_reads_the_order_invoice_and_gl_and_the_outcome_check_accepts_the_credit(monkeypatch):
+    reader, calls = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+    found, context = await cc.gather(db, "tenant", CASE, ["1471"])
+    assert [d["id"] for d, _ in found["invoices"]] == ["16029044"] and found["credits"] == []
+    assert found["period"]["id"] == "173" and found["invoices"][0][0]["currency_code"] == "USD"
+    assert context["order"] == {"id": "15945327", "tranId": "R231821517"}
+    result = cc.assess(lines=LINES, memo="reseller discount", **found)
+    assert result["balance"]["after"]["gross"] == "12820.02"
+
+
+@pytest.mark.asyncio
+async def test_a_credit_applied_to_the_invoice_counts_so_no_second_credit_is_proposed(monkeypatch):
+    reader, _ = _netsuite(credits=[_credit("16123312", 674.73)])
+    db = _patch_reads(monkeypatch, reader)
+    found, _ = await cc.gather(db, "tenant", CASE, ["1471"])
+    assert [d["id"] for d, _ in found["credits"]] == ["16123312"]
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=LINES, memo="x", **found)
+    assert exc.value.code == "no_difference"
+
+
+@pytest.mark.asyncio
+async def test_a_credit_naming_the_order_but_not_applied_to_its_invoice_stops_the_proposal(monkeypatch):
+    stray = _credit("16200000", 674.73, applied_to="999", memo="R231821517 standalone")
+    reader, _ = _netsuite(credits=[stray], named=["16200000"])
+    # The fake also lists it as applied; mark it applied elsewhere through its own apply sublist.
+    db = _patch_reads(monkeypatch, reader)
+    with pytest.raises(cc.RefusalError) as exc:
+        await cc.gather(db, "tenant", CASE, ["1471"])
+    assert exc.value.code == "existing_credit_not_applied_to_invoice"
+
+
+# --- readback ---------------------------------------------------------------------------------
+
+
+def _approved_proposal():
+    found = _facts()
+    result = cc.assess(lines=LINES, memo="reseller discount", **found)
+    ext = "ss-credit-abc"
+    return {
+        "kind": cc.KIND,
+        "case_id": str(CASE),
+        "lines": LINES,
+        "memo": result["proposed_fields"]["memo"],
+        "proposed_fields": {**result["proposed_fields"], "externalId": ext},
+        "expected_after": result["expected_after"],
+        "expected_ledger": result["expected_ledger"],
+        "source": found["source"],
+        "invoice_id": "16029044",
+    }
+
+
+def _after_post(p, **over):
+    found = _facts()
+    credit = {
+        "id": "16123312",
+        "tranId": "CM12127",
+        "total": "674.73",
+        "applied": "674.73",
+        "unapplied": "0",
+        "account": {"id": "119"},
+        "entity": {"id": "5658593"},
+        "subsidiary": {"id": "1"},
+        "currency": {"id": "1"},
+        "exchangeRate": "1.0",
+        "memo": p["proposed_fields"]["memo"],
+        "externalId": p["proposed_fields"]["externalId"],
+        "line_evidence": {"complete": True, "lines": [{"item": {"id": "1471"}, "amount": "674.73"}]},
+    }
+    credit.update(over.pop("credit", {}))
+    gl = {
+        "complete": True,
+        "rows": [
+            {"account": "119", "accountingbook": "1", "credit": "674.73"},
+            {"account": "774", "accountingbook": "1", "debit": over.pop("debit", "674.73")},
+        ],
+    }
+    found["credits"] = [(credit, gl)]
+    found["invoices"][0][0]["amountRemaining"] = "12820.02"
+    return found
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change, outcome",
+    [
+        ({}, "verified"),
+        ({"credit": {"externalId": "other"}}, "credit_creation_not_found:0"),
+        ({"credit": {"memo": "R231821517 something else"}}, "credit_creation_memo_differs"),
+        ({"credit": {"unapplied": "1.00", "applied": "673.73"}}, "credit_creation_not_fully_applied"),
+        (
+            {"credit": {"line_evidence": {"complete": True, "lines": [{"item": {"id": "5005"}, "amount": "674.73"}]}}},
+            "credit_creation_lines_differ",
+        ),
+    ],
+)
+async def test_readback_requires_the_approved_credit_and_an_order_that_now_agrees(monkeypatch, change, outcome):
+    p = _approved_proposal()
+    found = _after_post(p, **deepcopy(change))
+
+    async def fresh(db, tenant_id, proposal):
+        return found, {}
+
+    monkeypatch.setattr(cc, "fresh", fresh)
+    result = await cc.verify_after(SimpleNamespace(info={}), "tenant", p, {"recordId": "16123312"})
+    if outcome == "verified":
+        assert result["status"] == "verified" and result["credit_memo_number"] == "CM12127"
+        assert result["balance"]["booked"] == result["balance"]["source"]
+    else:
+        assert (result["status"], result["reason"]) == ("needs_review", outcome)
