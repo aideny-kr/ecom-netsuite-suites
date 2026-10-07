@@ -920,6 +920,8 @@ export interface SalesCreditReview extends AccountingReviewBase {
   };
   sales_adjustment_account: string;
   sales_adjustment_account_name?: string;
+  /** The approved skill that let the order's own adjustment label take this treatment. */
+  skill?: { name: string; version: number } | null;
 }
 
 export interface InvoiceDiscountReview extends Omit<SalesCreditReview, "kind" | "expected_after"> {
