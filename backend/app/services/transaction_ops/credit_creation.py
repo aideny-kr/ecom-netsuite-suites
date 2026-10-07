@@ -248,7 +248,10 @@ def booked_balance(*, posting_date=None, **order):
 # credit_line_reallocation; the orchestration of reads is repeated (not the accounting logic,
 # which is shared) so that path stays untouched. Unify the two readers in a follow-up.
 
-READ_CALLS = 32
+READ_CALLS = 32  # the reader's hard cap
+# Proposal and approval hold calls back so the readback can also read the credit it created; a
+# correct post must never exceed the budget its own verification needs (review round 4).
+READBACK_RESERVE = 2
 CARD_MAX_AGE_SECONDS = 300
 
 
@@ -269,7 +272,7 @@ def external_id(tenant_id, scope, case_id, invoice_id):
     return f"ss-credit-{digest[:48]}"
 
 
-async def gather(db, tenant_id, case_id, item_ids):
+async def gather(db, tenant_id, case_id, item_ids, *, reserve=0):
     """Fresh, complete evidence for a new credit on one case: ``(order, context)``.
 
     ``order`` is exactly what :func:`assess` takes besides ``lines`` and ``memo``. Read directly
@@ -339,7 +342,11 @@ async def gather(db, tenant_id, case_id, item_ids):
         raise RefusalError("item_not_allowed", {"reason": "item_ids_unreadable"})
     ext = None
     async with authenticated_reader(
-        db, tenant_id, review["netsuite_connection_id"], scope["netsuite_account_id"], max_api_calls=READ_CALLS
+        db,
+        tenant_id,
+        review["netsuite_connection_id"],
+        scope["netsuite_account_id"],
+        max_api_calls=READ_CALLS - reserve,
     ) as reader:
 
         async def ids(query, limit=50):
@@ -397,13 +404,11 @@ async def gather(db, tenant_id, case_id, item_ids):
             "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' "
             f"WHERE tl.createdfrom = {invoice_ids[0]} AND t.type = 'CustCred'"
         )
-        since = str(order.get("tranDate") or "")[:10]
-        window = f"AND t.trandate >= TO_DATE('{since}', 'YYYY-MM-DD') " if len(since) == 10 else ""
-        # Any customer in the subsidiary: a standalone credit naming this order under another
-        # customer must still stop a second credit (review round 3).
+        # Any customer in the subsidiary and any date: a standalone credit naming this order under
+        # another customer (round 3) or backdated before the order (round 4) still stops a second.
         named = await ids(
             "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' "
-            f"WHERE t.type = 'CustCred' AND tl.subsidiary = {subsidiary} {window}"
+            f"WHERE t.type = 'CustCred' AND tl.subsidiary = {subsidiary} "
             f"AND (t.memo LIKE '%{reference}%' OR t.externalid = '{ext}')"
         )
         try:
@@ -686,7 +691,7 @@ async def propose(db, tenant_id, case_id, lines, memo, reason):
     item_ids = (
         [str((x or {}).get("item_id") or "") for x in lines if isinstance(x, dict)] if isinstance(lines, list) else []
     )
-    found, context = await gather(db, tenant_id, case_id, item_ids)
+    found, context = await gather(db, tenant_id, case_id, item_ids, reserve=READBACK_RESERVE)
     result = assess(lines=lines, memo=memo, **found)
     proposal = _proposal(tenant_id, found, context, result, lines, memo, reason)
     from app.services.transaction_ops.resolution_plan import proposal_plan
@@ -722,11 +727,11 @@ def review_for_card(db, tenant_id, tool_name, record_type, normalized, *, check_
     return p
 
 
-async def fresh(db, tenant_id, p):
+async def fresh(db, tenant_id, p, *, reserve=0):
     from app.services.transaction_ops.credit_api_correction import assert_binding_unchanged
     from app.services.transaction_ops.credit_line_reallocation import _json
 
-    found, context = await gather(db, tenant_id, p["case_id"], [x["item_id"] for x in p["lines"]])
+    found, context = await gather(db, tenant_id, p["case_id"], [x["item_id"] for x in p["lines"]], reserve=reserve)
     assert_binding_unchanged(context["review"], p)
     if _json(found["source"]) != p["source"]:
         raise ValueError("credit_creation_source_changed")
@@ -746,7 +751,7 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, p):
         db, tenant_id, tool_name, tool_input.get("recordType", ""), normalize_write_payload(tool_input), check_age=False
     )
     await case_resolution_scope.validate(db, tenant_id, p)
-    found, context = await fresh(db, tenant_id, p)
+    found, context = await fresh(db, tenant_id, p, reserve=READBACK_RESERVE)
     if _identity(found, context) != p["support"]["identity"]:
         raise ValueError("credit_creation_related_record_changed")
     try:

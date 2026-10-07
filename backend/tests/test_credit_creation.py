@@ -339,6 +339,7 @@ def _netsuite(*, credits=(), named=(), graph_credits=()):
                     "subsidiary": {"id": "1"},
                     "currency": {"id": "1"},
                     "lastModifiedDate": "2026-09-30T13:35:00Z",
+                    "tranDate": "2026-09-23",
                     "item": {"items": [{"line": 1, "item": {"id": "70"}, "amount": Decimal("13494.75")}]},
                 }
             if path.startswith("/record/v1/creditMemo/"):
@@ -390,8 +391,11 @@ def _patch_reads(monkeypatch, reader, graph_ids=()):
     async def refunds(reader, order_id, subsidiary, currency, *, order_reference):
         return {"dependency_manifest": {"truncated": False, "transaction_ids": list(graph_ids)}}
 
+    budgets = []
+
     @asynccontextmanager
     async def authenticated(*args, **kwargs):
+        budgets.append(kwargs.get("max_api_calls"))
         yield reader
 
     monkeypatch.setattr("app.services.transaction_ops.case_service.get_case", get_case)
@@ -403,7 +407,7 @@ def _patch_reads(monkeypatch, reader, graph_ids=()):
     async def scalar(*a, **k):
         return config
 
-    return SimpleNamespace(scalar=scalar, info={})
+    return SimpleNamespace(scalar=scalar, info={}, budgets=budgets)
 
 
 def _credit(ident, total, *, applied_to="16029044", unapplied="0", memo="R231821517 other", ext=None):
@@ -860,3 +864,28 @@ def test_r3_f3_fingerprints_do_not_depend_on_gl_row_order():
     context = {"order": {"id": "15945327"}, "refund_graph": {}}
     assert cc.baseline(found, context) == cc.baseline(reversed_, context)
     assert cc._identity(found, context) == cc._identity(reversed_, context)
+
+
+# --- review round 4 -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_r4_f1_the_credit_search_has_no_date_cutoff(monkeypatch):
+    """F1 (a regression from round 3's window): a backdated standalone credit naming the order is
+    found by its memo or external ID whatever its transaction date."""
+    reader, calls = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+    await cc.gather(db, "tenant", CASE, ["1471"])
+    (query,) = [q for _, _, q in calls if q and "t.memo LIKE" in q]
+    assert "trandate" not in query
+
+
+@pytest.mark.asyncio
+async def test_r4_f2_proposal_and_approval_leave_read_budget_for_the_readback(monkeypatch):
+    """F2: preparation could use the whole budget, then the posted credit's own read exceeded it."""
+    reader, _ = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+    await cc.gather(db, "tenant", CASE, ["1471"], reserve=cc.READBACK_RESERVE)
+    await cc.gather(db, "tenant", CASE, ["1471"])
+    assert db.budgets == [cc.READ_CALLS - cc.READBACK_RESERVE, cc.READ_CALLS]
+    assert cc.READ_CALLS <= 32 and cc.READBACK_RESERVE >= 1
