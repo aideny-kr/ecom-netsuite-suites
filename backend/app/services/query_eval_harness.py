@@ -154,6 +154,8 @@ _DEFAULT_ARG = r"(?:\s*,\s*(?:'S'|[\w.]+))?"  # literals are 'S' after _lex
 _BUILTIN_DF_FILTER = re.compile(rf"{_DF_ANY}{_DEFAULT_ARG}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_ANY}")
 _TRANSACTION_LINES = re.compile(r"\bTRANSACTIONLINE\b")
 _CASE_TOKEN = re.compile(r"\b(CASE|END)\b")
+_PREDICATE_BEFORE = re.compile(r"\b(?:WHERE|AND|OR|ON|HAVING|NOT)\s*\(*\s*$")
+_COMPARED_AFTER = re.compile(rf"\s*\)*\s*{_CMP}")
 _NOT_AN_ALIAS = {"WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "ON", "GROUP", "ORDER", "FETCH", "UNION"}
 
 
@@ -189,22 +191,30 @@ def _lex(sql: str) -> str:
 
 
 def _without_case(text: str) -> str:
-    """*text* minus every balanced CASE ... END block (nested ones included). A CASE label compares
-    but filters nothing, and its dates bound nothing (#390 review R1/R4). Unbalanced SQL is kept
-    whole, so a malformed query can only be over-checked, never under-checked."""
-    kept, depth, last = [], 0, 0
+    """*text* minus every balanced CASE ... END block used as a VALUE (nested ones included): a
+    display label compares but filters nothing, and its dates bound nothing (#390 review R1/R4).
+    A CASE used as a predicate stays: one that follows WHERE/AND/OR/ON/HAVING/NOT, or is itself
+    compared after its END (#397 review R4). Unbalanced SQL is kept whole, so a malformed query
+    can only be over-checked, never under-checked."""
+    spans, depth, begin = [], 0, 0
     for m in _CASE_TOKEN.finditer(text):
         if m.group(1) == "CASE":
             if depth == 0:
-                kept.append(text[last : m.start()])
+                begin = m.start()
             depth += 1
         elif depth:
             depth -= 1
             if depth == 0:
-                kept.append(" ")
-                last = m.end()
+                spans.append((begin, m.end()))
     if depth:
         return text
+    kept, last = [], 0
+    for begin, end in spans:
+        predicate = _PREDICATE_BEFORE.search(text[:begin]) or _COMPARED_AFTER.match(text, end)
+        if not predicate:
+            kept.append(text[last:begin])
+            kept.append(" ")
+            last = end
     kept.append(text[last:])
     return "".join(kept)
 
@@ -214,16 +224,35 @@ def _aliases(text: str, table: str) -> set[str]:
     return {a for a in found if a not in _NOT_AN_ALIAS}
 
 
+def _top_level(text: str) -> str:
+    """Only the characters outside every parenthesis."""
+    kept, depth = [], 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif depth == 0:
+            kept.append(ch)
+    return "".join(kept)
+
+
 def _is_transaction_lookup(text: str) -> bool:
-    """Specific transactions by internal ID or number (`t.id = 123`, `t.tranid IN ('SO1')`,
-    `tl.transaction = 987`) read a handful of rows, so they bound the scan like a date range."""
-    literal = r"(?:=\s*(?:\d+|'S')|IN\s*\(\s*(?:\d+|'S'))"
-    for alias in _aliases(text, "TRANSACTION"):
-        if re.search(rf"\b{alias}\s*\.\s*(?:ID|TRANID)\s*{literal}", text):
-            return True
-    for alias in _aliases(text, "TRANSACTIONLINE"):
-        if re.search(rf"\b{alias}\s*\.\s*TRANSACTION\s*{literal}", text):
-            return True
+    """Specific rows by key read a handful of rows, so they bound the scan like a date range:
+    `t.id = 123`, `t.tranid IN ('SO1')`, `tl.transaction = 987`, or one address by its key
+    (`sa.nKey = 123`, #397 review R2). The key must stand directly after WHERE or AND, and no
+    OR may sit outside parentheses, so an ID in an OR branch does not exempt the rest (#397
+    review R3); a parenthesized OR group such as `(t.custbody1 = 'F' OR ... IS NULL)` is fine."""
+    if re.search(r"\bOR\b", _top_level(text)):
+        return False  # with an OR outside parentheses, precedence decides which branch scans
+    literal = r"(?:=\s*(?:\d+\b|'S')|IN\s*\(\s*(?:\d+|'S')[^)]*\))"
+    keys = [(table, r"(?:ID|TRANID)") for table in ("TRANSACTION",)]
+    keys += [("TRANSACTIONLINE", "TRANSACTION")]
+    keys += [(table, "NKEY") for table in _ADDRESS_TABLES]
+    for table, column in keys:
+        for alias in _aliases(text, table):
+            if re.search(rf"\b(?:WHERE|AND)\s+{alias}\s*\.\s*{column}\s*{literal}", text):
+                return True
     return False
 
 

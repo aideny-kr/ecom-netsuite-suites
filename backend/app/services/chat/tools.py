@@ -414,9 +414,10 @@ _SCAN_REFUSALS = {
         "Not run: this query joins the shipping/billing address table with no lower trandate limit, so "
         "NetSuite reads the address of every transaction in the account's history. Queries like this take "
         "about a minute or time out.",
-        "Add a t.trandate range with a lower limit: for 'today' or 'as of today' use "
-        "TRUNC(t.trandate) = TRUNC(SYSDATE); for a period use t.trandate >= <start>. Or look up specific "
-        "transactions (t.id = <id>, t.tranid = '<number>').",
+        "Add a t.trandate range with a lower limit that matches the question: for one day, "
+        "TRUNC(t.trandate) = TRUNC(SYSDATE); for a period, t.trandate >= <start>. If the question means "
+        "everything up to a date, state the start date you use in the answer, or ask the user for it; do not "
+        "silently narrow the period. Or look up specific transactions (t.id = <id>, t.tranid = '<number>').",
     ),
 }
 

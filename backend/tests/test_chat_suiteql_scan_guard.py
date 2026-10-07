@@ -70,6 +70,9 @@ async def test_an_address_join_over_all_history_is_refused_on_both_tools(monkeyp
         result = json.loads(await tools.execute_tool_call(name, {key: ADDRESS_ALL_HISTORY}, **CONTEXT))
         assert result["perf_anti_patterns"] == ["unbounded_address_join"]
         assert "lower" in result["next_step"] and "address" in result["error"]
+        # #397 review R1: the hint must not turn "as of today" into "dated today".
+        assert "as of today" not in result["next_step"].lower()
+        assert "state" in result["next_step"] and "ask" in result["next_step"]
     assert rpc.await_count == 0
     today = ADDRESS_ALL_HISTORY.replace("t.trandate <=", "TRUNC(t.trandate) =")
     one_order = ADDRESS_ALL_HISTORY.replace(

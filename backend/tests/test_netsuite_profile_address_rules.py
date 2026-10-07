@@ -39,6 +39,8 @@ def test_address_rule_says_an_upper_limit_alone_is_still_all_history():
     # timed out on both sides. The rule must name the lower limit, and say the tool refuses it.
     rule = next(line for line in _netsuite_yaml().splitlines() if "Address-table joins are HEAVY" in line)
     assert "lower limit" in rule and "t.trandate <=" in rule and "refuses" in rule
+    # #397 review R1: "as of today" can mean cumulative-to-date; never silently narrow it to today.
+    assert "as of today" not in rule.lower() or "do not narrow" in rule.lower()
 
 
 def test_warns_shipcountry_is_not_exposed():

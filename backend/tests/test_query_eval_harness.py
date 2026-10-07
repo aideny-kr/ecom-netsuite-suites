@@ -467,6 +467,42 @@ class TestATransactionLookupIsBounded:
         assert detect_perf_anti_patterns(sql) == []
 
 
+class TestReviewRoundOneOn397:
+    """gpt-6-astra round 1 on #397, each reproduced before fixing."""
+
+    def test_an_address_key_lookup_is_bounded(self):
+        # R2: one address by its key reads one row.
+        assert (
+            detect_perf_anti_patterns("SELECT sa.country FROM transactionShippingAddress sa WHERE sa.nKey = 123") == []
+        )
+
+    def test_an_id_inside_an_or_branch_does_not_bound_the_scan(self):
+        # R3: the OR branch still scans every sales order in history.
+        sql = (
+            "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id "
+            "WHERE BUILTIN.DF(tl.item) = 'Widget' AND (t.id = 123 OR t.type = 'SalesOrd')"
+        )
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+        reordered = sql.replace("(t.id = 123 OR t.type = 'SalesOrd')", "t.id = 123 OR t.type = 'SalesOrd'")
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(reordered)
+
+    def test_an_and_lookup_next_to_an_unrelated_or_group_still_counts(self):
+        sql = (
+            "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id "
+            "WHERE t.tranid = 'SO865732' AND (t.custbody1 = 'F' OR t.custbody1 IS NULL) "
+            "AND BUILTIN.DF(tl.item) = 'Widget'"
+        )
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_a_case_used_as_a_filter_is_still_checked(self):
+        # R4: this CASE filters rows; it is not a display label.
+        sql = (
+            "SELECT COUNT(*) FROM transaction t JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress "
+            "WHERE t.trandate >= SYSDATE - 30 AND CASE WHEN BUILTIN.DF(sa.country) = 'Singapore' THEN 1 ELSE 0 END = 1"
+        )
+        assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
+
+
 class TestCompositeScore:
     def test_weighted_composite(self):
         # Weights: accuracy 30%, syntax 30%, efficiency 15%, sql_match 25%
