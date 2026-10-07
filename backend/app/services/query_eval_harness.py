@@ -160,9 +160,10 @@ _TRANSACTION_LINES = re.compile(r"\bTRANSACTIONLINE\b")
 
 
 def _lex(sql: str) -> str:
-    """Upper-cased SQL with every string literal replaced by 'S' (handling '' escapes), every quoted
-    identifier by "Q", and comments removed outside both, so a value or an alias can neither fake
-    nor hide syntax (#390 review round 2 R1/R3/R5, #397 round 3 R3)."""
+    """Upper-cased SQL with every string literal replaced by 'S' (handling '' escapes) and comments
+    removed outside literals and quoted identifiers, so a value can neither fake nor hide syntax and
+    `--` inside a quoted alias is not a comment (#390 review round 2 R1/R3/R5, #397 round 3 R3).
+    Quoted identifiers are kept as they are, so a quoted table name is still seen."""
     out: list[str] = []
     i, n = 0, len(sql)
     while i < n:
@@ -173,9 +174,12 @@ def _lex(sql: str) -> str:
             out.append("'S'")
             i = j + 1
         elif sql[i] == '"':
+            # Kept verbatim: a quoted table ("TRANSACTIONLINE") must stay visible (#398 review R1);
+            # only its inside is opaque to the literal and comment handling.
             j = sql.find('"', i + 1)
-            out.append('"Q"')
-            i = n if j < 0 else j + 1
+            j = n - 1 if j < 0 else j
+            out.append(sql[i : j + 1])
+            i = j + 1
         elif sql.startswith("--", i):
             j = sql.find("\n", i)
             out.append(" ")

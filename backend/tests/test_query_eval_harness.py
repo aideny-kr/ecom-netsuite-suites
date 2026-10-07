@@ -389,6 +389,13 @@ class TestLiteralsAndCommentsCannotFoolTheCheck:
         )
         assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
 
+    def test_a_quoted_table_name_is_still_a_table(self):
+        # #398 review round 1 R1: quoting a table must not hide it from the check.
+        lines = 'SELECT t.id FROM transaction t JOIN "TRANSACTIONLINE" tl ON tl.transaction = t.id '
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(lines + "WHERE BUILTIN.DF(tl.item) = 'Widget'")
+        address = 'SELECT t.id FROM transaction t JOIN "TRANSACTIONSHIPPINGADDRESS" sa ON sa.nKey = t.shippingAddress'
+        assert "unbounded_address_join" in detect_perf_anti_patterns(address)
+
     def test_a_quoted_identifier_is_opaque(self):
         sql = 'SELECT BUILTIN.DF(tl.location) AS "Ship -- From" ' + self.LINES + "WHERE BUILTIN.DF(tl.item) = 'Widget'"
         assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
