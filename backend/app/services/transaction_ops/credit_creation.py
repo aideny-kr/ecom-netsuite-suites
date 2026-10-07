@@ -354,7 +354,19 @@ async def gather(db, tenant_id, case_id, item_ids):
         )
         if len(orders) != 1:
             raise RefusalError("evidence_incomplete", {"reason": "sales_order_not_unique", "found": len(orders)})
-        order = {"id": str(orders[0]["id"]), "tranId": orders[0].get("tranid")}
+        raw_order = await reader.request(
+            "GET", f"/record/v1/salesOrder/{orders[0]['id']}", params={"expandSubResources": "true"}
+        )
+        order_problems = []
+        # The whole protected sales order (header, lines, revision), as credit_api_correction
+        # protects it: any change between proposal, approval and readback is seen (round 3).
+        order = {
+            **_project(raw_order, HEADER_FIELDS),
+            "lines": _sublist(raw_order, "item", "order", LINE_FIELDS, order_problems),
+        }
+        if order_problems or str(order.get("id")) != str(orders[0]["id"]) or order.get("tranId") != reference:
+            raise RefusalError("evidence_incomplete", {"reason": "sales_order_unreadable"})
+        order["id"] = str(order["id"])
         invoice_ids = await ids(
             "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' "
             f"WHERE tl.createdfrom = {order['id']} AND t.type IN ('CustInvc', 'CashSale')"
@@ -385,8 +397,13 @@ async def gather(db, tenant_id, case_id, item_ids):
             "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' "
             f"WHERE tl.createdfrom = {invoice_ids[0]} AND t.type = 'CustCred'"
         )
+        since = str(order.get("tranDate") or "")[:10]
+        window = f"AND t.trandate >= TO_DATE('{since}', 'YYYY-MM-DD') " if len(since) == 10 else ""
+        # Any customer in the subsidiary: a standalone credit naming this order under another
+        # customer must still stop a second credit (review round 3).
         named = await ids(
-            f"SELECT t.id FROM transaction t WHERE t.type = 'CustCred' AND t.entity = {entity} "
+            "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' "
+            f"WHERE t.type = 'CustCred' AND tl.subsidiary = {subsidiary} {window}"
             f"AND (t.memo LIKE '%{reference}%' OR t.externalid = '{ext}')"
         )
         try:
@@ -442,6 +459,8 @@ async def gather(db, tenant_id, case_id, item_ids):
             gl[str(row["transaction"])]["rows"].append(
                 {k: row.get(k) for k in ("account", "accountingbook", "debit", "credit")}
             )
+        for section in gl.values():  # NetSuite returns rows in no fixed order (review round 3)
+            section["rows"] = _canonical_gl(section)["rows"]
         account_ids = sorted({str(r["account"]) for r in gl_rows if r.get("account") is not None})
         if not account_ids or not all(_id(a) for a in account_ids):
             raise RefusalError("evidence_incomplete", {"reason": "gl_accounts_unreadable"})
@@ -512,6 +531,19 @@ async def gather(db, tenant_id, case_id, item_ids):
     return found, context
 
 
+def _canonical_gl(gl):
+    """A GL section with its rows in one fixed order, so no comparison depends on how NetSuite
+    happened to return them."""
+    rows = (gl or {}).get("rows") or []
+    return {
+        "complete": (gl or {}).get("complete"),
+        "rows": sorted(
+            rows,
+            key=lambda r: tuple(str(r.get(k)) for k in ("account", "accountingbook", "debit", "credit")),
+        ),
+    }
+
+
 def baseline(found, context, *, exclude=None):
     """Everything the new credit must leave unchanged, in a form a correct write never changes:
     the invoice's identity and GL (not its open amount), every other credit, the profile and
@@ -525,7 +557,7 @@ def baseline(found, context, *, exclude=None):
                 k: invoice.get(k)
                 for k in ("id", "tranId", "total", "entity", "subsidiary", "currency", "account", "createdFrom")
             },
-            "invoice_gl": invoice_gl,
+            "invoice_gl": _canonical_gl(invoice_gl),
             # Every other credit's amounts AND ledger: an account change on an existing credit is a
             # side effect the readback must see (review round 2).
             "credits": sorted(
@@ -548,7 +580,7 @@ def baseline(found, context, *, exclude=None):
                 key=lambda c: c["id"],
             ),
             "profile": found["profile"],
-            "sales_order": (context.get("order") or {}).get("id"),
+            "sales_order": context.get("order") or {},
         }
     )
 
@@ -560,8 +592,8 @@ def _identity(found, context):
 
     return fingerprint(
         {
-            "invoices": [(d, g) for d, g in found["invoices"]],
-            "credits": [(d, g) for d, g in found["credits"]],
+            "invoices": [(d, _canonical_gl(g)) for d, g in found["invoices"]],
+            "credits": [(d, _canonical_gl(g)) for d, g in found["credits"]],
             "profile": found["profile"],
             "items": found["items"],
             "sales_order": context["order"],

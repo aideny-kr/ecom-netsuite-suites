@@ -330,6 +330,17 @@ def _netsuite(*, credits=(), named=(), graph_credits=()):
                 return {"items": rows, "count": len(rows), "totalResults": len(rows), "hasMore": False}
             if path == "/record/v1/invoice/16029044":
                 return invoice
+            if path == "/record/v1/salesOrder/15945327":
+                return {
+                    "id": "15945327",
+                    "tranId": "R231821517",
+                    "total": Decimal("13494.75"),
+                    "entity": {"id": "5658593"},
+                    "subsidiary": {"id": "1"},
+                    "currency": {"id": "1"},
+                    "lastModifiedDate": "2026-09-30T13:35:00Z",
+                    "item": {"items": [{"line": 1, "item": {"id": "70"}, "amount": Decimal("13494.75")}]},
+                }
             if path.startswith("/record/v1/creditMemo/"):
                 return docs[path.rsplit("/", 1)[1]]
             if path.startswith("/record/v1/accountingPeriod/"):
@@ -422,7 +433,8 @@ async def test_gather_reads_the_order_invoice_and_gl_and_the_outcome_check_accep
     found, context = await cc.gather(db, "tenant", CASE, ["1471"])
     assert [d["id"] for d, _ in found["invoices"]] == ["16029044"] and found["credits"] == []
     assert found["period"]["id"] == "173" and found["invoices"][0][0]["currency_code"] == "USD"
-    assert context["order"] == {"id": "15945327", "tranId": "R231821517"}
+    assert (context["order"]["id"], context["order"]["tranId"]) == ("15945327", "R231821517")
+    assert context["order"]["lines"] and context["order"]["lastModifiedDate"]
     result = cc.assess(lines=LINES, memo="reseller discount", **found)
     assert result["balance"]["after"]["gross"] == "12820.02"
 
@@ -811,3 +823,40 @@ def test_r2_f4_a_truncated_memo_is_stable_across_reassessment():
     first = cc.assess(lines=LINES, memo=memo, **_facts())["proposed_fields"]["memo"]
     second = cc.assess(lines=LINES, memo=first, **_facts())["proposed_fields"]["memo"]
     assert first == second and len(first) <= cc.MEMO_MAX and first == first.strip()
+
+
+# --- review round 3: the evidence approval and readback compare is complete and canonical -------
+
+
+@pytest.mark.asyncio
+async def test_r3_f1_the_protected_sales_order_is_the_whole_record(monkeypatch):
+    reader, calls = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+    found, context = await cc.gather(db, "tenant", CASE, ["1471"])
+    order = context["order"]
+    assert (
+        order["id"] == "15945327"
+        and order["total"] == Decimal("13494.75")
+        and order["lastModifiedDate"] == "2026-09-30T13:35:00Z"
+    )
+    changed = {**context, "order": {**order, "total": Decimal("1.00")}}
+    assert cc._identity(found, context) != cc._identity(found, changed)
+    assert cc.baseline(found, context) != cc.baseline(found, changed)
+
+
+@pytest.mark.asyncio
+async def test_r3_f2_the_credit_search_covers_every_customer_in_the_subsidiary(monkeypatch):
+    reader, calls = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+    await cc.gather(db, "tenant", CASE, ["1471"])
+    (query,) = [q for _, _, q in calls if q and "t.memo LIKE" in q]
+    assert "t.entity" not in query and "subsidiary = 1" in query
+
+
+def test_r3_f3_fingerprints_do_not_depend_on_gl_row_order():
+    found = _facts()
+    reversed_ = deepcopy(found)
+    reversed_["invoices"][0][1]["rows"].reverse()
+    context = {"order": {"id": "15945327"}, "refund_graph": {}}
+    assert cc.baseline(found, context) == cc.baseline(reversed_, context)
+    assert cc._identity(found, context) == cc._identity(reversed_, context)
