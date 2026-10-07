@@ -70,13 +70,14 @@ def test_unresolved_refund_cases_share_investigation_without_financial_approval(
 
 
 def test_invoice_discount_is_a_separate_treatment_from_credit_and_tax():
-    from tests.test_invoice_discount import unpaid_inputs
+    from tests.test_invoice_discount import discount_candidate, unpaid_inputs
 
     members = same_scope_members()[:1]
-    for kind, data in (("discount", unpaid_inputs()), ("credit", inputs(paid="25"))):
-        members.append(
-            {"case_id": kind, "confirmation_id": kind, "card": {"accounting_review": build_candidate(**data)}}
-        )
+    for kind, review in (
+        ("discount", discount_candidate(**unpaid_inputs())),
+        ("credit", build_candidate(**inputs(paid="25"))),
+    ):
+        members.append({"case_id": kind, "confirmation_id": kind, "card": {"accounting_review": review}})
     assert {b["treatment"]["kind"] for b in treatment_batches(members)} == {
         "invoice_tax",
         "invoice_sales_adjustment",

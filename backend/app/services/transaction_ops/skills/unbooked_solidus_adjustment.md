@@ -1,9 +1,9 @@
 ---
 name: unbooked-solidus-adjustment
 version: 1
-status: proposed
-approved_by: null
-approved_at: null
+status: approved
+approved_by: Aiden
+approved_at: "2026-10-06"
 cause: An order adjustment in Solidus never reached NetSuite, so NetSuite bills more than Solidus charged.
 diagnosis: needs_credit_memo
 action: create

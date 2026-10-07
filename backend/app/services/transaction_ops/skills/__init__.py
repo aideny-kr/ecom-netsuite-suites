@@ -300,3 +300,39 @@ def skill_find(case_file: dict, chain: dict, *, library: dict | None = None) -> 
         "awaiting_approval": awaiting,
         "ambiguous": [],
     }
+
+
+def credit_memo_skill(item_id: str, *, library: dict | None = None) -> dict | None:
+    """The one approved skill whose change is a one-line credit memo from the invoice on this item.
+
+    None when there is none or more than one: never guess between skills. The sales-credit
+    treatment (`sales_credit`) uses it to let an order's own adjustment label take the
+    configured treatment; accounts, item and book still come from the audited profile. That
+    treatment builds only on stricter evidence than the seed's checks: exactly one invoice
+    created from the order, read from a complete document list; one adjustment explaining
+    both the Solidus header and the invoice total; no credit for this customer from the
+    invoice, on the item, naming the order or carrying the posting key; and no refunds.
+    """
+    library = load_library() if library is None else library
+    found = [
+        skill
+        for skill in library.values()
+        if skill["status"] == "approved"
+        and skill["action"] == "create"
+        and skill["change"]["record_type"] == "creditMemo"
+        and skill["change"]["created_from"] == "invoice"
+        and [str(line["item"]) for line in skill["change"]["lines"]] == [str(item_id)]
+        # Verification finds the posted credit by the order number in its memo.
+        and (skill["change"].get("memo") is None or "order" in _memo_fields(skill["change"]["memo"]))
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+def _memo_fields(memo: str) -> set[str]:
+    return {field for _literal, field, _spec, _conversion in string.Formatter().parse(memo) if field}
+
+
+def credit_memo_text(skill: dict, order: str, label: str) -> str:
+    """The memo the skill books: its template, or "<order> <label>" when it has none."""
+    template = skill["change"].get("memo") or "{order} {adjustment_label}"
+    return template.format(order=order, adjustment_label=label).strip()
