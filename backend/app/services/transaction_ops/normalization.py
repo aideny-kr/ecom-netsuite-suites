@@ -34,6 +34,7 @@ from app.services.transaction_ops.metabase_reader import ReplicaBinding
 from app.services.transaction_ops.netsuite_reader import _account
 from app.services.transaction_ops.periods import ReconciliationPolicy
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile
+from app.services.transaction_ops.rounding_tolerance import RoundingTolerance
 from app.services.transaction_ops.sales_credit_profile import SalesCreditProfile
 
 
@@ -104,6 +105,7 @@ class NetSuiteLegacyTaxMapping(EvidenceModel):
 class TransactionMapping(EvidenceModel):
     sales_credit_profile: SalesCreditProfile | None = None
     refund_adjustments: RefundAdjustmentProfile | None = None
+    rounding_tolerance: RoundingTolerance | None = None
     metabase_replica: ReplicaBinding | None = None
     reconciliation_policy: ReconciliationPolicy | None = None
     solidus_refund_step_id: UUID | None = None
