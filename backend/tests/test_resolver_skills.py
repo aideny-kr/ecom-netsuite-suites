@@ -1,0 +1,265 @@
+"""Resolver skills (spec 2026-10-01 §5.5, block B7): the skill format and finding the skill for a case."""
+
+from __future__ import annotations
+
+import copy
+import textwrap
+
+import pytest
+
+from app.services.transaction_ops import skills
+
+# Shapes from case_file.build_case_file (B5) and resolver_reads.chain_read (B6).
+CASE_FILE = {
+    "case": {"id": "c1", "order": "R100000001", "status": "open"},
+    "comparison": {"metrics": {"order_total": {"solidus": "95.18", "netsuite": "100.00", "difference": "-4.82"}}},
+    "facts": {"adjustments_equal_to_difference": ["Fix Order Status"]},
+}
+CHAIN = {
+    "top": "10",
+    "complete": True,
+    "documents": [
+        {"id": "10", "type": "sales order", "number": "R100000001", "total": 100.0, "created_from": None, "depth": 0},
+        {"id": "11", "type": "customer deposit", "number": "CD1", "total": 100.0, "created_from": "10", "depth": 1},
+        {"id": "12", "type": "invoice", "number": "INV1", "total": 100.0, "created_from": "10", "depth": 1},
+    ],
+}
+SEED = "unbooked-solidus-adjustment"
+
+
+def _approved(library):
+    return {name: {**skill, "status": "approved"} for name, skill in library.items()}
+
+
+def _find(case=CASE_FILE, chain=CHAIN, **kwargs):
+    return skills.skill_find(case, chain, library=_approved(skills.load_library()), **kwargs)
+
+
+def test_the_seed_skill_loads_with_its_evidence_and_awaits_approval():
+    seed = skills.load_library()[SEED]
+    assert seed["status"] == "proposed" and seed["version"] == 1
+    assert seed["diagnosis"] == "needs_credit_memo" and seed["action"] == "create"
+    assert any("CM11788" in e for e in seed["evidence"])
+
+
+def test_an_unbooked_adjustment_gets_the_credit_memo_with_amounts_from_the_case():
+    match = _find()["match"]
+    assert match["skill"] == SEED
+    assert match["change"] == {
+        "record_type": "creditMemo",
+        "created_from": {"type": "invoice", "id": "12", "number": "INV1"},
+        "lines": [{"item": "1471", "amount": "4.82"}],
+        "memo": "R100000001 Fix Order Status",
+    }
+    assert all(check["passed"] for check in match["checks"])
+
+
+@pytest.mark.parametrize(
+    "mutate, failed",
+    [
+        (lambda c, ch: c["facts"].update(adjustments_equal_to_difference=[]), "adjustment_equals_difference"),
+        (lambda c, ch: c["facts"].update(adjustments_equal_to_difference=["A", "B"]), "adjustment_equals_difference"),
+        (lambda c, ch: c["comparison"]["metrics"]["order_total"].update(difference="4.82"), "solidus_below_netsuite"),
+        (lambda c, ch: ch.update(complete=False), "chain_complete"),
+        (lambda c, ch: ch["documents"].pop(), "one_invoice_from_the_order"),
+        (
+            lambda c, ch: ch["documents"].append(
+                {"id": "13", "type": "invoice", "number": "INV2", "total": 1.0, "created_from": "10", "depth": 1}
+            ),
+            "one_invoice_from_the_order",
+        ),
+        (
+            lambda c, ch: ch["documents"].append(
+                {"id": "14", "type": "credit memo", "number": "CM1", "total": -4.82, "created_from": "12", "depth": 2}
+            ),
+            "no_credit_from_the_invoice",
+        ),
+    ],
+)
+def test_a_case_that_fails_a_check_gets_no_skill_and_the_failed_check_is_named(mutate, failed):
+    case, chain = copy.deepcopy(CASE_FILE), copy.deepcopy(CHAIN)
+    mutate(case, chain)
+    result = _find(case, chain)
+    assert result["match"] is None
+    near = {n["skill"]: n for n in result["near"]}
+    assert failed in {f["check"] for f in near[SEED]["failed"]}
+
+
+def test_a_proposed_skill_is_never_applied_only_reported():
+    result = skills.skill_find(CASE_FILE, CHAIN, library=skills.load_library())
+    assert result["match"] is None and result["awaiting_approval"] == [SEED]
+
+
+def test_missing_evidence_fails_the_check_instead_of_raising():
+    result = _find({"case": {"order": "R1"}}, {"documents": []})
+    assert result["match"] is None
+
+
+# --- the format: a bad skill file fails loudly at load ------------------------------------
+
+
+def _write(tmp_path, front):
+    (tmp_path / "x.md").write_text("---\n" + textwrap.dedent(front) + "---\nProse.\n")
+    return tmp_path
+
+
+GOOD = """\
+name: x
+version: 1
+status: proposed
+cause: c
+diagnosis: needs_credit_memo
+action: create
+checks: [solidus_below_netsuite]
+change:
+  record_type: creditMemo
+  created_from: invoice
+  lines: [{item: "1471", amount: difference}]
+  memo: "{order} {adjustment_label}"
+verify: [v]
+evidence: [e]
+"""
+
+
+def test_a_well_formed_skill_file_loads(tmp_path):
+    assert skills.load_library(_write(tmp_path, GOOD))["x"]["prose"] == "Prose."
+
+
+@pytest.mark.parametrize(
+    "replace, why",
+    [
+        (("checks: [solidus_below_netsuite]", "checks: [made_up_check]"), "unknown check"),
+        (("status: proposed", "status: live"), "status"),
+        (("diagnosis: needs_credit_memo", "diagnosis: vibes"), "diagnosis"),
+        (("amount: difference", "amount: 12.50"), "amount"),
+        (("version: 1", "version: one"), "version"),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order} {secret}"'), "memo"),
+    ],
+)
+def test_a_malformed_skill_file_fails_loudly(tmp_path, replace, why):
+    with pytest.raises(ValueError, match=why):
+        skills.load_library(_write(tmp_path, GOOD.replace(*replace)))
+
+
+def test_an_approved_skill_names_who_approved_it(tmp_path):
+    with pytest.raises(ValueError, match="approved_by"):
+        skills.load_library(_write(tmp_path, GOOD.replace("status: proposed", "status: approved")))
+
+
+# --- review round 1 (gpt-6-astra on 14f16c69) ---------------------------------------------
+
+
+def test_r1_a_chain_from_another_order_never_matches():
+    chain = copy.deepcopy(CHAIN)
+    chain["documents"][0]["number"] = "R999999999"
+    result = _find(chain=chain)
+    assert result["match"] is None
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda c, ch: ch["documents"][2].update(id=None),  # invoice without an id
+        lambda c, ch: c["case"].update(order=None),  # no order number for the memo
+        lambda c, ch: c["facts"].update(adjustments_equal_to_difference=[None]),  # a label that is not text
+        lambda c, ch: c["comparison"]["metrics"]["order_total"].update(difference="0"),
+    ],
+)
+def test_r1_resolution_needs_its_own_evidence_whatever_the_checks_say(mutate):
+    case, chain = copy.deepcopy(CASE_FILE), copy.deepcopy(CHAIN)
+    mutate(case, chain)
+    assert _find(case, chain)["match"] is None
+
+
+def test_r1_a_skill_with_few_checks_cannot_crash_on_missing_evidence(tmp_path):
+    library = _approved(skills.load_library(_write(tmp_path, GOOD)))
+    library["x"].update(approved_by="a", approved_at="t")
+    result = skills.skill_find({"comparison": {"metrics": {"order_total": {"difference": "-1"}}}}, {}, library=library)
+    assert result["match"] is None
+
+
+@pytest.mark.parametrize(
+    "replace, why",
+    [
+        (
+            (
+                'lines: [{item: "1471", amount: difference}]',
+                'lines: [{item: "1471", amount: difference}, {item: "1471", amount: difference}]',
+            ),
+            "exactly one line",
+        ),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order[0]} {adjustment_label}"'), "memo"),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order!s}"'), "memo"),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order:>9}"'), "memo"),
+        (('memo: "{order} {adjustment_label}"', "memo: 123"), "memo"),
+        (('memo: "{order} {adjustment_label}"', 'memo: "{order"'), "memo"),
+        (("  created_from: invoice\n", ""), "created_from"),
+        (("action: create", "action: explain_close"), "change"),
+        (("action: create", "action: update"), "update"),
+    ],
+)
+def test_r1_the_loader_rejects_every_shape_it_cannot_resolve_safely(tmp_path, replace, why):
+    with pytest.raises(ValueError, match=why):
+        skills.load_library(_write(tmp_path, GOOD.replace(*replace)))
+
+
+def test_r1_an_explain_skill_carries_no_change(tmp_path):
+    front = GOOD.replace("action: create", "action: explain_close").split("change:")[0] + "verify: [v]\nevidence: [e]\n"
+    assert skills.load_library(_write(tmp_path, front))["x"].get("change") is None
+
+
+# --- review round 2 ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda ch: ch.update(top=None),
+        lambda ch: ch["documents"][0].update(type="customer deposit"),
+        lambda ch: ch["documents"][2].update(created_from=None),
+        lambda ch: ch["documents"][0].update(id=None),
+    ],
+)
+def test_r2_the_chain_must_link_the_invoice_to_this_cases_sales_order(mutate):
+    chain = copy.deepcopy(CHAIN)
+    mutate(chain)
+    assert _find(chain=chain)["match"] is None
+
+
+def test_r2_identity_holds_for_a_skill_with_few_checks(tmp_path):
+    library = _approved(skills.load_library(_write(tmp_path, GOOD)))
+    library["x"].update(approved_by="a", approved_at="t")
+    chain = copy.deepcopy(CHAIN)
+    chain["documents"][0]["type"] = "customer deposit"
+    assert skills.skill_find(CASE_FILE, chain, library=library)["match"] is None
+
+
+@pytest.mark.parametrize(
+    "replace, why",
+    [
+        (("record_type: creditMemo", 'record_type: ""'), "record_type"),
+        (("record_type: creditMemo", "record_type: journalEntry"), "record_type"),
+        (('item: "1471"', 'item: "1471\\n"'), "item"),
+    ],
+)
+def test_r2_record_types_are_allow_listed_and_ids_match_whole(tmp_path, replace, why):
+    with pytest.raises(ValueError, match=why):
+        skills.load_library(_write(tmp_path, GOOD.replace(*replace)))
+
+
+# --- review round 3 ----------------------------------------------------------------------------
+
+
+def test_r3_no_credit_against_an_invoice_that_already_matches_solidus():
+    chain = copy.deepcopy(CHAIN)
+    chain["documents"][2]["total"] = 95.18  # the invoice already equals the Solidus total
+    result = _find(chain=chain)
+    assert result["match"] is None
+    assert any("invoice" in f["detail"] for n in result["near"] for f in n["failed"])
+
+
+@pytest.mark.parametrize("solidus, difference", [("95.175", "-4.825"), ("99.996", "-0.004")])
+def test_r3_an_amount_is_never_rounded_into_the_proposal(solidus, difference):
+    case = copy.deepcopy(CASE_FILE)
+    case["comparison"]["metrics"]["order_total"].update(solidus=solidus, difference=difference)
+    assert _find(case)["match"] is None
