@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, localcontext
 
 from app.schemas.transaction_ops import _decimal
+from app.services.transaction_ops import skills
 from app.services.transaction_ops.commercial_credits import _applied_to, _money, source_adjustment_basis
 from app.services.transaction_ops.credit_classification import (
     FIELDS,
@@ -137,6 +138,11 @@ def _commercial_candidate(*, tenant_id, case_id, source, report, review, support
             if str(posting_sales[0].get("id")) != str(invoice["id"]) or posting_sales[0]["type"] != "CustInvc":
                 return None
             scope = review["scope"]
+            # The configured label takes the treatment as configured. Another label takes it
+            # only for a single adjustment that the one approved credit-memo skill on this
+            # item covers (Aiden, 2026-10-06); accounts, item and book stay the profile's.
+            labels = {a["label"] for a in source["adjustments"]}
+            skill = None if labels == {profile.source_adjustment_label} else skills.credit_memo_skill(profile.item_id)
             if (
                 not basis
                 or review.get("configuration_status") != "scoped_configuration_found"
@@ -150,7 +156,7 @@ def _commercial_candidate(*, tenant_id, case_id, source, report, review, support
                 or basis["source_record_id"] != str(report["source"]["record_id"])
                 or report["source"]["currency"] != profile.currency
                 or review["business_entity_subsidiaries"].get(source["business_entity"]) != profile.subsidiary_id
-                or any(a["label"] != profile.source_adjustment_label for a in source["adjustments"])
+                or (labels != {profile.source_adjustment_label} and (skill is None or len(source["adjustments"]) != 1))
                 or str(invoice["subsidiary"]["id"]) != profile.subsidiary_id
                 or str(support["currency"]["id"]) != str(invoice["currency"]["id"])
                 or support["currency"].get("symbol") != profile.currency
@@ -263,7 +269,11 @@ def _commercial_candidate(*, tenant_id, case_id, source, report, review, support
                 "externalId": key,
                 "tranDate": posting_date.isoformat(),
                 "postingPeriod": {"id": str(period["id"])},
-                "memo": f"{source['number']} {profile.source_adjustment_label}",
+                "memo": (
+                    skills.credit_memo_text(skill, source["number"], source["adjustments"][0]["label"])
+                    if skill
+                    else f"{source['number']} {profile.source_adjustment_label}"
+                ),
                 "autoApply": False,
                 "toBeEmailed": False,
                 "item": {
@@ -283,6 +293,7 @@ def _commercial_candidate(*, tenant_id, case_id, source, report, review, support
             return deepcopy(
                 {
                     "kind": "sales_adjustment_credit",
+                    "skill": {"name": skill["name"], "version": skill["version"]} if skill else None,
                     "mutation_type": "create",
                     "record_type": "creditmemo",
                     "record_id": str(invoice["id"]),
@@ -314,7 +325,13 @@ def _commercial_candidate(*, tenant_id, case_id, source, report, review, support
                     "ar_account": profile.ar_account_id,
                     "sales_adjustment_account": profile.adjustment_account_id,
                     "accounting_book": profile.accounting_book_id,
-                    "approval_basis": "Approve this finalized source commercial adjustment as a non-taxable Sales "
+                    "approval_basis": (
+                        f"Treatment from approved skill {skill['name']} v{skill['version']} "
+                        f"(approved by {skill['approved_by']} on {skill['approved_at']}). "
+                        if skill
+                        else ""
+                    )
+                    + "Approve this finalized source commercial adjustment as a non-taxable Sales "
                     "Adjustments credit and apply only to the displayed invoice. Finance approval confirms this "
                     "treatment and posting date. This credits receivables, leaves invoice tax unchanged, and does "
                     "not issue a cash refund or prove bank/processor settlement. "
@@ -333,12 +350,14 @@ def _commercial_candidate(*, tenant_id, case_id, source, report, review, support
 
 
 def build_candidate(**kwargs):
-    candidate = _commercial_candidate(**kwargs)
-    if candidate and _money(candidate["before"]["amountPaid"]) == 0:
-        from app.services.transaction_ops.invoice_discount import from_commercial_candidate
+    """The credit memo for a missing commercial adjustment, paid or unpaid invoice alike.
 
-        return from_commercial_candidate(candidate)
-    return candidate
+    An unpaid invoice used to get an invoice discount instead (`invoice_discount`), which
+    required the invoice to sit in the current posting period. Aiden, 2026-10-06: an unpaid
+    invoice gets the credit memo too, applied to it, so no issued document is edited.
+    `invoice_discount` still reviews and verifies discount proposals created before.
+    """
+    return _commercial_candidate(**kwargs)
 
 
 async def collect_support(db, tenant_id, source, report, review, evidence, *, now=None):

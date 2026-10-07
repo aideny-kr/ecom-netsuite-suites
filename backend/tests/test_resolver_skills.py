@@ -35,9 +35,9 @@ def _find(case=CASE_FILE, chain=CHAIN, **kwargs):
     return skills.skill_find(case, chain, library=_approved(skills.load_library()), **kwargs)
 
 
-def test_the_seed_skill_loads_with_its_evidence_and_awaits_approval():
+def test_the_seed_skill_loads_with_its_evidence_and_approval():
     seed = skills.load_library()[SEED]
-    assert seed["status"] == "proposed" and seed["version"] == 1
+    assert seed["status"] == "approved" and seed["version"] == 1  # Aiden, 2026-10-06
     assert seed["diagnosis"] == "needs_credit_memo" and seed["action"] == "create"
     assert any("CM11788" in e for e in seed["evidence"])
 
@@ -86,7 +86,8 @@ def test_a_case_that_fails_a_check_gets_no_skill_and_the_failed_check_is_named(m
 
 
 def test_a_proposed_skill_is_never_applied_only_reported():
-    result = skills.skill_find(CASE_FILE, CHAIN, library=skills.load_library())
+    proposed = {name: {**skill, "status": "proposed"} for name, skill in skills.load_library().items()}
+    result = skills.skill_find(CASE_FILE, CHAIN, library=proposed)
     assert result["match"] is None and result["awaiting_approval"] == [SEED]
 
 

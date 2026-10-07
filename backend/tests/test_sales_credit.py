@@ -235,5 +235,8 @@ def test_duplicate_search_does_not_hide_old_partial_or_unapplied_credits():
         )
 
 
-def test_unpaid_taxable_invoice_does_not_fall_back_to_credit():
-    assert build_candidate(**inputs(paid="0")) is None
+def test_an_unpaid_taxable_invoice_gets_the_credit_memo_too():
+    """Aiden, 2026-10-06: an unpaid invoice gets the credit memo (it used to get nothing here)."""
+    p = build_candidate(**inputs(paid="0"))
+    assert p["kind"] == "sales_adjustment_credit"
+    assert p["expected_after"]["credit_tax"] == "0.00" and p["expected_after"]["invoice_remaining"] == "101.00"
