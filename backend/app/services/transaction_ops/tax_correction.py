@@ -479,6 +479,27 @@ def approval_text(p):
     )
 
 
+def card_call(p):
+    """The connector call that displays a candidate's card: ``(mutation, tool name, params)``.
+
+    The proposal's own ``mutation_type`` decides create versus update. A list of creating
+    kinds here turned a new creating treatment (credit_creation) into an update whose
+    card could never bind (smart resolver, review round 1).
+    """
+    mutation = "create" if p.get("mutation_type") == "create" else "update"
+    operation = "ns_createRecord" if mutation == "create" else "ns_updateRecord"
+    name = f"ext__{p['connector_id'].replace('-', '')}__{operation}"
+    params = {
+        "recordType": p["record_type"],
+        "data": p["wire_record_json"]
+        if p.get("execution_transport") == "mcp_record_api"
+        else json.dumps(p["proposed_fields"]),
+    }
+    if mutation == "update":
+        params["recordId"] = p["record_id"]
+    return mutation, name, params
+
+
 async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, session_id, task, tools, policy, case_id):
     """Present a supported correction through the existing HITL card, without another model hop."""
     import re
@@ -505,18 +526,7 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         from app.services.transaction_ops.native_accounting_service import confirmation
 
         return await confirmation(db, tenant_id, actor_id, session_id, p, policy, correlation_id)
-    creating_credit = p.get("kind") == "sales_adjustment_credit"
-    mutation = "create" if creating_credit else "update"
-    operation = "ns_createRecord" if creating_credit else "ns_updateRecord"
-    name = f"ext__{p['connector_id'].replace('-', '')}__{operation}"
-    params = {
-        "recordType": p["record_type"],
-        "data": p["wire_record_json"]
-        if p.get("execution_transport") == "mcp_record_api"
-        else json.dumps(p["proposed_fields"]),
-    }
-    if not creating_credit:
-        params["recordId"] = p["record_id"]
+    mutation, name, params = card_call(p)
     if name not in {t.get("name") for t in tools or []}:
         raise ValueError("The scoped NetSuite update tool is unavailable; no approval card was created.")
     review_for_card(db, tenant_id, name, p["record_type"], normalize_write_payload(params))

@@ -14,6 +14,7 @@ numbers the agent needs to correct itself. Spec: docs/superpowers/specs/2026-10-
 from decimal import Decimal
 
 from app.services.transaction_ops.credit_line_reallocation import (
+    NET_ACCOUNT_TYPES,
     RefusalError,
     _add,
     _adjustments,
@@ -109,7 +110,7 @@ def facts(
     }
 
 
-def _lines(lines, profile, items, taxed, precision):
+def _lines(lines, profile, items, taxed, precision, account_types):
     configured = {str(k): str(v) for k, v in (profile.get("tax_item_accounts") or {}).items()}
     parsed = []
     for raw in lines if isinstance(lines, list) else []:
@@ -132,6 +133,11 @@ def _lines(lines, profile, items, taxed, precision):
         if account in taxed and item_id not in configured:
             # Tax is reversed only through the subsidiary's configured tax-refund items.
             raise RefusalError("item_not_allowed", {"item_id": item_id, "reason": "unconfigured_item_posts_to_tax"})
+        kind = (account_types or {}).get(account)
+        if account not in taxed and kind not in NET_ACCOUNT_TYPES:
+            # A non-tax line must post to an income account; an unknown or liability type is
+            # never assumed to be a sales adjustment (smart resolver, review round 1).
+            raise RefusalError("account_not_supported", {"item_id": item_id, "account": account, "type": kind})
         parsed.append({"item_id": item_id, "amount": amount, "account": account})
     if not parsed:
         raise RefusalError("invalid_amount", {"reason": "no_lines"})
@@ -142,7 +148,7 @@ def assess(*, lines, memo, posting_date, **order):
     """Accept the agent's lines only if the order then equals the source; return the exact card data."""
     precision = order.get("precision", 2)
     found = facts(posting_date=posting_date, **order)
-    parsed = _lines(lines, order["profile"], order["items"], found["taxed"], precision)
+    parsed = _lines(lines, order["profile"], order["items"], found["taxed"], precision, order.get("account_types"))
     total = sum((line["amount"] for line in parsed), Decimal(0))
     new_tax = sum((line["amount"] for line in parsed if line["account"] in found["taxed"]), Decimal(0))
     by_account = {}
@@ -349,8 +355,14 @@ async def gather(db, tenant_id, case_id, item_ids):
         raw_invoice = await reader.request(
             "GET", f"/record/v1/invoice/{invoice_ids[0]}", params={"expandSubResources": "true"}
         )
-        invoice = _project(raw_invoice, HEADER_FIELDS | {"account", "location", "department", "amountRemaining"})
-        if str(invoice.get("id")) != invoice_ids[0] or _ref(invoice, "subsidiary") != subsidiary:
+        invoice = _project(
+            raw_invoice, HEADER_FIELDS | {"account", "location", "department", "amountRemaining", "createdFrom"}
+        )
+        if (
+            str(invoice.get("id")) != invoice_ids[0]
+            or _ref(invoice, "subsidiary") != subsidiary
+            or _ref(invoice, "createdFrom") != order["id"]
+        ):
             raise RefusalError("evidence_incomplete", {"reason": "invoice_identity"})
         entity = _ref(invoice, "entity")
         if not _id(str(entity or "")):
@@ -435,6 +447,11 @@ async def gather(db, tenant_id, case_id, item_ids):
                 reader, f"SELECT id, isinactive, incomeaccount, itemtype FROM item WHERE id IN ({','.join(wanted)})", 50
             )
         }
+        # Every account a line could post to is typed, not only those already in the GL: a
+        # proposed item's account of unknown or liability type must refuse before any write.
+        account_ids = sorted(
+            set(account_ids) | {a for item in items.values() if (a := _item_account(item)) and _id(a)}, key=int
+        )
         account_types = {
             str(r["id"]): r.get("accttype")
             for r in await _suiteql(
@@ -486,6 +503,34 @@ async def gather(db, tenant_id, case_id, item_ids):
     return found, context
 
 
+def baseline(found, context, *, exclude=None):
+    """Everything the new credit must leave unchanged, in a form a correct write never changes:
+    the invoice's identity and GL (not its open amount), every other credit, the profile and
+    the sales order. Taken at proposal; recomputed at readback without the created credit."""
+    from app.services.transaction_ops.resolution_plan import fingerprint
+
+    invoice, invoice_gl = found["invoices"][0]
+    return fingerprint(
+        {
+            "invoice": {
+                k: invoice.get(k)
+                for k in ("id", "tranId", "total", "entity", "subsidiary", "currency", "account", "createdFrom")
+            },
+            "invoice_gl": invoice_gl,
+            "credits": sorted(
+                [
+                    {k: str(d.get(k)) for k in ("id", "total", "applied", "unapplied", "externalId")}
+                    for d, _ in found["credits"]
+                    if str(d.get("id")) != str(exclude)
+                ],
+                key=lambda c: c["id"],
+            ),
+            "profile": found["profile"],
+            "sales_order": (context.get("order") or {}).get("id"),
+        }
+    )
+
+
 def _identity(found, context):
     """What the approved write must leave unchanged: the order's invoices, existing credits, profile,
     sales order and refund graph. Checked at approval and readback."""
@@ -526,6 +571,7 @@ def _proposal(tenant_id, found, context, result, lines, memo, reason):
     return _json(
         {
             "kind": KIND,
+            "mutation_type": "create",
             "tenant_id": str(tenant_id),
             "case_id": context["case_id"],
             "scope": review["scope"],
@@ -549,7 +595,11 @@ def _proposal(tenant_id, found, context, result, lines, memo, reason):
             "expected_ledger": result["expected_ledger"],
             "balance": balance,
             "source": source,
-            "support": {"invoice": invoice, "identity": _identity(found, context)},
+            "support": {
+                "invoice": invoice,
+                "identity": _identity(found, context),
+                "baseline": baseline(found, context),
+            },
             "protected_sales_order": context["order"],
             # The invoice as the human sees it before the credit (shown on the approval card).
             "before": {k: invoice.get(k) for k in ("tranId", "total", "amountRemaining", "subsidiary")},
@@ -670,6 +720,12 @@ async def verify_after(db, tenant_id, p, receipt=None):
         if len(created) != 1:
             raise ValueError(f"credit_creation_not_found:{len(created)}")
         credit, credit_gl = created[0]
+        if (
+            str(found["invoices"][0][0].get("id")) != str(p["invoice_id"])
+            or str((context.get("order") or {}).get("id")) != str(p.get("sales_order_id"))
+            or baseline(found, context, exclude=credit["id"]) != p["support"]["baseline"]
+        ):
+            raise ValueError("credit_creation_related_record_changed")
         if isinstance(receipt, dict) and any(
             str(receipt[k]) != str(credit["id"]) for k in ("id", "recordId", "internalId") if receipt.get(k)
         ):

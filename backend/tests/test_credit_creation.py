@@ -277,6 +277,7 @@ def _netsuite(*, credits=(), named=(), graph_credits=()):
         "exchangeRate": Decimal("1.0"),
         "location": {"id": "30"},
         "department": {"id": "18"},
+        "createdFrom": {"id": "15945327"},
     }
     gl = [
         {"transaction": 16029044, "account": 119, "accountingbook": 1, "debit": Decimal("13494.75"), "credit": None},
@@ -464,6 +465,8 @@ def _approved_proposal():
         "expected_ledger": result["expected_ledger"],
         "source": found["source"],
         "invoice_id": "16029044",
+        "sales_order_id": "15945327",
+        "support": {"baseline": cc.baseline(found, {"order": {"id": "15945327"}})},
     }
 
 
@@ -516,7 +519,7 @@ async def test_readback_requires_the_approved_credit_and_an_order_that_now_agree
     found = _after_post(p, **deepcopy(change))
 
     async def fresh(db, tenant_id, proposal):
-        return found, {}
+        return found, {"order": {"id": "15945327"}}
 
     monkeypatch.setattr(cc, "fresh", fresh)
     result = await cc.verify_after(SimpleNamespace(info={}), "tenant", p, {"recordId": "16123312"})
@@ -607,3 +610,127 @@ def test_the_accounting_playbook_routes_an_uncovered_over_posting_to_the_new_cre
     for rule in ("never round", "Never create a second credit", "exact params", "configured tax-refund item"):
         assert rule.lower() in method.lower()
     assert "transaction_ops_propose_credit" in {t["name"] for t in build_local_tool_definitions()}
+
+
+# --- review round 1 -----------------------------------------------------------------------------
+
+
+def test_r1_f1_the_server_card_creates_a_new_credit_and_updates_everything_else():
+    """F1: the server card decided create-vs-update by listing kinds, so a credit_creation
+    proposal became an update and its card never displayed. The proposal's own mutation_type
+    decides now."""
+    from app.services.transaction_ops.tax_correction import card_call
+
+    base = {
+        "connector_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "record_type": "creditmemo",
+        "record_id": "20",
+        "execution_transport": "mcp_record_api",
+        "wire_record_json": "{}",
+    }
+    mutation, name, params = card_call({**base, "kind": cc.KIND, "mutation_type": "create"})
+    assert (mutation, name.endswith("__ns_createRecord"), "recordId" in params) == ("create", True, False)
+    mutation, name, params = card_call({**base, "kind": "credit_line_reallocation"})
+    assert (mutation, name.endswith("__ns_updateRecord"), params["recordId"]) == ("update", True, "20")
+    mutation, name, _ = card_call(
+        {
+            **base,
+            "kind": "sales_adjustment_credit",
+            "mutation_type": "create",
+            "execution_transport": None,
+            "proposed_fields": {},
+        }
+    )
+    assert (mutation, name.endswith("__ns_createRecord")) == ("create", True)
+
+
+def test_r1_f2_the_proposal_keeps_the_invoice_to_order_edge_the_recheck_binds_through(monkeypatch):
+    """F2: the invoice projection dropped createdFrom, so the recheck could not bind the report."""
+    from app.services.transaction_ops import credit_api_correction
+    from app.services.transaction_ops.treatments import reconciliation_target_id
+
+    monkeypatch.setattr(credit_api_correction, "schema_contract", lambda raw, fields: {"digest": "x"})
+    monkeypatch.setattr(credit_api_correction, "typed_fields", lambda raw, fields: fields)
+    found = _facts()
+    found["invoices"][0][0]["createdFrom"] = {"id": "15945327"}
+    result = cc.assess(lines=LINES, memo="reseller discount", **found)
+    context = {
+        "review": {
+            "scope": SCOPE,
+            "config_id": "c",
+            "netsuite_connection_id": "n",
+            "native_mcp_connector_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        },
+        "case_id": str(CASE),
+        "order": {"id": "15945327"},
+        "catalog": {},
+        "refund_graph": {},
+    }
+    p = cc._proposal("tenant", found, context, result, LINES, "reseller discount", "r")
+    assert p["mutation_type"] == "create"
+    assert p["support"]["invoice"]["createdFrom"] == {"id": "15945327"}
+    assert reconciliation_target_id(p) == "15945327"
+
+
+@pytest.mark.asyncio
+async def test_r1_f2_gather_keeps_created_from_on_the_invoice(monkeypatch):
+    reader, _ = _netsuite()
+    reader_invoice = {"createdFrom": {"id": "15945327", "refName": "Sales Order #R231821517"}}
+    orig = reader.request
+
+    async def request(method, path, **kw):
+        out = await orig(method, path, **kw)
+        return {**out, **reader_invoice} if path == "/record/v1/invoice/16029044" else out
+
+    reader.request = request
+    db = _patch_reads(monkeypatch, reader)
+    found, _ = await cc.gather(db, "tenant", CASE, ["1471"])
+    assert found["invoices"][0][0]["createdFrom"]["id"] == "15945327"
+
+
+def test_r1_f3_a_line_posting_to_a_liability_or_unknown_account_is_refused_before_any_write():
+    facts = _facts()
+    facts["items"]["999"] = {"id": "999", "isInactive": False, "itemType": "OthCharge", "incomeAccount": {"id": "870"}}
+    facts["account_types"]["870"] = "OthCurrLiab"
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=[{"item_id": "999", "amount": "674.73"}], memo="x", **facts)
+    assert exc.value.code == "account_not_supported"
+    facts["items"]["998"] = {"id": "998", "isInactive": False, "itemType": "OthCharge", "incomeAccount": {"id": "871"}}
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=[{"item_id": "998", "amount": "674.73"}], memo="x", **facts)
+    assert exc.value.code == "account_not_supported"  # unknown type: never assumed net
+
+
+@pytest.mark.asyncio
+async def test_r1_f3_gather_reads_the_type_of_every_proposed_items_account(monkeypatch):
+    reader, calls = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+    await cc.gather(db, "tenant", CASE, ["1471"])
+    (query,) = [q for _, path, q in calls if q and "FROM account " in q]
+    assert "774" in query.split("IN (")[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["invoice", "order", "existing_credit"])
+async def test_r1_f4_readback_requires_the_approved_invoice_order_and_unchanged_existing_credits(monkeypatch, change):
+    p = _approved_proposal()
+    found = _after_post(p)
+    p["sales_order_id"] = "15945327"
+    p["support"] = {"baseline": cc.baseline(_facts(), {"order": {"id": "15945327"}})}
+    context = {"order": {"id": "15945327"}}
+    if change == "invoice":
+        found["invoices"][0][0]["id"] = "999999"
+    elif change == "order":
+        context = {"order": {"id": "1"}}
+    else:
+        older = deepcopy(found["credits"][0])
+        older[0].update(id="15", externalId=None, total="1.00")
+        found["credits"].append(older)
+
+    async def fresh(db, tenant_id, proposal):
+        return found, context
+
+    monkeypatch.setattr(cc, "fresh", fresh)
+    result = await cc.verify_after(SimpleNamespace(info={}), "tenant", p, {"recordId": "16123312"})
+    assert result["status"] == "needs_review"
+    assert result["reason"].startswith("credit_creation_related_record_changed")
