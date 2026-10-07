@@ -221,6 +221,11 @@ def review_for_card(db, tenant_id, tool_name, record_type, normalized):
         return discount_review(db, tenant_id, tool_name, record_type, normalized)
     parsed = parse_external_tool_name(tool_name)
     if record_type.lower() == "creditmemo" and parsed and parsed[1] == "ns_createRecord":
+        from app.services.transaction_ops import credit_creation
+
+        if isinstance(cached, dict) and cached.get("kind") == credit_creation.KIND:
+            # An agent-proposed credit, accepted by outcome (smart resolver).
+            return credit_creation.review_for_card(db, tenant_id, tool_name, record_type, normalized)
         from app.services.transaction_ops.sales_credit import review_for_card as credit_review
 
         return credit_review(db, tenant_id, tool_name, record_type, normalized)

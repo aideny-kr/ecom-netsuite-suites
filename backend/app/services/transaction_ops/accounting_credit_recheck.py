@@ -42,10 +42,11 @@ def _read_session(db):
 
 
 def project(p, report, current, *, verified_at, now):
-    from app.services.transaction_ops import credit_line_reallocation
+    from app.services.transaction_ops import credit_creation, credit_line_reallocation
 
-    if p.get("kind") == credit_line_reallocation.KIND:
-        return credit_line_reallocation.project(p, report, current, verified_at=verified_at, now=now)
+    agent = {credit_line_reallocation.KIND: credit_line_reallocation, credit_creation.KIND: credit_creation}
+    if p.get("kind") in agent:
+        return agent[p["kind"]].project(p, report, current, verified_at=verified_at, now=now)
     source, review, evidence, support = current
     if (
         str(support["credit"]["id"]) != p["record_id"]

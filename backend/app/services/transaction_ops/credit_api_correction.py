@@ -18,14 +18,17 @@ from app.services.transaction_ops.resolution_plan import fingerprint
 
 
 def _reallocation(p):
-    """The agent-proposed line reallocation shares this transport but has its own checks.
+    """The agent-proposed MCP credit treatments share this transport but have their own checks:
+    the line reallocation of an existing credit and the creation of a new one (smart resolver).
 
     Every MCP credit proposal reaches the card binding, approval revalidation, readback and
     recheck through the four functions below, so routing it here reaches every call site.
     """
-    from app.services.transaction_ops import credit_line_reallocation
+    from app.services.transaction_ops import credit_creation, credit_line_reallocation
 
-    return credit_line_reallocation if (p or {}).get("kind") == credit_line_reallocation.KIND else None
+    return {credit_line_reallocation.KIND: credit_line_reallocation, credit_creation.KIND: credit_creation}.get(
+        (p or {}).get("kind")
+    )
 
 
 def _json(value):
