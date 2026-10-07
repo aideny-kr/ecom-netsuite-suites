@@ -148,7 +148,9 @@ def verify_applied_credit(basis, invoice, applications, invoice_gl):
         cm, amount = credits[0]
         if (
             amount != credit
-            or _money(cm["taxTotal"]) != 0
+            # NetSuite omits taxTotal on a credit that carries no tax (CM12127, 2026-10-07). Absent
+            # means zero here because the ledger check below admits only the AR and one debit line.
+            or _money(cm.get("taxTotal") or 0) != 0
             # Standalone credits legitimately have a blank native CreatedFrom.
             # Exact apply rows above establish the invoice binding. A conflicting
             # nonempty origin is still rejected. Oracle section_N1312521.html.

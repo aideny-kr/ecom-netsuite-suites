@@ -102,7 +102,9 @@ def _reference_matches(support, profile):
         and cm.get("lines_complete") is True
         and len(lines) == 1
         and amount > 0
-        and _money(cm["taxTotal"]) == 0
+        # NetSuite omits taxTotal on a credit that carries no tax; _gl_proves below admits only
+        # the AR and adjustment lines.
+        and _money(cm.get("taxTotal") or 0) == 0
         and _money(cm["shippingCost"]) == 0
         and _money(cm["discountTotal"]) == 0
         and _money(lines[0]["amount"]) == amount

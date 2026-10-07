@@ -147,6 +147,19 @@ def test_credit_preserves_partially_paid_receivables(paid, remaining):
     assert p["proposed_fields"]["apply"]["items"] == [{"doc": {"id": "20"}, "apply": True, "amount": 5.0}]
 
 
+@pytest.mark.parametrize("absent", ["missing", "none"])
+def test_a_reference_credit_without_a_tax_field_still_proves_the_treatment(absent):
+    """NetSuite omits taxTotal on a credit that carries no tax (CM12127, 2026-10-07); the
+    reference credit's ledger proof already admits only the AR and adjustment lines."""
+    data = inputs()
+    ref = data["support"]["reference_credit"]
+    if absent == "missing":
+        ref.pop("taxTotal")
+    else:
+        ref["taxTotal"] = None
+    assert build_candidate(**data) is not None
+
+
 @pytest.mark.parametrize("paid", ["-1", "102"])
 def test_credit_rejects_negative_payments_and_overpayments(paid):
     assert build_candidate(**inputs(paid=paid)) is None
