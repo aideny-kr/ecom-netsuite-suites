@@ -322,8 +322,14 @@ def credit_memo_skill(item_id: str, *, library: dict | None = None) -> dict | No
         and skill["change"]["record_type"] == "creditMemo"
         and skill["change"]["created_from"] == "invoice"
         and [str(line["item"]) for line in skill["change"]["lines"]] == [str(item_id)]
+        # Verification finds the posted credit by the order number in its memo.
+        and (skill["change"].get("memo") is None or "order" in _memo_fields(skill["change"]["memo"]))
     ]
     return found[0] if len(found) == 1 else None
+
+
+def _memo_fields(memo: str) -> set[str]:
+    return {field for _literal, field, _spec, _conversion in string.Formatter().parse(memo) if field}
 
 
 def credit_memo_text(skill: dict, order: str, label: str) -> str:

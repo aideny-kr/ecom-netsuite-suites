@@ -627,6 +627,7 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
     if (
         not fresh
         or any(fresh[k] != proposal[k] for k in ("proposed_fields", "before", "period"))
+        or fresh.get("skill") != proposal.get("skill")
         or sorted(fresh["before_gl"], key=lambda row: json.dumps(row, sort_keys=True))
         != sorted(proposal["before_gl"], key=lambda row: json.dumps(row, sort_keys=True))
     ):
