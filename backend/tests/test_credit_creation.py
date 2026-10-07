@@ -618,8 +618,8 @@ async def test_a_refusal_returns_its_code_figures_and_guidance(monkeypatch):
 
 
 def test_the_accounting_playbook_routes_an_uncovered_over_posting_to_the_new_credit():
-    from app.services.chat.tools import build_local_tool_definitions
     from app.services.chat.skills import get_skill_instructions
+    from app.services.chat.tools import build_local_tool_definitions
 
     core = get_skill_instructions("accounting_operations")
     assert "credit_creation" in core and "transaction_ops_propose_credit" in core
