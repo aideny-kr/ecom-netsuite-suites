@@ -415,15 +415,15 @@ def _refuse_unbounded_line_scan(sql: str) -> str | None:
     return json.dumps(
         {
             "error": (
-                "Not run: this query reads transactionline and filters with BUILTIN.DF(...) but has no "
-                "trandate range, so NetSuite converts every transaction line in the account's history to "
+                "Not run: this query reads transactionline and filters with BUILTIN.DF(...) but has no lower "
+                "trandate limit, so NetSuite converts every transaction line in the account's history to "
                 "text before filtering. Queries like this take 1-2 minutes or time out."
             ),
             "perf_anti_patterns": ["unbounded_df_line_scan"],
             "next_step": (
-                "Add a t.trandate range (if the start is unknown, first find it with a small query, e.g. the "
-                "earliest t.trandate for the item IDs), or filter on raw internal IDs instead of display text "
-                "(i.custitem_x = <id>, tl.item IN (<ids>)). Keep BUILTIN.DF in the SELECT list for labels."
+                "Add a t.trandate range with a lower limit (if the start is unknown, first find it with a small "
+                "query, e.g. the earliest t.trandate for the item IDs), or filter on raw internal IDs instead of "
+                "display text (i.custitem_x = <id>, tl.item IN (<ids>)). Keep BUILTIN.DF in the SELECT list for labels."
             ),
         }
     )
