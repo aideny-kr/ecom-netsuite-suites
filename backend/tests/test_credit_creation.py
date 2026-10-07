@@ -525,3 +525,85 @@ async def test_readback_requires_the_approved_credit_and_an_order_that_now_agree
         assert result["balance"]["booked"] == result["balance"]["source"]
     else:
         assert (result["status"], result["reason"]) == ("needs_review", outcome)
+
+
+# --- the agent's tool and playbook ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_tool_returns_only_the_exact_card_call_never_amounts_to_restate(monkeypatch):
+    from app.mcp.tools import transaction_ops_tools as tools
+
+    db = SimpleNamespace(info={})
+    actor = SimpleNamespace(id="actor")
+
+    async def authorize(context, create):
+        return db, "tenant", actor
+
+    async def no_scope(*a, **k):
+        return None
+
+    async def log(*a, **k):
+        return SimpleNamespace(id="audit-1")
+
+    async def propose(db_, tenant_id, case_id, lines, memo, reason):
+        p = {
+            "connector_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "record_type": "creditmemo",
+            "wire_record_json": '{"memo": "R231821517 reseller discount"}',
+            "case_id": str(case_id),
+        }
+        db_.info["accounting_correction_candidate"] = p
+        return p
+
+    monkeypatch.setattr(tools, "_authorize", authorize)
+    monkeypatch.setattr("app.services.transaction_ops.case_resolution_scope.load", no_scope)
+    monkeypatch.setattr("app.services.audit_service.log_event", log)
+    monkeypatch.setattr(cc, "propose", propose)
+    out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES, "memo": "reseller discount"})
+    assert out["success"] is True and out["financial_writes"] == 0
+    call = out["correction_candidate"]
+    assert call["tool_name"] == "ext__aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa__ns_createRecord"
+    assert call["params"] == {"recordType": "creditMemo", "data": '{"memo": "R231821517 reseller discount"}'}
+    assert "674.73" not in str(out)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_returns_its_code_figures_and_guidance(monkeypatch):
+    from app.mcp.tools import transaction_ops_tools as tools
+
+    db = SimpleNamespace(info={})
+
+    async def authorize(context, create):
+        return db, "tenant", SimpleNamespace(id="actor")
+
+    async def no_scope(*a, **k):
+        return None
+
+    async def log(*a, **k):
+        return SimpleNamespace(id="audit-1")
+
+    async def propose(*a, **k):
+        raise cc.RefusalError("no_difference", {"booked": {"gross": "1.00"}})
+
+    monkeypatch.setattr(tools, "_authorize", authorize)
+    monkeypatch.setattr("app.services.transaction_ops.case_resolution_scope.load", no_scope)
+    monkeypatch.setattr("app.services.audit_service.log_event", log)
+    monkeypatch.setattr(cc, "propose", propose)
+    out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
+    assert (out["success"], out["refused"]) == (False, "no_difference")
+    assert "NetSuite is right" in out["guidance"]
+    bad = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES, "record_id": "1"})
+    assert bad["success"] is False
+
+
+def test_the_accounting_playbook_routes_an_uncovered_over_posting_to_the_new_credit():
+    from app.services.chat.tools import build_local_tool_definitions
+    from app.services.chat.skills import get_skill_instructions
+
+    core = get_skill_instructions("accounting_operations")
+    assert "credit_creation" in core and "transaction_ops_propose_credit" in core
+    method = get_skill_instructions("credit_creation")
+    for rule in ("never round", "Never create a second credit", "exact params", "configured tax-refund item"):
+        assert rule.lower() in method.lower()
+    assert "transaction_ops_propose_credit" in {t["name"] for t in build_local_tool_definitions()}

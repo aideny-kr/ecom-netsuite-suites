@@ -35,6 +35,7 @@ class TestAllowedChatToolsFromOld:
             "transaction_ops.group_breakdown",
             "transaction_ops.accounting_evidence",
             "transaction_ops.propose_credit_reallocation",
+            "transaction_ops.propose_credit",
             "transaction_ops.accounting_group",
             "transaction_ops.accounting_reference",
             "agent.skill",
