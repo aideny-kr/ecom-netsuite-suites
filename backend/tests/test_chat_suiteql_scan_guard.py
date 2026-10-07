@@ -51,3 +51,17 @@ async def test_replays_that_opt_out_run_unchanged(monkeypatch):
     monkeypatch.setattr(tools, "_execute_tool_call_once", rpc)
     await tools.execute_tool_call("netsuite_suiteql", {"query": UNBOUNDED}, perf_guard=False, **CONTEXT)
     assert rpc.await_count == 1
+
+
+async def test_address_joins_stay_scoring_only_in_chat(monkeypatch):
+    """Not refused: on 30 days of real Framework chat SQL (2026-10-06), 2 of 4 undated address joins
+    ran in 2-4 s because a subquery restricted them to specific orders (the Yucca country breakdown)."""
+    rpc = AsyncMock(return_value=json.dumps({"rows": []}))
+    monkeypatch.setattr(tools, "_execute_tool_call_once", rpc)
+    sql = (
+        "SELECT BUILTIN.DF(sa.country) AS c, COUNT(DISTINCT t.id) FROM transaction t JOIN transactionShippingAddress sa "
+        "ON sa.nKey = t.shippingAddress WHERE t.type = 'SalesOrd' AND t.id IN (SELECT tl.transaction FROM "
+        "transactionline tl WHERE tl.item IN (11889, 5323)) GROUP BY BUILTIN.DF(sa.country)"
+    )
+    await tools.execute_tool_call("netsuite_suiteql", {"query": sql}, **CONTEXT)
+    assert rpc.await_count == 1

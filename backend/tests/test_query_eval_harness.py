@@ -355,6 +355,84 @@ class TestUnboundedDfLineScan:
         assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
 
 
+class TestLiteralsAndCommentsCannotFoolTheCheck:
+    """Quoted text, quoted identifiers and comments are hidden before any pattern is matched
+    (#390 review round 2 R1-quoted/R3/R5, #397 round 3 R3). No structural parsing: #397 showed
+    hand-written structure reading fails review round after round."""
+
+    LINES = "FROM transaction t JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item "
+
+    def test_a_quoted_end_inside_a_label_does_not_expose_the_label(self):
+        sql = (
+            "SELECT CASE WHEN t.type = 'SalesOrd' THEN 'End' WHEN BUILTIN.DF(i.custitem_fw_platform) = 'Yucca' "
+            "THEN 'Yucca' ELSE 'Other' END AS p " + self.LINES + "WHERE t.id = 123"
+        )
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_an_escaped_quote_in_a_default_argument_does_not_hide_the_filter(self):
+        sql = (
+            "SELECT t.id " + self.LINES + "WHERE NVL(BUILTIN.DF(i.custitem_fw_platform), 'Doesn''t have one') = 'Yucca'"
+        )
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+
+    def test_dashes_inside_a_value_are_not_a_comment(self):
+        sql = (
+            "SELECT t.id " + self.LINES + "WHERE BUILTIN.DF(i.custitem_fw_platform) = 'Yucca--EU' "
+            "AND t.trandate >= TO_DATE('2026-09-01', 'YYYY-MM-DD')"
+        )
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_a_real_comment_still_cannot_supply_the_range(self):
+        sql = (
+            "SELECT t.id " + self.LINES + "WHERE BUILTIN.DF(i.custitem_fw_platform) = 'Yucca' "
+            "-- AND t.trandate >= TO_DATE('2026-09-01', 'YYYY-MM-DD')\n"
+        )
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+
+    def test_a_quoted_identifier_is_opaque(self):
+        sql = 'SELECT BUILTIN.DF(tl.location) AS "Ship -- From" ' + self.LINES + "WHERE BUILTIN.DF(tl.item) = 'Widget'"
+        assert "unbounded_df_line_scan" in detect_perf_anti_patterns(sql)
+
+
+class TestARangeNeedsALowerLimit:
+    """`t.trandate <= today` alone still reads all history: vs-MCP 2026-10-06, sales_country_canonical
+    read "as of today" that way and timed out on both sides (54-60 s per query)."""
+
+    DF_SCAN = (
+        "SELECT t.id FROM transaction t JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item "
+        "WHERE BUILTIN.DF(i.custitem_fw_platform) = 'Yucca' AND {bound}"
+    )
+
+    def test_upper_limits_alone_are_not_a_range(self):
+        for bound in (
+            "t.trandate <= TO_DATE('2026-10-06', 'YYYY-MM-DD')",
+            "t.trandate < SYSDATE",
+            "TO_DATE('2026-10-06', 'YYYY-MM-DD') >= t.trandate",
+            "SYSDATE > t.trandate",
+        ):
+            assert "unbounded_df_line_scan" in detect_perf_anti_patterns(self.DF_SCAN.format(bound=bound)), bound
+
+    def test_lower_limits_single_days_and_between_are_ranges(self):
+        for bound in (
+            "t.trandate >= TO_DATE('2026-09-01', 'YYYY-MM-DD')",
+            "t.trandate > SYSDATE - 30",
+            "TRUNC(t.trandate) = TRUNC(SYSDATE)",
+            "t.trandate BETWEEN TO_DATE('2026-09-01', 'YYYY-MM-DD') AND SYSDATE",
+            "TO_DATE('2026-09-01', 'YYYY-MM-DD') <= t.trandate",
+            "SYSDATE - 7 < t.trandate",
+        ):
+            assert detect_perf_anti_patterns(self.DF_SCAN.format(bound=bound)) == [], bound
+
+    def test_the_benchmark_address_query_scores_as_unbounded(self):
+        sql = (
+            "SELECT BUILTIN.DF(sa.country) AS ship_country, COUNT(DISTINCT t.id) FROM transaction t "
+            "JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress WHERE t.type = 'SalesOrd' "
+            "AND t.trandate <= TO_DATE('2026-10-06', 'YYYY-MM-DD') AND sa.country IN ('NO', 'CH') "
+            "GROUP BY BUILTIN.DF(sa.country)"
+        )
+        assert "unbounded_address_join" in detect_perf_anti_patterns(sql)
+
+
 class TestCompositeScore:
     def test_weighted_composite(self):
         # Weights: accuracy 30%, syntax 30%, efficiency 15%, sql_match 25%
