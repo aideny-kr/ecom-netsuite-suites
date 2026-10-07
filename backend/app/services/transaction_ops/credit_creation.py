@@ -32,6 +32,9 @@ KIND = "credit_creation"
 # inventory items would move stock, which a credit for a commercial difference must not do.
 CREDIT_ITEM_TYPES = frozenset({"NonInvtPart", "OthCharge", "Service", "Discount"})
 MEMO_MAX = 500
+# The most credits one order's readback reads. A proposal needs room for its own credit
+# within it, or a correct post could never be verified (review round 2).
+MAX_CREDITS = 8
 
 
 def _item_account(item):
@@ -81,6 +84,8 @@ def facts(
         or any("finalized" in a and a["finalized"] is not True for a in _adjustments(source))
     ):
         raise RefusalError("source_not_final")
+    if require_difference and len(credits) >= MAX_CREDITS:
+        raise RefusalError("too_many_credits", {"credits": len(credits), "max_existing": MAX_CREDITS - 1})
     taxed = _tax_accounts(profile)
     gross, tax, invoice_by_account = _posted(invoice, invoices[0][1], taxed, 1, account_types)
     credit_gross = credit_tax = Decimal(0)
@@ -200,7 +205,7 @@ def assess(*, lines, memo, posting_date, **order):
         "location": {"id": found["location"]},
         "tranDate": posting_date,
         "postingPeriod": {"id": str(order["period"]["id"])},
-        "memo": memo_text[:MEMO_MAX],
+        "memo": memo_text[:MEMO_MAX].rstrip(),  # stable when reassessed (review round 2)
         "autoApply": False,
         "toBeEmailed": False,
         "item": {"items": wire},
@@ -325,6 +330,10 @@ async def gather(db, tenant_id, case_id, item_ids):
     reference = str(source.get("number") or "")
     if reference != case.order_reference or not reference.replace("-", "").isalnum():
         raise RefusalError("evidence_incomplete", {"reason": "source_identity"})
+    if (review.get("business_entity_subsidiaries") or {}).get(source.get("business_entity")) != subsidiary:
+        # The source order must belong to this case's legal entity (as sales_credit and
+        # normalization require): a matching reference elsewhere is never credited here.
+        raise RefusalError("source_scope_mismatch", {"business_entity": source.get("business_entity")})
     wanted = sorted({str(i) for i in item_ids or ()} | {str(k) for k in profile.tax_item_accounts})
     if not wanted or not all(_id(i) for i in wanted):
         raise RefusalError("item_not_allowed", {"reason": "item_ids_unreadable"})
@@ -396,7 +405,7 @@ async def gather(db, tenant_id, case_id, item_ids):
             else []
         )
         credit_ids = sorted(set(applied) | set(created) | set(named) | set(graph_credits), key=int)
-        if len(credit_ids) > 8:
+        if len(credit_ids) > MAX_CREDITS:
             raise RefusalError("evidence_incomplete", {"reason": "too_many_credits", "credits": len(credit_ids)})
         credits = []
         for ident in credit_ids:
@@ -517,10 +526,23 @@ def baseline(found, context, *, exclude=None):
                 for k in ("id", "tranId", "total", "entity", "subsidiary", "currency", "account", "createdFrom")
             },
             "invoice_gl": invoice_gl,
+            # Every other credit's amounts AND ledger: an account change on an existing credit is a
+            # side effect the readback must see (review round 2).
             "credits": sorted(
                 [
-                    {k: str(d.get(k)) for k in ("id", "total", "applied", "unapplied", "externalId")}
-                    for d, _ in found["credits"]
+                    {
+                        **{k: str(d.get(k)) for k in ("id", "total", "applied", "unapplied", "externalId")},
+                        "gl": sorted(
+                            (
+                                str(r.get("account")),
+                                str(r.get("accountingbook")),
+                                str(r.get("debit")),
+                                str(r.get("credit")),
+                            )
+                            for r in (g or {}).get("rows") or []
+                        ),
+                    }
+                    for d, g in found["credits"]
                     if str(d.get("id")) != str(exclude)
                 ],
                 key=lambda c: c["id"],

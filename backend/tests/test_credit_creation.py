@@ -352,6 +352,7 @@ def _patch_reads(monkeypatch, reader, graph_ids=()):
         "scope": SCOPE,
         "config_id": "fd06b784-9d74-42e8-aa84-d8885fc58005",
         "netsuite_connection_id": "3871205d-2a4c-4c56-a069-285c5f74836e",
+        "business_entity_subsidiaries": {"Framework Inc": "1", "Framework BV": "2"},
     }
     config = SimpleNamespace(
         mapping_json={
@@ -373,7 +374,7 @@ def _patch_reads(monkeypatch, reader, graph_ids=()):
         return review
 
     async def source(db, tenant_id, scope, ref, **kw):
-        return _facts()["source"]
+        return {**_facts()["source"], "business_entity": "Framework Inc"}
 
     async def refunds(reader, order_id, subsidiary, currency, *, order_reference):
         return {"dependency_manifest": {"truncated": False, "transaction_ids": list(graph_ids)}}
@@ -734,3 +735,79 @@ async def test_r1_f4_readback_requires_the_approved_invoice_order_and_unchanged_
     result = await cc.verify_after(SimpleNamespace(info={}), "tenant", p, {"recordId": "16123312"})
     assert result["status"] == "needs_review"
     assert result["reason"].startswith("credit_creation_related_record_changed")
+
+
+# --- review round 2 -----------------------------------------------------------------------------
+
+
+def _existing_credit(ident, total="1.00", debit_account="774"):
+    doc = {
+        "id": ident,
+        "total": total,
+        "applied": total,
+        "unapplied": "0",
+        "externalId": None,
+        "account": {"id": "119"},
+        "entity": {"id": "5658593"},
+        "subsidiary": {"id": "1"},
+        "currency": {"id": "1"},
+        "exchangeRate": "1.0",
+    }
+    gl = {
+        "complete": True,
+        "rows": [
+            {"account": "119", "accountingbook": "1", "credit": total},
+            {"account": debit_account, "accountingbook": "1", "debit": total},
+        ],
+    }
+    return doc, gl
+
+
+def test_r2_f1_the_proposal_leaves_room_for_its_own_credit_within_the_readback_bound():
+    """F1: eight existing credits passed the proposal, then nine could never be read back."""
+    facts = _facts()
+    facts["credits"] = [_existing_credit(str(100 + i)) for i in range(cc.MAX_CREDITS)]
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=[{"item_id": "1471", "amount": "666.73"}], memo="x", **facts)
+    assert exc.value.code == "too_many_credits"
+    facts["credits"] = facts["credits"][: cc.MAX_CREDITS - 1]
+    assert cc.assess(lines=[{"item_id": "1471", "amount": "667.73"}], memo="x", **facts)
+
+
+@pytest.mark.asyncio
+async def test_r2_f2_the_source_order_must_belong_to_the_cases_subsidiary(monkeypatch):
+    """F2: a matching reference in another legal entity must never be credited."""
+    reader, _ = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+
+    async def other_entity(db, tenant_id, scope, ref, **kw):
+        return {**_facts()["source"], "business_entity": "Framework BV"}
+
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.refresh_source", other_entity)
+    with pytest.raises(cc.RefusalError) as exc:
+        await cc.gather(db, "tenant", CASE, ["1471"])
+    assert exc.value.code == "source_scope_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_r2_f3_readback_detects_an_existing_credit_whose_accounts_changed(monkeypatch):
+    p = _approved_proposal()
+    before = _facts()
+    before["credits"] = [_existing_credit("15", "1.00", "774")]
+    p["support"] = {"baseline": cc.baseline(before, {"order": {"id": "15945327"}})}
+    found = _after_post(p)
+    found["credits"].append(_existing_credit("15", "1.00", "54"))  # same amount, other account
+
+    async def fresh(db, tenant_id, proposal):
+        return found, {"order": {"id": "15945327"}}
+
+    monkeypatch.setattr(cc, "fresh", fresh)
+    result = await cc.verify_after(SimpleNamespace(info={}), "tenant", p, {"recordId": "16123312"})
+    assert result["status"] == "needs_review" and result["reason"] == "credit_creation_related_record_changed"
+
+
+def test_r2_f4_a_truncated_memo_is_stable_across_reassessment():
+    memo = "x" * 488 + " remainder"
+    first = cc.assess(lines=LINES, memo=memo, **_facts())["proposed_fields"]["memo"]
+    second = cc.assess(lines=LINES, memo=first, **_facts())["proposed_fields"]["memo"]
+    assert first == second and len(first) <= cc.MEMO_MAX and first == first.strip()
