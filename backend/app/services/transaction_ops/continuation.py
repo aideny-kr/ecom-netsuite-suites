@@ -150,7 +150,7 @@ async def continuation_result(db, tenant_id, run_id):
 
 def next_metadata(previous, now, *, operator_retry=False):
     progress = previous.progress_json or {}
-    operator_repair = operator_retry and bool(progress.get("last_collection_failure"))
+    operator_repair = operator_retry and collection_stop(previous) and bool(progress.get("last_collection_failure"))
     if operator_repair:
         if not collection_stop(previous):
             raise ValueError("collection_retry_unavailable")
@@ -253,6 +253,11 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None, operator_retry
     collection_retry = collection_stop(previous, operator_retry=operator_retry)
     if operator_retry:
         await state_service._human(db, tenant_id, actor, "recon.run")
+        if not collection_retry:
+            # A misplaced repair request must not poison ordinary budget or
+            # credential-gated recovery with a permanent blocked audit.
+            await state_service._commit(db, tenant_id)
+            raise state_service.StateError("collection_retry_unavailable", 409)
     if (
         previous.status != "finished"
         or (previous.termination_reason != "budget" and not auth_retry and not collection_retry)

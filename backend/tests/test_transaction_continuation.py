@@ -28,7 +28,9 @@ def distinct_run_creation_times():
         event.remove(TransactionRun, "before_insert", set_created_at)
 
 
-async def budget_run(db, user, *, reason="budget", progress=None, origin="manual", failure=None):
+async def budget_run(
+    db, user, *, reason="budget", progress=None, origin="manual", failure=None, read_failure_code=None
+):
     await db.execute(
         update(TenantFeatureFlag)
         .where(
@@ -65,6 +67,13 @@ async def budget_run(db, user, *, reason="budget", progress=None, origin="manual
         )
     if run.progress_json.get("read_stop_reason"):
         run.progress_json.setdefault("read_stop_run_id", str(run.id))
+    if read_failure_code is not None:
+        run.progress_json["last_read_failure"] = {
+            "code": read_failure_code,
+            "run_id": str(run.id),
+            "resolved": False,
+            "observed_at": run.finished_at.isoformat(),
+        }
     await db.flush()
     return run, config
 

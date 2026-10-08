@@ -362,3 +362,36 @@ async def test_authenticated_repair_endpoint_checks_confirmation_tenant_and_perm
     assert response.status_code == 202, response.text
     assert response.json()["progress_json"]["pending_refs"] == prior.progress_json["pending_refs"]
     assert scheduler._dispatch.call_args.args[3] == scheduler.investigation_queue("schedule", 1000)
+
+
+@pytest.mark.parametrize("kind", ["auth", "budget", "manual"])
+async def test_misplaced_operator_repair_cannot_poison_existing_recovery(db, admin_user, client, monkeypatch, kind):
+    from unittest.mock import AsyncMock
+
+    from app.services.transaction_ops import auth_recovery, continuation, scheduler, state_service
+    from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
+    from tests.test_transaction_continuation import budget_run
+
+    actor, headers = admin_user
+    prior, _ = await budget_run(
+        db,
+        actor,
+        origin="manual" if kind == "manual" else "schedule",
+        reason="error" if kind == "auth" else "budget",
+        failure=NetSuiteEvidenceError("upstream_http_401") if kind == "auth" else TimeoutError(),
+        read_failure_code="netsuite_upstream_http_401" if kind == "auth" else None,
+    )
+    now = prior.finished_at + timedelta(minutes=5)
+    monkeypatch.setattr(state_service, "run_clock", AsyncMock(return_value=now))
+    monkeypatch.setattr(scheduler, "_dispatch", AsyncMock())
+    response = await client.post(
+        f"/api/v1/transaction-ops/runs/{prior.id}/retry-collection", headers=headers, json={"confirm_repaired": True}
+    )
+    assert response.status_code == 409
+    assert await continuation.continuation_result(db, actor.tenant_id, prior.id) == (None, None)
+    # This test isolates the no-poison property. Existing auth-recovery tests
+    # separately prove credential freshness/account checks before a real resume.
+    monkeypatch.setattr(auth_recovery, "auth_resume_ready", AsyncMock(return_value=True))
+    monkeypatch.setattr(continuation, "auth_resume_ready", AsyncMock(return_value=True))
+    child = await continuation.continue_budget_run(db, actor.tenant_id, prior.id, now=now)
+    assert child is not None and child.progress_json["pending_refs"] == prior.progress_json["pending_refs"]
