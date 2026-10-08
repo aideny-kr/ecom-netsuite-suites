@@ -10,12 +10,14 @@ from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionConfig, TransactionRun
 from app.services.transaction_ops import daily_status, state_service
 from app.services.transaction_ops.auth_recovery import auth_stop
+from app.services.transaction_ops.collection_recovery import collection_stop, validated_failure
 from app.services.transaction_ops.continuation import (
     MAX_CYCLE_AGE,
     MAX_PARTS,
     READ_RETRY_DELAYS,
     SCHEDULE_MAX_PARTS,
     auth_resume_due,
+    collection_resume_due,
     continuation_result,
     next_metadata,
     read_retry_due,
@@ -178,8 +180,17 @@ def run_snapshot(run, now):
             "max_read_retries": len(READ_RETRY_DELAYS),
         },
         "last_read_failure": diagnostic,
+        "last_collection_failure": _collection_diagnostic(run),
         "collection_wait": None,
     }
+
+
+def _collection_diagnostic(run):
+    failure = (run.progress_json or {}).get("last_collection_failure")
+    try:
+        return validated_failure(failure, run) if failure else None
+    except (ValueError, TypeError, KeyError):
+        return None
 
 
 def _action(kind, reason, eligible_at=None):
@@ -203,17 +214,22 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
             return _action("continue_checkpoint", continuation["reason"], continuation["eligible_at"])
         if continuation["state"] == "connection_check_required":
             return _action("check_connection", continuation["reason"])
-        if auth_resume_due(latest, now) or continuation["reason"] not in {
-            "part_limit",
-            "cycle_expired",
-            "auth_retry_limit",
-            "no_progress",
-            "read_retry_limit",
-            "paused",
-            "feature_unavailable",
-            "permission_denied",
-            "continuation_unavailable",
-        }:
+        if (
+            collection_resume_due(latest, now)
+            or auth_resume_due(latest, now)
+            or continuation["reason"]
+            not in {
+                "part_limit",
+                "cycle_expired",
+                "auth_retry_limit",
+                "no_progress",
+                "read_retry_limit",
+                "paused",
+                "feature_unavailable",
+                "permission_denied",
+                "continuation_unavailable",
+            }
+        ):
             return _action("operator_review", continuation["reason"])
         # A finite continuation stop is not a permanent stop of the next daily cycle.
         from app.services.transaction_ops.scheduler import _cycle_key, _schedule_key
@@ -361,7 +377,11 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
             snapshots.append(snapshot)
         last = latest.get(config.id)
         recovery = None
-        if last and last.status == "finished" and (last.termination_reason == "budget" or auth_stop(last)):
+        if (
+            last
+            and last.status == "finished"
+            and (last.termination_reason == "budget" or auth_stop(last) or collection_stop(last))
+        ):
             child, blocked = await continuation_result(db, tenant_id, last.id)
             recovery = (
                 {"state": "continued", "reason": "child_exists", "eligible_at": None}
