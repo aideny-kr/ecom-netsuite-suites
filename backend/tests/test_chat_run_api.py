@@ -63,6 +63,21 @@ def mock_rm():
 class TestStreamEndpoint:
     """SSE stream relay from Redis."""
 
+    def test_completed_replay_drains_all_pages(self, client, mock_rm):
+        mock_rm.get_status.return_value = "complete"
+        events = [{"id": f"{i}-0", "data": {"type": "text", "content": f"event-{i}"}} for i in range(1, 301)]
+
+        def read_page(run_id, last_id, count, block_ms):
+            start = int(last_id.split("-")[0])
+            return events[start : start + count]
+
+        mock_rm.read_events.side_effect = read_page
+        response = client.get(f"/api/v1/chat/runs/{uuid.uuid4()}/stream")
+        assert response.status_code == 200
+        assert response.text.count('"type": "text"') == 300
+        assert '"content": "event-300"' in response.text
+        assert response.text.index('"content": "event-300"') < response.text.index('"type": "run_status"')
+
     def test_stream_returns_events_and_content_type(self, client, mock_rm):
         run_id = str(uuid.uuid4())
         mock_rm.get_status.return_value = "running"

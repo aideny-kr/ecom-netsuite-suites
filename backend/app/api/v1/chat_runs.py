@@ -83,25 +83,17 @@ async def stream_run(
                         for event in events:
                             cursor = event["id"]
                             await queue.put(event["data"])
-                    else:
-                        # No events — check if run is done
-                        current = await asyncio.to_thread(rm.get_status, run_id)
-                        if current in _TERMINAL_STATUSES:
-                            # Drain any remaining events
+                    # Check terminal even after an empty read. Drain every
+                    # remaining page before status; reconnects may have a backlog.
+                    current = await asyncio.to_thread(rm.get_status, run_id)
+                    if current in _TERMINAL_STATUSES:
+                        while True:
                             remaining = await asyncio.to_thread(rm.read_events, run_id, cursor, 100, None)
+                            if not remaining:
+                                break
                             for event in remaining:
                                 cursor = event["id"]
                                 await queue.put(event["data"])
-                            await queue.put({"type": "run_status", "status": current})
-                            await queue.put(_SENTINEL)
-                            return
-                    # Check terminal after reading events too
-                    current = await asyncio.to_thread(rm.get_status, run_id)
-                    if current in _TERMINAL_STATUSES:
-                        remaining = await asyncio.to_thread(rm.read_events, run_id, cursor, 100, None)
-                        for event in remaining:
-                            cursor = event["id"]
-                            await queue.put(event["data"])
                         await queue.put({"type": "run_status", "status": current})
                         await queue.put(_SENTINEL)
                         return

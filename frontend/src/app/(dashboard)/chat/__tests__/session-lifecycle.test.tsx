@@ -100,11 +100,20 @@ it("an old aborted stream cannot reset the active conversation's response", asyn
   await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled());
 });
 
-it("creates only one session for an investigate-prefill deep link", async () => {
-  nav.query = "new_session=true&prefill=Investigate+the+evidence"; mount();
+it.each(["new_session=true&", ""])("creates only one session for an investigate-prefill deep link (%s)", async (prefix) => {
+  nav.query = `${prefix}prefill=Investigate+the+evidence`; mount();
   await waitFor(() => expect(api.post.mock.calls.some(c => c[0] === "/api/v1/chat/sessions/created/messages")).toBe(true));
   expect(api.post.mock.calls.filter(c => c[0] === "/api/v1/chat/sessions")).toHaveLength(1);
   expect(nav.replace).toHaveBeenCalledWith("/chat?session=created", { scroll: false });
+});
+
+it("preserves a legacy compose link without selecting previous history", async () => {
+  nav.query = "compose=Use+skill"; mount();
+  await screen.findByRole("button", { name: "older" });
+  expect(nav.replace).not.toHaveBeenCalledWith("/chat?session=recent", { scroll: false });
+  expect(api.get).not.toHaveBeenCalledWith("/api/v1/chat/sessions/recent");
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(api.post.mock.calls.filter(c => c[0] === "/api/v1/chat/sessions")).toHaveLength(1));
 });
 
 it("releases the composer after a terminal SSE error", async () => {
