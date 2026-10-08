@@ -44,6 +44,10 @@ def parse_interpretation(raw: str) -> dict | None:
     return {"diagnosis": body["diagnosis"], "action": body["action"]}
 
 
+# Far above any reply the agent shows; a longer one is refused, never cut (review round 5).
+MAX_INTERPRET_CHARS = 100_000
+
+
 def make_interpreter(*, api_key: str, model: str):
     """An async `interpret(reply_text)` backed by one Anthropic call per reply."""
     from anthropic import AsyncAnthropic
@@ -53,10 +57,13 @@ def make_interpreter(*, api_key: str, model: str):
     async def interpret(reply_text: str) -> dict | None:
         if not reply_text.strip():
             return None
+        if len(reply_text) > MAX_INTERPRET_CHARS:
+            # Reading only the start could take a superseded conclusion for the final one.
+            raise ValueError(f"reply too long to interpret ({len(reply_text)} characters)")
         response = await client.messages.create(
             model=model,
             max_tokens=200,
-            messages=[{"role": "user", "content": PROMPT + reply_text[:8000]}],
+            messages=[{"role": "user", "content": PROMPT + reply_text}],
         )
         text = "".join(getattr(block, "text", "") for block in response.content)
         return parse_interpretation(text)

@@ -62,6 +62,7 @@ class Attempt:
     environment_errors: int = 0
     unreplayable: int = 0
     network_blocked: int = 0
+    unmetered_model_calls: int = 0  # a model call whose usage could not be read
     refused_tools: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -138,17 +139,21 @@ def _created_from(card, fields, review):
         for key, kind in (("invoice_id", "Invoice"), ("sales_order_id", "Sales order"))
         if review.get(key) is not None
     }
+    apply_lines = _sublist(fields, "apply") + [
+        line for line in card.get("proposed_lines") or [] if isinstance(line, dict) and "doc" in line
+    ]
+    applied = {_ref_id(line.get("doc")) for line in apply_lines if line.get("apply", True)}
     origin = fields.get("createdFrom")
     if origin not in (None, "", {}):
+        # Every applied document must be the origin itself: an explicit createdFrom never
+        # masks an application to a document that cannot be typed (review round 5).
+        if applied and applied != {_ref_id(origin)}:
+            return "unknown"
         if _ref_id(origin) in by_id:
             return by_id[_ref_id(origin)]
         name = str(_ref_name(origin) or "").lower()
         return next((kind for kind in CREATED_FROM_TYPES if name.startswith(kind.lower())), "unknown")
     # A credit created standalone and applied to the order's invoice is "against the invoice".
-    apply_lines = _sublist(fields, "apply") + [
-        line for line in card.get("proposed_lines") or [] if isinstance(line, dict) and "doc" in line
-    ]
-    applied = {_ref_id(line.get("doc")) for line in apply_lines if line.get("apply", True)}
     if not applied:
         return None
     # Every applied document must be typed; one untypable application makes the origin unknown.
@@ -245,6 +250,10 @@ def grade(task: Task, attempt: Attempt, *, interpret=None) -> Grade:
         tool_calls=attempt.tool_calls,
         wall_ms=attempt.wall_ms,
         environment_complete=not (
-            attempt.tape_misses or attempt.environment_errors or attempt.unreplayable or attempt.network_blocked
+            attempt.tape_misses
+            or attempt.environment_errors
+            or attempt.unreplayable
+            or attempt.network_blocked
+            or attempt.unmetered_model_calls
         ),
     )

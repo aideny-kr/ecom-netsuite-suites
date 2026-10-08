@@ -82,6 +82,10 @@ async def run(tasks, agent, *, trials: int = 3, out_path=None, meta: dict | None
                     interpret_error = f"{type(exc).__name__}: {exc}"
             hook = (lambda _text: reading) if interpret is not None else None
             graded = asdict(grade(task, attempt, interpret=hook))
+            if interpret_error is not None:
+                # The grader could not read the reply, so this trial's score is not the agent's
+                # (review round 5): it counts, but the run is not comparable.
+                graded["environment_complete"] = False
             rows.append(
                 {
                     "ref": task.ref,

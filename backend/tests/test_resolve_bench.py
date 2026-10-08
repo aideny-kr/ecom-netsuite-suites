@@ -8,11 +8,13 @@ from __future__ import annotations
 import hashlib
 import json
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from app.services.benchmarks.resolve import graders, report, tape, tasks
 from app.services.benchmarks.resolve.graders import Attempt, Proposal
+from app.services.benchmarks.resolve.meter import ModelMeter
 from app.services.benchmarks.resolve.ours import attempt_from_run
 from app.services.chat.agents.base_agent import AgentResult
 from app.services.chat.llm_adapter import TokenUsage
@@ -307,6 +309,65 @@ async def test_three_tasks_run_end_to_end_and_persist(tmp_path):
     assert summary["environment_incomplete_trials"] == 1 and summary["comparable"] is False
 
 
+def _message(usage):
+    return {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": usage,
+    }
+
+
+def _stream_body(input_tokens, output_tokens):
+    start = {**_message({"input_tokens": input_tokens, "output_tokens": 1}), "content": [], "stop_reason": None}
+    events = [
+        ("message_start", {"type": "message_start", "message": start}),
+        (
+            "content_block_start",
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        ),
+        (
+            "content_block_delta",
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        ),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": output_tokens},
+            },
+        ),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    return "".join(f"event: {name}\ndata: {json.dumps(body)}\n\n" for name, body in events)
+
+
+def _anthropic(responses):
+    """A real Anthropic SDK client whose HTTP answers come from `responses`, in order."""
+    import anthropic
+    import httpx
+
+    queue = list(responses)
+
+    def handler(request):
+        kind, body = queue.pop(0)
+        if kind == "stream":
+            return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json=body)
+
+    return anthropic.AsyncAnthropic(api_key="x", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+
+async def model_call(client):
+    await client.messages.create(model="m", max_tokens=1, messages=[{"role": "user", "content": "x"}])
+
+
 # --- our agent: the run mapped onto an attempt ---------------------------------------
 
 
@@ -320,7 +381,7 @@ def test_our_agent_run_becomes_an_attempt(tmp_path):
         tokens_used=TokenUsage(input_tokens=10, output_tokens=5, cache_read_input_tokens=7),
     )
     events = [("text", "server note $4.82"), ("confirmation_required", CARD), ("response", result)]
-    a = attempt_from_run(events, d, wall_ms=1234)
+    a = attempt_from_run(events, d, wall_ms=1234, meter=ModelMeter(input_tokens=10, output_tokens=5, cache_tokens=7))
     assert a.reply_text == "Prepared a credit memo for approval."  # the model's words, not server-written card text
     assert [p.record for p in a.proposals] == ["Credit memo"] and a.resolution is None
     assert (a.tool_calls, a.input_tokens, a.output_tokens, a.cache_tokens, a.tape_misses) == (3, 10, 5, 7, 2)
@@ -378,7 +439,7 @@ def test_both_turns_are_charged_when_the_agent_asked_for_the_source(tmp_path):
         success=True, data="Done.", tool_calls_log=[{"tool_name": "x"}], tokens_used=TokenUsage(input_tokens=6)
     )
     a = attempt_from_run([("response", asked), ("response", answered)], d, wall_ms=1)
-    assert (a.reply_text, a.input_tokens, a.tool_calls) == ("Done.", 10, 1)
+    assert (a.reply_text, a.tool_calls) == ("Done.", 1)
 
 
 async def test_run_ours_drives_the_agent_through_the_tape(tmp_path, monkeypatch):
@@ -395,6 +456,7 @@ async def test_run_ours_drives_the_agent_through_the_tape(tmp_path, monkeypatch)
         '{"ok": 1}',
     )
     seen, seen_actors = [], []
+    llm = _anthropic([("json", _message({"input_tokens": 1})), ("json", _message({"input_tokens": 2}))])
 
     class FakeAgent:
         turns = 0
@@ -404,6 +466,7 @@ async def test_run_ours_drives_the_agent_through_the_tape(tmp_path, monkeypatch)
 
         async def run_streaming(self, *, task, context, db, adapter, model, conversation_history):
             FakeAgent.turns += 1
+            await model_call(llm)
             if FakeAgent.turns == 1:
                 yield (
                     "response",
@@ -918,28 +981,27 @@ async def test_r4_setup_model_calls_are_charged(tmp_path, monkeypatch):
     from app.core.config import settings
     from app.services.benchmarks import agent_runner
     from app.services.benchmarks.resolve import ours
-    from app.services.chat.llm_adapter import LLMResponse
 
-    class FakeAdapter:
-        async def create_message(self, **kwargs):
-            return LLMResponse(usage=TokenUsage(input_tokens=100, output_tokens=10))
+    setup = _anthropic([("json", _message({"input_tokens": 100, "output_tokens": 10}))])
+    turn = _anthropic([("json", _message({"input_tokens": 2}))])
 
     class FakeAgent:
         def __init__(self, **kwargs):
             pass
 
         async def run_streaming(self, **kwargs):
-            yield "response", AgentResult(success=True, data="ok", tokens_used=TokenUsage(input_tokens=2))
+            await model_call(turn)
+            yield "response", AgentResult(success=True, data="ok")
 
     async def _none(*args, **kwargs):
         return None
 
     async def _context(**kwargs):
-        await kwargs["adapter"].create_message(model="m", max_tokens=1, messages=[])
+        await model_call(setup)
         return {}
 
     monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "test-key", raising=False)
-    monkeypatch.setattr(agent_runner, "_build_adapter", lambda **kwargs: FakeAdapter())
+    monkeypatch.setattr(agent_runner, "_build_adapter", lambda **kwargs: object())
     monkeypatch.setattr(agent_runner, "get_active_metadata", _none)
     monkeypatch.setattr(agent_runner, "_load_tenant_config", _none)
     monkeypatch.setattr(agent_runner, "_assemble_context", _context)
@@ -971,3 +1033,173 @@ async def test_r4_a_failed_save_keeps_the_previous_results(tmp_path, monkeypatch
     with pytest.raises(OSError):
         await report.run(bench, agent, trials=1, out_path=out)
     assert len(json.loads(out.read_text())["trials"]) == 1
+
+
+# --- review round 5: one mechanism per shape ----------------------------------------------------
+
+
+def _trial_patches(monkeypatch, agent_cls, context):
+    from app.core.config import settings
+    from app.services.benchmarks import agent_runner
+
+    async def _none(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "test-key", raising=False)
+    monkeypatch.setattr(agent_runner, "_build_adapter", lambda **kwargs: object())
+    monkeypatch.setattr(agent_runner, "get_active_metadata", _none)
+    monkeypatch.setattr(agent_runner, "_load_tenant_config", _none)
+    monkeypatch.setattr(agent_runner, "_assemble_context", context)
+    monkeypatch.setattr(agent_runner, "UnifiedAgent", agent_cls)
+    monkeypatch.setattr(agent_runner, "_asks_for_source", lambda result: False)
+
+
+async def test_r5_every_model_call_in_a_trial_is_charged_wherever_it_is_made(tmp_path, monkeypatch):
+    """F21 then F26 were model calls missed by summing usage at known call sites (entity
+    resolution, then the confidence check). Tokens are counted at the SDK, which every call
+    passes: setup, the agent's turns, a stream, and a side call on another client."""
+    from app.services.benchmarks.resolve import ours
+
+    setup_client = _anthropic([("json", _message({"input_tokens": 100, "output_tokens": 10}))])
+    agent_client = _anthropic(
+        [
+            ("json", _message({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 7})),
+            ("stream", _stream_body(4, 2)),
+        ]
+    )
+    side_client = _anthropic([("json", _message({"input_tokens": 3, "output_tokens": 1}))])
+
+    class Agent:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_streaming(self, **kwargs):
+            await agent_client.messages.create(model="m", max_tokens=1, messages=[{"role": "user", "content": "x"}])
+            async with agent_client.messages.stream(
+                model="m", max_tokens=1, messages=[{"role": "user", "content": "x"}]
+            ) as s:
+                async for _ in s:
+                    pass
+            await side_client.messages.create(model="h", max_tokens=1, messages=[{"role": "user", "content": "x"}])
+            yield "response", AgentResult(success=True, data="ok", tokens_used=TokenUsage(input_tokens=999))
+
+    async def context(**kwargs):
+        await setup_client.messages.create(model="m", max_tokens=1, messages=[{"role": "user", "content": "x"}])
+        return {}
+
+    _trial_patches(monkeypatch, Agent, context)
+    task = tasks.Task(ref="R100000000", case_id="c", prompt="p", gold=None)
+    a = await ours.run_ours(
+        task, 0, db=None, tenant_id="t", actor_id="u", tape=tape.Tape(tmp_path / "t.jsonl"), mode="replay", model="m"
+    )
+    assert (a.input_tokens, a.output_tokens, a.cache_tokens) == (117, 18, 7)
+    assert a.unmetered_model_calls == 0 and a.error is None
+
+
+async def test_r5_a_model_call_whose_usage_cannot_be_read_makes_the_run_not_comparable(tmp_path, monkeypatch):
+    from app.services.benchmarks.resolve import ours
+
+    client = _anthropic([("stream", _stream_body(4, 2))])
+
+    class Agent:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_streaming(self, **kwargs):
+            raw = await client.messages.create(
+                model="m", max_tokens=1, stream=True, messages=[{"role": "user", "content": "x"}]
+            )
+            async for _ in raw:
+                pass
+            yield "response", AgentResult(success=True, data="ok")
+
+    async def context(**kwargs):
+        return {}
+
+    _trial_patches(monkeypatch, Agent, context)
+    task = tasks.Task(ref="R100000000", case_id="c", prompt="p", gold=None)
+    a = await ours.run_ours(
+        task, 0, db=None, tenant_id="t", actor_id="u", tape=tape.Tape(tmp_path / "t.jsonl"), mode="replay", model="m"
+    )
+    assert a.unmetered_model_calls == 1
+    assert graders.grade(tasks.Task(ref="R1", case_id="c", prompt="p", gold=_gold()), a).environment_complete is False
+
+
+async def test_r5_setup_runs_inside_the_network_guard(tmp_path, monkeypatch):
+    """F25: context assembly ran before the guard, so its retrieval could reach other hosts."""
+    import httpx
+
+    from app.services.benchmarks.resolve import ours
+
+    class Agent:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_streaming(self, **kwargs):
+            yield "response", AgentResult(success=True, data="ok")
+
+    async def context(**kwargs):
+        try:  # retrieval swallows its own failures, as the real helpers do
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))) as c:
+                await c.post("https://api.openai.com/v1/embeddings", json={})
+        except Exception:
+            pass
+        return {}
+
+    _trial_patches(monkeypatch, Agent, context)
+    task = tasks.Task(ref="R100000000", case_id="c", prompt="p", gold=None)
+    a = await ours.run_ours(
+        task, 0, db=None, tenant_id="t", actor_id="u", tape=tape.Tape(tmp_path / "t.jsonl"), mode="replay", model="m"
+    )
+    assert a.network_blocked == 1
+
+
+async def test_r5_an_interpreter_failure_makes_the_run_not_comparable(tmp_path):
+    """F23: a failed interpretation lowered the score while the run still read comparable."""
+    bench = [tasks.Task(ref="R100000001", case_id="c", prompt="p", gold=_gold())]
+
+    async def agent(task, trial):
+        return _attempt(resolution=None)  # undeclared, so the interpreter must read it
+
+    async def interpret(text):
+        raise RuntimeError("provider down")
+
+    summary = await report.run(bench, agent, trials=1, out_path=tmp_path / "r.json", interpret=interpret)
+    assert summary["environment_incomplete_trials"] == 1 and summary["comparable"] is False
+
+
+async def test_r5_the_interpreter_reads_the_whole_reply_or_refuses(monkeypatch):
+    """F24: text after 8,000 characters was dropped, so a final conclusion could be ignored."""
+    import anthropic
+
+    from app.services.benchmarks.resolve import interpret as mod
+
+    sent = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.messages = self
+
+        async def create(self, **kwargs):
+            sent.append(kwargs["messages"][0]["content"])
+            return SimpleNamespace(content=[SimpleNamespace(text='{"diagnosis": null, "action": null}')])
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", Client)
+    read = mod.make_interpreter(api_key="x", model="m")
+    await read("a" * 9000 + " FINAL CONCLUSION")
+    assert sent[-1].endswith("FINAL CONCLUSION")
+    with pytest.raises(ValueError, match="too long"):
+        await read("a" * (mod.MAX_INTERPRET_CHARS + 1))
+
+
+@pytest.mark.parametrize(("applied", "expected"), [(["77", "99"], "unknown"), (["77"], "Invoice"), ([], "Invoice")])
+def test_r5_created_from_never_masks_an_untypable_application(applied, expected):
+    """F5: an explicit createdFrom returned before the applied documents were checked."""
+    fields = {
+        **SALES_CREDIT_CARD["proposed_fields"],
+        "createdFrom": {"id": "77"},
+        "apply": {"items": [{"doc": {"id": d}, "apply": True} for d in applied]},
+    }
+    card = {**SALES_CREDIT_CARD, "proposed_fields": fields}
+    card["accounting_review"] = {**(card.get("accounting_review") or {}), "invoice_id": "77"}
+    assert graders.proposal_from_card(card).created_from == expected

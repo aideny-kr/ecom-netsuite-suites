@@ -20,38 +20,18 @@ import uuid
 
 from app.services.benchmarks import agent_runner
 from app.services.benchmarks.resolve.graders import Attempt, proposal_from_card
+from app.services.benchmarks.resolve.meter import ModelMeter, metered
 from app.services.benchmarks.resolve.tape import TapedDispatcher, installed
 
 WALL_CLOCK_SECONDS = 600.0
 
 
-class _ChargedAdapter:
-    """The model adapter for setup calls (entity resolution), adding their usage to the trial."""
-
-    def __init__(self, adapter):
-        self._adapter, self.usage = adapter, []
-
-    def __getattr__(self, name):
-        return getattr(self._adapter, name)
-
-    async def create_message(self, **kwargs):
-        response = await self._adapter.create_message(**kwargs)
-        self.usage.append(getattr(response, "usage", None))
-        return response
-
-
-def _usage(results, field_name):
-    return sum(int(getattr(getattr(r, "tokens_used", None), field_name, 0) or 0) for r in results)
-
-
-def _setup(usages, field_name):
-    return sum(int(getattr(u, field_name, 0) or 0) for u in usages if u is not None)
-
-
 def attempt_from_run(
-    events, dispatcher: TapedDispatcher, *, wall_ms: int, error: str | None = None, setup_usage=()
+    events, dispatcher: TapedDispatcher, *, wall_ms: int, error: str | None = None, meter: ModelMeter | None = None
 ) -> Attempt:
-    """Every turn's usage and tool calls are charged; the reply graded is the last turn's."""
+    """Tokens come from the trial's meter (every model call, wherever made); tool calls from
+    every turn; the reply graded is the last turn's."""
+    meter = meter or ModelMeter()
     cards = [payload for kind, payload in events if kind == "confirmation_required" and isinstance(payload, dict)]
     results = [payload for kind, payload in events if kind == "response"]
     result = results[-1] if results else None
@@ -75,12 +55,10 @@ def attempt_from_run(
         unreplayable=dispatcher.unreplayable,
         network_blocked=dispatcher.network_blocked,
         refused_tools=len(dispatcher.refused),
-        input_tokens=_usage(results, "input_tokens") + _setup(setup_usage, "input_tokens"),
-        output_tokens=_usage(results, "output_tokens") + _setup(setup_usage, "output_tokens"),
-        cache_tokens=_usage(results, "cache_creation_input_tokens")
-        + _usage(results, "cache_read_input_tokens")
-        + _setup(setup_usage, "cache_creation_input_tokens")
-        + _setup(setup_usage, "cache_read_input_tokens"),
+        input_tokens=meter.input_tokens,
+        output_tokens=meter.output_tokens,
+        cache_tokens=meter.cache_tokens,
+        unmetered_model_calls=meter.unmetered,
         tool_calls=sum(len(getattr(r, "tool_calls_log", None) or []) for r in results),
         wall_ms=wall_ms,
         error=error
@@ -92,28 +70,72 @@ async def run_ours(
     task, trial, *, db, tenant_id: uuid.UUID, actor_id: uuid.UUID, tape, mode: str, model: str
 ) -> Attempt:
     """One trial. `mode` is "replay" (default for scoring) or "record" (staging, first run)."""
-    from app.core.config import settings
     from app.services.chat import tools
 
     dispatcher = TapedDispatcher(tape, mode=mode, live=tools._execute_tool_call_once if mode == "record" else None)
     start = time.monotonic()
     events: list = []
     error = None
-    setup = None
+    meter = ModelMeter()
     try:
-        adapter = agent_runner._build_adapter(provider="anthropic", api_key=settings.ANTHROPIC_API_KEY)
-        metadata = await agent_runner.get_active_metadata(db, tenant_id)
-        tenant_config = await agent_runner._load_tenant_config(db, tenant_id)
-        setup = _ChargedAdapter(adapter)  # entity resolution calls the model before the agent runs
-        context = await agent_runner._assemble_context(
-            db=db,
-            tenant_id=tenant_id,
-            question=task.prompt,
-            adapter=setup,
-            entity_resolver_model=model,
-            tenant_config=tenant_config,
-        )
-        agent = agent_runner.UnifiedAgent(
+        # Setup reads and calls the model too (entity resolution, retrieval), so it runs inside
+        # the same network guard and meter as the agent's turns (review round 5).
+        with installed(dispatcher), metered(meter):
+            await asyncio.wait_for(
+                _trial(task, trial, db, tenant_id, actor_id, model, events), timeout=WALL_CLOCK_SECONDS
+            )
+    except TimeoutError:
+        error = f"timeout after {WALL_CLOCK_SECONDS:.0f}s"
+    except Exception as exc:  # a crashed trial is graded as failed, never dropped
+        error = f"{type(exc).__name__}: {exc}"
+    return attempt_from_run(
+        events, dispatcher, wall_ms=int((time.monotonic() - start) * 1000), error=error, meter=meter
+    )
+
+
+async def _trial(task, trial, db, tenant_id, actor_id, model, events):
+    """Setup, then the agent's turns; every event is appended to `events` as it streams, so a
+    timeout keeps what was shown."""
+    from app.core.config import settings
+
+    adapter = agent_runner._build_adapter(provider="anthropic", api_key=settings.ANTHROPIC_API_KEY)
+    metadata = await agent_runner.get_active_metadata(db, tenant_id)
+    tenant_config = await agent_runner._load_tenant_config(db, tenant_id)
+    context = await agent_runner._assemble_context(
+        db=db,
+        tenant_id=tenant_id,
+        question=task.prompt,
+        adapter=adapter,
+        entity_resolver_model=model,
+        tenant_config=tenant_config,
+    )
+    agent = agent_runner.UnifiedAgent(
+        tenant_id=tenant_id,
+        user_id=actor_id,
+        correlation_id=f"resolve-bench:{task.ref}:{trial}",
+        metadata=metadata,
+        policy=None,
+        context_need="data",
+    )
+
+    async def turn(the_agent, text, turn_context, history=None):
+        last = None
+        async for kind, payload in the_agent.run_streaming(
+            task=text, context=turn_context, db=db, adapter=adapter, model=model, conversation_history=history
+        ):
+            events.append((kind, payload))
+            if kind == "response":
+                last = payload
+        return last
+
+    async def drive():
+        first = await turn(agent, task.prompt, context)
+        if not agent_runner._asks_for_source(first):
+            return
+        # Answer "which data source?" once, as a person would (the vs-MCP runner's rule).
+        history = agent_runner._source_reply_history(task.prompt, first)
+        reply = agent_runner._SOURCE_REPLY
+        again = agent_runner.UnifiedAgent(
             tenant_id=tenant_id,
             user_id=actor_id,
             correlation_id=f"resolve-bench:{task.ref}:{trial}",
@@ -121,49 +143,11 @@ async def run_ours(
             policy=None,
             context_need="data",
         )
+        reply_context = {
+            **context,
+            "source_selection_task": reply,
+            "source_selection_history": [*history, {"role": "user", "content": reply}],
+        }
+        await turn(again, reply, reply_context, [{"role": m["role"], "content": m["content"]} for m in history])
 
-        async def turn(the_agent, text, turn_context, history=None):
-            last = None
-            async for kind, payload in the_agent.run_streaming(
-                task=text, context=turn_context, db=db, adapter=adapter, model=model, conversation_history=history
-            ):
-                events.append((kind, payload))
-                if kind == "response":
-                    last = payload
-            return last
-
-        async def drive():
-            first = await turn(agent, task.prompt, context)
-            if not agent_runner._asks_for_source(first):
-                return
-            # Answer "which data source?" once, as a person would (the vs-MCP runner's rule).
-            history = agent_runner._source_reply_history(task.prompt, first)
-            reply = agent_runner._SOURCE_REPLY
-            again = agent_runner.UnifiedAgent(
-                tenant_id=tenant_id,
-                user_id=actor_id,
-                correlation_id=f"resolve-bench:{task.ref}:{trial}",
-                metadata=metadata,
-                policy=None,
-                context_need="data",
-            )
-            reply_context = {
-                **context,
-                "source_selection_task": reply,
-                "source_selection_history": [*history, {"role": "user", "content": reply}],
-            }
-            await turn(again, reply, reply_context, [{"role": m["role"], "content": m["content"]} for m in history])
-
-        with installed(dispatcher):
-            await asyncio.wait_for(drive(), timeout=WALL_CLOCK_SECONDS)
-    except TimeoutError:
-        error = f"timeout after {WALL_CLOCK_SECONDS:.0f}s"
-    except Exception as exc:  # a crashed trial is graded as failed, never dropped
-        error = f"{type(exc).__name__}: {exc}"
-    return attempt_from_run(
-        events,
-        dispatcher,
-        wall_ms=int((time.monotonic() - start) * 1000),
-        error=error,
-        setup_usage=setup.usage if setup is not None else (),
-    )
+    await drive()
