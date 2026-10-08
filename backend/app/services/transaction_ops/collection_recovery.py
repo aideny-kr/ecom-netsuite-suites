@@ -129,8 +129,6 @@ def collection_stop(run, *, operator_retry=False):
     try:
         UUID(failure["run_id"])
         observed = datetime.fromisoformat(failure["observed_at"])
-        return run.created_at <= observed <= run.finished_at and failure.get("code") in _CODES - {
-            "collection_permanent"
-        }
+        return run.created_at <= observed <= run.finished_at and failure.get("code") in _CODES
     except (KeyError, TypeError, ValueError):
         return False

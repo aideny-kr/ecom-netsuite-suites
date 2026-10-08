@@ -225,14 +225,18 @@ def test_auth_failure_keeps_existing_credential_gated_recovery():
     assert continuation.next_metadata(run, NOW)["auth_resume_count"] == 1
 
 
-async def test_collection_retry_rejects_changed_account_scope(db, admin_user):
+async def test_collection_retry_rejects_changed_account_scope(db, admin_user, monkeypatch):
     from app.services.transaction_ops import continuation
     from tests.test_transaction_continuation import budget_run
 
     actor = admin_user[0]
     prior, conf = await budget_run(db, actor, origin="schedule", reason="error", failure=TimeoutError())
-    conf.netsuite_account_id = "different-account"
-    await db.flush()
+    from unittest.mock import AsyncMock
+    from app.services.transaction_ops import state_service
+
+    changed = SimpleNamespace(**{key: value for key, value in conf.__dict__.items() if not key.startswith("_")})
+    changed.netsuite_account_id = "different-account"
+    monkeypatch.setattr(state_service, "get_config", AsyncMock(return_value=changed))
     assert (
         await continuation.continue_budget_run(
             db, actor.tenant_id, prior.id, now=prior.finished_at + timedelta(minutes=5)
