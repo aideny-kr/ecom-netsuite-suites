@@ -223,3 +223,22 @@ def test_auth_failure_keeps_existing_credential_gated_recovery():
     }
     assert not collection_stop(run)
     assert continuation.next_metadata(run, NOW)["auth_resume_count"] == 1
+
+
+async def test_collection_retry_rejects_changed_account_scope(db, admin_user):
+    from app.services.transaction_ops import continuation
+    from tests.test_transaction_continuation import budget_run
+
+    actor = admin_user[0]
+    prior, conf = await budget_run(db, actor, origin="schedule", reason="error", failure=TimeoutError())
+    conf.netsuite_account_id = "different-account"
+    await db.flush()
+    assert (
+        await continuation.continue_budget_run(
+            db, actor.tenant_id, prior.id, now=prior.finished_at + timedelta(minutes=5)
+        )
+        is None
+    )
+    assert (await continuation.continuation_result(db, actor.tenant_id, prior.id))[1][
+        "reason"
+    ] == "collection_scope_changed"

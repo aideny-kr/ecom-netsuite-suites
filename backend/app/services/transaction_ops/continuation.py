@@ -331,6 +331,7 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None, operator_retry
                 "auth_retry_limit",
                 "collection_diagnostic_retry_limit",
                 "collection_failure_permanent",
+                "collection_scope_changed",
             }
             else "continuation_unavailable"
         )

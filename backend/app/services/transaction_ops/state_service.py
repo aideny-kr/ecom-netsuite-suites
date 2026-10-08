@@ -506,6 +506,20 @@ async def create_run(
 
             if not collection_stop(previous, operator_retry=operator_collection_retry):
                 raise StateError("invalid_run_continuation")
+            if any(
+                str(previous.config_snapshot.get(field)) != str(getattr(config, field))
+                for field in (
+                    "netsuite_connection_id",
+                    "netsuite_account_id",
+                    "subsidiary_id",
+                    "source_step_id",
+                    "source_connection_id",
+                )
+            ) or (config.mapping_json or {}).get("action_mode", "detect_only") not in {
+                "detect_only",
+                "propose_actions",
+            }:
+                raise StateError("collection_scope_changed")
         if automatic_auth_recovery:
             from app.services.transaction_ops.auth_recovery import auth_resume_ready
 
