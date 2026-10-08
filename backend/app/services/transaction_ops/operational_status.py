@@ -345,13 +345,21 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
         else {}
     )
     monitor_health = await db.scalar(
-        select(AuditEvent.payload)
+        select(AuditEvent)
         .where(
             AuditEvent.tenant_id == tenant_id,
             AuditEvent.action == "recon.watchdog.health",
         )
         .order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
         .limit(1)
+    )
+    monitor_health = (
+        {
+            **(monitor_health.payload or {}),
+            "observed_at": (monitor_health.payload or {}).get("observed_at") or _iso(monitor_health.timestamp),
+        }
+        if monitor_health
+        else None
     )
     for config in configs:
         planned = schedule(config, now)

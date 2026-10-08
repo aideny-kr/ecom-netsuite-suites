@@ -264,7 +264,7 @@ async def test_beat_outage_falls_back_only_to_scheduled_collection_and_alerts(db
     health = await db.scalar(
         select(AuditEvent.payload).where(AuditEvent.tenant_id == tenant, AuditEvent.action == "recon.watchdog.health")
     )
-    assert health == {"collector_stale": True}
+    assert health["collector_stale"] is True and health["observed_at"]
 
 
 async def test_two_api_processes_cannot_supervise_together_and_shutdown_releases_lock(monkeypatch):
@@ -396,3 +396,125 @@ async def test_resend_sends_stable_idempotency_header_and_hides_provider_error(m
         )
     assert str(failure.value) == "Resend API error: 503"
     assert calls[0]["headers"]["Idempotency-Key"] == "stable-key"
+
+
+async def test_watchdog_calls_real_shared_status_contract_and_detects_committed_stagnation(db, admin_user, monkeypatch):
+    from app.models.job import Job
+    from tests.test_transaction_operational_status import seed
+
+    user = admin_user[0]
+    for flag in ("celigo", "reconciliation"):
+        await enable_feature_flag(db, user.tenant_id, flag)
+    conf, _ = await seed(db, user)
+    run = await state.create_run(
+        db,
+        user.tenant_id,
+        conf.id,
+        RunCreate(origin="schedule", evaluation_key=str(uuid4()), order_references=["R123456789"]),
+        actor=user,
+    )
+    token = await state.claim_run(db, user.tenant_id, run.id)
+    now = datetime.now(timezone.utc)
+    await state.update_progress(
+        db, user.tenant_id, run.id, ProgressUpdate(progress_json={"processed": 1}), lease_token=token, now=now
+    )
+    clock = now + timedelta(minutes=11)
+    db.add(
+        Job(
+            tenant_id=watchdog.SYSTEM_TENANT,
+            job_type="tasks.transaction_ops_collect_due",
+            status="completed",
+            completed_at=clock,
+            result_summary={},
+        )
+    )
+    await db.flush()
+    monkeypatch.setattr(
+        watchdog.feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[user.tenant_id])
+    )
+    # Exercise actual operational_status validation/queries, rather than a mock
+    # that could accept an invalid pagination limit.
+    notify = AsyncMock(return_value=0)
+    monkeypatch.setattr(watchdog, "notify", notify)
+    result = await watchdog.supervise(db, now=clock)
+    assert result["tenant_failed"] == 0 and result["tenants"] == 1
+    notify.assert_awaited_once()
+    assert notify.await_args.args[2][0]["reason"] == "progress_stalled"
+
+
+async def test_unchanged_incident_has_three_reservations_per_day_and_finite_delivery_attempts(
+    db, admin_user, monkeypatch
+):
+    tenant = admin_user[0].tenant_id
+    monkeypatch.setattr(watchdog, "admin_emails", AsyncMock(return_value=["a@example.invalid"]))
+    items = [{"config_id": str(uuid4()), "name": "Inc", "reason": "progress_stalled"}]
+    now = datetime.now(timezone.utc)
+    sender = AsyncMock(side_effect=RuntimeError("provider unavailable"))
+    for minutes in (0, 6, 12, 18, 24):
+        await watchdog.notify(db, tenant, items, now=now + timedelta(minutes=minutes), sender=sender)
+    assert sender.await_count == 3
+    working = AsyncMock()
+    for hours in (6, 12, 18):
+        await watchdog.notify(db, tenant, items, now=now + timedelta(hours=hours), sender=working)
+    assert working.await_count == 2  # First reservation plus two reminders/day.
+
+
+async def test_send_deadline_defers_without_reserving_or_sending(db, admin_user):
+    sender = AsyncMock()
+    count = await watchdog.notify(
+        db,
+        admin_user[0].tenant_id,
+        [{"config_id": str(uuid4()), "name": "Inc", "reason": "queue_delayed"}],
+        now=datetime.now(timezone.utc),
+        sender=sender,
+        deadline=asyncio.get_running_loop().time(),
+    )
+    assert count == 0
+    sender.assert_not_awaited()
+
+
+async def test_failed_leader_cleanup_invalidates_connection_before_pool_reuse():
+    connection = AsyncMock()
+    connection.rollback.side_effect = RuntimeError("database connection lost")
+    with pytest.raises(RuntimeError):
+        await watchdog.release_leader(connection, True)
+    connection.invalidate.assert_awaited_once()
+
+
+def test_stale_monitor_health_alerts_even_when_daily_coverage_is_current():
+    e = entity()
+    e["coverage"]["status"] = "up_to_date"
+    e["monitor"] = {"collector_stale": False, "observed_at": (NOW - timedelta(minutes=6)).isoformat()}
+    assert check(e, NOW)["detail"] == "monitor_unavailable"
+
+
+async def test_existing_celery_digest_detects_stopped_api_watchdog(db, admin_user):
+    from app.services import ops_digest
+    from tests.test_transaction_operational_status import NOW as EARLY
+    from tests.test_transaction_operational_status import seed
+
+    user = admin_user[0]
+    await seed(db, user)
+    db.add(
+        AuditEvent(
+            tenant_id=user.tenant_id,
+            category="operations",
+            action="recon.watchdog.health",
+            actor_type="system",
+            payload={"collector_stale": False, "observed_at": (EARLY - timedelta(minutes=6)).isoformat()},
+        )
+    )
+    await db.flush()
+    sender = AsyncMock()
+    await ops_digest.run_ops_digest(db, now=EARLY, sender=sender, tenant_ids=[user.tenant_id])
+    sender.assert_awaited_once()
+    assert "daily scan stopped" in sender.await_args.kwargs["text_body"]
+
+
+async def test_supervision_uses_database_clock_when_no_trusted_test_clock_is_given(db, monkeypatch):
+    clock = AsyncMock(return_value=datetime.now(timezone.utc))
+    monkeypatch.setattr(watchdog.state_service, "run_clock", clock)
+    monkeypatch.setattr(watchdog, "collect_due_runs", AsyncMock(return_value={}))
+    monkeypatch.setattr(watchdog.feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[]))
+    await watchdog.supervise(db)
+    clock.assert_awaited_once_with(db, None)
