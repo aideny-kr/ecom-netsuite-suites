@@ -232,6 +232,7 @@ async def test_collection_retry_rejects_changed_account_scope(db, admin_user, mo
     actor = admin_user[0]
     prior, conf = await budget_run(db, actor, origin="schedule", reason="error", failure=TimeoutError())
     from unittest.mock import AsyncMock
+
     from app.services.transaction_ops import state_service
 
     changed = SimpleNamespace(**{key: value for key, value in conf.__dict__.items() if not key.startswith("_")})
