@@ -98,7 +98,11 @@ def item_usable(item, profile):
 
 
 def from_commercial_candidate(candidate):
-    """Use the existing scoped commercial evidence, but never credit an unpaid invoice.
+    """The invoice-discount form of a commercial credit candidate on an unpaid invoice.
+
+    No longer proposed (Aiden, 2026-10-06: an unpaid invoice gets the credit memo, see
+    `sales_credit.build_candidate`); kept so proposals created before can be reviewed,
+    refused at approval and verified.
 
     Initial supported discount treatment is zero tax, no existing discounts,
     one open/current invoice period and no payments/applications. Taxable,
@@ -256,6 +260,9 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
         if support
         else None
     )
+    if fresh and fresh.get("kind") != KIND:
+        # Aiden, 2026-10-06: the treatment for an unpaid invoice is now a credit memo.
+        raise ValueError("An unpaid invoice now gets a credit memo, not an invoice edit. Prepare a fresh approval.")
     if not fresh or any(
         fresh.get(k) != p.get(k)
         for k in ("kind", "scope", "proposed_fields", "before", "period", "expected_after", "before_gl")

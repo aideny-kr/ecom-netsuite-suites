@@ -401,6 +401,34 @@ async def build_all_tool_definitions(
     return tools
 
 
+def _refuse_unbounded_line_scan(sql: str) -> str | None:
+    """The refusal for a BUILTIN.DF filter on an undated transactionline scan, else None.
+
+    Measured on Framework 2026-10-05: such a query took 65-116 s (a 7-minute chat turn) and
+    timed out on the MCP, while the same filter with a trandate floor returned in seconds.
+    Only this pattern is refused; the older address/country patterns stay scoring-only.
+    """
+    from app.services.query_eval_harness import detect_perf_anti_patterns
+
+    if "unbounded_df_line_scan" not in detect_perf_anti_patterns(sql):
+        return None
+    return json.dumps(
+        {
+            "error": (
+                "Not run: this query reads transactionline and filters with BUILTIN.DF(...) but has no lower "
+                "trandate limit, so NetSuite converts every transaction line in the account's history to "
+                "text before filtering. Queries like this take 1-2 minutes or time out."
+            ),
+            "perf_anti_patterns": ["unbounded_df_line_scan"],
+            "next_step": (
+                "Add a t.trandate range with a lower limit (if the start is unknown, first find it with a small "
+                "query, e.g. the earliest t.trandate for the item IDs), or filter on raw internal IDs instead of "
+                "display text (i.custitem_x = <id>, tl.item IN (<ids>)). Keep BUILTIN.DF in the SELECT list for labels."
+            ),
+        }
+    )
+
+
 async def execute_tool_call(
     tool_name,
     tool_input,
@@ -413,8 +441,15 @@ async def execute_tool_call(
     actor_type="user",
     human_approved=False,
     approval_context=None,
+    perf_guard=True,
 ):
-    """Do not spend another RPC/model repair cycle repeating a rejected query in one turn."""
+    """Do not spend another RPC/model repair cycle repeating a rejected query in one turn.
+
+    SuiteQL that matches a proven timeout pattern is refused before it reaches NetSuite, with
+    the fix in the error. ``perf_guard`` is on by default so a new chat path cannot skip it;
+    only callers that replay SQL verbatim and must not be altered turn it off (a report
+    refresh replays an accepted recipe; the vs-MCP baseline is plain Claude + MCP).
+    """
     kwargs = dict(
         tenant_id=tenant_id,
         actor_id=actor_id,
@@ -432,6 +467,10 @@ async def execute_tool_call(
         if tool_name == "netsuite_suiteql"
         else (tool_input.get("sqlQuery") if tool_name.endswith("__ns_runCustomSuiteQL") else None)
     )
+    if perf_guard and isinstance(sql, str):
+        refused = _refuse_unbounded_line_scan(sql)
+        if refused:
+            return refused
     state = None
     key = None
     if isinstance(info, dict) and kwargs.get("correlation_id"):

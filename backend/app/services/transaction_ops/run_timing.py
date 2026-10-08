@@ -43,6 +43,8 @@ class RunTiming:
         self.started = clock()
         # Per-slice, rather than inherited totals: queue waiting is outside this clock.
         self.values = {}
+        self.failure_exception = None
+        self.failure_stage = "collection"
         progress["timing_ms"] = self.values
 
     def snapshot(self):
@@ -55,6 +57,10 @@ class RunTiming:
         start = self.clock()
         try:
             yield
+        except Exception as exc:
+            if exc is not self.failure_exception:
+                self.failure_exception, self.failure_stage = exc, stage
+            raise
         finally:
             key = stage if stage in _STATES | _READS | {"enablement", "source_mirror", "source_snapshot"} else "other"
             value = self.values.setdefault(key, {"calls": 0, "total": 0, "max": 0})

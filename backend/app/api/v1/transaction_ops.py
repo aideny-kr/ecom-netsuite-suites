@@ -182,6 +182,31 @@ async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Data
         raise _http_error(exc) from None
 
 
+class CollectionRetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm_repaired: Literal[True]
+
+
+@router.post("/runs/{run_id}/retry-collection", response_model=RunOut, status_code=202)
+async def retry_collection(run_id: UUID, request: CollectionRetry, user: Reader, db: Database):
+    from app.services.transaction_ops.continuation import continue_budget_run
+
+    try:
+        child = await continue_budget_run(db, user.tenant_id, run_id, operator_retry=True, actor=user)
+        if child is None:
+            raise service.StateError("collection_retry_unavailable", 409)
+        if child.status == "pending":
+            await scheduler._dispatch(
+                user.tenant_id,
+                child.id,
+                {"dispatched": 0, "dispatch_failed": 0},
+                scheduler.investigation_queue(child.origin, child.max_orders),
+            )
+        return child
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 @router.post("/configs/{config_id}/review", response_model=RunOut, status_code=202)
 async def review_period(config_id: UUID, request: PeriodReview, user: Reader, db: Database):
     try:

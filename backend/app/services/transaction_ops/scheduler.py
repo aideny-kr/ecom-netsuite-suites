@@ -51,7 +51,7 @@ def _read_stop_clause(run):
     )
 
 
-async def _recovery_ids(db, tenant_id, now):
+async def _recovery_ids(db, tenant_id, now, *, scheduled_only=False):
     _, _, config, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     child = aliased(run)
@@ -86,6 +86,23 @@ async def _recovery_ids(db, tenant_id, now):
         select(run.id)
         .where(
             run.tenant_id == tenant_id,
+            *(
+                [
+                    run.origin == "schedule",
+                    run.params_json["operation_id"].astext.is_(None),
+                    run.params_json["approval_message_id"].astext.is_(None),
+                    run.params_json["review"].astext.is_(None),
+                    run.params_json["verification_scope"].astext.is_(None),
+                    or_(
+                        run.config_snapshot["mapping_json"]["action_mode"].astext.is_(None),
+                        run.config_snapshot["mapping_json"]["action_mode"].astext.in_(
+                            ("detect_only", "propose_actions")
+                        ),
+                    ),
+                ]
+                if scheduled_only
+                else []
+            ),
             ~stopped_clause(run),
             or_(
                 and_(
@@ -200,6 +217,17 @@ async def _candidate_ids(db, tenant_id, now):
             run.progress_json["continuation_part"].astext == str(MAX_PARTS),
         )
     )
+    deadline_stop = exists(
+        select(run.id).where(
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.created_at == latest.c.latest_at,
+            run.status == "finished",
+            run.termination_reason == "budget",
+            run.finished_at >= run.deadline_at,
+            run.finished_at > now - timedelta(days=1),
+        )
+    )
     auth_stop = exists(
         select(run.id).where(
             run.tenant_id == tenant_id,
@@ -209,6 +237,17 @@ async def _candidate_ids(db, tenant_id, now):
             run.status == "finished",
             run.termination_reason == "error",
             run.progress_json["last_read_failure"]["code"].astext.in_(AUTH_STOP_CODES),
+        )
+    )
+    collection_error = exists(
+        select(run.id).where(
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.created_at == latest.c.latest_at,
+            run.origin == "schedule",
+            run.status == "finished",
+            run.termination_reason == "error",
+            run.progress_json["last_collection_failure"]["run_id"].astext.is_not(None),
         )
     )
     query = (
@@ -226,7 +265,9 @@ async def _candidate_ids(db, tenant_id, now):
                 config.mapping_json["reconciliation_policy"].astext.is_not(None),
                 latest_read_stop,
                 legacy_part_stop,
+                deadline_stop,
                 auth_stop,
+                collection_error,
             ),
         )
         .order_by(latest.c.latest_at.asc().nullsfirst(), config.created_at, config.id)
@@ -287,7 +328,15 @@ def _scope(config, latest, now):
         params = latest.params_json
         scope = {key: params.get(key) for key in ("window_start", "window_end")}
         scope["order_references"] = params.get("order_references", [])
-        return scope, latest.id if latest.termination_reason in {"budget", "stall"} else None, None
+        from app.services.transaction_ops.continuation import collection_daily_fallback
+
+        return (
+            scope,
+            latest.id
+            if latest.termination_reason in {"budget", "stall"} or collection_daily_fallback(latest, now)
+            else None,
+            None,
+        )
     policy_value = (getattr(config, "mapping_json", None) or {}).get("reconciliation_policy")
     if policy_value:
         from app.services.transaction_ops.periods import ReconciliationPolicy, scheduled_window
@@ -399,7 +448,7 @@ async def _dispatch(tenant_id, run_id, stats, queue="recon", *, generation=None)
         stats["dispatch_failed"] += 1
 
 
-async def collect_due_runs(db, now: datetime) -> dict:
+async def collect_due_runs(db, now: datetime, *, scheduled_only=False) -> dict:
     if now.utcoffset() is None:
         raise ValueError("An aware clock is required")
     now = now.astimezone(timezone.utc)
@@ -438,7 +487,9 @@ async def collect_due_runs(db, now: datetime) -> dict:
                     await db.rollback()
                     stats["source_refresh_failed"] += 1
                 try:
-                    recover = await _recovery_ids(db, tenant_id, now)
+                    recover = await _recovery_ids(
+                        db, tenant_id, now, **({"scheduled_only": True} if scheduled_only else {})
+                    )
                     stats["truncated"] |= len(recover) > _SCAN_LIMIT
                     queues = await _run_queues(db, tenant_id, recover[:_SCAN_LIMIT])
                     # Release a read transaction before waiting on a broker.
@@ -457,6 +508,13 @@ async def collect_due_runs(db, now: datetime) -> dict:
                     try:
                         # Manual/chat creates take this same lock in state.
                         config = await state.get_config(db, tenant_id, config_id, lock=True)
+                        if scheduled_only and (config.mapping_json or {}).get("action_mode", "detect_only") not in {
+                            "detect_only",
+                            "propose_actions",
+                        }:
+                            stats["skipped"] += 1
+                            await db.commit()
+                            continue
                         active, latest = await _schedule_history(db, tenant_id, config_id)
                         key = _schedule_key(config, now)
                         already_due = latest is not None and _cycle_key(config, latest) >= key
@@ -467,14 +525,22 @@ async def collect_due_runs(db, now: datetime) -> dict:
                         )
                         from app.services.transaction_ops.continuation import (
                             auth_resume_due,
+                            collection_daily_fallback,
+                            collection_resume_due,
                             continue_budget_run,
+                            deadline_resume_due,
                             read_retry_due,
                             scheduled_part_resume_candidate,
                         )
 
-                        resume_due = auth_resume_due(latest, now) or (
-                            already_due
-                            and (read_retry_due(latest, now) or scheduled_part_resume_candidate(latest, now))
+                        resume_due = (
+                            deadline_resume_due(latest, now)
+                            or collection_resume_due(latest, now)
+                            or auth_resume_due(latest, now)
+                            or (
+                                already_due
+                                and (read_retry_due(latest, now) or scheduled_part_resume_candidate(latest, now))
+                            )
                         )
                         if (
                             not config.enabled
@@ -509,7 +575,18 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             continue
                         request = request_type(origin="schedule", evaluation_key=key, **scope)
                         run = await state.create_run(
-                            db, tenant_id, config_id, request, actor=None, now=now, resume_from_run_id=resume_id
+                            db,
+                            tenant_id,
+                            config_id,
+                            request,
+                            actor=None,
+                            now=now,
+                            resume_from_run_id=resume_id,
+                            **(
+                                {"automatic_collection_recovery": True}
+                                if resume_id and collection_daily_fallback(latest, now)
+                                else {}
+                            ),
                         )
                         # create_run commits before returning. Only scalar IDs
                         # survive into the broker call or the next transaction.

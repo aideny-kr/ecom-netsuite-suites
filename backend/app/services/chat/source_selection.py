@@ -41,6 +41,18 @@ def _chosen_card_source(history: list[dict]) -> str | None:
     return None
 
 
+def conversation_has_chosen_source(history: list[dict]) -> bool:
+    """Whether the user already settled a data source in this conversation.
+
+    Read only from server-owned state: a resolved clarification card, or the latest
+    request context. An unanswered source question (``pending_source``) is not a choice.
+    """
+    if _chosen_card_source(history):
+        return True
+    previous = previous_request_context(history)
+    return bool(previous and previous.kind == "analytics" and previous.sources)
+
+
 def _source_question(sources: dict[str, str], *, unavailable: bool = False) -> str:
     labels = sorted(sources.values())
     if not labels:

@@ -137,8 +137,8 @@ describe("transaction operations pages", () => {
     mocks.manage = true;
     render(<TransactionOperationsPage />);
     expect(
-      screen.getByRole("link", { name: "Open Transactions" }),
-    ).toHaveAttribute("href", "/tables/orders");
+      screen.getByRole("link", { name: "Browse records" }),
+    ).toHaveAttribute("href", "/tables/orders?view=records");
     expect(
       screen.queryByRole("link", { name: "Configure a new scope" }),
     ).not.toBeInTheDocument();
@@ -150,7 +150,7 @@ describe("transaction operations pages", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Open Connections" }),
-    ).toHaveAttribute("href", "/connections");
+    ).toHaveAttribute("href", "/settings#connections");
     expect(
       screen.queryByRole("button", { name: "Start investigation" }),
     ).not.toBeInTheDocument();

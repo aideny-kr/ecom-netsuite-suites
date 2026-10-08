@@ -417,6 +417,9 @@ async def run_investigation(
     )
     deadline_at = run.deadline_at
     progress = _initial_progress(run)
+    from app.services.transaction_ops.period_membership import Membership
+
+    membership = Membership(db, tenant_id, run, progress, clock)
     from app.services.transaction_ops import cached_review
     from app.services.transaction_ops.run_timing import RunTiming
 
@@ -440,6 +443,7 @@ async def run_investigation(
 
     async def flush_findings():
         nonlocal batch_baseline
+        await membership.flush()
         if not finding_batch:
             return
         progress["finding_batch_orders"] = progress.get("finding_batch_orders", 0) + len(finding_batch)
@@ -462,6 +466,9 @@ async def run_investigation(
         if batch_baseline is not None:
             progress.clear()
             progress.update(batch_baseline)
+        # These events belonged to the rolled-back checkpoint, not a completed
+        # discovery page. Never flush them from a terminal/lease-loss handler.
+        membership.unsupported()
         finding_batch.clear()
         batch_baseline = None
 
@@ -495,9 +502,20 @@ async def run_investigation(
             db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
         )
 
-    async def finish(reason):
+    async def finish(reason, *, failure=None):
         await flush_findings()
-        await state.finish_run(db, tenant_id, run_id, reason, lease_token=token, now=clock())
+        if reason == "done" and membership.active:
+            await membership.seal()
+            await save()
+        await state.finish_run(
+            db,
+            tenant_id,
+            run_id,
+            reason,
+            lease_token=token,
+            now=clock(),
+            **({"failure": failure} if failure is not None else {}),
+        )
         return {
             "run_id": str(run_id),
             "status": "finished",
@@ -507,7 +525,7 @@ async def run_investigation(
             "needs_review": progress["needs_review"],
         }
 
-    async def finish_after_failure():
+    async def finish_after_failure(exc):
         # A bounded provider read also performs local DB work. Cancelling that
         # work can invalidate its transaction. Discard it before finalization;
         # committed holds/checkpoints remain durable and finish_run still fences
@@ -516,7 +534,15 @@ async def run_investigation(
             await db.rollback()
         discard_findings()
         reason = "budget" if clock() >= deadline_at else "error"
-        return await finish(reason)
+        from app.services.transaction_ops.collection_recovery import failure_diagnostic
+
+        failure = failure_diagnostic(
+            exc,
+            run_id=run_id,
+            now=clock(),
+            stage=timing.failure_stage if timing.failure_exception is exc else "collection",
+        )
+        return await finish(reason, failure=failure)
 
     async def finish_stalled(**details):
         # This is also called from exception handlers: a failed buffer fence
@@ -666,6 +692,7 @@ async def run_investigation(
         )
         update = _append_replica_page_progress if append else _replica_page_progress
         update(page, progress, run.params_json, config)
+        membership.source(page, progress["pending_refs"])
         await save()
         return True
 
@@ -945,6 +972,7 @@ async def run_investigation(
                                 progress["outside_scope"] = progress.get("outside_scope", 0) + 1
                             else:
                                 references.append(row["number"])
+                        membership.refunds(refund_page, references)
                         progress["pending_refs"] = await state.unseen_references(db, tenant_id, run_id, references)
                         progress["refund_scan_count"] = progress.get("refund_scan_count", 0) + len(rows)
                         progress["phase"] = "refunds"
@@ -986,6 +1014,11 @@ async def run_investigation(
                             continue
 
                         async def dependency_page(stream, after):
+                            membership_windows = (
+                                membership.windows()
+                                if membership.active and stream in {"transaction_lines", "transaction_links"}
+                                else ()
+                            )
                             if not await reserve(2, hold=True):
                                 raise ReadBudgetExhaustedError
                             return await metered_read(
@@ -1002,6 +1035,11 @@ async def run_investigation(
                                     _time(run.params_json["window_end"]),
                                     after=after,
                                     page_size=progress.get("dependency_page_size", 250) if dependency_staging else 20,
+                                    **(
+                                        {"membership_windows": membership_windows}
+                                        if membership_windows and _dependency_page_reader is None
+                                        else {}
+                                    ),
                                 ),
                                 held=2,
                                 data_calls=1,
@@ -1036,6 +1074,11 @@ async def run_investigation(
                                 run.config_id,
                                 keys,
                                 **options,
+                                **(
+                                    {"include_membership": True}
+                                    if membership.active and _dependency_index is None
+                                    else {}
+                                ),
                             )
 
                         async def unobserved(refs, **options):
@@ -1048,6 +1091,7 @@ async def run_investigation(
                             indexed_owners=indexed_owners,
                             unobserved=unobserved,
                             staging=dependency_staging,
+                            membership=membership,
                         )
                         progress["dependency_step_count"] = progress.get("dependency_step_count", 0) + 1
                         await save()
@@ -1707,8 +1751,8 @@ async def run_investigation(
         return await finish_stalled(reason="source_subsidiary_unproven")
     except ScanChangedError:
         return await finish_stalled(restart_scan=True)
-    except TimeoutError:
-        return await finish_after_failure()
+    except TimeoutError as exc:
+        return await finish_after_failure(exc)
     except state_service.StateError as exc:
         if exc.code == "batch_disabled":
             await db.rollback()
@@ -1717,9 +1761,9 @@ async def run_investigation(
         if exc.code == "run_lease_lost":
             return await finish_lost_lease()
         raise
-    except Exception:
+    except Exception as exc:
         # Provider helpers use safe error codes, but unexpected library/DB
         # exceptions may carry SQL or bodies. Never persist/return their text.
-        return await finish_after_failure()
+        return await finish_after_failure(exc)
     finally:
         await transport.aclose()

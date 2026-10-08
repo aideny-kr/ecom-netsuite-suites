@@ -314,11 +314,11 @@ export default function ReconciliationPage() {
   }
 
   return (
-    <div className="animate-fade-in space-y-8 p-8">
-      <div className="flex items-center justify-between">
+    <div className="animate-fade-in space-y-8">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <Scale className="h-6 w-6 text-muted-foreground" />
-          <h1 className="text-2xl font-bold text-foreground">Reconciliation</h1>
+          <h2 className="text-xl font-medium text-foreground">Payment / deposit matching</h2>
         </div>
 
         <div className="flex items-center gap-3">

@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -62,9 +62,17 @@ beforeEach(() => {
 it("renders the active report full-size on the wall, with the greeting demoted beneath the header", async () => {
   const active = report({});
   api.get.mockResolvedValue({ published: [active], active, active_is_fallback: false });
-  const { findByText } = renderPage();
+  const { findByText, getByRole, queryByRole, container } = renderPage();
   expect(await findByText(active.title)).toBeTruthy();
   expect(await findByText(/welcome back, jamie/i)).toBeTruthy();
+  expect(queryByRole("region", { name: "Launch your next task" })).toBeNull();
+  const frame = container.querySelector("iframe");
+  fireEvent.click(getByRole("button", { name: "Open launchpad" }));
+  expect(getByRole("region", { name: "Launch your next task" })).toBeTruthy();
+  expect(container.querySelector("iframe")).toBe(frame);
+  fireEvent.click(getByRole("button", { name: "Close launchpad" }));
+  expect(queryByRole("region", { name: "Launch your next task" })).toBeNull();
+  expect(container.querySelector("iframe")).toBe(frame);
 });
 
 it("fetches the active report's frozen HTML into a fully sandboxed iframe", async () => {
@@ -81,7 +89,7 @@ it("fetches the active report's frozen HTML into a fully sandboxed iframe", asyn
 it("shows the real empty state (not the wall) when nothing is published", async () => {
   api.get.mockResolvedValue({ published: [], active: null, active_is_fallback: false });
   const { findByText, queryByText } = renderPage();
-  expect(await findByText("No dashboard on the wall yet")).toBeTruthy();
+  expect(await findByText("No reports in Command Center yet")).toBeTruthy();
   expect(queryByText("Open ↗")).toBeNull();
 });
 
@@ -100,10 +108,10 @@ it("Quick Access grid still renders when nothing is published", async () => {
 
 // Carried from Task 3's review: this outer isError branch (no active report AND
 // the GET failed) previously had zero coverage.
-it("shows a 'Couldn't load your dashboard' message when the dashboard query errors and nothing is active", async () => {
+it("shows a 'Couldn't load Command Center' message when the dashboard query errors and nothing is active", async () => {
   api.get.mockRejectedValue(new Error("network down"));
   const { findByText } = renderPage();
-  expect(await findByText(/couldn.t load your dashboard/i)).toBeTruthy();
+  expect(await findByText(/couldn.t load Command Center/i)).toBeTruthy();
   expect(await findByText(/try refreshing the page/i)).toBeTruthy();
 });
 
@@ -149,14 +157,14 @@ it("shows a distinct waiting state (not the nothing-published empty state) when 
 
   expect(await findByText(/tracking income statement/i)).toBeTruthy();
   expect(await findByText(/waiting for its first report/i)).toBeTruthy();
-  expect(queryByText("No dashboard on the wall yet")).toBeNull();
+  expect(queryByText("No reports in Command Center yet")).toBeNull();
   expect(await findByRole("button", { name: /switch/i })).toBeTruthy();
 });
 
 it("still renders the real empty state, with no switcher, when nothing is published and there's no tracking series either", async () => {
   api.get.mockResolvedValue({ published: [], active: null, active_is_fallback: false });
   const { findByText, queryByRole } = renderPage();
-  expect(await findByText("No dashboard on the wall yet")).toBeTruthy();
+  expect(await findByText("No reports in Command Center yet")).toBeTruthy();
   expect(queryByRole("button", { name: /switch/i })).toBeNull();
 });
 
@@ -170,5 +178,5 @@ it("shows a skeleton sized like the wall while the dashboard query is loading", 
   const { container, findByText } = renderPage();
   await waitFor(() => expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0));
   resolveGet({ published: [], active: null, active_is_fallback: false });
-  expect(await findByText("No dashboard on the wall yet")).toBeTruthy();
+  expect(await findByText("No reports in Command Center yet")).toBeTruthy();
 });

@@ -97,13 +97,15 @@ def kind_proposal(kind):
     from tests.test_sales_credit import inputs as credit_inputs
 
     if kind == "discount":
-        from tests.test_invoice_discount import unpaid_inputs
+        from tests.test_invoice_discount import discount_candidate, unpaid_inputs
 
         data = unpaid_inputs()
+        data["review"]["native_mcp_connector_id"] = proposal()["connector_id"]
+        p = discount_candidate(**data)
     else:
         data = credit_inputs()
-    data["review"]["native_mcp_connector_id"] = proposal()["connector_id"]
-    p = build_candidate(**data)
+        data["review"]["native_mcp_connector_id"] = proposal()["connector_id"]
+        p = build_candidate(**data)
     p["observed_at"] = datetime.now(timezone.utc).isoformat()
     return p
 

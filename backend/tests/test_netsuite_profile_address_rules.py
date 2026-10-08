@@ -34,6 +34,15 @@ def test_requires_date_scope_on_address_joins():
     assert "t.trandate" in text
 
 
+def test_address_rule_says_an_upper_limit_alone_is_still_all_history():
+    # vs-MCP 2026-10-06: "as of today" became `t.trandate <= today` over the address join and
+    # timed out on both sides. The rule must name the lower limit, and never narrow an "as of"
+    # (cumulative) question to one day silently (#397 review round 1 R1).
+    rule = next(line for line in _netsuite_yaml().splitlines() if "Address-table joins are HEAVY" in line)
+    assert "lower limit" in rule and "t.trandate <=" in rule and "all-time" in rule
+    assert "never silently narrow" in rule
+
+
 def test_warns_shipcountry_is_not_exposed():
     # transaction.shipcountry is NOT_EXPOSED — the rules must flag it, not recommend
     # it as an escape hatch (codex review, 2026-06-05).
@@ -54,7 +63,12 @@ def test_custom_list_rule_has_perf_caveat():
     # it no longer contradicts the ADDRESS TABLES "NEVER BUILTIN.DF in WHERE" rule
     # (grill: the blanket allowance was the seed template for the country anti-pattern).
     text = _netsuite_yaml()
-    assert "small static lists only" in text.lower()
+    # 2026-10-05: "OK for small static lists" read as permission to filter a platform list
+    # through BUILTIN.DF on an undated transactionline scan (65-116 s per query, a 7-minute
+    # turn). The caveat must name what actually makes it slow: the undated line scan.
+    rule = next(line for line in text.splitlines() if "SELECT-type fields store integer IDs" in line)
+    assert "small static lists" not in rule.lower()
+    assert "transactionline" in rule and "trandate" in rule
 
 
 def test_join_patterns_doc_drops_both_work_country_framing():

@@ -59,7 +59,7 @@ def transaction_ops_run(tenant_id: str, run_id: str):
                 await _dispatch(tenant, run, stats, generation=result["generation"])
                 return {**result, **stats}
             child = None
-            if result.get("termination_reason") == "budget":
+            if result.get("termination_reason") in {"budget", "error"}:
                 from app.services.transaction_ops.continuation import continue_budget_run
 
                 child = await continue_budget_run(db, tenant, run)

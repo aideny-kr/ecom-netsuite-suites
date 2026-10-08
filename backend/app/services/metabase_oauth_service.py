@@ -317,7 +317,9 @@ async def complete(db, connector, user, state, code, error):
     return result
 
 
-async def get_token(connector, db):
+async def get_token(connector, db, *, refresh_buffer_seconds=60):
+    if type(refresh_buffer_seconds) is not int or not 60 <= refresh_buffer_seconds <= 600:
+        raise ValueError("invalid_refresh_buffer")
     if not connector.encrypted_credentials:
         return None
     credentials = decrypt_credentials(connector.encrypted_credentials)
@@ -325,7 +327,7 @@ async def get_token(connector, db):
         return None
     if connector.status in ("revoked", "superseded"):
         return None
-    if time.time() < credentials.get("expires_at", 0) - 60:
+    if time.time() < credentials.get("expires_at", 0) - refresh_buffer_seconds:
         return credentials.get("access_token")
     if db is None:
         return None
@@ -340,7 +342,7 @@ async def get_token(connector, db):
     credentials = decrypt_credentials(connector.encrypted_credentials)
     if credentials.get("resource") != connector.server_url or credentials.get("oauth_provider") != "metabase":
         return None
-    if time.time() < credentials.get("expires_at", 0) - 60:
+    if time.time() < credentials.get("expires_at", 0) - refresh_buffer_seconds:
         return credentials.get("access_token")
     if not credentials.get("refresh_token") or not credentials.get("client_id"):
         return None

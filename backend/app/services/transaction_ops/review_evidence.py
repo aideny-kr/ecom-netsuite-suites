@@ -112,22 +112,10 @@ def current_review_evidence(cohort, readings, run_ids, *, name):
     )
 
 
-async def period_evidence(db, tenant_id, run_id, *, root=None):
-    """One authorized period's cohort with compatible later rechecks."""
-    from app.models.transaction_ops import TransactionFinding, TransactionRun
-    from app.schemas.transaction_runs import ReviewSpan
-    from app.services.transaction_ops import state_service as state
-
-    if root is None:
-        root = await state.get_run(db, tenant_id, run_id)
-    elif root.tenant_id != tenant_id or root.id != run_id:
-        raise state.StateError("not_found", 404)
-    if not root.params_json.get("review"):
-        raise state.StateError("not_a_period_review", 422)
-    span = ReviewSpan.model_validate(root.params_json["review"])
+def review_run_scopes(root, span):
     from app.services.transaction_ops.daily_evidence import compatible_observation_runs
 
-    f, r = TransactionFinding, TransactionRun
+    r = Run
     cohort_scope = and_(
         r.config_id == root.config_id,
         func.coalesce(r.params_json["evidence_mode"].astext, "current")
@@ -145,18 +133,80 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
         if replacement
         else literal(False)
     )
-    # JSON scope predicates badly underestimate run cardinality. Resolve the
-    # immutable authorized run IDs first, so PostgreSQL can estimate findings
-    # from ordinary indexed run_id values instead of multiplying nested scans.
-    runs = (
+    return cohort_scope, replacement_filter
+
+
+async def resolve_review_runs(db, tenant_id, roots):
+    """Resolve every selected scope in one database roundtrip, with identical predicates."""
+    from app.schemas.transaction_runs import ReviewSpan
+    from app.services.transaction_ops import state_service as state
+
+    selections = []
+    for root in roots:
+        if root.tenant_id != tenant_id:
+            raise state.StateError("not_found", 404)
+        if not root.params_json.get("review"):
+            raise state.StateError("not_a_period_review", 422)
+        span = ReviewSpan.model_validate(root.params_json["review"])
+        selections.append(review_run_scopes(root, span))
+    columns = [flag.label(f"scope_{i}_{j}") for i, pair in enumerate(selections) for j, flag in enumerate(pair)]
+    rows = (
         await db.execute(
-            select(r.id, cohort_scope.label("cohort"), replacement_filter.label("replacement")).where(
-                r.tenant_id == tenant_id, or_(cohort_scope, replacement_filter)
-            )
+            select(
+                Run.id,
+                *columns,
+                Run.params_json["review"].label("review"),
+                Run.params_json["window_start"].astext.label("window_start"),
+                Run.params_json["window_end"].astext.label("window_end"),
+                Run.progress_json["period_membership"].label("membership"),
+            ).where(Run.tenant_id == tenant_id, or_(*(flag for pair in selections for flag in pair)))
         )
     ).all()
-    cohort_ids = [row.id for row in runs if row.cohort]
-    replacement_ids = [row.id for row in runs if row.replacement]
+    selections_by_root = {
+        root.id: ([row.id for row in rows if row[1 + 2 * i]], [row.id for row in rows if row[2 + 2 * i]])
+        for i, root in enumerate(roots)
+    }
+    from types import SimpleNamespace
+
+    from app.services.transaction_ops.period_membership import selected_members
+
+    for i, root in enumerate(roots):
+        span = ReviewSpan.model_validate(root.params_json["review"])
+        restricted = []
+        for row in rows:
+            if not row[1 + 2 * i] or row.review == root.params_json["review"]:
+                continue
+            from datetime import datetime
+
+            if (
+                datetime.fromisoformat(row.window_start) < span.start
+                or datetime.fromisoformat(row.window_end) > span.end
+            ):
+                restricted.append(SimpleNamespace(id=row.id, progress_json={"period_membership": row.membership}))
+        if restricted:
+            pairs = await selected_members(db, tenant_id, restricted, span)
+            selections_by_root[root.id] = (*selections_by_root[root.id], [row.id for row in restricted], pairs)
+    return selections_by_root
+
+
+async def period_evidence(db, tenant_id, run_id, *, root=None, metadata_only=False, _run_selection=None):
+    """One authorized period's cohort with compatible later rechecks."""
+    from app.models.transaction_ops import TransactionFinding
+    from app.schemas.transaction_runs import ReviewSpan
+    from app.services.transaction_ops import state_service as state
+
+    if root is None:
+        root = await state.get_run(db, tenant_id, run_id)
+    elif root.tenant_id != tenant_id or root.id != run_id:
+        raise state.StateError("not_found", 404)
+    if not root.params_json.get("review"):
+        raise state.StateError("not_a_period_review", 422)
+    span = ReviewSpan.model_validate(root.params_json["review"])
+    f = TransactionFinding
+    if _run_selection is None:
+        _run_selection = await resolve_review_runs(db, tenant_id, [root])
+    selection = _run_selection[root.id]
+    cohort_ids, replacement_ids = selection[:2]
     name = f"review_{root.id.hex}"
     # The trigger-maintained projection avoids repeatedly decompressing full
     # financial reports for counts and winner selection. NULL legacy rows keep
@@ -189,27 +239,35 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
             final_evidence(report),
         )
     )
-    cohort_readings = (
-        reading_query.where(run_ids_match(f.run_id, cohort_ids))
-        .cte(f"{name}_cohort_readings")
-        .prefix_with("MATERIALIZED")
-    )
+    cohort_filter = run_ids_match(f.run_id, cohort_ids)
+    if len(selection) > 2:
+        from app.services.transaction_ops.period_membership import member_filter
+
+        restricted_ids, pairs = selection[2:]
+        cohort_filter = and_(
+            cohort_filter,
+            or_(
+                ~run_ids_match(f.run_id, restricted_ids),
+                member_filter(f, pairs, f"{name}_members"),
+            ),
+        )
+    cohort_readings = reading_query.where(cohort_filter).cte(f"{name}_cohort_readings").prefix_with("MATERIALIZED")
     # Rechecks may refresh the fixed cohort, never enlarge it. Do not decode
     # unrelated orders as history grows, or decode cohort findings twice.
     other_readings = reading_query.where(
-        run_ids_match(f.run_id, sorted(set(replacement_ids) - set(cohort_ids))),
+        run_ids_match(f.run_id, replacement_ids),
+        ~cohort_filter,
         f.order_reference.in_(select(cohort_readings.c.order_reference)),
     )
     readings = union_all(select(cohort_readings), other_readings).cte(f"{name}_readings").prefix_with("MATERIALIZED")
     cohort = (
-        select(readings)
-        .where(run_ids_match(readings.c.run_id, cohort_ids))
-        .distinct(readings.c.order_reference)
+        select(cohort_readings)
+        .distinct(cohort_readings.c.order_reference)
         .order_by(
-            readings.c.order_reference,
-            readings.c.observed_at.desc(),
-            readings.c.updated_at.desc(),
-            readings.c.id.desc(),
+            cohort_readings.c.order_reference,
+            cohort_readings.c.observed_at.desc(),
+            cohort_readings.c.updated_at.desc(),
+            cohort_readings.c.id.desc(),
         )
         .cte(f"{name}_cohort")
         .prefix_with("MATERIALIZED")
@@ -220,33 +278,39 @@ async def period_evidence(db, tenant_id, run_id, *, root=None):
 
     # A reconciled order stays reconciled whatever a later scan read (decided 2026-09-30). Match the
     # case by this review's own scope, never by the order number alone.
-    reconciled = (
-        select(TransactionCase.id)
-        .where(
-            TransactionCase.tenant_id == tenant_id,
-            TransactionCase.order_reference == winners.c.order_reference,
-            TransactionCase.scope_json == case_scope(root),
-            TransactionCase.status == "reconciled",
-        )
-        .exists()
+    reconciled_orders = select(TransactionCase.order_reference).where(
+        TransactionCase.tenant_id == tenant_id,
+        TransactionCase.scope_json == case_scope(root),
+        TransactionCase.status == "reconciled",
     )
-    latest = (
+    # One hashed scoped set replaces a correlated case lookup per finding.
+    # The exact tenant + JSON business scope remains the authority boundary.
+    reconciled = winners.c.order_reference.in_(reconciled_orders)
+    query = (
         select(
-            f.id,
-            f.run_id,
+            readings.c.id,
+            readings.c.run_id,
             winners.c.order_reference,
+            readings.c.balance_status,
+            reconciled.label("case_reconciled"),
+        )
+        .select_from(winners)
+        .join(readings, readings.c.id == winners.c.id)
+        .where(readings.c.eligible)
+    )
+    if metadata_only:
+        # Pagination/counts need winner keys, not every order's financial body.
+        # The page reader loads reports only after LIMIT. Its serializer takes
+        # a cached report's original clock from that report, as before.
+        query = query.add_columns(readings.c.updated_at)
+    else:
+        query = query.join(f, (f.id == winners.c.id) & (f.tenant_id == tenant_id)).add_columns(
             f.report_json,
             case(
                 (f.report_json["cached_evidence"].astext.is_not(None), readings.c.observed_at), else_=f.updated_at
             ).label("updated_at"),
-            readings.c.balance_status,
-            reconciled.label("case_reconciled"),
         )
-        .join(winners, (f.id == winners.c.id) & (f.tenant_id == tenant_id))
-        .join(readings, readings.c.id == winners.c.id)
-        .where(readings.c.eligible)
-        .subquery()
-    )
+    latest = query.subquery()
     # Filter after winner selection: never resurrect a superseded exception.
     return latest, span
 
