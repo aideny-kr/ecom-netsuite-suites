@@ -3,6 +3,8 @@
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.services.transaction_ops.progress_clock import stalled_snapshot
+
 GRACE_HOURS = 8
 
 
@@ -38,6 +40,12 @@ def freshness(entity, *, daily_check_hour, now, configured_at=None):
     check = (initial_check or datetime.combine(due_day, time(daily_check_hour), zone)).astimezone(timezone.utc)
     deadline = check + timedelta(hours=GRACE_HOURS)
     result["deadline_at"] = deadline.isoformat()
+    stalled = next((reason for run in entity["active_runs"] if (reason := stalled_snapshot(run, now))), None)
+    if (entity.get("monitor") or {}).get("collector_stale"):
+        stalled = stalled or "collector_heartbeat_missing"
+    if stalled:
+        # Existing clients already render this reason as a stopped daily scan.
+        return result | {"state": "alert", "reason": "daily_scan_stopped", "detail": stalled}
     if coverage["status"] == "up_to_date":
         return result | {"state": "healthy"}
 

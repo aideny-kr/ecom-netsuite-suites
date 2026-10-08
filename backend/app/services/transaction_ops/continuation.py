@@ -11,7 +11,7 @@ from app.models.user import User
 from app.schemas.transaction_runs import RunCreate
 from app.services.transaction_ops import state_service
 from app.services.transaction_ops.auth_recovery import auth_resume_candidate, auth_resume_ready, auth_stop
-from app.services.transaction_ops.collection_recovery import collection_stop
+from app.services.transaction_ops.collection_recovery import collection_only, collection_stop
 from app.services.transaction_ops.runner import enabled
 
 MAX_PARTS = 16
@@ -52,6 +52,52 @@ def _read_stopped_this_run(previous, progress, failure):
         return previous.created_at <= observed <= previous.finished_at
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def no_progress_deadline_stop(previous):
+    """One bounded read-only recovery for an actually exhausted, idle deadline.
+
+    Reservation/heartbeat activity is deliberately not productivity. Authentication,
+    permanent read failures, manual work and financial execution never qualify.
+    """
+    if previous is None or not collection_only(previous) or auth_stop(previous):
+        return False
+    if previous.status != "finished" or previous.termination_reason != "budget":
+        return False
+    progress = getattr(previous, "progress_json", None) or {}
+    deadline, finished = getattr(previous, "deadline_at", None), getattr(previous, "finished_at", None)
+    if deadline is None or finished is None or finished < deadline or progress.get("restart_scan"):
+        return False
+    baseline = progress.get("continuation_baseline") or {}
+    if any(
+        progress.get(key, 0) > baseline.get(key, 0)
+        for key in (
+            "processed",
+            "scan_count",
+            "refund_scan_count",
+            "outside_scope",
+            "destination_scan_count",
+            "dependency_step_count",
+        )
+    ):
+        return False
+    failure = progress.get("last_read_failure") or {}
+    if failure and _read_stopped_this_run(previous, progress, failure) and failure.get("resolved") is False:
+        from app.services.transaction_ops.read_recovery import TRANSIENT_READ_CODES
+
+        if failure.get("code") not in TRANSIENT_READ_CODES or failure.get("retryable") is not True:
+            return False
+    return True
+
+
+def deadline_resume_due(previous, now):
+    if not no_progress_deadline_stop(previous):
+        return False
+    try:
+        next_metadata(previous, now)
+    except (ValueError, TypeError) as exc:
+        return str(exc) == "read_retry_wait"
+    return True
 
 
 def read_retry_due(previous, now):
@@ -160,6 +206,7 @@ def next_metadata(previous, now, *, operator_retry=False):
             "continuation_started_at": now.isoformat(),
             "continuation_root_id": str(previous.id),
             "continuation_read_retry_count": 0,
+            "continuation_no_progress_retry_count": 0,
             "collection_diagnostic_retry_count": 0,
         }
     part = progress.get("continuation_part", 1)
@@ -189,7 +236,11 @@ def next_metadata(previous, now, *, operator_retry=False):
         and (progress.get("last_collection_failure") or {}).get("code") == "collection_permanent"
     ):
         raise ValueError("collection_failure_permanent")
-    retry = scheduled_read_stop(previous) or collection_retry
+    deadline_retry = no_progress_deadline_stop(previous)
+    deadline_count = progress.get("continuation_no_progress_retry_count", 0)
+    if type(deadline_count) is not int or not 0 <= deadline_count <= 1 or (deadline_retry and deadline_count == 1):
+        raise ValueError("no_progress_retry_limit")
+    retry = scheduled_read_stop(previous) or collection_retry or deadline_retry
     diagnostic_count = progress.get("collection_diagnostic_retry_count", 0)
     if type(diagnostic_count) is not int or not 0 <= diagnostic_count <= 1:
         raise ValueError("collection_diagnostic_retry_limit")
@@ -229,6 +280,7 @@ def next_metadata(previous, now, *, operator_retry=False):
         # continuation, even if intervening runs made progress. A new daily
         # cycle clears continuation metadata through the existing create path.
         "continuation_read_retry_count": retry_count,
+        "continuation_no_progress_retry_count": deadline_count + int(deadline_retry),
         "collection_diagnostic_retry_count": diagnostic_count + int(unknown),
     }
     if operator_repair:
@@ -250,6 +302,7 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None, operator_retry
             await state_service._commit(db, tenant_id)
             return None
     auth_retry = auth_stop(previous)
+    deadline_retry = no_progress_deadline_stop(previous)
     collection_retry = collection_stop(previous, operator_retry=operator_retry)
     if operator_retry:
         await state_service._human(db, tenant_id, actor, "recon.run")
@@ -294,7 +347,10 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None, operator_retry
     # Both paths recheck productivity/backoff and the current finite limits.
     if blocked and not (
         (operator_retry and collection_retry)
-        or (blocked.get("reason") == "no_progress" and read_retry_due(previous, now))
+        or (
+            blocked.get("reason") == "no_progress"
+            and (read_retry_due(previous, now) or deadline_resume_due(previous, now))
+        )
         or (blocked.get("reason") == "part_limit" and scheduled_part_resume_candidate(previous, now))
     ):
         await state_service._commit(db, tenant_id)
@@ -349,7 +405,7 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None, operator_retry
             resume_from_run_id=previous.id,
             automatic_continuation=True,
             automatic_auth_recovery=auth_retry,
-            automatic_collection_recovery=collection_retry,
+            automatic_collection_recovery=collection_retry or deadline_retry,
             operator_collection_retry=operator_retry,
         )
     except (ValueError, state_service.StateError) as exc:
@@ -370,6 +426,7 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None, operator_retry
                 "permission_denied",
                 "feature_unavailable",
                 "read_retry_limit",
+                "no_progress_retry_limit",
                 "auth_retry_limit",
                 "collection_diagnostic_retry_limit",
                 "collection_failure_permanent",

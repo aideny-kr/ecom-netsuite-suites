@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 
 from app.core.database import set_tenant_context
+from app.models.audit import AuditEvent
 from app.models.transaction_ops import TransactionConfig, TransactionRun
 from app.services.transaction_ops import daily_status, state_service
 from app.services.transaction_ops.auth_recovery import auth_stop
@@ -19,6 +20,7 @@ from app.services.transaction_ops.continuation import (
     auth_resume_due,
     collection_resume_due,
     continuation_result,
+    deadline_resume_due,
     next_metadata,
     read_retry_due,
     scheduled_part_resume_candidate,
@@ -106,7 +108,7 @@ def continuation_status(run, now, *, blocked=None):
         state = "waiting_for_retry"
     if blocked and not (
         blocked.get("reason") == "no_progress"
-        and read_retry_due(run, eligibility)
+        and (read_retry_due(run, eligibility) or deadline_resume_due(run, eligibility))
         or blocked.get("reason") == "part_limit"
         and scheduled_part_resume_candidate(run, eligibility)
     ):
@@ -155,7 +157,9 @@ def run_snapshot(run, now):
         "window_start": (run.params_json or {}).get("window_start"),
         "window_end": (run.params_json or {}).get("window_end"),
         "run_state_updated_at": _iso(run.updated_at),
-        "last_progress_at": None,
+        "last_progress_at": _timestamp(progress.get("last_progress_at")),
+        "execution_started_at": _timestamp(progress.get("execution_started_at")),
+        "created_at": _iso(run.created_at),
         "lease_until": _iso(run.lease_until),
         "deadline_at": _iso(run.deadline_at),
         "counters": {key: _number(progress.get(key)) for key in _COUNTERS},
@@ -202,6 +206,10 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
         return _action("paused", "schedule_disabled")
     scheduled = next((r for r in active if r["origin"] in {"schedule", "recovery"}), None)
     if scheduled:
+        from app.services.transaction_ops.progress_clock import stalled_snapshot
+
+        if stalled := stalled_snapshot(scheduled, now):
+            return _action("operator_review", stalled)
         if scheduled["execution_state"] in {"lease_expired", "deadline_expired", "queue_expired"}:
             return _action("scheduler_recovery", scheduled["execution_state"], _iso(now))
         if scheduled["collection_wait"]:
@@ -224,6 +232,7 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
                 "auth_retry_limit",
                 "no_progress",
                 "read_retry_limit",
+                "no_progress_retry_limit",
                 "paused",
                 "feature_unavailable",
                 "permission_denied",
@@ -335,6 +344,15 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
         if owner_ids
         else {}
     )
+    monitor_health = await db.scalar(
+        select(AuditEvent.payload)
+        .where(
+            AuditEvent.tenant_id == tenant_id,
+            AuditEvent.action == "recon.watchdog.health",
+        )
+        .order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
+        .limit(1)
+    )
     for config in configs:
         planned = schedule(config, now)
         cover = coverage.get(
@@ -398,6 +416,7 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
             "active_runs": snapshots,
             "active_runs_truncated": len(running) > _ACTIVE_LIMIT,
             "continuation": recovery,
+            "monitor": monitor_health,
             "next_action": _next_action(config, last, snapshots, cover, planned, recovery, now),
         }
         policy = ReconciliationPolicy.model_validate((config.mapping_json or {}).get("reconciliation_policy") or {})
