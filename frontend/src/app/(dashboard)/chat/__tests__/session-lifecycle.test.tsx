@@ -106,3 +106,23 @@ it("creates only one session for an investigate-prefill deep link", async () => 
   expect(api.post.mock.calls.filter(c => c[0] === "/api/v1/chat/sessions")).toHaveLength(1);
   expect(nav.replace).toHaveBeenCalledWith("/chat?session=created", { scroll: false });
 });
+
+it("releases the composer after a terminal SSE error", async () => {
+  nav.query = "session=older";
+  api.streamGet.mockResolvedValue(new Response('data: {"type":"error","error":"Synthetic stream failure"}\n\n'));
+  mount(); await screen.findByText("Conversation older"); fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await screen.findByText("Synthetic stream failure");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
+});
+
+it("releases a resumed run after persisted status becomes idle during history refresh", async () => {
+  nav.query = "session=older";
+  let listCalls = 0, detailCalls = 0;
+  api.get.mockImplementation(async (path: string) => {
+    if (path === "/api/v1/chat/sessions") { if (++listCalls > 1) await new Promise(r => setTimeout(r, 75)); return sessions; }
+    return { ...detail("older"), status: ++detailCalls <= 2 ? "running" : "idle", active_run_id: detailCalls <= 2 ? "run-resumed" : null };
+  });
+  api.streamGet.mockResolvedValue(new Response('data: {"type":"message","message":{"id":"done","role":"assistant","content":"Done"}}\n\n'));
+  mount(); await waitFor(() => expect(api.streamGet).toHaveBeenCalled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
+});

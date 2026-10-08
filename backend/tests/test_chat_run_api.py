@@ -1,11 +1,12 @@
 """Tests for chat run API endpoints (SSE relay + cancel)."""
 
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.main import app
 from app.models.user import User
@@ -16,6 +17,7 @@ from app.models.user import User
 
 _TENANT_ID = uuid.uuid4()
 _USER_ID = uuid.uuid4()
+_SESSION_ID = uuid.uuid4()
 
 
 def _fake_user() -> User:
@@ -31,6 +33,13 @@ def client():
     """TestClient with auth overridden."""
     fake_user = _fake_user()
     app.dependency_overrides[get_current_user] = lambda: fake_user
+    db = AsyncMock()
+    db.execute.return_value.scalar_one_or_none = MagicMock(return_value=_SESSION_ID)
+
+    async def override_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_db
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -41,6 +50,7 @@ def mock_rm():
     with patch("app.api.v1.chat_runs.get_run_manager") as factory:
         rm = MagicMock()
         rm.available = True
+        rm.get_session_id.return_value = str(_SESSION_ID)
         factory.return_value = rm
         yield rm
 

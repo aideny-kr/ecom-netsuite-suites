@@ -402,8 +402,33 @@ async def test_session_history_pagination_preserves_private_scope(client, db, ad
     assert [s["title"] for s in first.json()] == [f"Private {i}" for i in range(50)]
     assert [s["title"] for s in second.json()] == [f"Private {i}" for i in range(50, 53)]
     assert (await client.get("/api/v1/chat/sessions?offset=-1", headers=headers)).status_code == 422
+    assert (await client.get("/api/v1/chat/sessions?offset=9223372036854775808", headers=headers)).status_code == 422
     for method in ("get", "delete"):
         assert (
             await getattr(client, method)(f"/api/v1/chat/sessions/{owned[0].id}", headers=other_headers)
         ).status_code == 404
     assert (await client.get("/api/v1/chat/sessions?offset=50", headers=other_headers)).json() == []
+
+
+@pytest.mark.asyncio
+async def test_session_detail_preserves_workspace_context(client, db, admin_user):
+    from app.models.workspace import Workspace
+
+    user, headers = admin_user
+    workspace = Workspace(tenant_id=user.tenant_id, name="Synthetic project", created_by=user.id)
+    db.add(workspace)
+    await db.flush()
+    session = ChatSession(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        workspace_id=workspace.id,
+        session_type="workspace",
+        agent_id="bi-agent",
+    )
+    db.add(session)
+    await db.flush()
+    response = await client.get(f"/api/v1/chat/sessions/{session.id}", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["workspace_id"] == str(workspace.id)
+    assert response.json()["session_type"] == "workspace"
+    assert response.json()["agent_id"] == "bi-agent"

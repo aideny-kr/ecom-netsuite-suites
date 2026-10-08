@@ -141,12 +141,17 @@ export default function ChatPage() {
   });
   const sessions = Array.from(new Map(sessionPages?.pages.flat().map(session => [session.id, session]) || []).values());
 
-  const { data: sessionDetail, isLoading: isLoadingDetail, isError: sessionError, refetch: refetchSession } = useQuery<ChatSessionDetail>({
+  const { data: sessionDetail, isLoading: isLoadingDetail, isError: sessionError, error: sessionLoadError, refetch: refetchSession } = useQuery<ChatSessionDetail>({
     queryKey: ["chat-session", activeSessionId],
     queryFn: () => apiClient.get<ChatSessionDetail>(`/api/v1/chat/sessions/${activeSessionId}`),
     enabled: !!activeSessionId,
     refetchInterval: (query) => accountingProgressPending(query.state.data?.messages || []) ? 5000 : false,
   });
+
+  const sessionAccessDenied = sessionError && [401, 403, 404].includes(
+    (sessionLoadError as { status?: number } | null)?.status || 0,
+  );
+  const sessionLoadBlocked = !!activeSessionId && (!sessionDetail || sessionAccessDenied);
 
   const createSession = useMutation({
     mutationFn: (params?: { title?: string; agent_id?: string | null; navigationEpoch?: number }) =>
@@ -242,6 +247,7 @@ export default function ChatPage() {
   // to a session with an active run). Extracted to avoid duplicating handlers.
   const connectToRunStream = useCallback(
     async (runId: string, sessionId: string) => {
+      const epoch = sessionEpochRef.current;
       const controller = new AbortController();
       abortRef.current = controller;
       activeRunRef.current = runId;
@@ -348,11 +354,9 @@ export default function ChatPage() {
             ));
           },
           onError: (streamError) => {
+            if (sessionEpochRef.current !== epoch) return;
             setError(streamError);
-            if (abortRef.current) {
-              abortRef.current.abort();
-              abortRef.current = null;
-            }
+            controller.abort();
           },
           onMessage: (message) => {
             setFinancialReport((current) => {
@@ -400,7 +404,7 @@ export default function ChatPage() {
           setError(message);
         }
       } finally {
-        if (abortRef.current !== controller) return;
+        if (sessionEpochRef.current !== epoch) return;
         activeRunRef.current = null;
         if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
         if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
@@ -421,8 +425,8 @@ export default function ChatPage() {
           await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
           await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
         } catch { /* non-critical */ }
-        if (abortRef.current !== controller) return;
-        abortRef.current = null;
+        if (sessionEpochRef.current !== epoch) return;
+        if (abortRef.current === controller) abortRef.current = null;
         isStreamingRef.current = false;
         setIsStreaming(false);
         setPendingMessage(null);
@@ -476,7 +480,7 @@ export default function ChatPage() {
         };
       } = {},
     ) => {
-      if (isStreamingRef.current || createSession.isPending || (activeSessionId && (!sessionDetail || sessionError))) return;
+      if (isStreamingRef.current || createSession.isPending || sessionLoadBlocked) return;
       const epoch = sessionEpochRef.current;
       setError(null);
       setPendingMessage(content);
@@ -555,7 +559,7 @@ export default function ChatPage() {
         }
       }
     },
-    [activeSessionId, createSession, queryClient, pinnedAgentId, sessionDetail, sessionError, connectToRunStream],
+    [activeSessionId, createSession, queryClient, pinnedAgentId, sessionLoadBlocked, connectToRunStream],
   );
 
   const handleWriteConfirm = useCallback(
@@ -726,13 +730,13 @@ export default function ChatPage() {
   const handleMentionClick = useCallback(
     (filePath: string) => {
       const params = new URLSearchParams({ file: filePath });
-      const workspaceId = workspaces[0]?.id;
+      const workspaceId = sessionDetail?.workspace_id || workspaces[0]?.id;
       if (workspaceId) {
         params.set("workspace", workspaceId);
       }
       router.push(`/workspace?${params.toString()}`);
     },
-    [router, workspaces],
+    [router, workspaces, sessionDetail?.workspace_id],
   );
 
   return (
@@ -774,7 +778,7 @@ export default function ChatPage() {
           </button>
         )}
         {sessionError && <div role="alert" className="m-4 rounded-lg border border-destructive/30 p-4 text-sm">
-          <p>This conversation is unavailable. It may have been deleted or you may no longer have access.</p>
+          <p>{!sessionDetail || sessionAccessDenied ? "This conversation is unavailable. It may have been deleted or you may no longer have access." : "Could not refresh this conversation. Showing previously loaded messages."}</p>
           <button type="button" onClick={() => refetchSession()} className="mt-2 text-primary underline">Retry loading conversation</button>
         </div>}
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -835,9 +839,9 @@ export default function ChatPage() {
           variant="default"
           onSend={handleSend}
           onStop={handleStop}
-          isLoading={isStreaming || createSession.isPending || (!!activeSessionId && (!sessionDetail || sessionError))}
+          isLoading={isStreaming || createSession.isPending || sessionLoadBlocked}
           isRunning={isStreaming}
-          workspaceId={sessionDetail?.workspace_id || null}
+          workspaceId={sessionDetail?.workspace_id || workspaces[0]?.id || null}
           initialMessage={composeMessage}
         />
       </div>
