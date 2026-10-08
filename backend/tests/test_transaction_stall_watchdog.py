@@ -1,14 +1,17 @@
 """Fault/stop/resume checks for daily collection, committed progress and alerts."""
 
 import asyncio
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.models.audit import AuditEvent
 from app.models.transaction_ops import TransactionRun
@@ -268,6 +271,13 @@ async def test_beat_outage_falls_back_only_to_scheduled_collection_and_alerts(db
 
 
 async def test_two_api_processes_cannot_supervise_together_and_shutdown_releases_lock(monkeypatch):
+    from tests.conftest import _test_db_url
+
+    assert urlsplit(_test_db_url).hostname in {"localhost", "127.0.0.1", "postgres", "db"}
+    # Pytest creates a new event loop per test. A production API has one long-
+    # lived loop; do not reuse its module-level engine across test loops.
+    engine = create_async_engine(_test_db_url)
+    monkeypatch.setattr(watchdog, "engine", engine)
     entered, release = asyncio.Event(), asyncio.Event()
     calls = []
 
@@ -278,15 +288,23 @@ async def test_two_api_processes_cannot_supervise_together_and_shutdown_releases
 
     monkeypatch.setattr(watchdog, "supervise", supervise)
     first = asyncio.create_task(watchdog.run_pass())
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    await watchdog.run_pass()
-    assert len(calls) == 1
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    release.set()
-    await watchdog.run_pass()
-    assert len(calls) == 2
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        await watchdog.run_pass()
+        assert len(calls) == 1
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        release.set()
+        await watchdog.run_pass()
+        assert len(calls) == 2
+    finally:
+        release.set()
+        if not first.done():
+            first.cancel()
+        with suppress(asyncio.CancelledError):
+            await first
+        await engine.dispose()
 
 
 async def test_legacy_no_progress_audit_is_reconsidered_only_for_eligible_deadline(db, scheduled):
@@ -518,3 +536,32 @@ async def test_supervision_uses_database_clock_when_no_trusted_test_clock_is_giv
     monkeypatch.setattr(watchdog.feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[]))
     await watchdog.supervise(db)
     clock.assert_awaited_once_with(db, None)
+
+
+async def test_status_inventory_second_page_is_bounded_and_keeps_truncation(monkeypatch):
+    pages = [
+        {"entities": [{"config_id": str(i)} for i in range(50)], "truncated": True},
+        {"entities": [{"config_id": str(i)} for i in range(50, 100)], "truncated": True},
+    ]
+    reader = AsyncMock(side_effect=pages)
+    monkeypatch.setattr(watchdog, "operational_status", reader)
+    result = await watchdog.collect_status(AsyncMock(), uuid4(), NOW)
+    assert len(result["entities"]) == 100 and result["truncated"] is True
+    assert reader.await_count == 2
+    assert [call.kwargs["offset"] for call in reader.await_args_list] == [0, 50]
+    assert all(call.kwargs["limit"] == 50 for call in reader.await_args_list)
+
+
+async def test_failed_supervision_persists_incomplete_tick_in_finally(db, monkeypatch):
+    monkeypatch.setattr(watchdog, "collect_due_runs", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        watchdog.feature_flag_service, "list_tenants_with_flags", AsyncMock(side_effect=RuntimeError("fault"))
+    )
+    with pytest.raises(RuntimeError, match="fault"):
+        await watchdog.supervise(db, now=datetime.now(timezone.utc))
+    tick = await db.scalar(
+        select(AuditEvent.payload).where(
+            AuditEvent.tenant_id == watchdog.SYSTEM_TENANT, AuditEvent.action == "recon.watchdog.tick"
+        )
+    )
+    assert tick["completed"] is False and tick["tenants"] == 0
