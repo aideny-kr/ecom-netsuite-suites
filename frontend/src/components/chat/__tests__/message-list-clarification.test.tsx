@@ -263,7 +263,7 @@ describe("MessageList — ClarificationCard rendering", () => {
 });
 
 it("provides a focusable conversation region and preserves keyboard reading during streaming", () => {
-  const messages = [{ id: "keyboard-msg", role: "user", content: "Read the older evidence", created_at: "2026-10-08T00:00:00Z" }];
+  const messages = [{ id: "keyboard-msg", role: "user", content: "Read the older evidence", tool_calls: null, citations: null, created_at: "2026-10-08T00:00:00Z" }];
   const result = renderWithQueryClient(<MessageList messages={messages} isLoading={false} />);
   const region = screen.getByRole("region", { name: "Conversation messages" });
   expect(region).toHaveAttribute("tabindex", "0");
