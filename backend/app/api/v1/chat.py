@@ -225,6 +225,7 @@ async def list_sessions(
     workspace_id: str | None = None,
     session_type: str | None = None,
     include_all: bool = False,
+    offset: int = FastAPIQuery(default=0, ge=0),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -246,7 +247,7 @@ async def list_sessions(
     if session_type:
         q = q.where(ChatSession.session_type == session_type)
 
-    q = q.order_by(ChatSession.updated_at.desc()).limit(50)
+    q = q.order_by(ChatSession.updated_at.desc(), ChatSession.id.desc()).offset(offset).limit(50)
     result = await db.execute(q)
     sessions = result.scalars().all()
     return [_serialize_session(s) for s in sessions]

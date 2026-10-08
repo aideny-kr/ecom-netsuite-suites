@@ -261,3 +261,16 @@ describe("MessageList — ClarificationCard rendering", () => {
     expect(screen.queryByText(/This card expired/i)).not.toBeInTheDocument();
   });
 });
+
+it("provides a focusable conversation region and preserves keyboard reading during streaming", () => {
+  const messages = [{ id: "keyboard-msg", role: "user", content: "Read the older evidence", created_at: "2026-10-08T00:00:00Z" }];
+  const result = renderWithQueryClient(<MessageList messages={messages} isLoading={false} />);
+  const region = screen.getByRole("region", { name: "Conversation messages" });
+  expect(region).toHaveAttribute("tabindex", "0");
+  region.focus();
+  expect(region).toHaveFocus();
+  vi.mocked(HTMLElement.prototype.scrollIntoView).mockClear();
+  region.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+  result.rerender(<QueryClientProvider client={new QueryClient()}><MessageList messages={[...messages]} isLoading={false} isWaitingForReply={true} /></QueryClientProvider>);
+  expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+});

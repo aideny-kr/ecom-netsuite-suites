@@ -892,6 +892,15 @@ export function MessageList({
   return (
     <div
       ref={containerRef}
+      role="region"
+      aria-label="Conversation messages"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
+          shouldAutoScrollRef.current = false;
+        }
+      }}
+      onTouchMove={() => { shouldAutoScrollRef.current = false; }}
       onScroll={handleScroll}
       onWheel={handleWheel}
       className={cn(

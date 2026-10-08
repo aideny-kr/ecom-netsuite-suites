@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
 import { accountingProgressPending } from "@/lib/accounting-progress";
@@ -16,7 +16,7 @@ import { ChatWelcome } from "@/components/chat/chat-welcome";
 import { ChatInput } from "@/components/chat/chat-input";
 import { useWorkspaces } from "@/hooks/use-workspace";
 import { useAgents } from "@/hooks/use-agents";
-import { AlertCircle, X, PanelLeftOpen } from "lucide-react";
+import { AlertCircle, X, PanelLeftOpen, Plus } from "lucide-react";
 
 export default function ChatPage() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -28,6 +28,7 @@ export default function ChatPage() {
     return () => compact.removeEventListener("change", sync);
   }, []);
   const searchParams = useSearchParams();
+  const urlSessionId = searchParams?.get("session") || null;
   const pinnedAgentId = searchParams?.get("agent") || null;
   const prefillMessage = searchParams?.get("prefill") || null;
   // `compose` populates the composer WITHOUT sending (Skills page "Use in chat").
@@ -69,6 +70,14 @@ export default function ChatPage() {
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRunRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const sessionEpochRef = useRef(0);
+  const sessionUrl = useCallback((id: string | null) => {
+    const params = new URLSearchParams();
+    if (pinnedAgentId) params.set("agent", pinnedAgentId);
+    if (id) params.set("session", id);
+    else params.set("new_session", "true");
+    return `/chat?${params.toString()}`;
+  }, [pinnedAgentId]);
 
   const handleStop = useCallback(async () => {
     const runId = activeRunRef.current;
@@ -118,18 +127,21 @@ export default function ChatPage() {
 
   const { data: workspaces = [] } = useWorkspaces();
 
-  const { data: sessions = [] } = useQuery<ChatSession[]>({
+  const { data: sessionPages, isLoading: isLoadingSessions, isError: sessionsError,
+    refetch: refetchSessions, hasNextPage, fetchNextPage, isFetchingNextPage } = useInfiniteQuery<ChatSession[]>({
     queryKey: ["chat-sessions", "main"],
-    queryFn: () => apiClient.get<ChatSession[]>("/api/v1/chat/sessions"),
-    // Poll every 5s when any session is running, so sidebar indicator updates
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      const hasRunning = data?.some((s) => s.status === "running" || s.status === "cancelling");
-      return hasRunning ? 5000 : false;
-    },
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => apiClient.get<ChatSession[]>(
+      `/api/v1/chat/sessions${pageParam ? `?offset=${pageParam}` : ""}`,
+    ),
+    getNextPageParam: (lastPage, pages) => lastPage.length === 50 ? pages.reduce((n, page) => n + page.length, 0) : undefined,
+    refetchInterval: (query) => query.state.data?.pages.some(page =>
+      page.some(session => session.status === "running" || session.status === "cancelling"),
+    ) ? 5000 : false,
   });
+  const sessions = Array.from(new Map(sessionPages?.pages.flat().map(session => [session.id, session]) || []).values());
 
-  const { data: sessionDetail, isLoading: isLoadingDetail } = useQuery<ChatSessionDetail>({
+  const { data: sessionDetail, isLoading: isLoadingDetail, isError: sessionError, refetch: refetchSession } = useQuery<ChatSessionDetail>({
     queryKey: ["chat-session", activeSessionId],
     queryFn: () => apiClient.get<ChatSessionDetail>(`/api/v1/chat/sessions/${activeSessionId}`),
     enabled: !!activeSessionId,
@@ -137,14 +149,17 @@ export default function ChatPage() {
   });
 
   const createSession = useMutation({
-    mutationFn: (params?: { title?: string; agent_id?: string | null }) =>
+    mutationFn: (params?: { title?: string; agent_id?: string | null; navigationEpoch?: number }) =>
       apiClient.post<ChatSession>("/api/v1/chat/sessions", {
         title: params?.title,
         agent_id: params?.agent_id || undefined,
       }),
-    onSuccess: (session) => {
+    onSuccess: (session, params) => {
       queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+      if (params?.navigationEpoch !== undefined && params.navigationEpoch !== sessionEpochRef.current) return;
       setActiveSessionId(session.id);
+      hasAutoSelected.current = true;
+      router.replace(sessionUrl(session.id), { scroll: false });
     },
   });
 
@@ -156,15 +171,16 @@ export default function ChatPage() {
     // instead of resurrecting the most recent session; the send path creates a
     // new session when none is active (and recon's prefill effect creates one
     // explicitly). Marking hasAutoSelected prevents a later flash of an old one.
-    if (newSessionParam === "true") {
+    if (urlSessionId || newSessionParam === "true") {
       hasAutoSelected.current = true;
       return;
     }
     if (!hasAutoSelected.current && !activeSessionId && sessions.length > 0) {
       setActiveSessionId(sessions[0].id);
       hasAutoSelected.current = true;
+      router.replace(sessionUrl(sessions[0].id), { scroll: false });
     }
-  }, [sessions, activeSessionId, newSessionParam]);
+  }, [sessions, activeSessionId, newSessionParam, urlSessionId, router, sessionUrl]);
 
   // Hydrate structured output refs from persisted messages on session load
   const [, forceRender] = useState(0);
@@ -213,9 +229,8 @@ export default function ChatPage() {
     if (hydrated) forceRender((n) => n + 1);
   }, [sessionDetail]);
 
-  // When switching to a session that finished a background run, refetch to show the result.
-  // We intentionally do NOT reconnect to mid-stream runs — the completed response
-  // will appear when the session detail is refetched after the run finishes.
+  // Refetch persisted results when selecting a conversation. Active runs also
+  // reconnect through the effect below; selecting a session never starts a turn.
   useEffect(() => {
     if (!activeSessionId) return;
     queryClient.invalidateQueries({ queryKey: ["chat-session", activeSessionId] });
@@ -240,6 +255,7 @@ export default function ChatPage() {
           `/api/v1/chat/runs/${runId}/stream?last_id=0`,
           controller.signal,
         );
+        if (controller.signal.aborted) return;
         await consumeChatStream(res, {
           onText: (chunk) => {
             bufferRef.current.push(chunk);
@@ -384,6 +400,7 @@ export default function ChatPage() {
           setError(message);
         }
       } finally {
+        if (abortRef.current !== controller) return;
         activeRunRef.current = null;
         if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
         if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
@@ -404,6 +421,8 @@ export default function ChatPage() {
           await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
           await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
         } catch { /* non-critical */ }
+        if (abortRef.current !== controller) return;
+        abortRef.current = null;
         isStreamingRef.current = false;
         setIsStreaming(false);
         setPendingMessage(null);
@@ -424,7 +443,7 @@ export default function ChatPage() {
   // Prevents "looks dead" when navigating away and back mid-run.
   useEffect(() => {
     if (!sessionDetail?.active_run_id) return;
-    if (sessionDetail.status !== "running") return;
+    if (sessionDetail.status !== "running" && sessionDetail.status !== "cancelling") return;
     if (isStreamingRef.current) return; // Already consuming (we started this run)
 
     const runId = sessionDetail.active_run_id;
@@ -457,7 +476,8 @@ export default function ChatPage() {
         };
       } = {},
     ) => {
-      if (isStreamingRef.current || createSession.isPending) return;
+      if (isStreamingRef.current || createSession.isPending || (activeSessionId && (!sessionDetail || sessionError))) return;
+      const epoch = sessionEpochRef.current;
       setError(null);
       setPendingMessage(content);
       isStreamingRef.current = true;
@@ -472,9 +492,11 @@ export default function ChatPage() {
       let sessionId = activeSessionId;
       if (!sessionId) {
         try {
-          const session = await createSession.mutateAsync(pinnedAgentId ? { agent_id: pinnedAgentId } : undefined);
+          const session = await createSession.mutateAsync({ agent_id: pinnedAgentId, navigationEpoch: epoch });
           sessionId = session.id;
+          if (sessionEpochRef.current !== epoch) return;
         } catch {
+          if (sessionEpochRef.current !== epoch) return;
           setPendingMessage(null);
           isStreamingRef.current = false;
           setIsStreaming(false);
@@ -500,11 +522,13 @@ export default function ChatPage() {
         // then clear the optimistic pending copy. Clearing AFTER refetch prevents
         // the brief gap where neither the pending nor persisted message renders.
         await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        if (sessionEpochRef.current !== epoch) return;
         setPendingMessage(null);
 
         // Step 2: Connect to SSE stream for this run (shared with reconnection)
         await connectToRunStream(run_id, sessionId);
       } catch (err: unknown) {
+        if (sessionEpochRef.current !== epoch) return;
         // AbortController.abort() throws — this is expected on session switch, not an error
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (err instanceof Error && err.message.includes("aborted")) return;
@@ -531,7 +555,7 @@ export default function ChatPage() {
         }
       }
     },
-    [activeSessionId, createSession, flushBuffer, queryClient, pinnedAgentId],
+    [activeSessionId, createSession, queryClient, pinnedAgentId, sessionDetail, sessionError, connectToRunStream],
   );
 
   const handleWriteConfirm = useCallback(
@@ -550,6 +574,7 @@ export default function ChatPage() {
     async (messageId: string, optionId: "A" | "B" | "C") => {
       const sessionId = activeSessionId;
       if (!sessionId) return;
+      const epoch = sessionEpochRef.current;
       // Plan-mode resume turn: capture run_id from POST response and
       // immediately attach to the SSE stream (mirrors handleSend). Relying on
       // a session refetch to observe ``active_run_id`` races against fast
@@ -568,10 +593,11 @@ export default function ChatPage() {
           },
         );
         await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        if (sessionEpochRef.current !== epoch) return;
         await connectToRunStream(run_id, sessionId);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Failed to submit clarification.";
-        setError(message);
+        if (sessionEpochRef.current === epoch) setError(message);
         // Re-raise so ClarificationCard's awaited onChoose rejects and the card
         // resets pendingPick (otherwise the card would stay permanently disabled
         // after a failed resume — codex round 11 P2 Bug 1).
@@ -588,6 +614,7 @@ export default function ChatPage() {
     async (messageId: string, manualText: string) => {
       const sessionId = activeSessionId;
       if (!sessionId) return;
+      const epoch = sessionEpochRef.current;
       try {
         const { run_id } = await apiClient.post<{ run_id: string }>(
           `/api/v1/chat/sessions/${sessionId}/messages`,
@@ -601,10 +628,11 @@ export default function ChatPage() {
           },
         );
         await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        if (sessionEpochRef.current !== epoch) return;
         await connectToRunStream(run_id, sessionId);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Failed to submit clarification.";
-        setError(message);
+        if (sessionEpochRef.current === epoch) setError(message);
         // Re-raise so ClarificationCard preserves the textarea content for retry
         throw err;
       }
@@ -613,6 +641,11 @@ export default function ChatPage() {
   );
 
   const clearStreamingState = useCallback(() => {
+    sessionEpochRef.current += 1;
+    activeRunRef.current = null;
+    bufferRef.current = [];
+    if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
     // Abort any in-flight SSE connection so old handlers stop firing
     if (abortRef.current) {
       abortRef.current.abort();
@@ -627,45 +660,68 @@ export default function ChatPage() {
     setDataTable(null);
     setCharts([]);
     setTaskOutput(null);
+    setSheetsLink(null);
+    setDocsLink(null);
+    setReportReady(null);
+    setTemplateFile(null);
     setPendingMessage(null);
     setError(null);
   }, []);
 
+  // The URL is the durable navigation record. Never silently substitute a
+  // different conversation when a deep link is unavailable or outside history.
+  useEffect(() => {
+    if (!urlSessionId && newSessionParam !== "true") return;
+    hasAutoSelected.current = true;
+    const selected = urlSessionId || null;
+    if (selected !== activeSessionId) {
+      clearStreamingState();
+      setActiveSessionId(selected);
+    }
+    // Only react to actual URL navigation; local selection precedes router updates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlSessionId, newSessionParam, clearStreamingState]);
+
+  useEffect(() => () => {
+    sessionEpochRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+  }, []);
+
   const handleNewChat = useCallback(() => {
+    hasAutoSelected.current = true;
     setActiveSessionId(null);
     clearStreamingState();
-  }, [clearStreamingState]);
+    router.push(sessionUrl(null), { scroll: false });
+  }, [clearStreamingState, router, sessionUrl]);
 
   const handleSelectSession = useCallback((sessionId: string) => {
     if (sessionId === activeSessionId) return;
     clearStreamingState();
+    hasAutoSelected.current = true;
     setActiveSessionId(sessionId);
-  }, [activeSessionId, clearStreamingState]);
+    router.push(sessionUrl(sessionId), { scroll: false });
+  }, [activeSessionId, clearStreamingState, router, sessionUrl]);
+
+  const handleSendRef = useRef(handleSend);
+  handleSendRef.current = handleSend;
 
   // Auto-send prefill message from URL (e.g., from Recon "Investigate in Chat")
   useEffect(() => {
     if (!prefillMessage || prefillSentRef.current) return;
+    if (urlSessionId && !activeSessionId) return;
+    if (activeSessionId && (!sessionDetail || isLoadingDetail || sessionError)) return;
     const message = prefillMessage;
-    prefillSentRef.current = true;
-
     const timer = setTimeout(async () => {
-      if (newSessionParam === "true") {
-        try {
-          const session = await createSession.mutateAsync(
-            pinnedAgentId ? { agent_id: pinnedAgentId } : undefined
-          );
-          setActiveSessionId(session.id);
-        } catch {
-          setError("Failed to create chat session.");
-          return;
-        }
-      }
-      handleSend(message);
-      router.replace(`/chat${pinnedAgentId ? `?agent=${pinnedAgentId}` : ""}`);
+      prefillSentRef.current = true;
+      handleSendRef.current(message);
+      if (activeSessionId) router.replace(sessionUrl(activeSessionId), { scroll: false });
     }, 500);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prefillMessage]);
+  }, [prefillMessage, activeSessionId, isLoadingDetail, sessionError]);
 
   const handleMentionClick = useCallback(
     (filePath: string) => {
@@ -681,13 +737,25 @@ export default function ChatPage() {
 
   return (
     <div className="relative flex h-full min-h-0 w-full min-w-0 flex-col gap-5 p-4 md:p-7">
-      <header className="shrink-0"><p className="orbital-eyebrow">Your workspace</p><h1 className="mt-2 text-2xl font-medium">Chat</h1><p className="mt-2 text-[13px] text-muted-foreground">Ask a question, work through an idea, or continue a conversation.</p></header>
+      <header className="flex shrink-0 items-start justify-between gap-3">
+        <div className="min-w-0"><p className="orbital-eyebrow">Your workspace</p><h1 className="mt-2 text-2xl font-medium">Chat</h1>
+          <p className="mt-2 truncate text-[13px] text-muted-foreground" aria-live="polite">{activeSessionId ? sessionDetail?.title || "Loading conversation…" : "New conversation"}</p>
+          <p className="mt-1 text-xs text-muted-foreground">Private conversation · {sessionDetail?.workspace_id ? workspaces.find(w => w.id === sessionDetail.workspace_id)?.name || "Project workspace" : "General chat"}</p>
+        </div>
+        <button type="button" onClick={handleNewChat} aria-label="Start new conversation" className="flex shrink-0 items-center gap-2 rounded-md border bg-background px-3 py-2 text-[13px] hover:bg-accent"><Plus className="h-4 w-4" /><span className="hidden sm:inline">New chat</span></button>
+      </header>
       <div className="relative flex min-h-0 flex-1 gap-4">
       {!chatSidebarCollapsed && <button className="absolute inset-0 z-10 bg-black/40 md:hidden" aria-label="Close chat history" onClick={() => setChatSidebarCollapsed(true)} />}
       <div className="max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-20">
       <SessionSidebar
         variant="default"
         sessions={sessions}
+        isLoading={isLoadingSessions}
+        isError={sessionsError}
+        onRetry={() => refetchSessions()}
+        hasMore={hasNextPage}
+        isLoadingMore={isFetchingNextPage}
+        onLoadMore={() => fetchNextPage()}
         activeSessionId={activeSessionId}
         onSelectSession={(id) => { handleSelectSession(id); if (window.matchMedia("(max-width: 767px)").matches) setChatSidebarCollapsed(true); }}
         onNewChat={handleNewChat}
@@ -705,6 +773,10 @@ export default function ChatPage() {
             <PanelLeftOpen className="h-4 w-4" />
           </button>
         )}
+        {sessionError && <div role="alert" className="m-4 rounded-lg border border-destructive/30 p-4 text-sm">
+          <p>This conversation is unavailable. It may have been deleted or you may no longer have access.</p>
+          <button type="button" onClick={() => refetchSession()} className="mt-2 text-primary underline">Retry loading conversation</button>
+        </div>}
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <MessageList
             emptyState={<ChatWelcome />}
@@ -763,9 +835,9 @@ export default function ChatPage() {
           variant="default"
           onSend={handleSend}
           onStop={handleStop}
-          isLoading={isStreaming || createSession.isPending}
+          isLoading={isStreaming || createSession.isPending || (!!activeSessionId && (!sessionDetail || sessionError))}
           isRunning={isStreaming}
-          workspaceId={workspaces[0]?.id || null}
+          workspaceId={sessionDetail?.workspace_id || null}
           initialMessage={composeMessage}
         />
       </div>
