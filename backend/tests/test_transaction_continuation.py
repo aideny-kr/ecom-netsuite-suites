@@ -28,7 +28,7 @@ def distinct_run_creation_times():
         event.remove(TransactionRun, "before_insert", set_created_at)
 
 
-async def budget_run(db, user, *, reason="budget", progress=None, origin="manual"):
+async def budget_run(db, user, *, reason="budget", progress=None, origin="manual", failure=None):
     await db.execute(
         update(TenantFeatureFlag)
         .where(
@@ -57,6 +57,12 @@ async def budget_run(db, user, *, reason="budget", progress=None, origin="manual
         "scan_complete": True,
         **(progress or {}),
     }
+    if failure is not None:
+        from app.services.transaction_ops.collection_recovery import failure_diagnostic
+
+        run.progress_json["last_collection_failure"] = failure_diagnostic(
+            failure, run_id=run.id, now=run.finished_at, stage="source_page"
+        )
     if run.progress_json.get("read_stop_reason"):
         run.progress_json.setdefault("read_stop_run_id", str(run.id))
     await db.flush()

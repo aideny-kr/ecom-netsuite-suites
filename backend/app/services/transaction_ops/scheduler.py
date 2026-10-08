@@ -465,6 +465,7 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             and latest is not None
                             and latest.termination_reason == "done"
                         )
+                        from app.services.transaction_ops.collection_recovery import collection_stop
                         from app.services.transaction_ops.continuation import (
                             auth_resume_due,
                             continue_budget_run,
@@ -472,9 +473,13 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             scheduled_part_resume_candidate,
                         )
 
-                        resume_due = auth_resume_due(latest, now) or (
-                            already_due
-                            and (read_retry_due(latest, now) or scheduled_part_resume_candidate(latest, now))
+                        resume_due = (
+                            collection_stop(latest)
+                            or auth_resume_due(latest, now)
+                            or (
+                                already_due
+                                and (read_retry_due(latest, now) or scheduled_part_resume_candidate(latest, now))
+                            )
                         )
                         if (
                             not config.enabled

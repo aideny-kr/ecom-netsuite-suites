@@ -11,6 +11,7 @@ from app.models.user import User
 from app.schemas.transaction_runs import RunCreate
 from app.services.transaction_ops import state_service
 from app.services.transaction_ops.auth_recovery import auth_resume_candidate, auth_resume_ready, auth_stop
+from app.services.transaction_ops.collection_recovery import collection_stop
 from app.services.transaction_ops.runner import enabled
 
 MAX_PARTS = 16
@@ -129,7 +130,7 @@ async def continuation_result(db, tenant_id, run_id):
     return child, blocked
 
 
-def next_metadata(previous, now):
+def next_metadata(previous, now, *, operator_retry=False):
     progress = previous.progress_json or {}
     part = progress.get("continuation_part", 1)
     limit = SCHEDULE_MAX_PARTS if getattr(previous, "origin", None) == "schedule" else MAX_PARTS
@@ -151,7 +152,20 @@ def next_metadata(previous, now):
             if key in progress
         }
     )
-    retry = scheduled_read_stop(previous)
+    collection_retry = collection_stop(previous, operator_retry=operator_retry)
+    if collection_retry and (progress.get("last_collection_failure") or {}).get("code") == "collection_permanent":
+        raise ValueError("collection_failure_permanent")
+    retry = scheduled_read_stop(previous) or collection_retry
+    diagnostic_count = progress.get("collection_diagnostic_retry_count", 0)
+    if type(diagnostic_count) is not int or not 0 <= diagnostic_count <= 1:
+        raise ValueError("collection_diagnostic_retry_limit")
+    unknown = (
+        collection_retry
+        and (progress.get("last_collection_failure") or {}).get("code", "collection_unexpected")
+        == "collection_unexpected"
+    )
+    if unknown and diagnostic_count == 1:
+        raise ValueError("collection_diagnostic_retry_limit")
     auth_retry = auth_resume_candidate(previous)
     if auth_stop(previous) and not auth_retry:
         raise ValueError("auth_retry_limit")
@@ -181,13 +195,14 @@ def next_metadata(previous, now):
         # continuation, even if intervening runs made progress. A new daily
         # cycle clears continuation metadata through the existing create path.
         "continuation_read_retry_count": retry_count,
+        "collection_diagnostic_retry_count": diagnostic_count + int(unknown),
     }
     if auth_retry:
         metadata["auth_resume_count"] = 1
     return metadata
 
 
-async def continue_budget_run(db, tenant_id, run_id, *, now=None):
+async def continue_budget_run(db, tenant_id, run_id, *, now=None, operator_retry=False, actor=None):
     now = await state_service.run_clock(db, now)
     previous = await state_service.get_run(db, tenant_id, run_id)
     config = await state_service.get_config(db, tenant_id, previous.config_id, lock=True)
@@ -199,9 +214,12 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None):
             await state_service._commit(db, tenant_id)
             return None
     auth_retry = auth_stop(previous)
+    collection_retry = collection_stop(previous, operator_retry=operator_retry)
+    if operator_retry:
+        await state_service._human(db, tenant_id, actor, "recon.run")
     if (
         previous.status != "finished"
-        or (previous.termination_reason != "budget" and not auth_retry)
+        or (previous.termination_reason != "budget" and not auth_retry and not collection_retry)
         or previous.origin == "recovery"
     ):
         await state_service._commit(db, tenant_id)
@@ -244,13 +262,14 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None):
             raise ValueError("paused")
         if not await enabled(db, tenant_id):
             raise ValueError("feature_unavailable")
-        metadata = next_metadata(previous, now)
+        metadata = next_metadata(previous, now, operator_retry=operator_retry)
         if auth_retry and not await auth_resume_ready(db, tenant_id, previous, config, now):
             # Credentials can recover later. Keep the checkpoint, without a
             # permanent audit block or a provider request on each Beat tick.
             await state_service._commit(db, tenant_id)
             return None
-        actor = None
+        if not operator_retry:
+            actor = None
         if previous.origin != "schedule":
             actor = await db.scalar(select(User).where(User.tenant_id == tenant_id, User.id == previous.initiated_by))
             await state_service._human(db, tenant_id, actor, "recon.run")
@@ -288,6 +307,8 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None):
             resume_from_run_id=previous.id,
             automatic_continuation=True,
             automatic_auth_recovery=auth_retry,
+            automatic_collection_recovery=collection_retry,
+            operator_collection_retry=operator_retry,
         )
     except (ValueError, state_service.StateError) as exc:
         reason = exc.code if isinstance(exc, state_service.StateError) else str(exc)
@@ -308,6 +329,8 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None):
                 "feature_unavailable",
                 "read_retry_limit",
                 "auth_retry_limit",
+                "collection_diagnostic_retry_limit",
+                "collection_failure_permanent",
             }
             else "continuation_unavailable"
         )

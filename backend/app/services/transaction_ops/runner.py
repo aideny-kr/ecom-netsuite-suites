@@ -502,12 +502,20 @@ async def run_investigation(
             db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
         )
 
-    async def finish(reason):
+    async def finish(reason, *, failure=None):
         await flush_findings()
         if reason == "done" and membership.active:
             await membership.seal()
             await save()
-        await state.finish_run(db, tenant_id, run_id, reason, lease_token=token, now=clock())
+        await state.finish_run(
+            db,
+            tenant_id,
+            run_id,
+            reason,
+            lease_token=token,
+            now=clock(),
+            **({"failure": failure} if failure is not None else {}),
+        )
         return {
             "run_id": str(run_id),
             "status": "finished",
@@ -517,7 +525,7 @@ async def run_investigation(
             "needs_review": progress["needs_review"],
         }
 
-    async def finish_after_failure():
+    async def finish_after_failure(exc):
         # A bounded provider read also performs local DB work. Cancelling that
         # work can invalidate its transaction. Discard it before finalization;
         # committed holds/checkpoints remain durable and finish_run still fences
@@ -526,7 +534,15 @@ async def run_investigation(
             await db.rollback()
         discard_findings()
         reason = "budget" if clock() >= deadline_at else "error"
-        return await finish(reason)
+        from app.services.transaction_ops.collection_recovery import failure_diagnostic
+
+        failure = failure_diagnostic(
+            exc,
+            run_id=run_id,
+            now=clock(),
+            stage=timing.failure_stage if timing.failure_exception is exc else "collection",
+        )
+        return await finish(reason, failure=failure)
 
     async def finish_stalled(**details):
         # This is also called from exception handlers: a failed buffer fence
@@ -1735,8 +1751,8 @@ async def run_investigation(
         return await finish_stalled(reason="source_subsidiary_unproven")
     except ScanChangedError:
         return await finish_stalled(restart_scan=True)
-    except TimeoutError:
-        return await finish_after_failure()
+    except TimeoutError as exc:
+        return await finish_after_failure(exc)
     except state_service.StateError as exc:
         if exc.code == "batch_disabled":
             await db.rollback()
@@ -1745,9 +1761,9 @@ async def run_investigation(
         if exc.code == "run_lease_lost":
             return await finish_lost_lease()
         raise
-    except Exception:
+    except Exception as exc:
         # Provider helpers use safe error codes, but unexpected library/DB
         # exceptions may carry SQL or bodies. Never persist/return their text.
-        return await finish_after_failure()
+        return await finish_after_failure(exc)
     finally:
         await transport.aclose()
