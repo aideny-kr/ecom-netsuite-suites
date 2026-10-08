@@ -170,6 +170,17 @@ def test_partial_conflicting_or_incomplete_credit_never_clears_case(change):
     assert verify_applied_credit(source_adjustment_basis(source), invoice, applications, gl) is None
 
 
+@pytest.mark.parametrize("field", ["taxTotal", "shippingCost", "discountTotal"])
+def test_a_credit_shaped_like_cm12127_verifies(field):
+    """CM12127 as NetSuite returns it (read 2026-10-07): no taxTotal and no shippingCost."""
+    source, invoice, applications, gl = fixture()
+    doc = applications["documents"]["30"]
+    for missing in ("taxTotal", "shippingCost", field):
+        doc.pop(missing, None)
+    result = verify_applied_credit(source_adjustment_basis(source), invoice, applications, gl)
+    assert result["status"] == "existing_credit_verified"
+
+
 @pytest.mark.parametrize("absent", ["missing", "none"])
 def test_a_credit_without_a_tax_field_verifies_when_its_ledger_proves_no_tax(absent):
     """Live 2026-10-07 (R231821517, CM12127): NetSuite returns no taxTotal for a credit memo that

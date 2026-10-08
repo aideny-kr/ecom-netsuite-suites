@@ -15,7 +15,7 @@ from decimal import Decimal, localcontext
 
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops import skills
-from app.services.transaction_ops.commercial_credits import _applied_to, _money, source_adjustment_basis
+from app.services.transaction_ops.commercial_credits import _applied_to, _money, source_adjustment_basis, summary_money
 from app.services.transaction_ops.credit_classification import (
     FIELDS,
     RECORD_TYPES,
@@ -102,11 +102,8 @@ def _reference_matches(support, profile):
         and cm.get("lines_complete") is True
         and len(lines) == 1
         and amount > 0
-        # NetSuite omits taxTotal on a credit that carries no tax; _gl_proves below admits only
-        # the AR and adjustment lines.
-        and _money(cm.get("taxTotal") or 0) == 0
-        and _money(cm["shippingCost"]) == 0
-        and _money(cm["discountTotal"]) == 0
+        # Absent means zero: _gl_proves below admits only the AR and adjustment lines.
+        and all(summary_money(cm, f) == 0 for f in ("taxTotal", "shippingCost", "discountTotal"))
         and _money(lines[0]["amount"]) == amount
         and lines[0].get("isTaxable") is False
         and str(lines[0]["item"]["id"]) == profile.item_id
