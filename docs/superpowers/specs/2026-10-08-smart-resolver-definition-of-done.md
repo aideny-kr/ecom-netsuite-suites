@@ -74,7 +74,7 @@ These gates catch bugs during development. Each item exists because a bug reache
 
 | Date | Chose | Over | Because |
 |---|---|---|---|
-| 2026-10-07 | The agent proposes the **content** (record, lines, amounts, reason); the server builds the exact payload and accepts it by outcome. **Aiden to confirm.** | The agent drafting raw NetSuite payloads (the 10-07 spec's wording) | The server can then enforce scope, idempotency and the outcome check on every write. It's still not per cause: any line set that makes the order equal Solidus is accepted. |
+| 2026-10-07 | The agent proposes the **content** (record, lines, amounts, reason); the server builds the exact payload and accepts it by outcome. **Confirmed by Aiden 2026-10-08**, along with the G1–G7 targets. | The agent drafting raw NetSuite payloads (the 10-07 spec's wording) | The server can then enforce scope, idempotency and the outcome check on every write. It's still not per cause: any line set that makes the order equal Solidus is accepted. |
 | 2026-10-07 | Review rounds end at a round with no wrong-write path. Round 5 is the last, decided before it runs. | Looping until a round is clean | PR #403: 4, 4, 3, 2, then 1 finding, and one round's fix caused the next round's regression |
 | 2026-10-06 | When both the sales order and the invoice are wrong, fix both so they match | A credit memo alone | A credit fixes only the billed side, and reconciliation compares the sales-order total |
 | 2026-10-08 | Bugs are caught in the development cycle (§2 gates 2, 3 and 5), not by live approvals | Fixing them as tickets after deploy | Aiden, 2026-10-08 |
