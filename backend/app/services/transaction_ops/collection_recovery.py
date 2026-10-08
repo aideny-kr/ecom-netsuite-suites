@@ -114,7 +114,7 @@ def collection_stop(run, *, operator_retry=False):
     if (
         not collection_only(run)
         or getattr(run, "status", None) != "finished"
-        or getattr(run, "termination_reason", None) not in {"error", "budget"}
+        or getattr(run, "termination_reason", None) != "error"
     ):
         return False
     from app.services.transaction_ops.auth_recovery import auth_stop

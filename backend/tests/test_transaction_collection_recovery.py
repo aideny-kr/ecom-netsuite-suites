@@ -247,3 +247,118 @@ async def test_collection_retry_rejects_changed_account_scope(db, admin_user, mo
     assert (await continuation.continuation_result(db, actor.tenant_id, prior.id))[1][
         "reason"
     ] == "collection_scope_changed"
+
+
+def test_normal_productive_deadline_parts_never_consume_failure_retries():
+    run = stopped(TimeoutError(), termination_reason="budget")
+    run.progress_json["continuation_baseline"] = {"processed": 1406}
+    for part in range(1, 97):
+        run.progress_json["continuation_part"] = part
+        assert not collection_stop(run)
+        if part == 96:
+            with pytest.raises(ValueError, match="part_limit"):
+                next_metadata(run, NOW)
+        else:
+            metadata = next_metadata(run, NOW)
+            assert metadata["continuation_read_retry_count"] == 0
+            assert metadata["collection_diagnostic_retry_count"] == 0
+
+
+async def test_interval_preselector_finds_error_before_next_interval(db, admin_user):
+    from app.services.transaction_ops import scheduler
+    from tests.test_transaction_continuation import budget_run
+
+    actor = admin_user[0]
+    prior, conf = await budget_run(db, actor, origin="schedule", reason="error", failure=TimeoutError())
+    assert conf.interval_minutes == 1440 and not conf.mapping_json.get("reconciliation_policy")
+    assert conf.id in await scheduler._candidate_ids(db, actor.tenant_id, prior.created_at)
+
+
+async def test_transient_next_daily_cycle_resumes_evidence_after_limits(db, admin_user):
+    from app.schemas.transaction_runs import RunCreate
+    from app.services.transaction_ops import continuation, scheduler, state_service
+    from tests.test_transaction_continuation import budget_run
+
+    actor = admin_user[0]
+    prior, conf = await budget_run(
+        db,
+        actor,
+        origin="schedule",
+        reason="error",
+        failure=TimeoutError(),
+        progress={"last_source_id": 123, "collection_diagnostic_retry_count": 1},
+    )
+    tomorrow = prior.created_at + timedelta(days=1, minutes=1)
+    assert not continuation.collection_resume_due(prior, tomorrow)
+    scope, resume_id, reason = scheduler._scope(conf, prior, tomorrow)
+    assert resume_id == prior.id and reason is None
+    request = RunCreate(origin="schedule", evaluation_key=scheduler._schedule_key(conf, tomorrow), **scope)
+    child = await state_service.create_run(
+        db,
+        actor.tenant_id,
+        conf.id,
+        request,
+        now=tomorrow,
+        resume_from_run_id=prior.id,
+        automatic_collection_recovery=True,
+    )
+    assert child.progress_json["pending_refs"] == prior.progress_json["pending_refs"]
+    assert child.progress_json["last_source_id"] == 123
+    assert child.progress_json["collection_diagnostic_retry_count"] == 1  # Never restore unknown allowance.
+    assert "continuation_read_retry_count" not in child.progress_json
+
+
+async def test_operator_can_resume_repaired_permanent_error_without_database_edits(db, admin_user):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.transaction_ops import continuation
+    from tests.test_transaction_continuation import budget_run
+
+    actor = admin_user[0]
+    prior, _ = await budget_run(
+        db,
+        actor,
+        origin="schedule",
+        reason="error",
+        failure=IntegrityError("private SQL", {}, ValueError("secret")),
+        progress={"continuation_part": 96, "collection_diagnostic_retry_count": 1},
+    )
+    now = prior.finished_at + timedelta(days=2)
+    assert await continuation.continue_budget_run(db, actor.tenant_id, prior.id, now=now) is None
+    child = await continuation.continue_budget_run(
+        db, actor.tenant_id, prior.id, now=now, operator_retry=True, actor=actor
+    )
+    assert child and child.progress_json["continuation_operator_repair"] is True
+    assert child.progress_json["continuation_root_id"] == str(prior.id)
+    assert (
+        child.progress_json["continuation_part"] == 2 and child.progress_json["collection_diagnostic_retry_count"] == 1
+    )
+    assert child.progress_json["pending_refs"] == prior.progress_json["pending_refs"]
+    assert (
+        await continuation.continue_budget_run(db, actor.tenant_id, prior.id, now=now, operator_retry=True, actor=actor)
+    ).id == child.id
+
+
+async def test_authenticated_repair_endpoint_checks_confirmation_tenant_and_permission(
+    db, admin_user, admin_user_b, readonly_user, client, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    from app.services.transaction_ops import scheduler, state_service
+    from tests.conftest import enable_feature_flag
+    from tests.test_transaction_continuation import budget_run
+
+    actor, headers = admin_user
+    prior, _ = await budget_run(db, actor, origin="schedule", reason="error", failure=ValueError())
+    url = f"/api/v1/transaction-ops/runs/{prior.id}/retry-collection"
+    monkeypatch.setattr(state_service, "run_clock", AsyncMock(return_value=prior.finished_at + timedelta(minutes=5)))
+    monkeypatch.setattr(scheduler, "_dispatch", AsyncMock())
+    assert (await client.post(url, headers=headers, json={"confirm_repaired": False})).status_code == 422
+    assert (await client.post(url, headers=readonly_user[1], json={"confirm_repaired": True})).status_code == 403
+    for flag in ("celigo", "reconciliation"):
+        await enable_feature_flag(db, admin_user_b[0].tenant_id, flag)
+    assert (await client.post(url, headers=admin_user_b[1], json={"confirm_repaired": True})).status_code == 404
+    response = await client.post(url, headers=headers, json={"confirm_repaired": True})
+    assert response.status_code == 202, response.text
+    assert response.json()["progress_json"]["pending_refs"] == prior.progress_json["pending_refs"]
+    assert scheduler._dispatch.call_args.args[3] == scheduler.investigation_queue("schedule", 1000)

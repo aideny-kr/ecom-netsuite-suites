@@ -211,6 +211,17 @@ async def _candidate_ids(db, tenant_id, now):
             run.progress_json["last_read_failure"]["code"].astext.in_(AUTH_STOP_CODES),
         )
     )
+    collection_error = exists(
+        select(run.id).where(
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.created_at == latest.c.latest_at,
+            run.origin == "schedule",
+            run.status == "finished",
+            run.termination_reason == "error",
+            run.progress_json["last_collection_failure"]["run_id"].astext.is_not(None),
+        )
+    )
     query = (
         select(config.id)
         .outerjoin(latest, latest.c.config_id == config.id)
@@ -227,6 +238,7 @@ async def _candidate_ids(db, tenant_id, now):
                 latest_read_stop,
                 legacy_part_stop,
                 auth_stop,
+                collection_error,
             ),
         )
         .order_by(latest.c.latest_at.asc().nullsfirst(), config.created_at, config.id)
@@ -287,7 +299,15 @@ def _scope(config, latest, now):
         params = latest.params_json
         scope = {key: params.get(key) for key in ("window_start", "window_end")}
         scope["order_references"] = params.get("order_references", [])
-        return scope, latest.id if latest.termination_reason in {"budget", "stall"} else None, None
+        from app.services.transaction_ops.continuation import collection_daily_fallback
+
+        return (
+            scope,
+            latest.id
+            if latest.termination_reason in {"budget", "stall"} or collection_daily_fallback(latest, now)
+            else None,
+            None,
+        )
     policy_value = (getattr(config, "mapping_json", None) or {}).get("reconciliation_policy")
     if policy_value:
         from app.services.transaction_ops.periods import ReconciliationPolicy, scheduled_window
@@ -465,16 +485,17 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             and latest is not None
                             and latest.termination_reason == "done"
                         )
-                        from app.services.transaction_ops.collection_recovery import collection_stop
                         from app.services.transaction_ops.continuation import (
                             auth_resume_due,
+                            collection_daily_fallback,
+                            collection_resume_due,
                             continue_budget_run,
                             read_retry_due,
                             scheduled_part_resume_candidate,
                         )
 
                         resume_due = (
-                            collection_stop(latest)
+                            collection_resume_due(latest, now)
                             or auth_resume_due(latest, now)
                             or (
                                 already_due
@@ -514,7 +535,18 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             continue
                         request = request_type(origin="schedule", evaluation_key=key, **scope)
                         run = await state.create_run(
-                            db, tenant_id, config_id, request, actor=None, now=now, resume_from_run_id=resume_id
+                            db,
+                            tenant_id,
+                            config_id,
+                            request,
+                            actor=None,
+                            now=now,
+                            resume_from_run_id=resume_id,
+                            **(
+                                {"automatic_collection_recovery": True}
+                                if resume_id and collection_daily_fallback(latest, now)
+                                else {}
+                            ),
                         )
                         # create_run commits before returning. Only scalar IDs
                         # survive into the broker call or the next transaction.

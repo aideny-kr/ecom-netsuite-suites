@@ -64,6 +64,24 @@ def read_retry_due(previous, now):
     return True
 
 
+def collection_daily_fallback(previous, now):
+    from app.services.transaction_ops.read_recovery import TRANSIENT_READ_CODES
+
+    if not collection_stop(previous) or previous.progress_json["last_collection_failure"]["code"] not in (
+        TRANSIENT_READ_CODES | {"collection_database_unavailable"}
+    ):
+        return False
+    try:
+        next_metadata(previous, now)
+    except (ValueError, TypeError) as exc:
+        return str(exc) in {"cycle_expired", "part_limit", "read_retry_limit"}
+    return False
+
+
+def collection_resume_due(previous, now):
+    return collection_stop(previous) and not collection_daily_fallback(previous, now)
+
+
 def auth_resume_due(previous, now):
     """Wake recoverable auth checkpoints without trapping new pre-HTTP failures.
 
@@ -132,6 +150,18 @@ async def continuation_result(db, tenant_id, run_id):
 
 def next_metadata(previous, now, *, operator_retry=False):
     progress = previous.progress_json or {}
+    operator_repair = operator_retry and bool(progress.get("last_collection_failure"))
+    if operator_repair:
+        if not collection_stop(previous):
+            raise ValueError("collection_retry_unavailable")
+        progress = {
+            **progress,
+            "continuation_part": 1,
+            "continuation_started_at": now.isoformat(),
+            "continuation_root_id": str(previous.id),
+            "continuation_read_retry_count": 0,
+            "collection_diagnostic_retry_count": 0,
+        }
     part = progress.get("continuation_part", 1)
     limit = SCHEDULE_MAX_PARTS if getattr(previous, "origin", None) == "schedule" else MAX_PARTS
     if type(part) is not int or not 1 <= part < limit:
@@ -153,13 +183,17 @@ def next_metadata(previous, now, *, operator_retry=False):
         }
     )
     collection_retry = collection_stop(previous, operator_retry=operator_retry)
-    if collection_retry and (progress.get("last_collection_failure") or {}).get("code") == "collection_permanent":
+    if (
+        collection_retry
+        and not operator_repair
+        and (progress.get("last_collection_failure") or {}).get("code") == "collection_permanent"
+    ):
         raise ValueError("collection_failure_permanent")
     retry = scheduled_read_stop(previous) or collection_retry
     diagnostic_count = progress.get("collection_diagnostic_retry_count", 0)
     if type(diagnostic_count) is not int or not 0 <= diagnostic_count <= 1:
         raise ValueError("collection_diagnostic_retry_limit")
-    unknown = (
+    unknown = operator_repair or (
         collection_retry
         and (progress.get("last_collection_failure") or {}).get("code", "collection_unexpected")
         == "collection_unexpected"
@@ -197,6 +231,8 @@ def next_metadata(previous, now, *, operator_retry=False):
         "continuation_read_retry_count": retry_count,
         "collection_diagnostic_retry_count": diagnostic_count + int(unknown),
     }
+    if operator_repair:
+        metadata["continuation_operator_repair"] = True
     if auth_retry:
         metadata["auth_resume_count"] = 1
     return metadata
@@ -252,7 +288,8 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None, operator_retry
     # Reconsider only the old part cap or a retryable no-progress refusal.
     # Both paths recheck productivity/backoff and the current finite limits.
     if blocked and not (
-        (blocked.get("reason") == "no_progress" and read_retry_due(previous, now))
+        (operator_retry and collection_retry)
+        or (blocked.get("reason") == "no_progress" and read_retry_due(previous, now))
         or (blocked.get("reason") == "part_limit" and scheduled_part_resume_candidate(previous, now))
     ):
         await state_service._commit(db, tenant_id)

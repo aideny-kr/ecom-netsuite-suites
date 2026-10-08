@@ -453,7 +453,7 @@ async def create_run(
         raise StateError("invalid_run_continuation")
     if automatic_collection_recovery or operator_collection_retry:
         if (
-            not automatic_continuation
+            (not automatic_continuation and operator_collection_retry)
             or request.origin != "schedule"
             or human_retry
             or automatic_auth_recovery
@@ -506,6 +506,16 @@ async def create_run(
 
             if not collection_stop(previous, operator_retry=operator_collection_retry):
                 raise StateError("invalid_run_continuation")
+            if not automatic_continuation:
+                from app.services.transaction_ops.continuation import collection_daily_fallback
+                from app.services.transaction_ops.scheduler import _cycle_key, _schedule_key
+
+                if (
+                    not collection_daily_fallback(previous, now)
+                    or request.evaluation_key != _schedule_key(config, now)
+                    or _cycle_key(config, previous) >= request.evaluation_key
+                ):
+                    raise StateError("invalid_run_continuation")
             if any(
                 str(previous.config_snapshot.get(field)) != str(getattr(config, field))
                 for field in (
@@ -639,7 +649,10 @@ async def create_run(
             "run.collection_retry_authorized",
             row,
             actor,
-            payload={"parent_run_id": str(resume_from_run_id)},
+            payload={
+                "parent_run_id": str(resume_from_run_id),
+                "new_finite_cycle": bool(initial_progress.get("continuation_operator_repair")),
+            },
         )
     await _audit(db, tenant_id, "run.create", row, actor)
     await _commit(db, tenant_id)

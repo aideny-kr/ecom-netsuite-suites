@@ -17,6 +17,7 @@ from app.services.transaction_ops.continuation import (
     READ_RETRY_DELAYS,
     SCHEDULE_MAX_PARTS,
     auth_resume_due,
+    collection_resume_due,
     continuation_result,
     next_metadata,
     read_retry_due,
@@ -214,7 +215,7 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
         if continuation["state"] == "connection_check_required":
             return _action("check_connection", continuation["reason"])
         if (
-            collection_stop(latest)
+            collection_resume_due(latest, now)
             or auth_resume_due(latest, now)
             or continuation["reason"]
             not in {
