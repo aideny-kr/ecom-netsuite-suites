@@ -117,7 +117,13 @@ async def lifespan(app: FastAPI):
     setup_logging()
     await _cleanup_stale_jobs()
     _wire_auto_validate_orchestrator()
-    yield
+    from app.services.transaction_ops import watchdog
+
+    monitor = watchdog.start()
+    try:
+        yield
+    finally:
+        await watchdog.stop(monitor)
 
 
 async def _celigo_managed_elsewhere_handler(request: Request, exc: Exception) -> JSONResponse:

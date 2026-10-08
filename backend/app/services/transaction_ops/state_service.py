@@ -52,6 +52,7 @@ from app.schemas.transaction_runs import (
 from app.services import audit_service
 from app.services.feature_flag_service import get_all_flags
 from app.services.transaction_ops.normalization import TransactionMapping
+from app.services.transaction_ops.progress_clock import committed_progress, progress_sql
 
 _LEASE = timedelta(seconds=180)
 _RUN_QUEUE_AGE = timedelta(days=1)
@@ -503,8 +504,12 @@ async def create_run(
         previous = await get_run(db, tenant_id, resume_from_run_id)
         if automatic_collection_recovery:
             from app.services.transaction_ops.collection_recovery import collection_stop
+            from app.services.transaction_ops.continuation import no_progress_deadline_stop
 
-            if not collection_stop(previous, operator_retry=operator_collection_retry):
+            if not (
+                collection_stop(previous, operator_retry=operator_collection_retry)
+                or (automatic_continuation and no_progress_deadline_stop(previous))
+            ):
                 raise StateError("invalid_run_continuation")
             if not automatic_continuation:
                 from app.services.transaction_ops.continuation import collection_daily_fallback
@@ -570,7 +575,9 @@ async def create_run(
                 # work; cumulative evidence is not new productivity.
                 initial_progress["schedule_cycle_key"] = request.evaluation_key
         for field in list(initial_progress):
-            if field.startswith("continuation_"):
+            if field.startswith("continuation_") or (
+                not automatic_continuation and field in {"last_progress_at", "execution_started_at"}
+            ):
                 initial_progress.pop(field)
         if human_retry:
             attempt = initial_progress.get("review_attempt", 0)
@@ -814,6 +821,8 @@ async def claim_run(db, tenant_id, run_id, *, now=None, coverage_only=False):
         row.progress_json = {k: v for k, v in row.progress_json.items() if k != "collection_wait"}
     row.deadline_at = deadline
     row.status, row.lease_token = "running", uuid.uuid4()
+    if row.origin == "schedule" and not (row.progress_json or {}).get("execution_started_at"):
+        row.progress_json = {**(row.progress_json or {}), "execution_started_at": now.isoformat()}
     row.lease_until = min(row.deadline_at, now + _LEASE)
     if "worker_yielded_at" in (row.progress_json or {}):
         row.progress_json = {k: v for k, v in row.progress_json.items() if k != "worker_yielded_at"}
@@ -956,14 +965,18 @@ async def settle_budget(db, tenant_id, run_id, *, lease_token, release, spent, n
 async def update_progress(db, tenant_id, run_id, request: ProgressUpdate, *, lease_token, now=None):
     now = _clock(now)
     row = await _update_owned_run(
-        db, tenant_id, run_id, lease_token, now, values={"progress_json": request.progress_json}
+        db, tenant_id, run_id, lease_token, now, values={"progress_json": progress_sql(request.progress_json, now)}
     )
     if row is not None:
         await _commit(db, tenant_id)
         return row
     row = await get_run(db, tenant_id, run_id, lock=True)
     _lease(row, lease_token, now)
-    row.progress_json = request.progress_json
+    row.progress_json = (
+        committed_progress(row.progress_json, request.progress_json, now)
+        if row.origin == "schedule"
+        else request.progress_json
+    )
     row.lease_until = min(row.deadline_at, now + _LEASE)
     await _commit(db, tenant_id)
     return row
@@ -1052,7 +1065,11 @@ async def record_finding(
     _lease(run, lease_token, now)
     row = await _record_finding(db, tenant_id, run, order_reference, report_json, now=now, final=final)
     if checkpoint is not None:
-        run.progress_json = checkpoint.progress_json
+        run.progress_json = (
+            committed_progress(run.progress_json, checkpoint.progress_json, now)
+            if run.origin == "schedule"
+            else checkpoint.progress_json
+        )
     await _commit(db, tenant_id)
     return row
 
@@ -1095,7 +1112,11 @@ async def record_finding_batch(db, tenant_id, run_id, reports, *, lease_token, c
             rows.append(
                 await _record_finding(db, tenant_id, run, report["order_reference"], report, now=now, final=True)
             )
-    run.progress_json = checkpoint.progress_json
+    run.progress_json = (
+        committed_progress(run.progress_json, checkpoint.progress_json, now)
+        if run.origin == "schedule"
+        else checkpoint.progress_json
+    )
     await _commit(db, tenant_id)
     return rows
 

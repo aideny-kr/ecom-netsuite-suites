@@ -126,20 +126,22 @@ async def test_foreign_digest_keys_cannot_suppress_or_disclose_this_tenants_aler
     actor, other = admin_user[0], admin_user_b[0]
     await seed(db, actor)
     fresh = await freshness_digest.collect_freshness(db, actor.tenant_id, now=LATE)
-    db.add(
-        AuditEvent(
-            tenant_id=other.tenant_id,
-            category="ops",
-            action="ops.digest",
-            payload={"delivery": "sent", "freshness_keys": fresh["keys"], "until": LATE.isoformat()},
-        )
+    foreign_digest = AuditEvent(
+        tenant_id=other.tenant_id,
+        category="ops",
+        action="ops.digest",
+        payload={"delivery": "sent", "freshness_keys": fresh["keys"], "until": LATE.isoformat()},
     )
+    db.add(foreign_digest)
     await db.flush()
     sender = AsyncMock()
     await ops_digest.run_ops_digest(db, now=LATE, sender=sender, tenant_ids=[actor.tenant_id, other.tenant_id])
     sender.assert_awaited_once()
     assert sender.call_args.kwargs["to_email"] == actor.email
-    assert (await _digest_rows(db, other.tenant_id))[-1].payload["counts"]["freshness"] == 0
+    # SAVEPOINT-based fixtures give both audit rows the same transaction timestamp;
+    # a random UUID tie-breaker does not identify the newly generated digest.
+    generated = [row for row in await _digest_rows(db, other.tenant_id) if row.id != foreign_digest.id]
+    assert len(generated) == 1 and generated[0].payload["counts"]["freshness"] == 0
 
 
 async def test_collect_freshness_does_not_write_or_dispatch(db, admin_user):
