@@ -166,6 +166,10 @@ def _render_call(call: dict[str, Any]) -> list[str]:
             "confirmation_required": "AWAITING CONFIRMATION",
         }
         label = labels.get(outcome, "OUTCOME UNCLASSIFIED") if isinstance(outcome, str) else "OUTCOME UNCLASSIFIED"
+        if outcome in ("error", "failed"):
+            # Retain the reason so subsequent turns can avoid repeating a
+            # query that the connector explicitly reported as failed.
+            label += f": {_extract_failure_reason(result_summary)}"
         return [f"[step {step}] {tool_name} → {label}"]
     failed = not has_outcome and _is_failure(result_summary)
     sql = _extract_sql(params)

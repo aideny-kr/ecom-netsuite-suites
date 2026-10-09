@@ -147,3 +147,23 @@ def test_follow_up_history_uses_execution_evidence_not_result_prose(outcome, sum
     assert "→ OK" not in trace
     if outcome == "returned":
         assert "FAILED" not in trace
+
+
+@pytest.mark.parametrize("outcome", ["error", "failed"])
+@pytest.mark.parametrize("tool,param", [("netsuite_suiteql", "query"), ("ext__abcdef__suiteql", "sqlQuery")])
+def test_explicit_failure_retains_query_error_reason_without_replaying_sql(outcome, tool, param):
+    from app.services.chat.history_tool_trace import render_tool_trace
+
+    trace = render_tool_trace(
+        [
+            {
+                "step": 0,
+                "tool": tool,
+                "params": {param: "SELECT t.shipcountry FROM transaction t"},
+                "result_summary": "NetSuite query failed: Field 'shipcountry' NOT_EXPOSED",
+                "execution_outcome": outcome,
+            }
+        ]
+    )
+    assert "FAILED: shipcountry NOT_EXPOSED" in trace
+    assert "SELECT" not in trace
