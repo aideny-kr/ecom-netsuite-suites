@@ -239,6 +239,8 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
             + "\n  Accounting cases → transaction_ops_accounting_evidence first; reuse its scoped native reads."
             "\n  Existing credit posted to the wrong account → transaction_ops_propose_credit_reallocation; "
             "the server verifies the outcome, a person approves."
+            "\n  NetSuite posts more than the source and no credit covers it → transaction_ops_propose_credit; "
+            "the server verifies the outcome, a person approves."
             "\n  Explain an issue group → transaction_ops_group_breakdown with the exact group scope, first; "
             "it splits the group into causes and shows the user a card with every amount."
             "\n  Fix an issue group → transaction_ops_accounting_group with the exact group scope, only when a "
