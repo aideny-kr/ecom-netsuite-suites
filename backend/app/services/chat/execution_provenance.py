@@ -113,6 +113,7 @@ def tool_provenance(tool_name: str, result: dict) -> dict:
 
 
 def execution_receipt(skills: list[dict], calls: list[dict]) -> dict:
+    from app.services.chat.http_connector_tools import parse_name as parse_http_name
     from app.services.chat.tool_call_results import tool_call_had_error
     from app.services.chat.tools import parse_external_tool_name
 
@@ -124,10 +125,11 @@ def execution_receipt(skills: list[dict], calls: list[dict]) -> dict:
             loaded.append(deepcopy(skill))
         name = call.get("tool", "")
         parsed = parse_external_tool_name(name)
+        connector_id = parsed[0] if parsed else parse_http_name(name)
         tools.append(
             {
                 "tool": name,
-                "connector_id": str(parsed[0]) if parsed else None,
+                "connector_id": str(connector_id) if connector_id else None,
                 "step": call.get("step"),
                 "outcome": call.get("execution_outcome") or ("error" if tool_call_had_error(call) else "unclassified"),
             }

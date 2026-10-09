@@ -892,6 +892,30 @@ export function MessageList({
   return (
     <div
       ref={containerRef}
+      role="region"
+      aria-label="Conversation messages"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        // Leave links, buttons and confirmation inputs to their own keyboard
+        // behavior. Region navigation is immediate and respects reduced motion.
+        if (event.target !== event.currentTarget) return;
+        const el = event.currentTarget;
+        const positions: Record<string, number> = {
+          ArrowUp: el.scrollTop - 40,
+          ArrowDown: el.scrollTop + 40,
+          PageUp: el.scrollTop - el.clientHeight,
+          PageDown: el.scrollTop + el.clientHeight,
+          Home: 0,
+          End: el.scrollHeight,
+          " ": el.scrollTop + (event.shiftKey ? -el.clientHeight : el.clientHeight),
+        };
+        const top = positions[event.key];
+        if (top === undefined) return;
+        event.preventDefault();
+        shouldAutoScrollRef.current = false;
+        el.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+      }}
+      onTouchMove={() => { shouldAutoScrollRef.current = false; }}
       onScroll={handleScroll}
       onWheel={handleWheel}
       className={cn(

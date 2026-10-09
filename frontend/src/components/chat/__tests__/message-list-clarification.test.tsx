@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeAll } from "vitest";
 import React from "react";
@@ -260,4 +260,22 @@ describe("MessageList — ClarificationCard rendering", () => {
     expect(screen.getByText(/Replaced by your follow-up/i)).toBeInTheDocument();
     expect(screen.queryByText(/This card expired/i)).not.toBeInTheDocument();
   });
+});
+
+it("provides a focusable conversation region and preserves keyboard reading during streaming", () => {
+  const messages: import("@/lib/types").ChatMessage[] = [{ id: "keyboard-msg", role: "user", content: "Read the older evidence", tool_calls: null, citations: null, created_at: "2026-10-08T00:00:00Z" }];
+  const result = renderWithQueryClient(<MessageList messages={messages} isLoading={false} />);
+  const region = screen.getByRole("region", { name: "Conversation messages" });
+  expect(region).toHaveAttribute("tabindex", "0");
+  region.focus();
+  expect(region).toHaveFocus();
+  region.scrollTo = vi.fn();
+  Object.defineProperty(region, "scrollTop", { configurable: true, value: 400 });
+  Object.defineProperty(region, "clientHeight", { configurable: true, value: 300 });
+  fireEvent.keyDown(region, { key: "PageUp" });
+  expect(region.scrollTo).toHaveBeenCalledWith({ top: 100, behavior: "auto" });
+  vi.mocked(HTMLElement.prototype.scrollIntoView).mockClear();
+  region.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+  result.rerender(<QueryClientProvider client={new QueryClient()}><MessageList messages={[...messages]} isLoading={false} isWaitingForReply={true} /></QueryClientProvider>);
+  expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
 });

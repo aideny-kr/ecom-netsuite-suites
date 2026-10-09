@@ -3,13 +3,14 @@
 import pytest
 import redis
 
+from app.core.config import settings
 from app.services.chat.run_manager import RunManager, get_run_manager
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-REDIS_URL = "redis://localhost:6379/0"
+REDIS_URL = settings.REDIS_URL
 
 
 def _redis_available() -> bool:
