@@ -51,12 +51,18 @@ def test_result_preview_is_bounded_valid_json_and_cannot_escape_fence(data):
     json.loads(rendered.split("```json\n", 1)[1].rsplit("\n```", 1)[0])
 
 
-@pytest.mark.parametrize("result,outcome", [(_data(), "returned"), ({"error": "refused"}, "failed")])
-async def test_confirmed_custom_result_receipt_is_persisted_and_emitted(result, outcome):
+@pytest.mark.parametrize("http_api", [False, True])
+@pytest.mark.parametrize(
+    "result,outcome",
+    [(_data(), "returned"), ({"error": "refused"}, "failed"), ({"outcome_indeterminate": True}, "indeterminate")],
+)
+async def test_confirmed_custom_result_receipt_is_persisted_and_emitted(result, outcome, http_api):
     from app.services.chat.orchestrator import run_chat_turn
 
     sid = uuid.uuid4()
     tool = f"ext__{uuid.uuid4().hex}__docs_search"
+    if http_api:
+        tool = f"http__{uuid.uuid4().hex}__get"
     card = build_confirmation_payload(
         mutation_type="execute",
         record_type="external tool docs_search",
@@ -92,9 +98,52 @@ async def test_confirmed_custom_result_receipt_is_persisted_and_emitted(result, 
     response = next(e["message"] for e in events if e["type"] == "message")
     saved = next(c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], ChatMessage))
     assert saved.tool_calls == response["tool_calls"]
+    assert response["tool_calls"][0]["duration_ms"] >= 0
     assert saved.structured_output == response["structured_output"]
     receipt = response["structured_output"]["execution_receipt"]
     assert receipt["tools"][0]["tool"] == tool
     assert receipt["tools"][0]["outcome"] == outcome
     assert receipt["tools"][0]["connector_id"] == str(uuid.UUID(tool.split("__")[1]))
     assert execute.await_args.kwargs["human_approved"] is True
+
+
+@pytest.mark.parametrize(
+    "outcome,summary,label",
+    [
+        ("returned", "Documentation about error handling and invalid input", "RETURNED"),
+        (
+            "indeterminate",
+            "The connected service did not confirm success. Check its current state before retrying.",
+            "INDETERMINATE",
+        ),
+        ("failed", "The connected service reported a failed request.", "FAILED"),
+        ("confirmation_required", "Waiting for the signed decision", "AWAITING CONFIRMATION"),
+        ("unclassified", "No explicit outcome", "OUTCOME UNCLASSIFIED"),
+    ],
+)
+def test_follow_up_history_uses_execution_evidence_not_result_prose(outcome, summary, label):
+    from app.services.chat.history_tool_trace import build_history_dicts
+
+    history, _ = build_history_dicts(
+        [
+            {
+                "role": "assistant",
+                "content": "Connected result",
+                "tool_calls": [
+                    {
+                        "step": 0,
+                        "tool": "docs_search",
+                        "params": {"query": "Python"},
+                        "result_summary": summary,
+                        "execution_outcome": outcome,
+                    }
+                ],
+            }
+        ],
+        keep_recent=4,
+    )
+    trace = history[0]["content"]
+    assert f"→ {label}" in trace
+    assert "→ OK" not in trace
+    if outcome == "returned":
+        assert "FAILED" not in trace

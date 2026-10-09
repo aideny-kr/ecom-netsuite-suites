@@ -153,7 +153,21 @@ def _render_call(call: dict[str, Any]) -> list[str]:
     params = call.get("params") or {}
     result_summary = call.get("result_summary") or ""
 
-    failed = _is_failure(result_summary)
+    outcome = call.get("execution_outcome")
+    has_outcome = outcome is not None
+    if has_outcome and outcome != "returned":
+        # Explicit execution evidence takes precedence over words inside data.
+        # In particular, an unknown write outcome must never become success.
+        labels = {
+            "error": "FAILED",
+            "failed": "FAILED",
+            "blocked": "BLOCKED",
+            "indeterminate": "INDETERMINATE — check service state; do not retry",
+            "confirmation_required": "AWAITING CONFIRMATION",
+        }
+        label = labels.get(outcome, "OUTCOME UNCLASSIFIED") if isinstance(outcome, str) else "OUTCOME UNCLASSIFIED"
+        return [f"[step {step}] {tool_name} → {label}"]
+    failed = not has_outcome and _is_failure(result_summary)
     sql = _extract_sql(params)
 
     if failed:
@@ -168,9 +182,9 @@ def _render_call(call: dict[str, Any]) -> list[str]:
     # Row count if available
     row_match = re.search(r"Returned (\d+) rows?", result_summary)
     if row_match:
-        header_parts.append(f"→ OK ({row_match.group(1)} rows)")
+        header_parts.append(f"→ {'RETURNED' if outcome else 'OK'} ({row_match.group(1)} rows)")
     else:
-        header_parts.append("→ OK")
+        header_parts.append("→ RETURNED" if outcome else "→ OK")
 
     header = " ".join(header_parts)
     lines = [header]

@@ -64,7 +64,7 @@ def format_external_result(result: Any) -> str:
                 return out
             if isinstance(value, str):
                 # Count JSON-encoded characters so Unicode cannot defeat the cap.
-                limit = min(1000, max(0, remaining // 6))
+                limit = min(1000, max(0, (remaining - 80) // 12))
                 shortened = value[:limit]
                 if len(shortened) < len(value):
                     shortened += " [truncated]"

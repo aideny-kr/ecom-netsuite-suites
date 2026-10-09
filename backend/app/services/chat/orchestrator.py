@@ -2460,6 +2460,7 @@ async def run_chat_turn(
                         yield {"type": "error", "error": f"No change was sent to NetSuite: {exc}"}
                         return
 
+                _exec_started = time.monotonic()
                 _exec_result_str = await execute_tool_call(
                     # The ONE place this may be True. `tool_name`/`tool_input`
                     # here came from validate_and_extract_confirmation, which
@@ -2477,6 +2478,7 @@ async def run_chat_turn(
                     db=db,
                     session_id=str(session.id),
                 )
+                _exec_duration_ms = int((time.monotonic() - _exec_started) * 1000)
 
                 _mutation_type = _so.get("mutation_type", "write")
                 _record_type = _so.get("record_type", "record")
@@ -2937,6 +2939,7 @@ async def run_chat_turn(
                                 "tool": tool_name,
                                 "params": tool_input,
                                 "result_summary": _confirm_content,
+                                "duration_ms": _exec_duration_ms,
                                 "execution_outcome": "returned" if _exec_succeeded else _write_outcome,
                             }
                         ]
