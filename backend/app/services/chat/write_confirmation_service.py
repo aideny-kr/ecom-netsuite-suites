@@ -13,6 +13,7 @@ Consumers:
 from __future__ import annotations
 
 import json
+from itertools import islice
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -32,10 +33,56 @@ from app.services.chat.write_validator import EditableSlot, ValidationResult
 
 def format_external_result(result: Any) -> str:
     """Keep approved connector data visible and available in later chat history."""
-    rendered = json.dumps(result, ensure_ascii=True, indent=2, default=str)
+    rendered = json.dumps(result, ensure_ascii=True, indent=2, default=str).replace("`", "\\u0060")
+    notice = "The request completed. Returned data:"
     if len(rendered) > 20000:
-        return "The request completed. Its result is too large to display here; request a smaller page or add a filter."
-    return f"The request completed. Returned data:\n\n```json\n{rendered}\n```"
+        # Preserve useful evidence instead of discarding a successful response.
+        # Bound both traversal and output; this is explicitly a partial preview,
+        # never a complete dataset suitable for totals or an inferred outcome.
+        remaining, nodes = 10000, 120
+
+        def preview(value: Any, depth: int = 0) -> Any:
+            nonlocal remaining, nodes
+            nodes -= 1
+            if remaining <= 0 or nodes <= 0 or depth >= 6:
+                return "[omitted from preview]"
+            if isinstance(value, dict):
+                out = {}
+                for key, item in islice(value.items(), 20):
+                    key = str(key)
+                    if len(key) > 200 or remaining <= 0 or nodes <= 0:
+                        break
+                    remaining -= len(json.dumps(key).replace("`", "\\u0060"))
+                    out[key] = preview(item, depth + 1)
+                return out
+            if isinstance(value, list):
+                out = []
+                for item in value[:5]:
+                    if remaining <= 0 or nodes <= 0:
+                        break
+                    out.append(preview(item, depth + 1))
+                return out
+            if isinstance(value, str):
+                # Count JSON-encoded characters so Unicode cannot defeat the cap.
+                limit = min(1000, max(0, remaining // 6))
+                shortened = value[:limit]
+                if len(shortened) < len(value):
+                    shortened += " [truncated]"
+                remaining -= len(json.dumps(shortened, ensure_ascii=True).replace("`", "\\u0060"))
+                return shortened
+            if value is not None and not isinstance(value, (bool, int, float)):
+                return preview(str(value), depth)
+            remaining -= len(json.dumps(value, default=str))
+            return value
+
+        rendered = json.dumps(preview(result), ensure_ascii=True, indent=2, default=str)
+        notice = (
+            "The request completed. Partial result preview (fields, text and entries may be omitted). "
+            "Do not treat this preview as a complete dataset; request a smaller page or add a filter:"
+        )
+    # Connector strings must not break out of the JSON fence into active Markdown.
+    rendered = rendered.replace("`", "\\u0060")
+    return f"{notice}\n\n```json\n{rendered}\n```"
 
 
 class WriteConfirmationPayload(BaseModel):

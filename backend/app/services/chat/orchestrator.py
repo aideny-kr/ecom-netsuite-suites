@@ -2926,14 +2926,30 @@ async def run_chat_turn(
                     )
 
                 if _confirm_content is not None:
+                    _confirmed_calls = None
+                    _confirmed_output = {"accounting_group_child": True} if _so.get("accounting_group_child") else None
+                    if _mutation_type == "execute":
+                        from app.services.chat.execution_provenance import execution_receipt, persist_execution_receipt
+
+                        _confirmed_calls = [
+                            {
+                                "step": 0,
+                                "tool": tool_name,
+                                "params": tool_input,
+                                "result_summary": _confirm_content,
+                                "execution_outcome": "returned" if _exec_succeeded else _write_outcome,
+                            }
+                        ]
+                        _confirmed_output = persist_execution_receipt(
+                            _confirmed_output, execution_receipt([], _confirmed_calls)
+                        )
                     _assistant_msg = ChatMessage(
                         tenant_id=tenant_id,
                         session_id=session.id,
                         role="assistant",
                         content=_confirm_content,
-                        structured_output={"accounting_group_child": True}
-                        if _so.get("accounting_group_child")
-                        else None,
+                        tool_calls=_confirmed_calls,
+                        structured_output=_confirmed_output,
                         created_at=datetime.now(timezone.utc),
                     )
                     db.add(_assistant_msg)
@@ -2946,7 +2962,8 @@ async def run_chat_turn(
                             "id": str(_assistant_msg.id),
                             "role": "assistant",
                             "content": _confirm_content,
-                            "tool_calls": None,
+                            "tool_calls": _confirmed_calls,
+                            "structured_output": _confirmed_output,
                             "citations": None,
                             "created_at": _assistant_msg.created_at.isoformat(),
                         },
