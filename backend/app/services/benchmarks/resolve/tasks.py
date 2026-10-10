@@ -67,6 +67,7 @@ class Task:
     case_id: str
     prompt: str
     gold: Gold | None
+    snapshot: object | None = None  # outcome.Snapshot: graded by outcome when present
 
 
 def held_out_refs(refs) -> frozenset[str]:
@@ -124,7 +125,20 @@ def _label(labels_dir: Path | None, ref: str) -> dict | None:
     return json.loads(path.read_text()) if path.is_file() else None
 
 
-def load_tasks(tasks_path, labels_dir=None, *, split: Split = "held_in", require_gold: bool = True) -> list[Task]:
+def _snapshot(snapshots_dir, ref):
+    if snapshots_dir is None:
+        return None
+    from app.services.benchmarks.resolve.outcome import Snapshot
+
+    path = Path(snapshots_dir) / f"{ref}.json"
+    return Snapshot.from_json(json.loads(path.read_text())) if path.is_file() else None
+
+
+def load_tasks(
+    tasks_path, labels_dir=None, *, split: Split = "held_in", require_gold: bool = True, snapshots_dir=None
+) -> list[Task]:
+    """Tasks for a split. A task is graded by its snapshot's outcome when it has one (Aiden,
+    2026-10-10), else by its hand label; with ``require_gold`` a task needs one or the other."""
     rows = json.loads(Path(tasks_path).read_text())
     refs = [row["ref"] for row in rows]
     held = held_out_refs(refs)
@@ -135,9 +149,16 @@ def load_tasks(tasks_path, labels_dir=None, *, split: Split = "held_in", require
             continue
         label = _label(labels_dir, ref)
         gold = _gold(ref, label) if label is not None else None
-        if require_gold and gold is None:
+        snapshot = _snapshot(snapshots_dir, ref)
+        if require_gold and gold is None and snapshot is None:
             continue
         out.append(
-            Task(ref=ref, case_id=row["case_id"], prompt=PROMPT.format(ref=ref, case_id=row["case_id"]), gold=gold)
+            Task(
+                ref=ref,
+                case_id=row["case_id"],
+                prompt=PROMPT.format(ref=ref, case_id=row["case_id"]),
+                gold=gold,
+                snapshot=snapshot,
+            )
         )
     return out

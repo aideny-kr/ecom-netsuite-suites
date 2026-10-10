@@ -23,7 +23,14 @@ from app.services.benchmarks.resolve.graders import grade
 
 def summarize(rows: list[dict], *, trials: int) -> dict:
     by_task: dict[str, list[bool]] = {}
+    ungraded: dict[str, int] = {}
     for row in rows:
+        if row.get("graded", True) is False:
+            # The outcome engine cannot grade this shape yet: counted, never scored as a pass or a fail.
+            ungraded[row.get("outcome_reason") or "unknown"] = (
+                ungraded.get(row.get("outcome_reason") or "unknown", 0) + 1
+            )
+            continue
         by_task.setdefault(row["ref"], []).append(bool(row["outcome_ok"]))
     rates = [sum(passes) / len(passes) for passes in by_task.values()]
     resolved_tokens = [row["tokens"] for row in rows if row.get("outcome_ok") and "tokens" in row]
@@ -47,6 +54,9 @@ def summarize(rows: list[dict], *, trials: int) -> dict:
         "g5_median_tokens_resolved": statistics.median(resolved_tokens) if resolved_tokens else None,
         "environment_incomplete_trials": incomplete,
         "comparable": incomplete == 0,
+        "graded_tasks": len(by_task),
+        "ungraded_trials": sum(ungraded.values()),
+        "ungraded_reasons": dict(sorted(ungraded.items())),
     }
 
 

@@ -286,6 +286,7 @@ class TapedDispatcher:
             raise ValueError("record mode needs the live dispatcher")
         self.tape, self.mode, self.live = tape, mode, live
         self.writes: list[str] = []
+        self.write_calls: list[tuple] = []  # (tool name, input): native Claude's proposals
         self.refused: list[str] = []
         self.misses = 0
         self.environment_errors = 0
@@ -299,6 +300,7 @@ class TapedDispatcher:
         kind = classify(tool_name, tool_input)
         if kind == "write":
             self.writes.append(tool_name)
+            self.write_calls.append((tool_name, tool_input))
             return _refusal("benchmark: a write reached the dispatcher without approval; it was not executed")
         if kind == "refused":
             self.refused.append(tool_name)

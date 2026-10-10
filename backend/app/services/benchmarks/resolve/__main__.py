@@ -1,9 +1,15 @@
 """Resolve benchmark command line.
 
     python -m app.services.benchmarks.resolve split --tasks tasks.json
-    python -m app.services.benchmarks.resolve run --tasks tasks.json --labels labels/ \\
+    python -m app.services.benchmarks.resolve snapshot --tasks tasks.json --out-dir snapshots/ \\
+        --tenant <uuid> --items 1471,5005
+    python -m app.services.benchmarks.resolve run --tasks tasks.json (--snapshots snapshots/ | --labels labels/) \\
         --tape tape.jsonl --out results.json --tenant <uuid> --actor <user uuid> --model <model> \\
         [--mode record] [--limit 3]
+
+`snapshot` reads each order once, read-only, as the server's credit check reads it, so both
+agents are graded by outcome against the same facts (outcome.py). `--items` are the credit
+and tax items the booking profile allows (a credit on any other item fails the playbook).
 
 `run` drives today's agent and needs the platform model key, so it runs in the staging
 container. `--mode record` reads live and saves every read to the tape. `--mode replay`
@@ -51,7 +57,9 @@ async def _run(args) -> int:
     from app.services.benchmarks.resolve.ours import run_ours
 
     tenant_id, actor_id = uuid.UUID(args.tenant), uuid.UUID(args.actor)
-    bench = tasks.load_tasks(args.tasks, args.labels, split=args.split)[: args.limit or None]
+    bench = tasks.load_tasks(args.tasks, args.labels, split=args.split, snapshots_dir=args.snapshots)[
+        : args.limit or None
+    ]
     tape = Tape(args.tape)
 
     async def agent(task, trial):
@@ -85,14 +93,45 @@ async def _run(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+async def _capture_all(tasks_path, out_dir, tenant, item_ids, *, session_factory=None, set_tenant=None) -> dict:
+    """One snapshot per order in the task list (read-only); a refused shape is saved too."""
+    from app.services.benchmarks.resolve import outcome
+
+    if session_factory is None or set_tenant is None:
+        from app.core.database import async_session_factory, set_tenant_context
+
+        session_factory, set_tenant = session_factory or async_session_factory, set_tenant or set_tenant_context
+    tenant_id = uuid.UUID(str(tenant))
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    counts: dict = {"taken": 0, "refused": {}}
+    for row in json.loads(Path(tasks_path).read_text()):
+        async with session_factory() as db:
+            await set_tenant(db, str(tenant_id))
+            snap = await outcome.capture(db, tenant_id, row["case_id"], row["ref"], list(item_ids))
+        (target / f"{row['ref']}.json").write_text(json.dumps(snap.to_json(), indent=1))
+        if snap.refusal:
+            counts["refused"][snap.refusal] = counts["refused"].get(snap.refusal, 0) + 1
+        else:
+            counts["taken"] += 1
+    return counts
+
+
+def _parser():
     parser = argparse.ArgumentParser(prog="resolve-bench", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     split = sub.add_parser("split", help="count held-in and held-out tasks (reads no labels)")
     split.add_argument("--tasks", required=True)
+    snapshot = sub.add_parser("snapshot", help="read each order once, read-only, for the outcome grader")
+    snapshot.add_argument("--tasks", required=True)
+    snapshot.add_argument("--out-dir", required=True)
+    snapshot.add_argument("--tenant", required=True)
+    snapshot.add_argument("--items", required=True, help="comma-separated credit and tax item ids the profile allows")
     run = sub.add_parser("run", help="run today's agent on the tasks and grade it")
     run.add_argument("--tasks", required=True)
-    run.add_argument("--labels", required=True)
+    graded_by = run.add_mutually_exclusive_group(required=True)
+    graded_by.add_argument("--labels", help="grade by hand labels")
+    graded_by.add_argument("--snapshots", help="grade by outcome against these snapshots (Aiden, 2026-10-10)")
     run.add_argument("--tape", required=True)
     run.add_argument("--out", required=True)
     run.add_argument("--tenant", required=True)
@@ -103,12 +142,21 @@ def main(argv=None) -> int:
     run.add_argument("--split", choices=("held_in", "held_out", "all"), default="held_in")
     run.add_argument("--trials", type=int, default=3)
     run.add_argument("--limit", type=int, default=0)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None) -> int:
+    args = _parser().parse_args(argv)
 
     if args.command == "split":
         refs = [row["ref"] for row in json.loads(Path(args.tasks).read_text())]
         held = tasks.held_out_refs(refs)
         print(json.dumps({"tasks": len(refs), "held_in": len(refs) - len(held), "held_out": len(held)}))
+        return 0
+    if args.command == "snapshot":
+        _outside_repository(args.out_dir)
+        items = [i.strip() for i in args.items.split(",") if i.strip()]
+        print(json.dumps(asyncio.run(_capture_all(args.tasks, args.out_dir, args.tenant, items)), indent=2))
         return 0
     for path in (args.out, args.tape):
         _outside_repository(path)

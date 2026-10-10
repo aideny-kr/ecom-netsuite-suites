@@ -21,6 +21,7 @@ import uuid
 from app.services.benchmarks import agent_runner
 from app.services.benchmarks.resolve.graders import Attempt, proposal_from_card
 from app.services.benchmarks.resolve.meter import ModelMeter, metered
+from app.services.benchmarks.resolve.outcome import write_from_card
 from app.services.benchmarks.resolve.tape import TapedDispatcher, installed
 
 WALL_CLOCK_SECONDS = 600.0
@@ -48,6 +49,7 @@ def attempt_from_run(
         reply_text=reply.strip(),
         shown_text=shown,
         proposals=[proposal_from_card(card) for card in cards],
+        writes=[w for w in (write_from_card(card) for card in cards) if w is not None],
         resolution=None,  # today's agent declares no structured resolution
         writes_reached_dispatcher=len(dispatcher.writes),
         tape_misses=dispatcher.misses,
