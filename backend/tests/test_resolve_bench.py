@@ -1456,7 +1456,7 @@ async def test_r8_a_read_whose_io_failed_is_an_environment_error_and_never_recor
 
     d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
     with tape.installed(d):
-        await d("transaction_ops_accounting_reference", {"topic": "x"}, tenant_id="t", db=SimpleNamespace(info={}))
+        await d("transaction_ops_status", {"case_id": "c"}, tenant_id="t", db=SimpleNamespace(info={}))
     assert (d.io_failures, d.environment_errors, d.tape.entries) == (1, 1, {})
 
 
@@ -1562,3 +1562,81 @@ def test_r8_a_tape_recorded_before_failure_detection_is_refused(tmp_path):
     new = tape.Tape(tmp_path / "new.jsonl")
     new.put("k", "rag_search", {"query": "q"}, "{}")
     assert tape.Tape(tmp_path / "new.jsonl").get("k")["result"] == "{}"
+
+
+# --- review round 9: only tools with observable IO; the trial's own result cache ---------------
+
+
+def test_r9_a_tool_whose_io_the_harness_cannot_observe_is_not_offered():
+    """F36-F38: accounting_reference reads through DDGS/primp and streamed bodies and turns
+    every failure into a normal result; resolving a case does not need it."""
+    assert tape.classify("transaction_ops_accounting_reference") == "refused"
+
+
+async def test_r9_f36_a_streamed_body_that_fails_after_send_is_an_io_failure(tmp_path):
+    import httpx
+
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"partial"
+            raise httpx.ReadError("connection reset")
+
+    client = _http(lambda request: httpx.Response(200, stream=Broken()))
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    with tape.installed(d, allow_hosts=frozenset({"docs.example.com"})):
+        try:
+            async with client.stream("GET", "https://docs.example.com/page") as response:
+                async for _ in response.aiter_bytes():
+                    pass
+        except httpx.HTTPError:
+            pass
+    assert d.io_failures == 1
+
+
+async def test_r9_f37_an_aiohttp_failure_is_an_io_failure(tmp_path, monkeypatch):
+    import aiohttp
+
+    async def broken(self, method, url, **kwargs):
+        raise aiohttp.ClientConnectionError("down")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", broken)
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=lambda *a, **k: None)
+    with tape.installed(d):
+        async with aiohttp.ClientSession() as session:
+            try:
+                await session._request("POST", "https://api.voyageai.com/v1/embeddings")
+            except aiohttp.ClientError:
+                pass
+    assert d.io_failures == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "counted"), [(401, True), (403, True), (407, True), (400, False), (404, False), (422, False)]
+)
+async def test_r9_f38_auth_failures_are_environment_failures_but_query_mistakes_are_not(tmp_path, status, counted):
+    import httpx
+
+    client = _http(lambda request: httpx.Response(status))
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=lambda *a, **k: None)
+    with tape.installed(d):
+        await client.get("https://netsuite.example.com/record")
+    assert d.io_failures == (1 if counted else 0)
+
+
+async def test_r9_f39_each_trial_has_its_own_result_cache_and_never_reaches_redis(tmp_path, monkeypatch):
+    import redis
+
+    from app.services.chat import result_cache
+
+    def no_redis(*args, **kwargs):
+        raise AssertionError("a benchmark trial reached Redis")
+
+    monkeypatch.setattr(redis, "from_url", no_redis)
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    with tape.installed(d):
+        result_cache.cache_full_payload("conv", "r1", {"rows": [1]})
+        entry = result_cache.get_full_payload_entry("conv", "r1")
+    assert entry is not None  # the round trip ran in process, without Redis
+    with tape.installed(tape.TapedDispatcher(tape.Tape(tmp_path / "u.jsonl"), mode="replay")):
+        assert result_cache.get_full_payload_entry("conv", "r1") is None  # nothing leaks between trials
+    assert result_cache._get_redis.__name__ == "_get_redis"  # restored after the trial

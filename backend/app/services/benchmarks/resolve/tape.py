@@ -63,7 +63,8 @@ READ_TOOLS = frozenset(
         "netsuite.financial_report",
         "netsuite.get_metadata",
         "transaction_ops.accounting_evidence",
-        "transaction_ops.accounting_reference",
+        # transaction_ops.accounting_reference is NOT offered: it reads through DDGS/primp
+        # and streamed bodies and turns every failure into a normal result (review round 9).
         "transaction_ops.accounting_group",
         "transaction_ops.propose_credit_reallocation",  # reads, then prepares a card; no writes
         "transaction_ops.status",
@@ -439,11 +440,11 @@ def installed(dispatcher: TapedDispatcher, *, allow_hosts=MODEL_HOSTS):
     _ORIGINAL["dispatch"] = tools._execute_tool_call_once
     original = tools._execute_tool_call_once
     tools._execute_tool_call_once = dispatcher
-    from app.services.benchmarks.resolve.io_watch import watching
+    from app.services.benchmarks.resolve.io_watch import trial_result_cache, watching
 
     guard = _network_guard(dispatcher, allow_hosts) if dispatcher.mode == "replay" else nullcontext()
     try:
-        with guard, watching(dispatcher):
+        with guard, watching(dispatcher), trial_result_cache():
             yield dispatcher
     finally:
         tools._execute_tool_call_once = original
