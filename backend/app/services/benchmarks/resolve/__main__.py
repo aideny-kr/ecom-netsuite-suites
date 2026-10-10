@@ -55,6 +55,7 @@ async def _run(args) -> int:
     from app.core.database import async_session_factory, set_tenant_context
     from app.services.benchmarks.resolve.interpret import make_interpreter
     from app.services.benchmarks.resolve.ours import run_ours
+    from app.services.benchmarks.resolve.reference import run_reference
 
     tenant_id, actor_id = uuid.UUID(args.tenant), uuid.UUID(args.actor)
     bench = tasks.load_tasks(args.tasks, args.labels, split=args.split, snapshots_dir=args.snapshots)[
@@ -66,6 +67,10 @@ async def _run(args) -> int:
         async with async_session_factory() as db:
             try:
                 await set_tenant_context(db, str(tenant_id))
+                if args.agent == "reference":  # native Claude Opus 5.5 + the NetSuite MCP (B4)
+                    return await run_reference(
+                        task, trial, db=db, tenant_id=tenant_id, actor_id=actor_id, tape=tape, mode=args.mode
+                    )
                 return await run_ours(
                     task,
                     trial,
@@ -81,8 +86,8 @@ async def _run(args) -> int:
 
     interpret = make_interpreter(api_key=settings.ANTHROPIC_API_KEY, model=args.interpret_model)
     meta = {
-        "agent": "ours",
-        "model": args.model,
+        "agent": args.agent,
+        "model": args.model if args.agent == "ours" else "claude-opus-5-5 (high thinking)",
         "interpret_model": args.interpret_model,
         "mode": args.mode,
         "split": args.split,
@@ -127,8 +132,14 @@ def _parser():
     snapshot.add_argument("--out-dir", required=True)
     snapshot.add_argument("--tenant", required=True)
     snapshot.add_argument("--items", required=True, help="comma-separated credit and tax item ids the profile allows")
-    run = sub.add_parser("run", help="run today's agent on the tasks and grade it")
+    run = sub.add_parser("run", help="run an agent on the tasks and grade it")
     run.add_argument("--tasks", required=True)
+    run.add_argument(
+        "--agent",
+        choices=("ours", "reference"),
+        default="ours",
+        help="ours, or the native reference: Claude Opus 5.5 (high thinking) + the NetSuite MCP",
+    )
     graded_by = run.add_mutually_exclusive_group(required=True)
     graded_by.add_argument("--labels", help="grade by hand labels")
     graded_by.add_argument("--snapshots", help="grade by outcome against these snapshots (Aiden, 2026-10-10)")
