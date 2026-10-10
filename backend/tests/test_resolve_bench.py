@@ -1640,3 +1640,15 @@ async def test_r9_f39_each_trial_has_its_own_result_cache_and_never_reaches_redi
     with tape.installed(tape.TapedDispatcher(tape.Tape(tmp_path / "u.jsonl"), mode="replay")):
         assert result_cache.get_full_payload_entry("conv", "r1") is None  # nothing leaks between trials
     assert result_cache._get_redis.__name__ == "_get_redis"  # restored after the trial
+
+
+def test_every_card_builder_in_the_registry_is_offered_and_stateful():
+    """A card-building tool (transaction_ops.propose_*) refused by the benchmark scores our agent
+    without its own fix: #403's propose_credit was. Any new one fails here until it is listed."""
+    from app.mcp import registry
+
+    names = [n for n in registry.TOOL_REGISTRY if n.startswith("transaction_ops.propose_")]
+    assert names
+    for name in names:
+        assert tape.classify(name.replace(".", "_")) == "read", name
+        assert name in tape.STATEFUL_READS, name

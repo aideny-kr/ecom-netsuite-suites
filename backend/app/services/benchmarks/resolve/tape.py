@@ -67,6 +67,7 @@ READ_TOOLS = frozenset(
         # and streamed bodies and turns every failure into a normal result (review round 9).
         "transaction_ops.accounting_group",
         "transaction_ops.propose_credit_reallocation",  # reads, then prepares a card; no writes
+        "transaction_ops.propose_credit",  # the agent's credit, accepted by outcome (#403); no writes
         "transaction_ops.status",
         "transaction_ops.groups",
         "transaction_ops.group_breakdown",
@@ -80,6 +81,7 @@ STATEFUL_READS = frozenset(
         "transaction_ops.accounting_evidence",
         "transaction_ops.accounting_group",
         "transaction_ops.propose_credit_reallocation",
+        "transaction_ops.propose_credit",
     }
 )
 LOCAL_TOOLS = frozenset(
