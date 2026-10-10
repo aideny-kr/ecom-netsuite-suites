@@ -42,14 +42,15 @@ def parse_interpretation(raw: str) -> dict | None:
         body = json.loads(raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```"))
     except (TypeError, ValueError, AttributeError) as exc:
         raise ValueError(f"interpreter returned malformed output: {raw[:80]!r}") from exc
-    if not isinstance(body, dict):
-        raise ValueError("interpreter output is not an object")
-    diagnosis, action = body.get("diagnosis"), body.get("action")
-    if diagnosis is None or action is None:
+    # One strict shape (round 7): exactly the two fields, both null or both in vocabulary.
+    if not isinstance(body, dict) or set(body) != {"diagnosis", "action"}:
+        raise ValueError("interpreter output must be exactly {diagnosis, action}")
+    diagnosis, action = body["diagnosis"], body["action"]
+    if diagnosis is None and action is None:
         return None
-    if diagnosis not in DIAGNOSES or action not in ACTIONS:
-        raise ValueError(f"interpreter answered outside the label vocabulary: {diagnosis!r}, {action!r}")
-    return {"diagnosis": diagnosis, "action": action}
+    if diagnosis in DIAGNOSES and action in ACTIONS:
+        return {"diagnosis": diagnosis, "action": action}
+    raise ValueError(f"interpreter answered outside the label vocabulary: {diagnosis!r}, {action!r}")
 
 
 # Far above any reply the agent shows; a longer one is refused, never cut (review round 5).

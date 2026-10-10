@@ -232,14 +232,26 @@ def _has_blockers(value) -> bool:
     return False
 
 
-def _environment_error(result: str) -> bool:
-    """True for any error or blocker except the agent's own deterministic query mistakes."""
+# Reads that swallow their own failure into a normal-looking result, keyed by registry name.
+# Such a result is an environment failure, never a recording (review round 7).
+DEGRADED_RESULTS = {
+    # rag_search returns an empty result with a note instead of an error when retrieval fails
+    "rag.search": lambda body: not body.get("results") and bool(body.get("note")),
+}
+
+
+def _environment_error(result: str, tool_name: str | None = None) -> bool:
+    """True for any error, blocker or swallowed failure except the agent's own deterministic
+    query mistakes."""
     try:
         body = json.loads(result)
     except (TypeError, ValueError):
         return False
     if not isinstance(body, dict):
         return False
+    degraded = DEGRADED_RESULTS.get(canonical_name(tool_name)) if tool_name else None
+    if degraded is not None and degraded(body):
+        return True
     if _has_blockers(body):  # tools report source failures as blockers at any depth, even on success
         return True
     if not body.get("error"):
@@ -283,12 +295,14 @@ class TapedDispatcher:
                 return _refusal("benchmark: no recorded result for this exact call", not_recorded=True)
             if recorded["state_keys"] or canonical_name(tool_name) in STATEFUL_READS:
                 self.unreplayable += 1  # its session state is not restored, so what follows may differ
+            if _environment_error(recorded["result"], tool_name):
+                self.environment_errors += 1  # a tape from before a failure shape was known
             return recorded["result"]
         if recorded is not None and not recorded["state_keys"] and canonical_name(tool_name) not in STATEFUL_READS:
             return recorded["result"]
         before = {k: _fingerprint(v) for k, v in info.items()} if isinstance(info, dict) else {}
         result = await self.live(tool_name, tool_input, **kwargs)
-        if _environment_error(result):
+        if _environment_error(result, tool_name):
             self.environment_errors += 1
             return result
         state_keys = _state_keys(before, info) if isinstance(info, dict) else []

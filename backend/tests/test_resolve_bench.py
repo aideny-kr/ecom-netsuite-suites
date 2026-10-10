@@ -1359,3 +1359,64 @@ async def test_r6_f31_only_a_clean_null_is_the_agents_failure(monkeypatch, text,
         assert await read("The agent's reply.") is None
     else:
         assert await read("The agent's reply.") == {"diagnosis": "credited", "action": "explain_close"}
+
+
+# --- review round 7 ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{}",
+        '{"diagnosis": "credited"}',
+        '{"diagnosis": "made_up", "action": null}',
+        '{"diagnosis": null, "action": "explain_close"}',
+        '{"diagnosis": "credited", "action": "explain_close", "extra": 1}',
+    ],
+)
+def test_r7_f31_the_interpreter_reading_has_one_strict_shape(raw):
+    """F31 (third time): every reading that is not exactly {diagnosis, action}, both null or
+    both in the vocabularies, is the grader's failure."""
+    from app.services.benchmarks.resolve.interpret import parse_interpretation
+
+    with pytest.raises(ValueError):
+        parse_interpretation(raw)
+
+
+RAG_DOWN = {
+    "results": [],
+    "count": 0,
+    "query": "q",
+    "note": "Search temporarily unavailable, proceed without documentation context.",
+}
+
+
+async def test_r7_f32_a_degraded_search_is_an_environment_error_not_a_recording(tmp_path):
+    """F32: rag.search swallows its failures into an empty result with a note; recording that
+    would replay a failed retrieval as a clean one."""
+
+    async def live(tool_name, tool_input, **kwargs):
+        return json.dumps(RAG_DOWN)
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    await d("rag_search", {"query": "q"}, tenant_id="t", db=SimpleNamespace(info={}))
+    assert d.environment_errors == 1 and d.tape.entries == {}
+
+
+async def test_r7_f32_a_degraded_search_already_on_a_tape_is_not_replayed_as_clean(tmp_path):
+    t = tape.Tape(tmp_path / "t.jsonl")
+    t.put(
+        tape.tape_key("rag_search", {"query": "q"}, tenant_id="t"), "rag_search", {"query": "q"}, json.dumps(RAG_DOWN)
+    )
+    d = tape.TapedDispatcher(t, mode="replay")
+    await d("rag_search", {"query": "q"}, tenant_id="t", db=SimpleNamespace(info={}))
+    assert d.environment_errors == 1
+
+
+async def test_r7_f32_an_empty_but_healthy_search_is_still_a_clean_read(tmp_path):
+    async def live(tool_name, tool_input, **kwargs):
+        return json.dumps({"results": [], "count": 0, "query": "q"})
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    await d("rag_search", {"query": "q"}, tenant_id="t", db=SimpleNamespace(info={}))
+    assert d.environment_errors == 0 and len(d.tape.entries) == 1
