@@ -122,11 +122,44 @@ async def _capture_all(tasks_path, out_dir, tenant, item_ids, *, session_factory
     return counts
 
 
+async def _build_tasks(out, tenant, *, subsidiary=None, session_factory=None, page=100) -> int:
+    """The tenant's open cases (optionally one subsidiary's) as a task list, read-only."""
+    from app.services.transaction_ops import case_service
+
+    if session_factory is None:
+        from app.core.database import async_session_factory
+
+        session_factory = async_session_factory
+    tenant_id = uuid.UUID(str(tenant))
+    rows, offset = [], 0
+    async with session_factory() as db:
+        while True:
+            batch = await case_service.list_cases(db, tenant_id, status="open", limit=page, offset=offset)
+            rows += [
+                {"ref": c.order_reference, "case_id": str(c.id)}
+                for c in batch
+                if subsidiary is None or str((c.scope_json or {}).get("subsidiary_id")) == str(subsidiary)
+            ]
+            if len(batch) < page:
+                break
+            offset += page
+    Path(out).write_text(json.dumps(rows, indent=1))
+    return len(rows)
+
+
 def _parser():
     parser = argparse.ArgumentParser(prog="resolve-bench", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     split = sub.add_parser("split", help="count held-in and held-out tasks (reads no labels)")
     split.add_argument("--tasks", required=True)
+    build = sub.add_parser("tasks", help="the tenant's open cases as a task list (read-only)")
+    build.add_argument("--out", required=True)
+    build.add_argument("--tenant", required=True)
+    build.add_argument("--subsidiary", help="only cases in this NetSuite subsidiary")
+    compare = sub.add_parser("compare", help="the scorecard: our agent against native Claude + MCP")
+    compare.add_argument("--ours", required=True)
+    compare.add_argument("--reference", required=True)
+    compare.add_argument("--out", help="also write the scorecard JSON here")
     snapshot = sub.add_parser("snapshot", help="read each order once, read-only, for the outcome grader")
     snapshot.add_argument("--tasks", required=True)
     snapshot.add_argument("--out-dir", required=True)
@@ -163,6 +196,19 @@ def main(argv=None) -> int:
         refs = [row["ref"] for row in json.loads(Path(args.tasks).read_text())]
         held = tasks.held_out_refs(refs)
         print(json.dumps({"tasks": len(refs), "held_in": len(refs) - len(held), "held_out": len(held)}))
+        return 0
+    if args.command == "tasks":
+        _outside_repository(args.out)
+        print(json.dumps({"tasks": asyncio.run(_build_tasks(args.out, args.tenant, subsidiary=args.subsidiary))}))
+        return 0
+    if args.command == "compare":
+        from app.services.benchmarks.resolve import scorecard
+
+        card = scorecard.compare(json.loads(Path(args.ours).read_text()), json.loads(Path(args.reference).read_text()))
+        if args.out:
+            _outside_repository(args.out)
+            Path(args.out).write_text(json.dumps(card, indent=2, default=str))
+        print(scorecard.render_markdown(card))
         return 0
     if args.command == "snapshot":
         _outside_repository(args.out_dir)
