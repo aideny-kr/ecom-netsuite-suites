@@ -57,6 +57,7 @@ def test_registry_covers_every_kind_with_the_attributes_the_call_sites_need():
             "sales_order_source_alignment",
             "credit_tax_reallocation",
             "credit_line_reallocation",
+            "credit_creation",
             "sales_order_line_alignment",
         }
     )

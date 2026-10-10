@@ -4,6 +4,7 @@ import type { WriteConfirmationData } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { SalesOrderAlignmentConfirmationCard } from "./sales-order-alignment-confirmation-card";
 import { InvoiceDiscountConfirmationCard } from "./invoice-discount-confirmation-card";
+import { CreditCreationConfirmationCard } from "./credit-creation-confirmation-card";
 import { SalesCreditConfirmationCard } from "./sales-credit-confirmation-card";
 import { NativeAccountingConfirmationCard } from "./native-accounting-confirmation-card";
 
@@ -52,6 +53,9 @@ export function AccountingConfirmationCard({
     p.kind === "sales_order_line_alignment"
   ) {
     return <NativeAccountingConfirmationCard key={data.confirmation_token} data={data} proposal={p} onConfirm={onConfirm} onReject={onReject} disabled={disabled} readOnly={readOnly} groupState={groupState} />;
+  }
+  if (p.kind === "credit_creation") {
+    return <CreditCreationConfirmationCard key={data.confirmation_token} data={data} proposal={p} onConfirm={onConfirm} onReject={onReject} disabled={disabled} readOnly={readOnly} groupState={groupState} />;
   }
   if (p.kind === "sales_adjustment_credit") {
     return <SalesCreditConfirmationCard key={data.confirmation_token} data={data} proposal={p} onConfirm={onConfirm} onReject={onReject} disabled={disabled} readOnly={readOnly} groupState={groupState} />;
