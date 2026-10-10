@@ -663,14 +663,21 @@ async def test_f1_the_runner_interprets_an_undeclared_reply():
     "raw, expected",
     [
         ('{"diagnosis": "credited", "action": "explain_close"}', {"diagnosis": "credited", "action": "explain_close"}),
-        ('{"diagnosis": "made_up", "action": "explain_close"}', None),
-        ("not json", None),
+        ('{"diagnosis": "made_up", "action": "explain_close"}', ValueError),
+        ("not json", ValueError),
+        ('{"diagnosis": null, "action": null}', None),
     ],
 )
 def test_f1_the_interpreter_accepts_only_the_label_vocabularies(raw, expected):
+    """Round 6: outside-vocabulary or malformed output is the grader's failure (raises), not
+    the agent's; only a clean null reads as no conclusion."""
     from app.services.benchmarks.resolve.interpret import parse_interpretation
 
-    assert parse_interpretation(raw) == expected
+    if expected is ValueError:
+        with pytest.raises(ValueError):
+            parse_interpretation(raw)
+    else:
+        assert parse_interpretation(raw) == expected
 
 
 def test_f12_summary_counts_trials_with_amounts():
@@ -1203,3 +1210,152 @@ def test_r5_created_from_never_masks_an_untypable_application(applied, expected)
     card = {**SALES_CREDIT_CARD, "proposed_fields": fields}
     card["accounting_review"] = {**(card.get("accounting_review") or {}), "invoice_id": "77"}
     assert graders.proposal_from_card(card).created_from == expected
+
+
+# --- review round 6: the mechanisms' own holes ---------------------------------------------------
+
+
+def _failing_anthropic():
+    import anthropic
+    import httpx
+
+    def handler(request):
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    return anthropic.AsyncAnthropic(
+        api_key="x", max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+
+
+def _openai(usage):
+    import httpx
+    import openai
+
+    body = {
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+        "model": "text-embedding-3-small",
+        "usage": usage,
+    }
+    return openai.AsyncOpenAI(
+        api_key="x",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body))),
+    )
+
+
+def _truncated_stream_body():
+    # message_start and the text, then the connection ends: no message_delta, no message_stop.
+    full = _stream_body(10, 7)
+    return full[: full.index("event: message_delta")]
+
+
+async def _metered(coro_factory):
+    from app.services.benchmarks.resolve.meter import ModelMeter, metered
+
+    meter = ModelMeter()
+    with metered(meter):
+        try:
+            await coro_factory()
+        except Exception:
+            pass
+    return meter
+
+
+async def test_r6_f27_a_model_call_that_fails_is_unmetered_not_free():
+    client = _failing_anthropic()
+    meter = await _metered(lambda: model_call(client))
+    assert (meter.calls, meter.unmetered) == (1, 1)
+
+
+async def test_r6_f28_a_stream_that_ends_before_its_final_usage_is_unmetered():
+    client = _anthropic([("stream", _truncated_stream_body())])
+
+    async def read():
+        async with client.messages.stream(model="m", max_tokens=1, messages=[{"role": "user", "content": "x"}]) as s:
+            async for _ in s:
+                pass
+
+    meter = await _metered(read)
+    assert meter.unmetered == 1
+    complete = await _metered(lambda: _read_stream(_anthropic([("stream", _stream_body(4, 2))])))
+    assert (complete.unmetered, complete.output_tokens) == (0, 2)
+
+
+async def _read_stream(client):
+    async with client.messages.stream(model="m", max_tokens=1, messages=[{"role": "user", "content": "x"}]) as s:
+        async for _ in s:
+            pass
+
+
+async def test_r6_f29_embedding_tokens_are_metered_separately():
+    client = _openai({"prompt_tokens": 19, "total_tokens": 19})
+    meter = await _metered(lambda: client.embeddings.create(model="text-embedding-3-small", input="x"))
+    assert (meter.embedding_tokens, meter.input_tokens, meter.unmetered) == (19, 0, 0)
+
+
+async def test_r6_f29_a_trial_reports_its_embedding_tokens(tmp_path, monkeypatch):
+    from app.services.benchmarks.resolve import ours
+
+    embedder = _openai({"prompt_tokens": 19, "total_tokens": 19})
+
+    class Agent:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_streaming(self, **kwargs):
+            yield "response", AgentResult(success=True, data="ok")
+
+    async def context(**kwargs):
+        await embedder.embeddings.create(model="text-embedding-3-small", input="x")
+        return {}
+
+    _trial_patches(monkeypatch, Agent, context)
+    task = tasks.Task(ref="R100000000", case_id="c", prompt="p", gold=None)
+    a = await ours.run_ours(
+        task, 0, db=None, tenant_id="t", actor_id="u", tape=tape.Tape(tmp_path / "t.jsonl"), mode="record", model="m"
+    )  # embeddings run live only in record mode
+    assert a.embedding_tokens == 19
+
+
+def test_r6_f30_a_typed_origin_applied_to_a_typed_invoice_keeps_its_type():
+    fields = {
+        **SALES_CREDIT_CARD["proposed_fields"],
+        "createdFrom": {"id": "88", "refName": "Return Authorization #RA88"},
+        "apply": {"items": [{"doc": {"id": "77"}, "apply": True}]},
+    }
+    card = {**SALES_CREDIT_CARD, "proposed_fields": fields}
+    card["accounting_review"] = {**(card.get("accounting_review") or {}), "invoice_id": "77"}
+    assert graders.proposal_from_card(card).created_from == "Return authorization"
+
+
+@pytest.mark.parametrize(
+    ("text", "stop", "outcome"),
+    [
+        ('{"diagnosis": null, "action": null}', "end_turn", None),  # the agent reached no conclusion
+        ('{"diagnosis": "credited", "action": "explain_close"}', "end_turn", "read"),
+        ('{"diagnosis": "credi', "max_tokens", "raises"),  # cut off: the grader failed
+        ("not json", "end_turn", "raises"),
+        ('{"diagnosis": "made_up", "action": "explain_close"}', "end_turn", "raises"),
+    ],
+)
+async def test_r6_f31_only_a_clean_null_is_the_agents_failure(monkeypatch, text, stop, outcome):
+    import anthropic
+
+    from app.services.benchmarks.resolve import interpret as mod
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.messages = self
+
+        async def create(self, **kwargs):
+            return SimpleNamespace(stop_reason=stop, content=[SimpleNamespace(text=text)])
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", Client)
+    read = mod.make_interpreter(api_key="x", model="m")
+    if outcome == "raises":
+        with pytest.raises(ValueError):
+            await read("The agent's reply.")
+    elif outcome is None:
+        assert await read("The agent's reply.") is None
+    else:
+        assert await read("The agent's reply.") == {"diagnosis": "credited", "action": "explain_close"}

@@ -63,6 +63,7 @@ class Attempt:
     unreplayable: int = 0
     network_blocked: int = 0
     unmetered_model_calls: int = 0  # a model call whose usage could not be read
+    embedding_tokens: int = 0  # retrieval embeddings; reported apart from G5's model tokens
     refused_tools: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -85,6 +86,7 @@ class Grade:
     words: int
     model_amounts: list[str]
     tokens: int
+    embedding_tokens: int
     tool_calls: int
     wall_ms: int
     environment_complete: bool
@@ -145,9 +147,10 @@ def _created_from(card, fields, review):
     applied = {_ref_id(line.get("doc")) for line in apply_lines if line.get("apply", True)}
     origin = fields.get("createdFrom")
     if origin not in (None, "", {}):
-        # Every applied document must be the origin itself: an explicit createdFrom never
-        # masks an application to a document that cannot be typed (review round 5).
-        if applied and applied != {_ref_id(origin)}:
+        # Every applied document must be typable (the origin itself, or a document the review
+        # names): an explicit createdFrom never masks an untypable application (round 5), and
+        # a typed origin applied to a typed invoice keeps its type (round 6).
+        if applied - {_ref_id(origin)} - set(by_id):
             return "unknown"
         if _ref_id(origin) in by_id:
             return by_id[_ref_id(origin)]
@@ -247,6 +250,7 @@ def grade(task: Task, attempt: Attempt, *, interpret=None) -> Grade:
         words=len(attempt.reply_text.split()),
         model_amounts=_MONEY.findall(attempt.reply_text),
         tokens=attempt.input_tokens + attempt.output_tokens + attempt.cache_tokens,
+        embedding_tokens=attempt.embedding_tokens,
         tool_calls=attempt.tool_calls,
         wall_ms=attempt.wall_ms,
         environment_complete=not (

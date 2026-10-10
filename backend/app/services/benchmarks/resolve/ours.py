@@ -59,6 +59,7 @@ def attempt_from_run(
         output_tokens=meter.output_tokens,
         cache_tokens=meter.cache_tokens,
         unmetered_model_calls=meter.unmetered,
+        embedding_tokens=meter.embedding_tokens,
         tool_calls=sum(len(getattr(r, "tool_calls_log", None) or []) for r in results),
         wall_ms=wall_ms,
         error=error

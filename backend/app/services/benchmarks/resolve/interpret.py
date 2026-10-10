@@ -35,13 +35,21 @@ Reply:
 
 
 def parse_interpretation(raw: str) -> dict | None:
+    """The reading, or None when the grader read no conclusion (``null``): that one is the
+    agent's failure. Anything else unusable is the GRADER's failure and raises, so the trial
+    is marked not comparable instead of scored against the agent (review round 6)."""
     try:
         body = json.loads(raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```"))
-    except (TypeError, ValueError, AttributeError):
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(f"interpreter returned malformed output: {raw[:80]!r}") from exc
+    if not isinstance(body, dict):
+        raise ValueError("interpreter output is not an object")
+    diagnosis, action = body.get("diagnosis"), body.get("action")
+    if diagnosis is None or action is None:
         return None
-    if not isinstance(body, dict) or body.get("diagnosis") not in DIAGNOSES or body.get("action") not in ACTIONS:
-        return None
-    return {"diagnosis": body["diagnosis"], "action": body["action"]}
+    if diagnosis not in DIAGNOSES or action not in ACTIONS:
+        raise ValueError(f"interpreter answered outside the label vocabulary: {diagnosis!r}, {action!r}")
+    return {"diagnosis": diagnosis, "action": action}
 
 
 # Far above any reply the agent shows; a longer one is refused, never cut (review round 5).
@@ -65,6 +73,8 @@ def make_interpreter(*, api_key: str, model: str):
             max_tokens=200,
             messages=[{"role": "user", "content": PROMPT + reply_text}],
         )
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise ValueError("interpreter output was cut off")  # a truncated reading is not a reading
         text = "".join(getattr(block, "text", "") for block in response.content)
         return parse_interpretation(text)
 
