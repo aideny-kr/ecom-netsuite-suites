@@ -974,7 +974,21 @@ export type NativeAccountingReview =
   | (NativeAccountingReviewBase & { kind: "credit_line_reallocation" })
   | (NativeAccountingReviewBase & { kind: "sales_order_line_alignment" });
 
-export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview | NativeAccountingReview;
+/** A new credit the assistant proposed and the server accepted by outcome (smart resolver). */
+export interface CreditCreationReview extends AccountingReviewBase {
+  kind: "credit_creation";
+  source: Record<string, unknown>;
+  invoice_id: string;
+  memo: string;
+  lines: Array<{ item_id: string; amount: string }>;
+  expected_after: { total: string; subtotal: string; taxTotal: string };
+  expected_ledger: { debit: Record<string, string>; credit: Record<string, string> };
+  balance: Record<"before" | "after" | "source", { gross: string; net: string; tax: string }>;
+  sales_adjustment_account: string;
+  tax_account: string;
+}
+
+export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview | NativeAccountingReview | CreditCreationReview;
 
 export interface AccountingGroup {
   group_id: string;
