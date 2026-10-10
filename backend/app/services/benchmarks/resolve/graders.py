@@ -63,6 +63,7 @@ class Attempt:
     unreplayable: int = 0
     network_blocked: int = 0
     unmetered_model_calls: int = 0  # a model call whose usage could not be read
+    io_failures: int = 0  # an HTTP or database failure anywhere in the trial (io_watch)
     embedding_tokens: int = 0  # retrieval embeddings; reported apart from G5's model tokens
     refused_tools: int = 0
     input_tokens: int = 0
@@ -259,5 +260,6 @@ def grade(task: Task, attempt: Attempt, *, interpret=None) -> Grade:
             or attempt.unreplayable
             or attempt.network_blocked
             or attempt.unmetered_model_calls
+            or attempt.io_failures
         ),
     )

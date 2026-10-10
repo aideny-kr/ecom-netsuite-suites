@@ -1420,3 +1420,145 @@ async def test_r7_f32_an_empty_but_healthy_search_is_still_a_clean_read(tmp_path
     d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
     await d("rag_search", {"query": "q"}, tenant_id="t", db=SimpleNamespace(info={}))
     assert d.environment_errors == 0 and len(d.tape.entries) == 1
+
+
+# --- review round 8: reads that swallow failures, observed at the IO layer -----------------------
+
+
+def _http(handler):
+    import httpx
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def _swallowing_read(client, url):
+    """A read tool that, like several of ours, turns its own failure into a clean-looking result."""
+    try:
+        await client.get(url)
+    except Exception:
+        pass
+    return json.dumps({"results": [], "count": 0})
+
+
+@pytest.mark.parametrize("failure", ["raises", "503"])
+async def test_r8_a_read_whose_io_failed_is_an_environment_error_and_never_recorded(tmp_path, failure):
+    import httpx
+
+    def handler(request):
+        if failure == "raises":
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(503)
+
+    client = _http(handler)
+
+    async def live(tool_name, tool_input, **kwargs):
+        return await _swallowing_read(client, "https://search.example.com/q")
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    with tape.installed(d):
+        await d("transaction_ops_accounting_reference", {"topic": "x"}, tenant_id="t", db=SimpleNamespace(info={}))
+    assert (d.io_failures, d.environment_errors, d.tape.entries) == (1, 1, {})
+
+
+def test_r8_a_database_error_is_an_io_failure_but_an_integrity_error_is_not(tmp_path):
+    import sqlalchemy as sa
+
+    engine = sa.create_engine("sqlite://")
+    with engine.begin() as c:
+        c.execute(sa.text("CREATE TABLE t (id INTEGER PRIMARY KEY)"))
+        c.execute(sa.text("INSERT INTO t VALUES (1)"))
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    with tape.installed(d):
+        for sql in ("SELECT * FROM missing_table", "INSERT INTO t VALUES (1)"):
+            try:
+                with engine.begin() as c:
+                    c.execute(sa.text(sql))
+            except Exception:
+                pass
+    assert d.io_failures == 1  # the missing table, not the expected duplicate key
+
+
+async def test_r8_a_retried_model_call_is_the_meters_business_not_an_io_failure(tmp_path):
+    import anthropic
+    import httpx
+
+    answers = [
+        httpx.Response(429, json={"type": "error", "error": {"type": "rate_limit_error", "message": "slow"}}),
+        httpx.Response(200, json=_message({"input_tokens": 1})),
+    ]
+    client = anthropic.AsyncAnthropic(api_key="x", max_retries=1, http_client=_http(lambda request: answers.pop(0)))
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="replay")
+    with tape.installed(d):
+        await model_call(client)
+    assert d.io_failures == 0
+
+
+async def test_r8_a_trial_whose_setup_swallowed_an_io_failure_is_not_comparable(tmp_path, monkeypatch):
+    import httpx
+
+    from app.services.benchmarks.resolve import ours
+
+    def handler(request):
+        raise httpx.ConnectError("down", request=request)
+
+    class Agent:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_streaming(self, **kwargs):
+            yield "response", AgentResult(success=True, data="ok")
+
+    async def context(**kwargs):
+        await _swallowing_read(_http(handler), "https://retrieval.example.com/q")
+        return {}
+
+    _trial_patches(monkeypatch, Agent, context)
+    task = tasks.Task(ref="R100000000", case_id="c", prompt="p", gold=None)
+    a = await ours.run_ours(
+        task, 0, db=None, tenant_id="t", actor_id="u", tape=tape.Tape(tmp_path / "t.jsonl"), mode="record", model="m"
+    )
+    assert a.io_failures == 1
+    assert graders.grade(tasks.Task(ref="R1", case_id="c", prompt="p", gold=_gold()), a).environment_complete is False
+
+
+async def test_r8_record_mode_never_reuses_a_degraded_entry_as_clean(tmp_path):
+    t = tape.Tape(tmp_path / "t.jsonl")
+    t.put(
+        tape.tape_key("rag_search", {"query": "q"}, tenant_id="t"), "rag_search", {"query": "q"}, json.dumps(RAG_DOWN)
+    )
+
+    async def live(tool_name, tool_input, **kwargs):
+        raise AssertionError("a cache hit must not call live")
+
+    d = tape.TapedDispatcher(t, mode="record", live=live)
+    await d("rag_search", {"query": "q"}, tenant_id="t", db=SimpleNamespace(info={}))
+    assert d.environment_errors == 1
+
+
+@pytest.mark.parametrize(
+    ("netsuite", "saved", "degraded"),
+    [
+        ("timed_out", "complete", True),
+        ("complete", "unavailable", True),
+        ("unavailable", "complete", True),
+        ("complete", "complete", False),
+        ("not_needed", "complete", False),
+    ],
+)
+async def test_r8_a_group_breakdown_that_could_not_check_is_degraded(tmp_path, netsuite, saved, degraded):
+    async def live(tool_name, tool_input, **kwargs):
+        return json.dumps({"success": True, "checked": {"netsuite": netsuite, "saved_source": saved}, "causes": []})
+
+    d = tape.TapedDispatcher(tape.Tape(tmp_path / "t.jsonl"), mode="record", live=live)
+    await d("transaction_ops_group_breakdown", {"group_id": "g"}, tenant_id="t", db=SimpleNamespace(info={}))
+    assert d.environment_errors == (1 if degraded else 0)
+
+
+def test_r8_a_tape_recorded_before_failure_detection_is_refused(tmp_path):
+    old = tmp_path / "old.jsonl"
+    old.write_text(json.dumps({"key": "k", "result": "{}", "state_keys": []}) + "\n")
+    with pytest.raises(ValueError, match="re-record"):
+        tape.Tape(old)
+    new = tape.Tape(tmp_path / "new.jsonl")
+    new.put("k", "rag_search", {"query": "q"}, "{}")
+    assert tape.Tape(tmp_path / "new.jsonl").get("k")["result"] == "{}"

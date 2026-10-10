@@ -186,17 +186,26 @@ def _state_keys(before: dict, after: dict) -> list[str]:
     return sorted(changed | {k for k in before if k not in after})
 
 
+TAPE_VERSION = 2  # 2: only reads whose IO succeeded are recorded (review round 8)
+
+
 class Tape:
-    """Recorded results (and which session keys each read touched), one JSON line each."""
+    """Recorded results (and which session keys each read touched), one JSON line each.
+
+    The first line names the tape's version. A tape without it was recorded before reads
+    with failed IO were kept off the tape, so it may replay a failure as a clean read: it
+    is refused rather than trusted."""
 
     def __init__(self, path):
         self.path = Path(path)
         self.entries: dict[str, dict] = {}
         if self.path.exists():
-            for line in self.path.read_text().splitlines():
-                if line.strip():
-                    row = json.loads(line)
-                    self.entries[row["key"]] = {"result": row["result"], "state_keys": row.get("state_keys") or []}
+            lines = [line for line in self.path.read_text().splitlines() if line.strip()]
+            if lines and json.loads(lines[0]).get("tape_version") != TAPE_VERSION:
+                raise ValueError(f"{self.path} predates failure detection (tape version {TAPE_VERSION}); re-record it")
+            for line in lines[1:]:
+                row = json.loads(line)
+                self.entries[row["key"]] = {"result": row["result"], "state_keys": row.get("state_keys") or []}
 
     def get(self, key: str) -> dict | None:
         return self.entries.get(key)
@@ -207,6 +216,8 @@ class Tape:
         state_keys = sorted(set(previous) | set(state_keys))
         self.entries[key] = {"result": result, "state_keys": state_keys}
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists() or not self.path.read_text().strip():
+            self.path.write_text(json.dumps({"tape_version": TAPE_VERSION}) + "\n")
         row = {
             "key": key,
             "tenant": str(tenant_id),
@@ -237,7 +248,13 @@ def _has_blockers(value) -> bool:
 DEGRADED_RESULTS = {
     # rag_search returns an empty result with a note instead of an error when retrieval fails
     "rag.search": lambda body: not body.get("results") and bool(body.get("note")),
+    # the breakdown reports a source it could not read as a status, with success true
+    "transaction_ops.group_breakdown": lambda body: (
+        (body.get("checked") or {}).get("netsuite") in {"timed_out", "unavailable"}
+        or (body.get("checked") or {}).get("saved_source") == "unavailable"
+    ),
 }
+# Failures that touch no IO are listed above; every IO failure is caught by io_watch instead.
 
 
 def _environment_error(result: str, tool_name: str | None = None) -> bool:
@@ -273,6 +290,7 @@ class TapedDispatcher:
         self.environment_errors = 0
         self.unreplayable = 0
         self.network_blocked = 0
+        self.io_failures = 0  # counted by io_watch for the whole trial
         self.calls = 0
 
     async def __call__(self, tool_name, tool_input, **kwargs) -> str:
@@ -299,10 +317,14 @@ class TapedDispatcher:
                 self.environment_errors += 1  # a tape from before a failure shape was known
             return recorded["result"]
         if recorded is not None and not recorded["state_keys"] and canonical_name(tool_name) not in STATEFUL_READS:
+            if _environment_error(recorded["result"], tool_name):
+                self.environment_errors += 1  # never reuse a failure as a clean read
             return recorded["result"]
         before = {k: _fingerprint(v) for k, v in info.items()} if isinstance(info, dict) else {}
+        io_before = self.io_failures
         result = await self.live(tool_name, tool_input, **kwargs)
-        if _environment_error(result, tool_name):
+        if self.io_failures > io_before or _environment_error(result, tool_name):
+            # the read's own IO failed (whatever the tool made of it), or it reported a failure
             self.environment_errors += 1
             return result
         state_keys = _state_keys(before, info) if isinstance(info, dict) else []
@@ -417,9 +439,11 @@ def installed(dispatcher: TapedDispatcher, *, allow_hosts=MODEL_HOSTS):
     _ORIGINAL["dispatch"] = tools._execute_tool_call_once
     original = tools._execute_tool_call_once
     tools._execute_tool_call_once = dispatcher
+    from app.services.benchmarks.resolve.io_watch import watching
+
     guard = _network_guard(dispatcher, allow_hosts) if dispatcher.mode == "replay" else nullcontext()
     try:
-        with guard:
+        with guard, watching(dispatcher):
             yield dispatcher
     finally:
         tools._execute_tool_call_once = original

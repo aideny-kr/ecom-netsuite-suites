@@ -54,6 +54,7 @@ def attempt_from_run(
         environment_errors=dispatcher.environment_errors,
         unreplayable=dispatcher.unreplayable,
         network_blocked=dispatcher.network_blocked,
+        io_failures=dispatcher.io_failures,
         refused_tools=len(dispatcher.refused),
         input_tokens=meter.input_tokens,
         output_tokens=meter.output_tokens,
