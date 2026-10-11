@@ -426,23 +426,33 @@ _QUERY_PATTERN = re.compile(r"\bSELECT\b", re.IGNORECASE)
 _DATA_QUESTION_KEYWORDS = {
     "how many",
     "total",
+    "totals",
     "count",
+    "counts",
     "sum",
+    "sums",
     "average",
+    "averages",
     "quantity",
+    "quantities",
     "revenue",
     "sales",
     "orders",
     "inventory",
 }
+_DATA_QUESTION_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(keyword) for keyword in sorted(_DATA_QUESTION_KEYWORDS)) + r")\b",
+    re.IGNORECASE,
+)
 
 
 def _task_contains_query(task: str) -> bool:
     """Check if the task contains a SQL query or data question that requires tool execution."""
     if _QUERY_PATTERN.search(task):
         return True
-    task_lower = task.lower()
-    return any(kw in task_lower for kw in _DATA_QUESTION_KEYWORDS)
+    # Substrings such as "sum" in "summarize" and "count" in "accounting"
+    # must not discard a valid answer and force a new query on a prose turn.
+    return bool(_DATA_QUESTION_PATTERN.search(task))
 
 
 _MIN_ENTITY_CONFIDENCE = 0.70  # Minimum pg_trgm similarity for entity resolver matches
