@@ -426,32 +426,18 @@ _QUERY_PATTERN = re.compile(r"\bSELECT\b", re.IGNORECASE)
 _DATA_QUESTION_KEYWORDS = {
     "how many",
     "total",
-    "totals",
-    "subtotal",
-    "subtotals",
     "count",
-    "counts",
-    "counted",
-    "counting",
-    "headcount",
-    "headcounts",
     "sum",
-    "sums",
-    "summed",
-    "summing",
     "average",
-    "averages",
     "quantity",
-    "quantities",
     "revenue",
-    "revenues",
     "sales",
     "orders",
     "inventory",
 }
-_DATA_QUESTION_PATTERN = re.compile(
+_CALCULATION_QUESTION_PATTERN = re.compile(
     # Underscores and digits delimit field names too (total_revenue, count2).
-    r"(?<![a-z])(?:" + "|".join(re.escape(keyword) for keyword in sorted(_DATA_QUESTION_KEYWORDS)) + r")(?![a-z])",
+    r"(?<![a-z])(?:counts?|counted|counting|headcounts?|sums?|summed|summing)(?![a-z])",
     re.IGNORECASE,
 )
 
@@ -462,7 +448,13 @@ def _task_contains_query(task: str) -> bool:
         return True
     # Substrings such as "sum" in "summarize" and "count" in "accounting"
     # must not discard a valid answer and force a new query on a prose turn.
-    return bool(_DATA_QUESTION_PATTERN.search(task))
+    task_lower = task.lower()
+    # Keep the existing financial/source keyword behavior (including revenue
+    # plurals, subtotals and field identifiers); only these two roots caused
+    # the demonstrated ordinary-word false positives.
+    return any(keyword in task_lower for keyword in _DATA_QUESTION_KEYWORDS - {"sum", "count"}) or bool(
+        _CALCULATION_QUESTION_PATTERN.search(task)
+    )
 
 
 _MIN_ENTITY_CONFIDENCE = 0.70  # Minimum pg_trgm similarity for entity resolver matches
