@@ -889,3 +889,36 @@ async def test_r4_f2_proposal_and_approval_leave_read_budget_for_the_readback(mo
     await cc.gather(db, "tenant", CASE, ["1471"])
     assert db.budgets == [cc.READ_CALLS - cc.READBACK_RESERVE, cc.READ_CALLS]
     assert cc.READ_CALLS <= 32 and cc.READBACK_RESERVE >= 1
+
+
+# --- review round 5 (the deferred finding) ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_r5_proposal_and_approval_hold_back_gl_rows_for_the_new_credit(monkeypatch):
+    """Round 5: one 400-row GL limit for proposal and readback left no room for the created
+    credit's rows, so a correct post near the limit could never verify."""
+    reader, _ = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+    from app.services.transaction_ops import credit_line_reallocation as clr
+
+    limits = []
+    real = clr._suiteql
+
+    async def recording(reader_, query, limit):
+        if "transactionaccountingline" in query:
+            limits.append(limit)
+        return await real(reader_, query, limit)
+
+    monkeypatch.setattr(clr, "_suiteql", recording)
+    await cc.gather(db, "tenant", CASE, ["1471"], reserve=cc.READBACK_RESERVE)  # proposal and approval
+    await cc.gather(db, "tenant", CASE, ["1471"])  # readback
+    assert limits == [cc.GL_ROWS - cc.GL_ROW_RESERVE, cc.GL_ROWS]
+    assert cc.GL_ROW_RESERVE >= cc.MAX_CREDIT_LINES + 1  # every line's row plus the AR row
+
+
+def test_r5_a_credit_has_at_most_max_credit_lines():
+    lines = [{"item_id": "1471", "amount": "1.00"}] * (cc.MAX_CREDIT_LINES + 1)
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=lines, memo="x", **_facts())
+    assert exc.value.code == "too_many_lines"

@@ -117,6 +117,8 @@ def facts(
 
 def _lines(lines, profile, items, taxed, precision, account_types):
     configured = {str(k): str(v) for k, v in (profile.get("tax_item_accounts") or {}).items()}
+    if isinstance(lines, list) and len(lines) > MAX_CREDIT_LINES:
+        raise RefusalError("too_many_lines", {"max": MAX_CREDIT_LINES})
     parsed = []
     for raw in lines if isinstance(lines, list) else []:
         if not isinstance(raw, dict):
@@ -248,6 +250,12 @@ def booked_balance(*, posting_date=None, **order):
 # credit_line_reallocation; the orchestration of reads is repeated (not the accounting logic,
 # which is shared) so that path stays untouched. Unify the two readers in a follow-up.
 
+GL_ROWS = 400  # the GL read's bound
+MAX_CREDIT_LINES = 20
+# A created credit posts one GL row per line plus its AR row. Proposal and approval read the GL
+# with that many rows held back, so the readback can still read the order with the new credit in
+# it (review round 5; the same reasoning as READBACK_RESERVE for calls).
+GL_ROW_RESERVE = MAX_CREDIT_LINES + 1
 READ_CALLS = 32  # the reader's hard cap
 # Proposal and approval hold calls back so the readback can also read the credit it created; a
 # correct post must never exceed the budget its own verification needs (review round 4).
@@ -457,7 +465,7 @@ async def gather(db, tenant_id, case_id, item_ids, *, reserve=0):
             "SELECT tal.transaction, tal.account, tal.accountingbook, tal.debit, tal.credit "
             f"FROM transactionaccountingline tal WHERE tal.transaction IN ({','.join(str(d) for d in documents)}) "
             "AND (tal.debit <> 0 OR tal.credit <> 0)",
-            400,
+            GL_ROWS - (GL_ROW_RESERVE if reserve else 0),
         )
         gl = {str(d): {"complete": True, "rows": []} for d in documents}
         for row in gl_rows:
