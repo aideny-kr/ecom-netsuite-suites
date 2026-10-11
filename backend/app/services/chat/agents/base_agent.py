@@ -427,21 +427,31 @@ _DATA_QUESTION_KEYWORDS = {
     "how many",
     "total",
     "totals",
+    "subtotal",
+    "subtotals",
     "count",
     "counts",
+    "counted",
+    "counting",
+    "headcount",
+    "headcounts",
     "sum",
     "sums",
+    "summed",
+    "summing",
     "average",
     "averages",
     "quantity",
     "quantities",
     "revenue",
+    "revenues",
     "sales",
     "orders",
     "inventory",
 }
 _DATA_QUESTION_PATTERN = re.compile(
-    r"\b(?:" + "|".join(re.escape(keyword) for keyword in sorted(_DATA_QUESTION_KEYWORDS)) + r")\b",
+    # Underscores and digits delimit field names too (total_revenue, count2).
+    r"(?<![a-z])(?:" + "|".join(re.escape(keyword) for keyword in sorted(_DATA_QUESTION_KEYWORDS)) + r")(?![a-z])",
     re.IGNORECASE,
 )
 

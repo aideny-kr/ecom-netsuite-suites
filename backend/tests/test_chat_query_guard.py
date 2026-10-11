@@ -38,6 +38,14 @@ def test_ordinary_words_do_not_trigger_data_query_retry(task):
         "Show average order quantity.",
         "Show sales, orders and inventory.",
         "Summarize sales this month.",
+        "What were revenues last quarter?",
+        "What is the subtotal for SO12345?",
+        "Show subtotals by class.",
+        "Which invoices were counted twice?",
+        "Count by department when counting invoices.",
+        "Show headcounts by department.",
+        "Show total_revenue by month and order_count by day.",
+        "Show amounts summed by department.",
     ],
 )
 def test_explicit_data_questions_still_require_execution(task):
@@ -54,7 +62,12 @@ class _GuardAgent(BaseSpecialistAgent):
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize(
     "task,expected_calls",
-    [("Summarize the returned documentation evidence.", 1), ("What is the total revenue?", 2)],
+    [
+        ("Summarize the returned documentation evidence.", 1),
+        ("What is the total revenue?", 2),
+        ("What were revenues last quarter?", 2),
+        ("Show total_revenue by month.", 2),
+    ],
 )
 async def test_query_guard_only_retries_actual_data_questions(streaming, task, expected_calls):
     agent = _GuardAgent(uuid4(), uuid4(), "query-guard-test")

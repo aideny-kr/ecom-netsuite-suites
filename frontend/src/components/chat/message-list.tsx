@@ -1464,7 +1464,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         )}
 
         {!isStreamingPreview && message.model_used && (
-          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/60">
             {message.agent_id && AGENT_TAGS[message.agent_id] && (
               <span className={cn("rounded px-1.5 py-0.5 font-medium", AGENT_TAGS[message.agent_id].color)}>
                 {AGENT_TAGS[message.agent_id].label}
@@ -1479,9 +1479,9 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
                 Platform
               </span>
             )}
-            <span>{message.provider_used}</span>
+            <span className="break-all">{message.provider_used}</span>
             <span>/</span>
-            <span>{message.model_used}</span>
+            <span className="break-all">{message.model_used}</span>
             {tokenUsage && (
               <>
                 <span className="ml-1">·</span>
