@@ -213,5 +213,15 @@ async def test_actor_authorization_checks_tenant_active_user_and_permission(
 def test_approved_result_display_is_bounded():
     from app.services.chat.write_confirmation_service import format_external_result
 
-    assert "smaller page" in format_external_result({"rows": "x" * 25000})
-    assert len(format_external_result({"rows": "x" * 25000})) < 200
+    result = {"source": "https://api.example.com/orders", "rows": "x" * 25000}
+    rendered = format_external_result(result)
+
+    assert "Partial result preview" in rendered
+    assert "Do not treat this preview as a complete dataset" in rendered
+    assert "smaller page" in rendered
+    assert len(rendered) < 20000
+    preview = json.loads(rendered.split("```json\n", 1)[1].rsplit("\n```", 1)[0])
+    assert preview["source"] == result["source"]
+    assert preview["rows"].startswith("x")
+    assert preview["rows"].endswith(" [truncated]")
+    assert len(preview["rows"]) < len(result["rows"])

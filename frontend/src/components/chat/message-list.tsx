@@ -892,6 +892,30 @@ export function MessageList({
   return (
     <div
       ref={containerRef}
+      role="region"
+      aria-label="Conversation messages"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        // Leave links, buttons and confirmation inputs to their own keyboard
+        // behavior. Region navigation is immediate and respects reduced motion.
+        if (event.target !== event.currentTarget) return;
+        const el = event.currentTarget;
+        const positions: Record<string, number> = {
+          ArrowUp: el.scrollTop - 40,
+          ArrowDown: el.scrollTop + 40,
+          PageUp: el.scrollTop - el.clientHeight,
+          PageDown: el.scrollTop + el.clientHeight,
+          Home: 0,
+          End: el.scrollHeight,
+          " ": el.scrollTop + (event.shiftKey ? -el.clientHeight : el.clientHeight),
+        };
+        const top = positions[event.key];
+        if (top === undefined) return;
+        event.preventDefault();
+        shouldAutoScrollRef.current = false;
+        el.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+      }}
+      onTouchMove={() => { shouldAutoScrollRef.current = false; }}
       onScroll={handleScroll}
       onWheel={handleWheel}
       className={cn(
@@ -1440,7 +1464,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         )}
 
         {!isStreamingPreview && message.model_used && (
-          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/60">
             {message.agent_id && AGENT_TAGS[message.agent_id] && (
               <span className={cn("rounded px-1.5 py-0.5 font-medium", AGENT_TAGS[message.agent_id].color)}>
                 {AGENT_TAGS[message.agent_id].label}
@@ -1455,9 +1479,9 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
                 Platform
               </span>
             )}
-            <span>{message.provider_used}</span>
+            <span className="break-all">{message.provider_used}</span>
             <span>/</span>
-            <span>{message.model_used}</span>
+            <span className="break-all">{message.model_used}</span>
             {tokenUsage && (
               <>
                 <span className="ml-1">·</span>

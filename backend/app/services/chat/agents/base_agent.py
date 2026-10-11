@@ -435,14 +435,22 @@ _DATA_QUESTION_KEYWORDS = {
     "orders",
     "inventory",
 }
+_DATA_QUERY_PROSE_WORD_PATTERN = re.compile(
+    r"\b(?:summar[a-z]*|assum[a-z]*|accountants?)\b",
+    re.IGNORECASE,
+)
 
 
 def _task_contains_query(task: str) -> bool:
     """Check if the task contains a SQL query or data question that requires tool execution."""
     if _QUERY_PATTERN.search(task):
         return True
-    task_lower = task.lower()
-    return any(kw in task_lower for kw in _DATA_QUESTION_KEYWORDS)
+    # Ignore only explicit prose words containing calculation roots. Keep the
+    # existing substring guard for every other word, including account/discount
+    # questions and financial field identifiers. Other data words in the same
+    # request still trigger execution (e.g. "Summarize sales this month").
+    task_lower = _DATA_QUERY_PROSE_WORD_PATTERN.sub("", task).lower()
+    return any(keyword in task_lower for keyword in _DATA_QUESTION_KEYWORDS)
 
 
 _MIN_ENTITY_CONFIDENCE = 0.70  # Minimum pg_trgm similarity for entity resolver matches

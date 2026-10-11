@@ -51,8 +51,14 @@ class RunManager:
         pipe = r.pipeline()
         pipe.set(f"chat:run:{run_id}:status", "running", ex=_RUN_TTL)
         pipe.set(f"chat:run:{run_id}:started_at", str(time.time()), ex=_RUN_TTL)
+        pipe.set(f"chat:run:{run_id}:session", session_id, ex=_RUN_TTL)
         pipe.set(f"chat:session:{session_id}:run", run_id, ex=_RUN_TTL)
         pipe.execute()
+
+    def get_session_id(self, run_id: str) -> str | None:
+        """Return the owning session, including after the active pointer clears."""
+        r = self._redis
+        return r.get(f"chat:run:{run_id}:session") if r is not None else None
 
     def get_started_at(self, run_id: str) -> float | None:
         """Get the start timestamp of a run (Unix epoch)."""
@@ -76,6 +82,7 @@ class RunManager:
             return
         key = f"chat:run:{run_id}:status"
         r.set(key, status, ex=_RUN_TTL)
+        r.expire(f"chat:run:{run_id}:session", _RUN_TTL)
 
     # ------------------------------------------------------------------
     # Session -> run mapping
@@ -107,6 +114,7 @@ class RunManager:
         key = f"chat:run:{run_id}:events"
         stream_id = r.xadd(key, {"payload": json.dumps(event)})
         r.expire(key, _RUN_TTL)
+        r.expire(f"chat:run:{run_id}:session", _RUN_TTL)
         return stream_id
 
     def read_events(

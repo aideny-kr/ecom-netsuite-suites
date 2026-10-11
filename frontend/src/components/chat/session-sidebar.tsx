@@ -19,6 +19,7 @@ import {
   Tag,
   BarChart3,
   Scale,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -39,6 +40,12 @@ interface SessionSidebarProps {
   variant?: "default" | "terminal";
   collapsed?: boolean;
   onToggle?: () => void;
+  isLoading?: boolean;
+  isError?: boolean;
+  onRetry?: () => void;
+  hasMore?: boolean;
+  isLoadingMore?: boolean;
+  onLoadMore?: () => void;
 }
 
 export function SessionSidebar({
@@ -49,9 +56,19 @@ export function SessionSidebar({
   variant,
   collapsed = false,
   onToggle,
+  isLoading = false,
+  isError = false,
+  onRetry,
+  hasMore = false,
+  isLoadingMore = false,
+  onLoadMore,
 }: SessionSidebarProps) {
   const isTerminal = variant === "terminal";
   const [queriesExpanded, setQueriesExpanded] = useState(true);
+  const [search, setSearch] = useState("");
+  const filteredSessions = sessions.filter(session =>
+    (session.title || "New chat").toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
+  );
 
   return (
     <div
@@ -99,9 +116,14 @@ export function SessionSidebar({
         )}
       </div>
 
+      <div className="relative mx-3 mb-3">
+        <Search aria-hidden="true" className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+        <input type="search" aria-label="Search loaded conversations" placeholder="Search conversations" value={search} onChange={event => setSearch(event.target.value)} className="w-full rounded-md border bg-background py-2 pl-8 pr-8 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+        {search && <button type="button" aria-label="Clear conversation search" onClick={() => setSearch("")} className="absolute right-1 top-1 rounded p-1.5 text-muted-foreground hover:text-foreground"><X className="h-3.5 w-3.5" /></button>}
+      </div>
       {/* Chat Sessions — scrollable */}
       <div className="flex-1 min-h-0 overflow-auto px-3 space-y-0.5 scrollbar-thin">
-        {sessions.map((session) => (
+        {filteredSessions.map((session) => (
           <SessionItem
             key={session.id}
             session={session}
@@ -113,7 +135,11 @@ export function SessionSidebar({
             isTerminal={isTerminal}
           />
         ))}
-        {sessions.length === 0 && (
+        {isLoading && <p role="status" className="p-3 text-xs text-muted-foreground">Loading conversations…</p>}
+        {isError && <div role="status" className="p-3 text-xs text-muted-foreground"><p>Conversation history could not be loaded.</p><button type="button" aria-label="Retry conversation history" onClick={onRetry} className="mt-2 text-primary underline">Retry</button></div>}
+        {!isLoading && !isError && search.trim() && filteredSessions.length === 0 && <p role="status" className="p-3 text-xs text-muted-foreground">No matching loaded conversations.</p>}
+        {hasMore && <button type="button" disabled={isLoadingMore} onClick={onLoadMore} className="my-3 w-full rounded-md border p-2 text-xs hover:bg-accent disabled:opacity-50">{isLoadingMore ? "Loading older conversations…" : "Load older conversations"}</button>}
+        {!isLoading && !isError && sessions.length === 0 && (
           <div className="flex flex-col items-center py-12 text-center">
             <MessageSquare
               className={cn(
