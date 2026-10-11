@@ -17,7 +17,6 @@ from app.services.chat.llm_adapter import LLMResponse
         "or create workflows.",
         "Give me a summary of the documentation.",
         "Explain the assumptions in this paragraph.",
-        "Explain accounting terminology.",
     ],
 )
 def test_ordinary_words_do_not_trigger_data_query_retry(task):
@@ -29,6 +28,9 @@ def test_ordinary_words_do_not_trigger_data_query_retry(task):
     [
         "SELECT id FROM transaction",
         "How many invoices are open?",
+        "Which accounting periods are open?",
+        "List accounting books.",
+        "Explain accounting terminology.",
         "What is the total revenue?",
         "Compare the totals and averages.",
         "Count unpaid invoices.",
@@ -77,6 +79,8 @@ class _GuardAgent(BaseSpecialistAgent):
         ("Show total_revenue by month.", 2),
         ("What is the balance of account 1200?", 2),
         ("Show discounts by customer last month.", 2),
+        ("Which accounting periods are open?", 2),
+        ("List accounting books.", 2),
     ],
 )
 async def test_query_guard_only_retries_actual_data_questions(streaming, task, expected_calls):

@@ -436,7 +436,7 @@ _DATA_QUESTION_KEYWORDS = {
     "inventory",
 }
 _DATA_QUERY_PROSE_WORD_PATTERN = re.compile(
-    r"\b(?:summar[a-z]*|assum[a-z]*|accounting|accountants?)\b",
+    r"\b(?:summar[a-z]*|assum[a-z]*|accountants?)\b",
     re.IGNORECASE,
 )
 
