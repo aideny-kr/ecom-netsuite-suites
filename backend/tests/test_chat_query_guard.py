@@ -46,6 +46,14 @@ def test_ordinary_words_do_not_trigger_data_query_retry(task):
         "Show headcounts by department.",
         "Show total_revenue by month and order_count by day.",
         "Show amounts summed by department.",
+        "What is the balance of account 1200?",
+        "List accounts with a negative balance.",
+        "What is our accounts receivable balance?",
+        "Show discounts by customer last month.",
+        "Which invoices were discounted?",
+        "Show account_id and discount_amount.",
+        "Assuming the supplied context, show revenues.",
+        "Summarize account balances using fresh data.",
     ],
 )
 def test_explicit_data_questions_still_require_execution(task):
@@ -67,6 +75,8 @@ class _GuardAgent(BaseSpecialistAgent):
         ("What is the total revenue?", 2),
         ("What were revenues last quarter?", 2),
         ("Show total_revenue by month.", 2),
+        ("What is the balance of account 1200?", 2),
+        ("Show discounts by customer last month.", 2),
     ],
 )
 async def test_query_guard_only_retries_actual_data_questions(streaming, task, expected_calls):

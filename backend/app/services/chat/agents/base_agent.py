@@ -435,9 +435,8 @@ _DATA_QUESTION_KEYWORDS = {
     "orders",
     "inventory",
 }
-_CALCULATION_QUESTION_PATTERN = re.compile(
-    # Underscores and digits delimit field names too (total_revenue, count2).
-    r"(?<![a-z])(?:counts?|counted|counting|headcounts?|sums?|summed|summing)(?![a-z])",
+_DATA_QUERY_PROSE_WORD_PATTERN = re.compile(
+    r"\b(?:summar[a-z]*|assum[a-z]*|accounting|accountants?)\b",
     re.IGNORECASE,
 )
 
@@ -446,15 +445,12 @@ def _task_contains_query(task: str) -> bool:
     """Check if the task contains a SQL query or data question that requires tool execution."""
     if _QUERY_PATTERN.search(task):
         return True
-    # Substrings such as "sum" in "summarize" and "count" in "accounting"
-    # must not discard a valid answer and force a new query on a prose turn.
-    task_lower = task.lower()
-    # Keep the existing financial/source keyword behavior (including revenue
-    # plurals, subtotals and field identifiers); only these two roots caused
-    # the demonstrated ordinary-word false positives.
-    return any(keyword in task_lower for keyword in _DATA_QUESTION_KEYWORDS - {"sum", "count"}) or bool(
-        _CALCULATION_QUESTION_PATTERN.search(task)
-    )
+    # Ignore only explicit prose words containing calculation roots. Keep the
+    # existing substring guard for every other word, including account/discount
+    # questions and financial field identifiers. Other data words in the same
+    # request still trigger execution (e.g. "Summarize sales this month").
+    task_lower = _DATA_QUERY_PROSE_WORD_PATTERN.sub("", task).lower()
+    return any(keyword in task_lower for keyword in _DATA_QUESTION_KEYWORDS)
 
 
 _MIN_ENTITY_CONFIDENCE = 0.70  # Minimum pg_trgm similarity for entity resolver matches
