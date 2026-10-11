@@ -50,6 +50,8 @@ _ALLOWED_OTHER_CHAT_TOOLS: frozenset[str] = frozenset(
         # A refusal returns the required net/tax so the model can correct its own proposal;
         # an accepted proposal's exact figures are shown by the server's approval card.
         "transaction_ops.propose_credit_reallocation",
+        # The same refusal and card contract for a new credit (smart resolver, slice 1).
+        "transaction_ops.propose_credit",
         "transaction_ops.accounting_group",
         "suitescript.sync",  # control action, no data rows
         "tenant.save_learned_rule",  # write-side control action, no data rows

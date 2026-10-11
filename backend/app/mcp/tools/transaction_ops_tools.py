@@ -525,6 +525,113 @@ async def execute_propose_credit_reallocation(params: dict, **kwargs) -> dict:
         return {"success": False, "error": "Accounting case or scoped configuration unavailable.", "reason": str(exc)}
 
 
+_CREDIT_GUIDANCE = {
+    "outcome_does_not_match_source": "The lines do not make the order equal the source. Use detail.before and "
+    "detail.required: the credit is what the order's posted total exceeds the source by, and its tax part is what "
+    "posted tax exceeds source tax by. Never round. Do not show these figures to the user; use them only to "
+    "correct the lines.",
+    "no_difference": "Invoices less credits already equal the source: NetSuite is right for this order. Explain it; "
+    "do not propose a credit.",
+    "netsuite_below_source": "NetSuite posts less than the source; a credit cannot fix that. Explain the gap.",
+    "existing_credit_not_applied_to_invoice": "A credit naming this order is not wholly applied to its invoice. "
+    "Report it for a person to decide; never create a second credit beside it.",
+    "item_not_allowed": "Use a non-inventory or Sales Adjustments item, and only the configured tax-refund item for "
+    "tax (detail names the reason).",
+    "tax_refund_items_not_configured": "This subsidiary has no configured tax-refund item. Report the configuration "
+    "gap; do not substitute an item or propose another document.",
+    "tax_reversal_exceeds_posted": "A credit cannot reverse more tax than the invoice posted.",
+    "invoice_count_unsupported": "The order must have exactly one invoice for this correction.",
+    "invoice_remaining_too_small": "The credit is larger than the invoice's open amount; it cannot be applied.",
+    "period_locked": "The current posting period is closed or AR-locked; report it.",
+    "foreign_currency_unsupported": "Foreign-currency invoices are not supported by this correction.",
+    "credit_location_required": "The invoice has no location and the subsidiary has no configured correction "
+    "location; report the configuration gap.",
+}
+
+
+async def execute_propose_credit(params: dict, **kwargs) -> dict:
+    """Agent-proposed new credit memo, accepted only by outcome (smart resolver, slice 1).
+
+    The model chooses the items, amounts and memo. The server re-reads the order and accepts the
+    lines only when invoices less credits, with this credit applied, equal the finalized source in
+    gross, net and tax, then binds the exact connector payload for the human approval card.
+    No financial writes.
+    """
+    from app.services.audit_service import log_event
+    from app.services.transaction_ops import case_resolution_scope, credit_creation
+    from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
+    from app.services.transaction_ops.source_reader import SourceReadError
+    from app.services.transaction_ops.state_service import StateError
+
+    context = kwargs.get("context") or {}
+    try:
+        if set(params) - {"case_id", "lines", "memo", "reason"} or any(k not in params for k in ("case_id", "lines")):
+            raise _ToolError("invalid_parameters")
+        db, tenant_id, actor = await _authorize(context, create=False)
+        db.info.pop("accounting_correction_candidate", None)
+        case_id = uuid.UUID(str(params["case_id"]))
+        restriction = await case_resolution_scope.load(db, tenant_id, case_id)
+        try:
+            proposal = await credit_creation.propose(
+                db, tenant_id, case_id, params["lines"], params.get("memo"), params.get("reason")
+            )
+        except credit_creation.RefusalError as exc:
+            await log_event(
+                db,
+                tenant_id,
+                category="transaction_ops",
+                action="accounting.credit_creation.refused",
+                actor_id=actor.id,
+                resource_type="transaction_case",
+                resource_id=str(case_id),
+                correlation_id=context.get("correlation_id"),
+                payload={"code": exc.code, "detail": exc.detail, "lines": params["lines"], "financial_writes": 0},
+                status="error",
+            )
+            return {
+                "success": False,
+                "refused": exc.code,
+                "detail": exc.detail,
+                "guidance": _CREDIT_GUIDANCE.get(
+                    exc.code, "Resolve the stated evidence gap; do not switch to another write path."
+                ),
+                "financial_writes": 0,
+            }
+        if not case_resolution_scope.allows(restriction, proposal):
+            db.info.pop("accounting_correction_candidate", None)
+            return {"success": False, "refused": "outside_case_resolution_scope", "financial_writes": 0}
+        if restriction:
+            proposal["resolution_scope"] = restriction
+        event = await log_event(
+            db,
+            tenant_id,
+            category="transaction_ops",
+            action="accounting.credit_creation.proposed",
+            actor_id=actor.id,
+            resource_type="transaction_case",
+            resource_id=str(case_id),
+            correlation_id=context.get("correlation_id"),
+            payload={"correction_candidate": proposal, "financial_writes": 0},
+        )
+        # The approval card shows the verified figures; the model gets only the exact call that
+        # displays it, never computed amounts to restate (no LLM-presented tool numbers).
+        return {
+            "success": True,
+            "case_id": str(case_id),
+            "audit_id": str(event.id),
+            "outcome": "The server verified that this credit makes the order equal the source.",
+            "correction_candidate": {
+                "next_action": "Call this tool with these exact params to DISPLAY the approval card. "
+                "Execution requires human approval; do not alter the payload.",
+                "tool_name": f"ext__{uuid.UUID(proposal['connector_id']).hex}__ns_createRecord",
+                "params": {"recordType": "creditMemo", "data": proposal["wire_record_json"]},
+            },
+            "financial_writes": 0,
+        }
+    except (ValueError, _ToolError, StateError, NetSuiteEvidenceError, SourceReadError) as exc:
+        return {"success": False, "error": "Accounting case or scoped configuration unavailable.", "reason": str(exc)}
+
+
 async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
     """Exact-case native reads; caller cannot choose another account or inject SQL."""
     from app.services.transaction_ops import case_service

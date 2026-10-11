@@ -182,6 +182,35 @@ TOOL_REGISTRY = {
             "reason": {"type": "string", "description": "The observed cause, in one sentence."},
         },
     },
+    "transaction_ops.propose_credit": {
+        "description": "Propose a NEW credit memo for a case where NetSuite posts more than the finalized source "
+        "and no existing credit covers it, e.g. an order adjustment or discount that never reached NetSuite. Use "
+        "after transaction_ops_accounting_evidence. You choose the lines (item and amount) and a short memo reason; "
+        "the server stamps the order number into the memo, applies the credit to the order's one invoice and sets "
+        "an idempotency key. It re-reads the order and accepts the lines only if invoices less credits, with this "
+        "credit, then equal the source in gross, net and tax; otherwise it returns a refusal code and the required "
+        "figures. On success, call the returned correction_candidate tool with its exact params to display the "
+        "human approval card. Never for an amount an existing credit already covers. No financial writes.",
+        "execute": transaction_ops_tools.execute_propose_credit,
+        "params_schema": {
+            "case_id": {"type": "string", "required": True, "description": "Durable case UUID"},
+            "lines": {
+                "type": "array",
+                "required": True,
+                "description": "The new credit's item lines. Each: {item_id, amount (decimal string)}.",
+                "items": {
+                    "type": "object",
+                    "properties": {"item_id": {"type": "string"}, "amount": {"type": "string"}},
+                    "required": ["item_id", "amount"],
+                },
+            },
+            "memo": {
+                "type": "string",
+                "description": "Short reason after the order number, e.g. the adjustment label.",
+            },
+            "reason": {"type": "string", "description": "The observed cause, in one sentence."},
+        },
+    },
     "transaction_ops.accounting_evidence": {
         "description": "Read scoped native accounting evidence for a transaction case in one bounded call. "
         "Use FIRST after investigation status, before ad-hoc SuiteQL. Returns native lifecycle labels, linked "

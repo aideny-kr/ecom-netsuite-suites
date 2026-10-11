@@ -46,6 +46,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "transaction_ops.status",
         "transaction_ops.accounting_evidence",
         "transaction_ops.propose_credit_reallocation",
+        "transaction_ops.propose_credit",
         "transaction_ops.accounting_reference",
         "transaction_ops.accounting_group",
         "netsuite.suiteql",

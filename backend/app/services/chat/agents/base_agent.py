@@ -2388,6 +2388,7 @@ class BaseSpecialistAgent(abc.ABC):
                         "transaction_ops_accounting_evidence",
                         "transaction_ops_accounting_group",
                         "transaction_ops_propose_credit_reallocation",
+                        "transaction_ops_propose_credit",
                     }:
                         self._transaction_workflow = True
                     # Every tool that can leave a server-verified candidate is followed by the
@@ -2398,6 +2399,7 @@ class BaseSpecialistAgent(abc.ABC):
                             "transaction_ops_accounting_evidence",
                             "transaction_ops_accounting_group",
                             "transaction_ops_propose_credit_reallocation",
+                            "transaction_ops_propose_credit",
                         }
                         and not _had_error
                     ):
