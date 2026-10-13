@@ -1214,7 +1214,7 @@ export default function WorkspacePage() {
             {/* ─── Right: Tools Panel ─── */}
             <Panel id="panel-right-v16" defaultSize={25} className="min-w-0 xl:!min-w-[350px]">
               {selectedWorkspaceId ? (
-                <div className="flex h-full w-full flex-col overflow-hidden bg-muted/5 border-l min-w-0" style={{ minWidth: 300 }}>
+                <div className="flex h-full w-full flex-col overflow-hidden bg-muted/5 border-l min-w-0">
                   {/* Bottom tab bar */}
                   <div className="flex overflow-x-auto border-b shrink-0 bg-muted/10">
                     {(Object.entries(BOTTOM_TAB_CONFIG) as [BottomTab, typeof BOTTOM_TAB_CONFIG[BottomTab]][]).map(([tab, config]) => {

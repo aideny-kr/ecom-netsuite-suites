@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { FileEditPanel } from "../file-edit-panel";
+import { FileEditPanel, type FileDrafts } from "../file-edit-panel";
 
 const mock = vi.hoisted(() => ({ propose: vi.fn(), permission: true }));
 vi.mock("@/hooks/use-workspace", () => ({
@@ -9,7 +9,7 @@ vi.mock("@/hooks/use-workspace", () => ({
 vi.mock("@/hooks/use-permissions", () => ({ usePermissions: () => ({ hasPermission: () => mock.permission }) }));
 vi.mock("../code-viewer", () => ({ CodeViewer: ({ content }: { content: string }) => <pre>{content}</pre> }));
 const file = { id: "f1", path: "src/a.js", file_name: "a.js", content: "old\n", sha256_hash: "a".repeat(64), can_edit: true, truncated: false, total_lines: 1, mime_type: null };
-const props = () => ({ workspaceId: "w1", file, drafts: { current: {} }, onReview: vi.fn() });
+const props = () => ({ workspaceId: "w1", file, drafts: { current: {} as FileDrafts }, onReview: vi.fn() });
 beforeEach(() => { mock.propose.mockReset(); mock.permission = true; });
 
 describe("manual workspace drafts", () => {
