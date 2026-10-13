@@ -312,7 +312,7 @@ async def read_file(
     sliced = lines[start_idx:end_idx]
     sliced_content = "".join(sliced)
 
-    truncated = False
+    truncated = start_idx > 0
     if len(sliced_content) > MAX_READ_CHARS:
         sliced_content = sliced_content[:MAX_READ_CHARS]
         truncated = True
@@ -566,7 +566,7 @@ async def apply_changeset(
                 raise ValueError(f"File not found for modify: {patch.file_path}")
 
             # Conflict detection
-            current_hash = wf.sha256_hash or ""
+            current_hash = _sha256(wf.content or "")
             if current_hash != patch.baseline_sha256:
                 raise ValueError(f"Conflict detected on {patch.file_path}: file was modified since patch was proposed")
 
@@ -721,6 +721,7 @@ async def get_changeset_diff(
             # means the file has changed since this patch was proposed.
             if patch.baseline_sha256 and patch.baseline_sha256 != _sha256(original):
                 baseline_drift = True
+                diff_status = "stale"
 
             if patch.unified_diff:
                 try:

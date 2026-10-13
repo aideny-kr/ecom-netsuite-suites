@@ -51,4 +51,18 @@ describe("manual workspace drafts", () => {
     view.rerender(<FileEditPanel {...p} file={{...file,can_edit:false}} />);
     expect(screen.queryByRole("button",{name:"Edit code"})).not.toBeInTheDocument();
   });
+  it("keeps newer typing after a pending save's editor was remounted", async () => {
+    let finish!: (value: { changeset_id: string }) => void;
+    mock.propose.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+    const p=props();const view=render(<FileEditPanel {...p} />);
+    fireEvent.click(screen.getByRole("button",{name:"Edit code"}));
+    fireEvent.change(screen.getByRole("textbox"),{target:{value:"saved snapshot"}});
+    fireEvent.click(screen.getByRole("button",{name:"Save draft for review"}));
+    view.unmount();render(<FileEditPanel {...p} />);
+    fireEvent.change(screen.getByRole("textbox"),{target:{value:"newer unsaved typing"}});
+    finish({changeset_id:"older-save"});
+    await waitFor(()=>expect(p.drafts.current["w1:f1"]).toBeDefined());
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(p.drafts.current["w1:f1"].content).toBe("newer unsaved typing");
+  });
 });

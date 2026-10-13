@@ -343,6 +343,7 @@ export default function WorkspacePage() {
   const [fileTreeMode, setFileTreeMode] = useState<FileTreeMode>("tree");
   const [searchFocused, setSearchFocused] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
+  const [wideLayout, setWideLayout] = useState(false);
 
   const fileTreeRef = useRef<PanelImperativeHandle>(null);
   const fileDrafts = useRef<FileDrafts>({});
@@ -461,6 +462,10 @@ export default function WorkspacePage() {
 
   useEffect(() => {
     setIsMounted(true);
+    const resize = () => setWideLayout(window.innerWidth >= 1280);
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
   }, []);
 
   const handleWorkspaceSwitch = useCallback((wsId: string | null) => {
@@ -817,13 +822,13 @@ export default function WorkspacePage() {
             <CeligoSurface />
           </div>
         ) : isMounted ? (
-          <PanelGroup id="layout-final-v19" orientation="horizontal" className="flex w-full h-full overflow-hidden">
+          <PanelGroup id="layout-final-v19" orientation={wideLayout ? "horizontal" : "vertical"} className="flex w-full h-full overflow-hidden">
             {/* ─── Left: File Explorer ─── */}
             <Panel
               id="panel-left-v16"
               panelRef={fileTreeRef}
               defaultSize={20}
-              className="!min-w-[250px]"
+              className="min-w-0 xl:!min-w-[250px]"
             >
               {fileTreeCollapsed ? (
                 /* Collapsed strip */
@@ -966,7 +971,7 @@ export default function WorkspacePage() {
             </PanelResizeHandle>
 
             {/* ─── Middle: Editor ─── */}
-            <Panel id="panel-middle-v16" defaultSize={55} className="!min-w-[400px]">
+            <Panel id="panel-middle-v16" defaultSize={55} className="min-w-0 xl:!min-w-[400px]">
               <div className="flex h-full w-full flex-col overflow-hidden min-w-0">
                 {/* Tab bar */}
                 {openTabs.length > 0 && (
@@ -1207,11 +1212,11 @@ export default function WorkspacePage() {
             </PanelResizeHandle>
 
             {/* ─── Right: Tools Panel ─── */}
-            <Panel id="panel-right-v16" defaultSize={25} className="!min-w-[350px]">
+            <Panel id="panel-right-v16" defaultSize={25} className="min-w-0 xl:!min-w-[350px]">
               {selectedWorkspaceId ? (
                 <div className="flex h-full w-full flex-col overflow-hidden bg-muted/5 border-l min-w-0" style={{ minWidth: 300 }}>
                   {/* Bottom tab bar */}
-                  <div className="flex border-b shrink-0 bg-muted/10">
+                  <div className="flex overflow-x-auto border-b shrink-0 bg-muted/10">
                     {(Object.entries(BOTTOM_TAB_CONFIG) as [BottomTab, typeof BOTTOM_TAB_CONFIG[BottomTab]][]).map(([tab, config]) => {
                       const isActive = bottomTab === tab;
                       const badge =

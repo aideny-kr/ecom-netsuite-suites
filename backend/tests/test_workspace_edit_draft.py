@@ -134,7 +134,13 @@ async def test_http_edit_requires_current_permission_and_audits_no_content(clien
     saved = await client.post(path + "/draft", headers=headers, json=body)
     assert saved.status_code == 201, saved.text
     events = (
-        (await db.execute(select(AuditEvent).where(AuditEvent.action == "workspace.file.edit_proposed")))
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "workspace.file.edit_proposed", AuditEvent.tenant_id == tenant.id
+                )
+            )
+        )
         .scalars()
         .all()
     )
@@ -148,3 +154,30 @@ async def test_http_edit_requires_current_permission_and_audits_no_content(clien
     assert read.json()["can_edit"] is False
     denied = await client.post(path + "/draft", headers=headers, json=body)
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_apply_and_diff_detect_content_drift_with_stale_cached_hash(db, workspace, tenant, user):
+    file = await seed(db, workspace, tenant)
+    saved = await svc.propose_file_edit(db, workspace.id, file.id, tenant.id, user.id, sha("old\n"), "new\n")
+    cs_id = uuid.UUID(saved["changeset_id"])
+    # A source pull can change bytes without updating the cached hash.
+    file.content = "pulled after draft\n"
+    await db.flush()
+    diff = await svc.get_changeset_diff(db, cs_id, tenant.id)
+    assert diff["files"][0]["baseline_drift"] is True
+    assert diff["files"][0]["diff_status"] == "stale"
+    await svc.transition_changeset(db, cs_id, tenant.id, "submit", user.id)
+    await svc.transition_changeset(db, cs_id, tenant.id, "approve", user.id)
+    with pytest.raises(ValueError, match="Conflict"):
+        await svc.apply_changeset(db, cs_id, tenant.id, user.id)
+    assert file.content == "pulled after draft\n"
+
+
+@pytest.mark.asyncio
+async def test_partial_line_read_cannot_be_presented_as_complete(db, workspace, tenant, user):
+    file = await seed(db, workspace, tenant)
+    file.content = "first\nsecond\n"
+    await db.flush()
+    result = await svc.read_file(db, workspace.id, file.id, tenant.id, line_start=2)
+    assert result["truncated"] is True

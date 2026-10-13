@@ -45,7 +45,8 @@ export function FileEditPanel({ workspaceId, file, drafts, onReview }: {
       const result = await propose.mutateAsync({
         workspaceId, fileId: file.id, content: draft.content, baseline_sha256: draft.baseline,
       });
-      delete drafts.current[capturedKey];
+      // A remounted editor may have newer typing while this snapshot saves.
+      if (drafts.current[capturedKey] === draft) delete drafts.current[capturedKey];
       if (mounted.current && current.current === capturedKey) onReview(result.changeset_id);
     } catch (error) {
       if (mounted.current) setError({ key: capturedKey, message: error instanceof Error ? error.message : "Unable to save draft" });
