@@ -327,6 +327,7 @@ async def read_file(
         "truncated": truncated,
         "total_lines": total_lines,
         "mime_type": f.mime_type,
+        "sha256_hash": _sha256(content),
     }
 
 
@@ -757,6 +758,67 @@ async def get_changeset_diff(
 
 
 # --- Patch Operations ---
+
+
+async def propose_file_edit(
+    db: AsyncSession,
+    workspace_id: uuid.UUID,
+    file_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    baseline_sha256: str,
+    content: str,
+) -> dict:
+    """Persist a manual edit as a draft; never change or deploy the source file."""
+    if len(content.encode("utf-8")) > MAX_FILE_SIZE:
+        raise ValueError(f"File exceeds maximum size of {MAX_FILE_SIZE} bytes")
+    # Serialize with workspace archival, then lock the exact tenant-scoped file.
+    result = await db.execute(
+        select(Workspace)
+        .where(
+            Workspace.id == workspace_id,
+            Workspace.tenant_id == tenant_id,
+            Workspace.status == "active",
+        )
+        .with_for_update()
+    )
+    if result.scalar_one_or_none() is None:
+        raise ValueError("Workspace not found")
+    result = await db.execute(
+        select(WorkspaceFile)
+        .where(
+            WorkspaceFile.id == file_id,
+            WorkspaceFile.workspace_id == workspace_id,
+            WorkspaceFile.tenant_id == tenant_id,
+            WorkspaceFile.is_directory.is_(False),
+        )
+        .with_for_update()
+    )
+    file = result.scalar_one_or_none()
+    if file is None:
+        raise ValueError("File not found")
+    current = file.content or ""
+    if _sha256(current) != baseline_sha256:
+        raise ValueError("File changed since it was opened; reload before proposing an edit")
+    if current == content:
+        raise ValueError("No changes to propose")
+    if file.locked_by and file.locked_by != actor_id and not _is_lock_expired(file.locked_at):
+        raise ValueError("File is locked by another user")
+    cs = await create_changeset(db, workspace_id, tenant_id, f"Edit {file.path}", actor_id)
+    patch = WorkspacePatch(
+        tenant_id=tenant_id,
+        changeset_id=cs.id,
+        file_path=file.path,
+        operation="modify",
+        new_content=content,
+        baseline_sha256=baseline_sha256,
+        apply_order=0,
+    )
+    db.add(patch)
+    file.locked_by = actor_id
+    file.locked_at = datetime.now(timezone.utc)
+    await db.flush()
+    return {"changeset_id": str(cs.id), "file_id": str(file.id), "baseline_sha256": baseline_sha256}
 
 
 def _is_lock_expired(locked_at: datetime | None) -> bool:

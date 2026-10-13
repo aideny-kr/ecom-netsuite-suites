@@ -3,6 +3,7 @@
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -10,7 +11,7 @@ from sqlalchemy import inspect as _sql_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_permission
+from app.core.dependencies import has_permission, require_permission
 from app.models.user import User
 from app.schemas.workspace import (
     ChangeSetCreate,
@@ -18,6 +19,7 @@ from app.schemas.workspace import (
     DeployConfirmRequest,
     DeployPreviewRequest,
     DeploySandboxRequest,
+    FileEditProposal,
     SuiteQLAssertionsRequest,
     WorkspaceCreate,
 )
@@ -240,6 +242,7 @@ async def read_file(
     result = await ws_svc.read_file(db, workspace_id, file_id, user.tenant_id, line_start, line_end)
     if not result:
         raise HTTPException(status_code=404, detail="File not found")
+    result["can_edit"] = await has_permission(db, user.id, "workspace.manage")
     await audit_service.log_event(
         db=db,
         tenant_id=user.tenant_id,
@@ -254,6 +257,36 @@ async def read_file(
             "line_start": line_start,
             "line_end": line_end,
         },
+    )
+    await db.commit()
+    return result
+
+
+@router.post("/{workspace_id}/files/{file_id}/draft", status_code=status.HTTP_201_CREATED)
+async def propose_file_edit(
+    workspace_id: uuid.UUID,
+    file_id: uuid.UUID,
+    body: FileEditProposal,
+    user: Annotated[User, Depends(require_permission("workspace.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    try:
+        result = await ws_svc.propose_file_edit(
+            db, workspace_id, file_id, user.tenant_id, user.id, body.baseline_sha256, body.content
+        )
+    except ValueError as exc:
+        message = str(exc)
+        code = 404 if "not found" in message else 409 if "changed" in message or "locked" in message else 400
+        raise HTTPException(status_code=code, detail=message) from exc
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.file.edit_proposed",
+        actor_id=user.id,
+        resource_type="changeset",
+        resource_id=result["changeset_id"],
+        payload={"workspace_id": str(workspace_id), "file_id": str(file_id), "baseline_sha256": body.baseline_sha256},
     )
     await db.commit()
     return result

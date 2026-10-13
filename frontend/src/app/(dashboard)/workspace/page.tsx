@@ -61,7 +61,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { FileTree } from "@/components/workspace/file-tree";
 import { ConstellationView } from "@/components/workspace/constellation-view";
 import { ScriptContextBar } from "@/components/workspace/script-context-bar";
-import { CodeViewer } from "@/components/workspace/code-viewer";
+import { FileEditPanel, type FileDrafts } from "@/components/workspace/file-edit-panel";
 import { DiffViewer } from "@/components/workspace/diff-viewer";
 import { WorkspaceSelector } from "@/components/workspace/workspace-selector";
 import { ChangesetPanel } from "@/components/workspace/changeset-panel";
@@ -345,6 +345,7 @@ export default function WorkspacePage() {
   const [isMounted, setIsMounted] = useState(false);
 
   const fileTreeRef = useRef<PanelImperativeHandle>(null);
+  const fileDrafts = useRef<FileDrafts>({});
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // ── Data hooks ──────────────────────────────────────────────────────
@@ -1166,7 +1167,10 @@ export default function WorkspacePage() {
                         </div>
                       )}
                       <div className="flex-1 min-w-0 overflow-hidden">
-                        <CodeViewer content={fileContent.content} filePath={selectedFilePath} />
+                        <FileEditPanel workspaceId={selectedWorkspaceId!} file={fileContent} drafts={fileDrafts} onReview={id => {
+                          setViewingDiffId(id);
+                          setBottomTab("changesets");
+                        }} />
                       </div>
                     </div>
                   ) : (
