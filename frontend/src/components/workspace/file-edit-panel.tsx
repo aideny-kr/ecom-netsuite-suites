@@ -57,7 +57,7 @@ export function FileEditPanel({ workspaceId, file, drafts, onReview }: {
 
   return <div className="flex h-full min-w-0 flex-col">
     <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2">
-      <p className="min-w-0 flex-1 text-[11px] text-muted-foreground">
+      <p className="w-full min-w-0 sm:w-auto sm:flex-1 text-[11px] text-muted-foreground">
         {draft ? "Unsaved edit · Save a draft to preserve it for review. Applying and deploying require separate steps." : "Edits are saved as drafts for review."}
       </p>
       {editable && (draft ? <>
@@ -71,7 +71,7 @@ export function FileEditPanel({ workspaceId, file, drafts, onReview }: {
     {error?.key === key && <p role="alert" className="px-4 py-2 text-[13px] text-destructive">{error.message}</p>}
     {draft && editable ? <textarea
       aria-label={`Edit ${file.path}`} spellCheck={false} disabled={pending}
-      className="min-h-48 w-full min-w-0 flex-1 resize-none bg-background p-4 font-mono text-[13px] leading-relaxed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
+      className="min-h-0 w-full min-w-0 flex-1 resize-none bg-background p-4 font-mono text-[13px] leading-relaxed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
       value={draft.content} onChange={event => { drafts.current[key] = { ...draft, content: event.target.value };redraw(n=>n+1); }}
     /> : <CodeViewer content={file.content} filePath={file.path} />}
   </div>;
