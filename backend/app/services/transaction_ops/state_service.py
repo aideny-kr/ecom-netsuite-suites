@@ -349,6 +349,36 @@ async def get_config(db, tenant_id, config_id, *, lock=False):
     return await _one(db, tenant_id, TransactionConfig, config_id, lock=lock)
 
 
+# What makes two configs the same scope: the same source and the same NetSuite books.
+_SCOPE_FIELDS = ("source_connection_id", "source_step_id", "netsuite_account_id", "subsidiary_id", "record_type")
+
+
+async def current_config(db, tenant_id, config_id):
+    """The config a STORED config id means now, for verifying work already done under it.
+
+    The row itself while it is enabled; otherwise its newest enabled successor with the same
+    scope (a revision supersedes a config and disables it). None when there is none, or a
+    successor changed scope. A config revision must not strand an unverified write or its
+    recheck under the config it replaced (staging, 2026-10-13: CM12127). Executing a NEW
+    write never uses this: its permit check refuses a disabled config.
+    """
+    original = row = await get_config(db, tenant_id, config_id)
+    seen = {row.id}
+    while not row.enabled:
+        successor = await db.scalar(
+            select(TransactionConfig).where(
+                TransactionConfig.tenant_id == tenant_id, TransactionConfig.supersedes_config_id == row.id
+            )
+        )
+        if successor is None or successor.id in seen:
+            return None
+        if any(getattr(successor, f) != getattr(original, f) for f in _SCOPE_FIELDS):
+            return None
+        seen.add(successor.id)
+        row = successor
+    return row
+
+
 def current_config_clause():
     successor = aliased(TransactionConfig)
     return (
@@ -2045,8 +2075,10 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
         config_id, order_reference = proposal.config_id, proposal.order_reference
     if config_id is None or not order_reference:
         raise StateError("recovery_unscoped")
-    config = await get_config(db, tenant_id, config_id)
-    if not config.enabled:
+    # A revision since the write is read under its successor (current_config); refused only
+    # when no enabled successor of the same scope exists.
+    config = await current_config(db, tenant_id, config_id)
+    if config is None:
         raise StateError("config_disabled")
     pending = (
         await db.execute(
