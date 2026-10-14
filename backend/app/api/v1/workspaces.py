@@ -861,6 +861,8 @@ async def deploy_sandbox_confirm(
         extra_params={
             "sandbox_id": token_row.sandbox_id,
             "expected_snapshot_sha": token_row.snapshot_sha,
+            "expected_manifest_sha": token_row.manifest_sha,
+            "require_assertions": token_row.require_assertions,
         },
     )
 

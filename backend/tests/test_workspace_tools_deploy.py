@@ -94,12 +94,19 @@ async def mcp_deploy_eligible(db: AsyncSession, tenant_a, admin_user):
     db.add(cs)
     await db.flush()
 
+    from app.services.deploy_preview_service import compute_deploy_manifest
+
+    snapshot = (await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id))[
+        "snapshot_sha"
+    ]
+
     db.add(
         WorkspaceRun(
             tenant_id=tenant_a.id,
             workspace_id=ws.id,
             changeset_id=cs.id,
             run_type="suitecloud_validate",
+            snapshot_hash=snapshot,
             status="passed",
             triggered_by=user.id,
             has_errors=False,
@@ -112,8 +119,27 @@ async def mcp_deploy_eligible(db: AsyncSession, tenant_a, admin_user):
             workspace_id=ws.id,
             changeset_id=cs.id,
             run_type="jest_unit_test",
+            snapshot_hash=snapshot,
             status="passed",
             triggered_by=user.id,
+        )
+    )
+    await db.flush()
+    from app.models.workspace import WorkspaceArtifact
+
+    validation = (
+        await db.execute(
+            select(WorkspaceRun).where(
+                WorkspaceRun.changeset_id == cs.id, WorkspaceRun.run_type == "suitecloud_validate"
+            )
+        )
+    ).scalar_one()
+    db.add(
+        WorkspaceArtifact(
+            tenant_id=tenant_a.id,
+            run_id=validation.id,
+            artifact_type="result_json",
+            content='{"account_id":"6738075-sb1"}',
         )
     )
     await db.flush()

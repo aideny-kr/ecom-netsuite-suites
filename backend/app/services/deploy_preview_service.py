@@ -36,6 +36,7 @@ from app.services.chat.mutation_guard import (
 )
 from app.services.deploy_service import check_deploy_prerequisites
 from app.services.runner_service import _validate_sandbox_target
+from app.services.workspace.snapshot import snapshot_hash
 
 
 def _token_fingerprint(token: str) -> str:
@@ -266,10 +267,7 @@ async def compute_deploy_manifest(
         ops[path] = "modify"
 
     # snapshot_sha — final on-disk tree (post-patch).
-    snapshot_payload = {path: _sha256(content) for path, content in files.items()}
-    snapshot_sha = hashlib.sha256(
-        json.dumps(snapshot_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    snapshot_sha = snapshot_hash({path: content.encode("utf-8") for path, content in files.items()})
 
     # Manifest — surface unchanged files AND deleted files so the operator sees the
     # full delta. content_sha for deletes is the pre-delete hash; "" if unknown.
@@ -346,29 +344,23 @@ async def build_deploy_preview(
     except ValueError as e:
         raise InvalidSandboxTargetError(str(e)) from e
 
-    # 3. Gate check — validate + tests must be passing; assertions may be
-    # required for sensitive deploys. Snapshot binding (codex P1 #6) happens
-    # below once we compute snapshot_sha, when we re-call this with the hash.
+    manifest_payload = await compute_deploy_manifest(
+        db=db, changeset_id=changeset_id, tenant_id=tenant_id, workspace_id=changeset.workspace_id
+    )
+    # Passing checks must describe this exact content, including unchanged files.
     gate_result = await check_deploy_prerequisites(
         db,
         changeset_id,
         tenant_id,
         require_assertions=require_assertions,
+        expected_snapshot_hash=manifest_payload["snapshot_sha"],
+        expected_account_id=sandbox_id,
     )
     if not gate_result["allowed"]:
         raise DeployGateNotMetError(
             gate_result.get("blocked_reason") or "Deploy gate failed",
             gate_result.get("gates", {}),
         )
-
-    # 4. Compute manifest + hashes. This is the operator-visible
-    # preview content and the cryptographic anchor for the token.
-    manifest_payload = await compute_deploy_manifest(
-        db=db,
-        changeset_id=changeset_id,
-        tenant_id=tenant_id,
-        workspace_id=changeset.workspace_id,
-    )
 
     return {
         "changeset_id": str(changeset_id),
@@ -635,18 +627,6 @@ async def verify_and_consume_deploy_token(
             {"changeset_status": getattr(changeset, "status", None)},
         )
 
-    gate_result = await check_deploy_prerequisites(
-        db,
-        row.changeset_id,
-        tenant_id,
-        require_assertions=row.require_assertions,
-    )
-    if not gate_result["allowed"]:
-        raise DeployGateNotMetError(
-            gate_result.get("blocked_reason") or "Deploy gate failed at confirm",
-            gate_result.get("gates", {}),
-        )
-
     # Codex P1 #6 + #7 — snapshot must still match. Re-compute and
     # compare to the pinned hashes.
     fresh = await compute_deploy_manifest(
@@ -659,6 +639,20 @@ async def verify_and_consume_deploy_token(
         raise SnapshotDriftError("snapshot_sha")
     if fresh["manifest_sha"] != row.manifest_sha:
         raise SnapshotDriftError("manifest_sha")
+
+    gate_result = await check_deploy_prerequisites(
+        db,
+        row.changeset_id,
+        tenant_id,
+        require_assertions=row.require_assertions,
+        expected_snapshot_hash=row.snapshot_sha,
+        expected_account_id=row.sandbox_id,
+    )
+    if not gate_result["allowed"]:
+        raise DeployGateNotMetError(
+            gate_result.get("blocked_reason") or "Deploy gate failed at confirm",
+            gate_result.get("gates", {}),
+        )
 
     # All checks passed — caller will queue the run, then re-call this
     # row to set consumed_run_id. For now we mark consumed_at to lock the

@@ -28,6 +28,8 @@ from app.models.workspace import (
 )
 from app.services import audit_service
 from app.services import workspace_service as ws_svc
+from app.services.deploy_service import DeployGateError
+from app.services.workspace.snapshot import materialized_snapshot_hash
 
 logger = structlog.get_logger()
 
@@ -101,24 +103,6 @@ def validate_run_type(run_type: str) -> dict:
 
 def _sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _compute_snapshot_hash(
-    *,
-    workspace_id: uuid.UUID,
-    changeset_id: uuid.UUID | None,
-    file_count: int,
-    cli_version: str,
-    validator_engine: str,
-    account_id: str,
-) -> str:
-    """SHA-256 fingerprint over the inputs that determine validate result identity.
-
-    Used by the orchestrator to short-circuit redundant auto-revalidation when
-    nothing about the snapshot or validator has changed.
-    """
-    payload = f"{workspace_id}:{changeset_id or ''}:{file_count}:{cli_version}:{validator_engine}:{account_id}"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _redact_sensitive_output(content: str) -> str:
@@ -447,14 +431,12 @@ async def _execute_validate_run(
     start_time = time.monotonic()
 
     try:
-        file_count = await _materialize_snapshot(db, run, tmp_dir)
+        await _materialize_snapshot(db, run, tmp_dir)
+        run.snapshot_hash = materialized_snapshot_hash(tmp_dir)
 
         # Seed CLI credentials. If this fails, abort early with a clear stderr
-        # artifact and a blocking gate status. The seeder also returns the
-        # resolved account_id (used below for the snapshot hash) so we avoid a
-        # redundant Connection lookup + decrypt — which had a silent-corruption
-        # path (account_id="unknown" → snapshot_hash collisions) if the row
-        # vanished mid-run.
+        # artifact and a blocking gate status. Record the resolved account ID
+        # separately from the content hash; credentials are excluded from it.
         try:
             seeded = await seed_credentials_for_run(
                 db=db,
@@ -577,14 +559,6 @@ async def _execute_validate_run(
         else:
             run.status = "passed"
             run.gate_status = "pass"
-        run.snapshot_hash = _compute_snapshot_hash(
-            workspace_id=run.workspace_id,
-            changeset_id=run.changeset_id,
-            file_count=file_count,
-            cli_version="suitecloud-cli@latest",
-            validator_engine="suitecloud_server",
-            account_id=account_id,
-        )
         run.completed_at = datetime.now(timezone.utc)
         run.duration_ms = duration_ms
 
@@ -599,6 +573,8 @@ async def _execute_validate_run(
             "duration_ms": duration_ms,
             "parser_version": PARSER_VERSION,
             "validator_engine": "suitecloud_server",
+            "snapshot_hash": run.snapshot_hash,
+            "account_id": account_id,
         }
         await _store_artifact(db, run, "result_json", json.dumps(result_payload, default=str))
         await _audit_run_event(
@@ -743,6 +719,7 @@ async def execute_run(
 
     try:
         file_count = await _materialize_snapshot(db, run, tmp_dir)
+        run.snapshot_hash = materialized_snapshot_hash(tmp_dir)
 
         cmd = cmd_config["cmd"]
         if run.run_type == "deploy_sandbox":
@@ -751,46 +728,32 @@ async def execute_run(
             run.command = " ".join(cmd)
             await db.flush()
 
-            # Codex P1 #7 belt-and-suspenders — verify the materialized
-            # snapshot still matches the snapshot_sha the operator
-            # confirmed in the preview. If files mutated between confirm
-            # and worker pickup, abort BEFORE invoking suitecloud
-            # project:deploy. The preview-confirm gate already catches
-            # most drift; this layer protects against the worker queue
-            # backlog window.
-            expected_sha = (extra_params or {}).get("expected_snapshot_sha")
-            if expected_sha and run.changeset_id is not None:
-                from app.services.deploy_preview_service import compute_deploy_manifest
+            # Compare the actual materialized tree, then re-check current receipts.
+            # A database re-read alone can disagree with files already written to disk.
+            from app.services.deploy_preview_service import compute_deploy_manifest
+            from app.services.deploy_service import check_deploy_prerequisites
 
-                fresh = await compute_deploy_manifest(
-                    db=db,
-                    changeset_id=run.changeset_id,
-                    tenant_id=run.tenant_id,
-                    workspace_id=run.workspace_id,
-                )
-                if fresh["snapshot_sha"] != expected_sha:
-                    drift_reason = (
-                        f"Worker snapshot_sha {fresh['snapshot_sha']} "
-                        f"does not match expected {expected_sha}. "
-                        "Files mutated between confirm and worker pickup; "
-                        "deploy aborted."
-                    )
-                    run.status = "error"
-                    run.completed_at = datetime.now(timezone.utc)
-                    run.duration_ms = int((time.monotonic() - start_time) * 1000)
-                    await _store_artifact(db, run, "stderr", drift_reason)
-                    await _audit_run_event(
-                        db,
-                        run,
-                        action="deploy.worker_snapshot_drift",
-                        status="error",
-                        payload={
-                            "expected_snapshot_sha": expected_sha,
-                            "computed_snapshot_sha": fresh["snapshot_sha"],
-                        },
-                    )
-                    await db.flush()
-                    return run
+            expected_sha = (extra_params or {}).get("expected_snapshot_sha")
+            expected_manifest = (extra_params or {}).get("expected_manifest_sha")
+            if not expected_sha or not expected_manifest or run.changeset_id is None:
+                raise DeployGateError("Deploy requires a confirmed snapshot and manifest")
+            if run.snapshot_hash != expected_sha:
+                raise DeployGateError("Materialized snapshot differs from the confirmed snapshot")
+            fresh = await compute_deploy_manifest(
+                db=db, changeset_id=run.changeset_id, tenant_id=run.tenant_id, workspace_id=run.workspace_id
+            )
+            if fresh["snapshot_sha"] != expected_sha or fresh["manifest_sha"] != expected_manifest:
+                raise DeployGateError("Changeset differs from the confirmed manifest")
+            gates = await check_deploy_prerequisites(
+                db,
+                run.changeset_id,
+                run.tenant_id,
+                require_assertions=(extra_params or {}).get("require_assertions", False),
+                expected_snapshot_hash=run.snapshot_hash,
+                expected_account_id=str(sandbox_id),
+            )
+            if not gates["allowed"]:
+                raise DeployGateError(gates["blocked_reason"])
 
         exit_code, stdout, stderr = await _run_subprocess(cmd, tmp_dir, cmd_config["timeout"])
         duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -827,6 +790,7 @@ async def execute_run(
             "exit_code": exit_code,
             "duration_ms": duration_ms,
             "materialized_file_count": file_count,
+            "snapshot_hash": run.snapshot_hash,
         }
         await _store_artifact(db, run, "result_json", json.dumps(result_payload, default=str))
         artifact_count += 1
@@ -893,6 +857,34 @@ async def execute_run(
                 "duration_ms": duration_ms,
             },
             error_message=actionable,
+        )
+    except DeployGateError as exc:
+        run.status = "error"
+        run.completed_at = datetime.now(timezone.utc)
+        run.duration_ms = int((time.monotonic() - start_time) * 1000)
+        await _store_artifact(db, run, "stderr", str(exc))
+        await _store_artifact(
+            db,
+            run,
+            "result_json",
+            json.dumps(
+                {
+                    "run_id": str(run.id),
+                    "run_type": run.run_type,
+                    "status": run.status,
+                    "error_category": "DEPLOY_GATE",
+                    "error_message": str(exc),
+                    "snapshot_hash": run.snapshot_hash,
+                }
+            ),
+        )
+        await _audit_run_event(
+            db,
+            run,
+            action="deploy.worker_gate_rejected",
+            status="error",
+            payload={"error_category": "DEPLOY_GATE", "snapshot_hash": run.snapshot_hash},
+            error_message=str(exc),
         )
     except asyncio.TimeoutError:
         duration_ms = int((time.monotonic() - start_time) * 1000)
