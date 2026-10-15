@@ -19,7 +19,11 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import set_tenant_context
+from app.models.tenant import Tenant
+from app.models.user import Permission, RolePermission, User, UserRole
 from app.models.workspace import (
+    Workspace,
     WorkspaceArtifact,
     WorkspaceChangeSet,
     WorkspaceFile,
@@ -689,9 +693,17 @@ async def execute_run(
 ) -> WorkspaceRun:
     """Execute a workspace run: materialize snapshot, execute, and store immutable artifacts."""
     result = await db.execute(
-        select(WorkspaceRun).where(WorkspaceRun.id == run_id, WorkspaceRun.tenant_id == tenant_id)
+        select(WorkspaceRun)
+        .where(WorkspaceRun.id == run_id, WorkspaceRun.tenant_id == tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     run = result.scalar_one()
+
+    if run.run_type == "deploy_sandbox" and run.status != "queued":
+        # A running deployment may already have reached the external system.
+        # Redelivery must never turn an uncertain outcome into another write.
+        return run
 
     run.status = "running"
     run.started_at = datetime.now(timezone.utc)
@@ -703,6 +715,12 @@ async def execute_run(
         status="success",
         payload={"run_type": run.run_type, "workspace_id": str(run.workspace_id)},
     )
+
+    if run.run_type == "deploy_sandbox":
+        # Persist the exclusive claim before any external write. If the worker
+        # dies, this stays running for operator reconciliation, never auto-replay.
+        await db.commit()
+        await set_tenant_context(db, str(tenant_id))
 
     cmd_config = validate_run_type(run.run_type)
 
@@ -723,6 +741,26 @@ async def execute_run(
 
         cmd = cmd_config["cmd"]
         if run.run_type == "deploy_sandbox":
+            permitted_actor = await db.scalar(
+                select(User.id)
+                .join(Tenant, Tenant.id == User.tenant_id)
+                .join(UserRole, UserRole.user_id == User.id)
+                .join(RolePermission, RolePermission.role_id == UserRole.role_id)
+                .join(Permission, Permission.id == RolePermission.permission_id)
+                .join(Workspace, Workspace.tenant_id == Tenant.id)
+                .where(
+                    User.id == run.triggered_by,
+                    User.tenant_id == tenant_id,
+                    User.is_active.is_(True),
+                    Tenant.is_active.is_(True),
+                    Workspace.id == run.workspace_id,
+                    Workspace.status == "active",
+                    Permission.codename == "workspace.manage",
+                )
+                .limit(1)
+            )
+            if permitted_actor is None:
+                raise DeployGateError("Deployment actor, company or workspace is no longer authorized")
             sandbox_id = (extra_params or {}).get("sandbox_id")
             cmd = _build_deploy_command(cmd_config["cmd"], str(sandbox_id or ""))
             run.command = " ".join(cmd)

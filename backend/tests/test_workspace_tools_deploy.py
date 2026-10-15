@@ -215,6 +215,8 @@ class TestMcpDeployConfirm:
             assert fake_task.delay.called
             call_kwargs = fake_task.delay.call_args.kwargs
             assert call_kwargs["extra_params"]["expected_snapshot_sha"] == preview["snapshot_sha"]
+            assert call_kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
+            assert call_kwargs["extra_params"]["require_assertions"] is False
 
         # Token row marked consumed + linked to the run.
         import uuid as _uuid

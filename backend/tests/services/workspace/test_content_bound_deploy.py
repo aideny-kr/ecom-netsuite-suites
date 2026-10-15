@@ -209,3 +209,69 @@ async def test_checks_from_another_account_cannot_authorize_target(db, checked_p
             actor_id=user.id,
         )
     assert rejected.value.gates["validate"]["status"] == "target_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoke", ["user", "company", "permission"])
+async def test_queued_deploy_rechecks_authority(db, checked_project, revoke):
+    from sqlalchemy import delete
+
+    from app.models.tenant import Tenant
+    from app.models.user import UserRole
+
+    ws, cs, user, *_ = checked_project
+    p = await preview(db, checked_project)
+    run = await runner_service.create_run(
+        db,
+        tenant_id=ws.tenant_id,
+        workspace_id=ws.id,
+        changeset_id=cs.id,
+        triggered_by=user.id,
+        run_type="deploy_sandbox",
+    )
+    if revoke == "user":
+        user.is_active = False
+    elif revoke == "company":
+        (await db.get(Tenant, ws.tenant_id)).is_active = False
+    else:
+        await db.execute(delete(UserRole).where(UserRole.user_id == user.id))
+    await db.flush()
+    command = AsyncMock(return_value=(0, "", ""))
+    with patch.object(runner_service, "_run_subprocess", new=command):
+        result = await runner_service.execute_run(
+            db,
+            run.id,
+            ws.tenant_id,
+            extra_params={
+                "sandbox_id": "123-sb1",
+                "expected_snapshot_sha": p["snapshot_sha"],
+                "expected_manifest_sha": p["manifest_sha"],
+            },
+        )
+    assert result.status == "error"
+    command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_deploy_delivery_does_not_dispatch_again(db, checked_project):
+    ws, cs, user, *_ = checked_project
+    p = await preview(db, checked_project)
+    run = await runner_service.create_run(
+        db,
+        tenant_id=ws.tenant_id,
+        workspace_id=ws.id,
+        changeset_id=cs.id,
+        triggered_by=user.id,
+        run_type="deploy_sandbox",
+    )
+    params = {
+        "sandbox_id": "123-sb1",
+        "expected_snapshot_sha": p["snapshot_sha"],
+        "expected_manifest_sha": p["manifest_sha"],
+    }
+    command = AsyncMock(return_value=(0, "", ""))
+    with patch.object(runner_service, "_run_subprocess", new=command):
+        await runner_service.execute_run(db, run.id, ws.tenant_id, extra_params=params)
+        await runner_service.execute_run(db, run.id, ws.tenant_id, extra_params=params)
+    assert command.await_count == 1
+    assert run.status == "passed"

@@ -29,6 +29,7 @@ from app.services import workspace_service as ws_svc
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+run_router = APIRouter(prefix="/runs", tags=["workspaces"])
 
 
 def _serialize_workspace(ws) -> dict:
@@ -852,21 +853,26 @@ async def deploy_sandbox_confirm(
     await db.flush()
     await db.commit()
 
-    from app.workers.tasks.workspace_run import workspace_run_task
+    from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
 
-    workspace_run_task.delay(
-        tenant_id=str(user.tenant_id),
-        run_id=str(run.id),
-        correlation_id=run.correlation_id,
-        extra_params={
-            "sandbox_id": token_row.sandbox_id,
-            "expected_snapshot_sha": token_row.snapshot_sha,
-            "expected_manifest_sha": token_row.manifest_sha,
-            "require_assertions": token_row.require_assertions,
-        },
-    )
+    run, pending = await dispatch_confirmed_deploy(db, run_id=run.id, tenant_id=user.tenant_id, actor_id=user.id)
+    return {**_serialize_run(run), "dispatch_pending": pending}
 
-    return _serialize_run(run)
+
+@run_router.post("/{run_id}/dispatch")
+async def retry_deploy_delivery(
+    run_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("workspace.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Redeliver the same committed queued deploy; never replay a started run."""
+    from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
+
+    try:
+        run, pending = await dispatch_confirmed_deploy(db, run_id=run_id, tenant_id=user.tenant_id, actor_id=user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {**_serialize_run(run), "dispatch_pending": pending}
 
 
 def _gate_status(ok: bool, run) -> str:
@@ -937,9 +943,23 @@ async def get_uat_report(
                 assertions_report = None
             break
 
-    # Compute overall status
-    validate_ok = latest_runs.get("suitecloud_validate") and latest_runs["suitecloud_validate"].status == "passed"
-    tests_ok = latest_runs.get("jest_unit_test") and latest_runs["jest_unit_test"].status == "passed"
+    # Historical passing runs do not establish readiness of the current code.
+    from app.services.deploy_preview_service import DeployPreviewError
+    from app.services.deploy_service import check_deploy_prerequisites
+
+    try:
+        readiness = await check_deploy_prerequisites(db, cs.id, user.tenant_id)
+        current_gates = readiness["gates"]
+    except (ValueError, DeployPreviewError):
+        current_gates = {}
+    validate_state = current_gates.get("validate", {}).get(
+        "status", "stale" if latest_runs.get("suitecloud_validate") else "missing"
+    )
+    tests_state = current_gates.get("unit_tests", {}).get(
+        "status", "stale" if latest_runs.get("jest_unit_test") else "missing"
+    )
+    validate_ok = validate_state == "passed"
+    tests_ok = tests_state == "passed"
     assertions_ok = assertion_run is None or assertion_run.status == "passed"
     deploy_ok = latest_runs.get("deploy_sandbox") and latest_runs["deploy_sandbox"].status == "passed"
 
@@ -957,8 +977,8 @@ async def get_uat_report(
         "changeset_title": cs.title,
         "changeset_status": cs.status,
         "gates": {
-            "validate": _gate_status(validate_ok, latest_runs.get("suitecloud_validate")),
-            "unit_tests": _gate_status(tests_ok, latest_runs.get("jest_unit_test")),
+            "validate": validate_state,
+            "unit_tests": tests_state,
             "assertions": (
                 "passed"
                 if (assertion_run and assertion_run.status == "passed")
@@ -975,8 +995,6 @@ async def get_uat_report(
 
 
 # --- Run query endpoints ---
-
-run_router = APIRouter(prefix="/runs", tags=["workspaces"])
 
 
 @run_router.get("/{run_id}")

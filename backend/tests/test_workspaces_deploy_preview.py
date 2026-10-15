@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import sys
+import uuid
 from types import ModuleType
 from unittest.mock import MagicMock
 
@@ -214,6 +215,8 @@ class TestDeployConfirmEndpoint:
             call_kwargs = fake_task.delay.call_args.kwargs
             assert call_kwargs["extra_params"]["expected_snapshot_sha"] == preview["snapshot_sha"]
             assert call_kwargs["extra_params"]["sandbox_id"] == "6738075-sb1"
+            assert call_kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
+            assert call_kwargs["extra_params"]["require_assertions"] is False
 
         # Test 17 — token row consumed + consumed_run_id linked.
         # We must re-query in a fresh transaction context because the
@@ -250,3 +253,87 @@ class TestLegacyEndpointGone:
         assert detail["code"] == "deploy_one_click_deprecated"
         assert "preview_endpoint" in detail
         assert "confirm_endpoint" in detail
+
+
+@pytest.mark.asyncio
+async def test_broker_failure_keeps_same_confirmed_run_recoverable(db, client, deploy_eligible_changeset, tenant_a):
+    ws, cs, user = deploy_eligible_changeset
+    headers = _auth_headers(user.id, tenant_a.id)
+    preview = (
+        await client.post(
+            f"/api/v1/changesets/{cs.id}/deploy-sandbox/preview",
+            json={"sandbox_id": "6738075-sb1"},
+            headers=headers,
+        )
+    ).json()
+    with _mock_workspace_run_task() as task:
+        task.delay.side_effect = RuntimeError("synthetic broker unavailable")
+        confirmed = await client.post(
+            f"/api/v1/changesets/{cs.id}/deploy-sandbox/confirm",
+            json={"jti": preview["jti"], "confirmation_token": preview["confirmation_token"]},
+            headers=headers,
+        )
+    assert confirmed.status_code == 202, confirmed.text
+    assert confirmed.json()["dispatch_pending"] is True
+    run_id = confirmed.json()["id"]
+    with _mock_workspace_run_task() as task:
+        retried = await client.post(f"/api/v1/runs/{run_id}/dispatch", headers=headers)
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["id"] == run_id
+        assert retried.json()["dispatch_pending"] is False
+        assert task.delay.call_args.kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
+    run = await db.get(WorkspaceRun, uuid.UUID(run_id))
+    run.status = "running"
+    await db.flush()
+    with _mock_workspace_run_task() as task:
+        response = await client.post(f"/api/v1/runs/{run_id}/dispatch", headers=headers)
+        assert response.status_code == 200
+        task.delay.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delivery_commit_failure_never_publishes(db, deploy_eligible_changeset, tenant_a):
+    from unittest.mock import AsyncMock, patch
+
+    from app.services import runner_service
+    from app.services.deploy_preview_service import (
+        build_deploy_preview,
+        mint_deploy_token,
+        verify_and_consume_deploy_token,
+    )
+    from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
+
+    ws, cs, user = deploy_eligible_changeset
+    preview = await build_deploy_preview(
+        db=db,
+        changeset_id=cs.id,
+        sandbox_id="6738075-sb1",
+        require_assertions=False,
+        tenant_id=tenant_a.id,
+        actor_id=user.id,
+    )
+    minted = await mint_deploy_token(db=db, preview=preview)
+    confirmed = await verify_and_consume_deploy_token(
+        db=db,
+        jti=minted["jti"],
+        confirmation_token=minted["confirmation_token"],
+        actor_id=user.id,
+        tenant_id=tenant_a.id,
+    )
+    run = await runner_service.create_run(
+        db,
+        tenant_id=tenant_a.id,
+        workspace_id=ws.id,
+        changeset_id=cs.id,
+        run_type="deploy_sandbox",
+        triggered_by=user.id,
+    )
+    confirmed["row"].consumed_run_id = run.id
+    await db.flush()
+    with (
+        _mock_workspace_run_task() as task,
+        patch.object(db, "commit", new=AsyncMock(side_effect=RuntimeError("synthetic commit failure"))),
+    ):
+        with pytest.raises(RuntimeError, match="commit failure"):
+            await dispatch_confirmed_deploy(db, run_id=run.id, tenant_id=tenant_a.id, actor_id=user.id)
+        task.delay.assert_not_called()
