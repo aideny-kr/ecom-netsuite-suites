@@ -8,6 +8,7 @@ from typing import Annotated
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import inspect as _sql_inspect
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -961,7 +962,40 @@ async def get_uat_report(
     validate_ok = validate_state == "passed"
     tests_ok = tests_state == "passed"
     assertions_ok = assertion_run is None or assertion_run.status == "passed"
-    deploy_ok = latest_runs.get("deploy_sandbox") and latest_runs["deploy_sandbox"].status == "passed"
+    deployment = latest_runs.get("deploy_sandbox")
+    deploy_ok = False
+    if deployment is not None and deployment.status == "passed":
+        from app.models.workspace import WorkspaceDeployToken
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        receipt = await db.scalar(
+            select(WorkspaceDeployToken).where(
+                WorkspaceDeployToken.tenant_id == user.tenant_id,
+                WorkspaceDeployToken.workspace_id == cs.workspace_id,
+                WorkspaceDeployToken.changeset_id == cs.id,
+                WorkspaceDeployToken.consumed_run_id == deployment.id,
+                WorkspaceDeployToken.consumed_reason == "confirmed",
+                WorkspaceDeployToken.consumed_at.is_not(None),
+            )
+        )
+        try:
+            current = await compute_deploy_manifest(
+                db=db, changeset_id=cs.id, tenant_id=user.tenant_id, workspace_id=cs.workspace_id
+            )
+        except (ValueError, DeployPreviewError):
+            current = None
+        deploy_ok = bool(
+            receipt
+            and current
+            and deployment.snapshot_hash == current["snapshot_sha"]
+            and receipt.snapshot_sha == current["snapshot_sha"]
+            and receipt.manifest_sha == current["manifest_sha"]
+        )
+    deploy_state = (
+        "passed"
+        if deploy_ok
+        else ("stale" if deployment is not None and deployment.status == "passed" else _gate_status(False, deployment))
+    )
 
     if deploy_ok:
         overall = "deployed"
@@ -984,7 +1018,7 @@ async def get_uat_report(
                 if (assertion_run and assertion_run.status == "passed")
                 else ("not_run" if not assertion_run else assertion_run.status)
             ),
-            "deploy": _gate_status(deploy_ok, latest_runs.get("deploy_sandbox")),
+            "deploy": deploy_state,
         },
         "runs": runs_summary,
         "artifact_links": artifact_links,
