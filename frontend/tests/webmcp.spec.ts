@@ -94,8 +94,9 @@ test("backend permission denial is preserved", async ({ page }) => {
 test("the app still renders and navigates when WebMCP is unavailable", async ({ page }) => {
   await page.addInitScript(() => Object.defineProperty(document, "modelContext", { value: undefined }));
   await page.goto("/dashboard");
-  await page.getByRole("link", { name: "Audit Log", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible();
+  await page.getByRole("link", { name: "Chat", exact: true }).click();
+  await expect(page).toHaveURL(/\/chat$/);
+  await expect(page.getByRole("textbox").last()).toBeVisible();
 });
 
 const sessionId = "10000000-0000-4000-8000-000000000001";

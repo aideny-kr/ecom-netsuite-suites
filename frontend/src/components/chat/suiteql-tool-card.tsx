@@ -31,6 +31,7 @@ interface SuiteQLToolCardProps {
 
 export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const [showQuery, setShowQuery] = useState(false);
+  const [exportError, setExportError] = useState("");
   const [saveMode, setSaveMode] = useState<"idle" | "editing" | "saved">("idle");
   const [name, setName] = useState(userQuestion?.slice(0, 120) ?? "");
 
@@ -38,6 +39,8 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const savedSearchId = (step.params?.savedSearchId as string) ?? (step.params?.searchId as string) ?? "";
   const effectiveQueryText = queryText || (savedSearchId ? `Saved Search: ${savedSearchId}` : "");
   const resultPayload = getTablePayload(step);
+  const isPartial = !!resultPayload && (resultPayload.truncated || resultPayload.row_count > resultPayload.rows.length);
+  const onlyLoadedRowsAvailable = isPartial && !queryText;
   const hasStructuredRows = !!resultPayload;
   const isError = !hasStructuredRows && !!step.result_summary;
   const isMcpTool = step.tool !== "netsuite_suiteql";
@@ -45,6 +48,35 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
 
   const mutation = useCreateSavedQuery();
   const { exportToExcel, exportFromQuery, isExporting } = useExcelExport();
+
+  // Full exports re-run SuiteQL through the existing REST connection. Loaded-row
+  // downloads remain usable for MCP results without silently claiming completeness.
+  async function handleExport(format: "csv" | "xlsx", loadedOnly = false) {
+    if (!resultPayload || isExporting) return;
+    setExportError("");
+    const title = `query-results${loadedOnly || onlyLoadedRowsAvailable ? "-loaded-rows" : ""}-${new Date().toISOString().slice(0, 10)}`;
+    try {
+      const needsServerExport = isPartial || (format === "csv" && resultPayload.rows.length > DISPLAY_ROW_CAP);
+      if (!loadedOnly && needsServerExport && queryText) {
+        await exportFromQuery({ queryText, title, format });
+      } else if (format === "xlsx") {
+        await exportToExcel({ columns: resultPayload.columns, rows: resultPayload.rows, title });
+      } else {
+        const escape = (value: unknown) => {
+          const text = String(value ?? "");
+          return /[,"\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+        };
+        const csv = [resultPayload.columns, ...resultPayload.rows].map(row => row.map(escape).join(",")).join("\r\n");
+        const url = URL.createObjectURL(new Blob([csv], {type:"text/csv;charset=utf-8"}));
+        const anchor = document.createElement("a");
+        anchor.href = url; anchor.download = `${title}.csv`;
+        document.body.appendChild(anchor); anchor.click(); anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Download failed. Please try again.");
+    }
+  }
 
   const handleMutationSuccess = () => setSaveMode("saved");
 
@@ -113,6 +145,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
             onSave={handleSave}
           />
         </div>
+
       </div>
     );
   }
@@ -201,61 +234,15 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={() => {
-              if (!resultPayload) return;
-              // Route through the server when display cap was hit or the
-              // backend already truncated — keeps inline path for small
-              // results so they download instantly without a round-trip.
-              const needsServerExport =
-                resultPayload.rows.length > DISPLAY_ROW_CAP || resultPayload.truncated;
-              if (needsServerExport && queryText) {
-                exportFromQuery({
-                  queryText,
-                  title: `query-results-${new Date().toISOString().slice(0, 10)}`,
-                  format: "csv",
-                });
-                return;
-              }
-              const escape = (v: unknown) => {
-                const s = String(v ?? "");
-                return s.includes(",") || s.includes('"') || s.includes("\n")
-                  ? `"${s.replace(/"/g, '""')}"`
-                  : s;
-              };
-              const header = resultPayload.columns.map(escape).join(",");
-              const body = resultPayload.rows
-                .map((row: unknown[]) => row.map(escape).join(","))
-                .join("\n");
-              const blob = new Blob([`${header}\n${body}`], { type: "text/csv" });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = `query-results-${new Date().toISOString().slice(0, 10)}.csv`;
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
+            onClick={() => void handleExport("csv")}
             disabled={isExporting || !resultPayload}
             className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
           >
             <Download className="h-3 w-3" />
-            Export CSV
+            Export CSV{onlyLoadedRowsAvailable ? " (loaded rows)" : ""}
           </button>
           <button
-            onClick={() => {
-              if (!resultPayload) return;
-              if (resultPayload.truncated && queryText) {
-                exportFromQuery({
-                  queryText,
-                  title: `query-results-${new Date().toISOString().slice(0, 10)}`,
-                });
-              } else {
-                exportToExcel({
-                  columns: resultPayload.columns,
-                  rows: resultPayload.rows,
-                  title: `query-results-${new Date().toISOString().slice(0, 10)}`,
-                });
-              }
-            }}
+            onClick={() => void handleExport("xlsx")}
             disabled={isExporting || !resultPayload}
             className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
           >
@@ -264,7 +251,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
             ) : (
               <FileSpreadsheet className="h-3 w-3" />
             )}
-            Export Excel
+            Export Excel{onlyLoadedRowsAvailable ? " (loaded rows)" : ""}
           </button>
           <SaveQueryBar
             saveMode={saveMode}
@@ -275,6 +262,16 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
             onSave={handleSave}
           />
         </div>
+        {(isPartial || (resultPayload.rows.length > DISPLAY_ROW_CAP && queryText)) && (
+          <div className="rounded-md border bg-muted/20 p-3 text-xs">
+            <p className="text-muted-foreground">{queryText ? "Re-running an export requires a direct NetSuite connection. You can also download the " : "Downloads contain only the "}{resultPayload.rows.length.toLocaleString()} rows already loaded{isPartial ? " — this is a partial result" : ""}.</p>
+            <div className="mt-2 flex flex-wrap gap-4">
+              <button type="button" disabled={isExporting || !resultPayload.rows.length} onClick={() => void handleExport("csv", true)} className="text-primary underline underline-offset-4 disabled:opacity-50">Download loaded rows as CSV</button>
+              <button type="button" disabled={isExporting || !resultPayload.rows.length} onClick={() => void handleExport("xlsx", true)} className="text-primary underline underline-offset-4 disabled:opacity-50">Download loaded rows as Excel</button>
+            </div>
+          </div>
+        )}
+        {exportError && <p role="alert" className="rounded-md border border-destructive/30 p-3 text-xs text-destructive">Download failed: {exportError}</p>}
       </div>
     </div>
   );

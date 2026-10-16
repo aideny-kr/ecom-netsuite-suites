@@ -73,6 +73,16 @@ def _owner_query(frontier):
     )
 
 
+def _ownership_edges(previous, following, before, after):
+    """The verified native parent orientations used by discovery and provenance."""
+    if before in _PARENTS.get(after, set()):
+        yield following, previous, before
+    if before == "CustRfnd" and after in {"DepAppl", "CustCred"}:
+        yield previous, following, after
+    if after == "CustRfnd" and before in {"DepAppl", "CustCred"}:
+        yield following, previous, before
+
+
 async def collect_order_candidates(
     request, subsidiary_id, reference_field, document_ids, order_ids, references, *, bulk=False
 ):
@@ -184,17 +194,12 @@ async def collect_order_candidates(
                 or (previous not in frontier and following not in frontier)
             ):
                 raise NetSuiteEvidenceError("dependency_owner_identity_unproven")
-            if following in frontier and before in _PARENTS.get(after, set()):
-                if before == "SalesOrd":
-                    native_roots.add(previous)
-                else:
-                    parents.add(previous)
-            # Native customer refunds also appear on the reverse side of the
-            # application edge. Follow both supported orientations to parents.
-            if previous in frontier and before == "CustRfnd" and after in {"DepAppl", "CustCred"}:
-                parents.add(following)
-            if following in frontier and after == "CustRfnd" and before in {"DepAppl", "CustCred"}:
-                parents.add(previous)
+            for child, parent, kind in _ownership_edges(previous, following, before, after):
+                if child in frontier:
+                    if kind == "SalesOrd":
+                        native_roots.add(parent)
+                    else:
+                        parents.add(parent)
         visited.update(frontier)
         frontier = parents - visited
         if len(visited | frontier | native_roots) > document_limit:
@@ -211,7 +216,14 @@ async def collect_order_candidates(
         rows = await query(
             "SELECT r.id,r.custrecord_refreq_so_link AS order_id,"
             "r.custrecord_refreq_order_number AS order_reference "
-            "FROM customrecord_fw_refund_requests r "
+            + (
+                ",r.custrecord_refreq_cm_link AS credit_memo_id,"
+                "r.custrecord_refreq_refund_link AS refund_id,"
+                "r.custrecord_refreq_cust_dep_link AS deposit_id "
+                if bulk
+                else ""
+            )
+            + "FROM customrecord_fw_refund_requests r "
             f"WHERE r.custrecord_refreq_cm_link IN ({ids}) OR r.custrecord_refreq_refund_link IN ({ids}) "
             f"OR r.custrecord_refreq_cust_dep_link IN ({ids}) ORDER BY r.id"
         )
@@ -229,6 +241,53 @@ async def collect_order_candidates(
     result = {"order_references": sorted(candidates), "outside_subsidiary_ids": sorted(outside, key=int)}
     if bulk:
         result["inventory"] = inventory  # Native rows retained for replay/audit; no monetary fields.
+    return result
+
+
+def candidate_membership(changes, inventory, subsidiary_id):
+    """Resolve provenance locally from the same native rows; no extra provider calls."""
+    roots, ancestors, custom = {}, {}, {}
+    for rows in inventory:
+        for row in rows:
+            if row.get("type") == "SalesOrd" and str(row.get("subsidiary")) == str(subsidiary_id):
+                ref = row.get("order_reference")
+                if isinstance(ref, str) and _REFERENCE.fullmatch(ref):
+                    roots.setdefault(str(row["id"]), set()).add(ref)
+    for rows in inventory:
+        for row in rows:
+            before, after = row.get("previoustype"), row.get("nexttype")
+            previous, following = str(row.get("previousdoc")), str(row.get("nextdoc"))
+            for child, parent, _ in _ownership_edges(previous, following, before, after):
+                ancestors.setdefault(child, set()).add(parent)
+            if "order_id" in row:
+                for field in ("credit_memo_id", "refund_id", "deposit_id"):
+                    if row.get(field):
+                        linked = {str(row["order_id"])} if row.get("order_id") else set()
+                        linked.update(
+                            identifier for identifier, refs in roots.items() if row.get("order_reference") in refs
+                        )
+                        custom.setdefault(str(row[field]), set()).update(linked)
+    result = []
+    for change in changes:
+        frontier = {str(key[1]) for key in change["record_keys"] if key[0] == "transaction"}
+        if change.get("order_id"):
+            frontier.add(str(change["order_id"]))
+        found, visited = set(), set()
+        if change.get("order_reference") and _REFERENCE.fullmatch(change["order_reference"]):
+            # Refund-request references still need subsidiary-qualified roots.
+            found.update(ref for refs in roots.values() for ref in refs if ref == change["order_reference"])
+        for _ in range(MAX_DEPTH + 2):
+            if not frontier:
+                break
+            for identifier in frontier:
+                found.update(roots.get(identifier, ()))
+            visited.update(frontier)
+            frontier = {
+                parent
+                for identifier in frontier
+                for parent in ancestors.get(identifier, set()) | custom.get(identifier, set())
+            } - visited
+        result.append((change, sorted(found)))
     return result
 
 

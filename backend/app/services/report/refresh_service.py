@@ -239,6 +239,7 @@ async def _execute_sources(
                 actor_type=actor_type,  # tool_call audit rows must not stamp a system replay as 'user'
                 correlation_id=correlation_id,
                 db=db,
+                perf_guard=False,  # replays a recipe the user already accepted; never refuse it at refresh time
             )
             try:
                 parsed = json.loads(result_str)

@@ -55,10 +55,11 @@ export function SessionSidebar({
 
   return (
     <div
+      style={{ display: collapsed ? "none" : undefined }}
       className={cn(
-        "flex shrink-0 flex-col border-r transition-[width] duration-200 overflow-hidden",
-        collapsed ? "w-0 border-r-0" : "w-[280px]",
-        isTerminal ? "bg-[var(--card)] border-[var(--chat-surface-mid)]" : "bg-muted/30",
+        "flex h-full shrink-0 flex-col border-r transition-[width] duration-200 overflow-hidden",
+        collapsed ? "w-0 border-r-0" : "w-[230px]",
+        isTerminal ? "bg-card border-[var(--chat-surface-mid)]" : "rounded-lg border bg-card",
       )}
     >
       {/* New Chat button + collapse toggle */}
@@ -67,9 +68,9 @@ export function SessionSidebar({
           {isTerminal ? (
             <button
               onClick={onNewChat}
-              className="w-full bg-[var(--chat-accent)] text-white py-3 rounded-sm font-headline font-bold text-xs tracking-widest uppercase flex items-center justify-center gap-2 hover:bg-[var(--chat-accent-hover)] transition-all"
+              className="w-full bg-[var(--chat-accent)] text-primary-foreground py-3 rounded-sm font-medium text-[13px] flex items-center justify-center gap-2 hover:bg-[var(--chat-accent-hover)] transition-all"
             >
-              <Plus className="h-3.5 w-3.5" /> NEW CHAT
+              <Plus className="h-3.5 w-3.5" /> New chat
             </button>
           ) : (
             <Button
@@ -78,7 +79,7 @@ export function SessionSidebar({
               onClick={onNewChat}
             >
               <Plus className="h-4 w-4" />
-              New Chat
+              New chat
             </Button>
           )}
         </div>
@@ -315,19 +316,18 @@ function SessionItem({
           : cn(
               "rounded-lg",
               isActive
-                ? "bg-primary/10 border border-primary/20 shadow-soft"
-                : "hover:bg-card/50",
+                ? "bg-accent border border-primary/60 shadow-[inset_3px_0_hsl(var(--primary))]"
+                : "border border-transparent hover:border-primary/40 hover:bg-accent",
             ),
       )}
-      onClick={onSelect}
     >
-      <div className="min-w-0 flex-1">
+      <button type="button" className="min-w-0 flex-1 text-left" onClick={onSelect} aria-label={`Open conversation: ${session.title || "New chat"}`} aria-current={isActive ? "true" : undefined}>
         <div className="flex items-center gap-1.5">
           <p
             className={cn(
               "truncate font-medium",
               isTerminal
-                ? "text-[12px] tracking-wide uppercase"
+                ? "text-[13px]"
                 : "text-[13px] text-foreground",
             )}
           >
@@ -362,8 +362,8 @@ function SessionItem({
         >
           {new Date(session.updated_at).toLocaleDateString()}
         </p>
-      </div>
-      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-1">
+      </button>
+      <div className="flex items-center gap-0.5 opacity-70 group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0 ml-1">
         <button
           onClick={(e) => {
             e.stopPropagation();

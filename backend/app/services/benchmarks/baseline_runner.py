@@ -358,6 +358,7 @@ async def run_baseline(
                     actor_id=_BENCHMARK_ACTOR_ID,
                     correlation_id=_BENCHMARK_CORRELATION_ID,
                     db=db,
+                    perf_guard=False,  # the baseline is plain Claude + MCP; our query guards must not help it
                 )
             except Exception as exc:
                 tool_result_str = f'{{"error": "tool_execution_failed: {exc}"}}'

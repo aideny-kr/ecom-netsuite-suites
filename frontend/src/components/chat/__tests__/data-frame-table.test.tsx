@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 
 // --- Mock lucide-react (no real SVGs in jsdom) ---
 vi.mock("lucide-react", () => {
@@ -40,10 +40,12 @@ vi.mock("@/components/ui/table", () => ({
 }));
 
 // --- Mock hooks ---
+const exportToExcel = vi.fn();
+const exportFromQuery = vi.fn();
 vi.mock("@/hooks/use-excel-export", () => ({
   useExcelExport: () => ({
-    exportToExcel: vi.fn(),
-    exportFromQuery: vi.fn(),
+    exportToExcel,
+    exportFromQuery,
     isExporting: false,
   }),
 }));
@@ -82,12 +84,48 @@ function makeQueryData(overrides: Partial<DataTableData> = {}): DataTableData {
 }
 
 beforeEach(() => {
+  exportToExcel.mockReset();
+  exportFromQuery.mockReset();
   // jsdom doesn't implement clipboard or URL.createObjectURL
   Object.assign(navigator, {
     clipboard: { writeText: vi.fn() },
   });
   (URL as unknown as { createObjectURL: () => string }).createObjectURL = vi.fn(() => "blob:test");
   (URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = vi.fn();
+});
+
+describe("DataFrameTable downloads", () => {
+  it.each(["SELECT id FROM transaction", "Saved Search: customsearch_orders", "SELECT * FROM `project.orders`", "net_margin"])("exports received rows without rerunning %s", async (queryText) => {
+    const data = makeQueryData({ isMetric: queryText === "net_margin" });
+    render(<DataFrameTable data={data} queryText={queryText} />);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    fireEvent.click(screen.getByRole("button", {name: "CSV"}));
+    expect(click).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", {name: "Excel"}));
+    expect(exportToExcel).toHaveBeenCalledWith(expect.objectContaining({columns:data.columns, rows:data.rows}));
+    expect(exportFromQuery).not.toHaveBeenCalled();
+    click.mockRestore();
+  });
+
+  it("labels partial downloads and exposes explicit full-query errors", async () => {
+    exportFromQuery.mockRejectedValueOnce(new Error("No active NetSuite connection"));
+    render(<DataFrameTable data={makeQueryData({truncated:true,row_count:100})} queryText="SELECT id FROM transaction" />);
+    expect(screen.getByText(/1 loaded rows only/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", {name:"Excel (loaded rows)"}));
+    expect(exportToExcel).toHaveBeenCalledWith(expect.objectContaining({title:expect.stringContaining("loaded-rows")}));
+    expect(exportFromQuery).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Export full results"));
+    fireEvent.click(screen.getByRole("button", {name:"Re-run for full CSV"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("No active NetSuite connection");
+    expect(exportFromQuery).toHaveBeenCalledWith(expect.objectContaining({queryText:"SELECT id FROM transaction",format:"csv"}));
+  });
+
+  it("shows Excel failures instead of rejecting silently", async () => {
+    exportToExcel.mockRejectedValueOnce(new Error("Excel unavailable"));
+    render(<DataFrameTable data={makeQueryData()} />);
+    fireEvent.click(screen.getByRole("button", {name:"Excel"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Excel unavailable");
+  });
 });
 
 describe("DataFrameTable — metric table (isMetric: true)", () => {

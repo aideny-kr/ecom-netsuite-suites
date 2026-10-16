@@ -2,6 +2,7 @@ import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
+import { reportReadingFixture } from "@/lib/__fixtures__/report-presentation";
 
 const api = vi.hoisted(() => ({ getText: vi.fn(), put: vi.fn(), post: vi.fn() }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
@@ -98,6 +99,18 @@ it("revokes the object URL on unmount", async () => {
   await waitFor(() => expect(api.getText).toHaveBeenCalled());
   unmount();
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:test");
+});
+
+it("lets enhanced reports reflow at container width without scaling their text", async () => {
+  api.getText.mockResolvedValue(reportReadingFixture);
+  const { container } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+  act(() => capturedCallback?.([{ contentRect: { width: 320, height: 600 } }]));
+  const iframe = container.querySelector("iframe")!;
+  expect(iframe.style.width).toBe("100%");
+  expect(iframe.style.height).toBe("100%");
+  expect(iframe.style.transform).toBe("");
+  expect(iframe.getAttribute("sandbox")).toBe("");
 });
 
 it("revokes the previous blob and refetches when the displayed report changes (a switch)", async () => {

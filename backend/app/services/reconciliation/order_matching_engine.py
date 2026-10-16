@@ -154,6 +154,8 @@ class OrderMatchingEngine:
         """
         if len(charge_group) == 1 and len(deposit_group) == 1:
             charge, deposit = charge_group[0], deposit_group[0]
+            if deposit.record_type == "customerpayment" and charge.currency != deposit.currency:
+                return [], []
             variance, confidence, variance_type = self._variance_and_confidence(charge, deposit)
             return [
                 OrderMatchCandidate(
@@ -185,7 +187,12 @@ class OrderMatchingEngine:
             charges_by_amount.setdefault(c.amount, []).append(c)
 
         for amount, c_list in charges_by_amount.items():
-            d_list = [d for d in remaining_deposits if d.amount == amount]
+            d_list = [
+                d
+                for d in remaining_deposits
+                if d.amount == amount
+                and (d.record_type != "customerpayment" or {c.currency for c in c_list} == {d.currency})
+            ]
             if d_list and len(d_list) == len(c_list):
                 sorted_charges = sorted(c_list, key=lambda c: c.source_id)
                 sorted_deposits = sorted(d_list, key=lambda d: self._numeric_id_sort_key(d.netsuite_internal_id))
@@ -204,7 +211,12 @@ class OrderMatchingEngine:
         for c in remaining_charges:
             if not remaining_deposits:
                 break
-            chosen = min(remaining_deposits, key=lambda d, _c=c: self._nearest_deposit_sort_key(d, _c))
+            compatible = [
+                d for d in remaining_deposits if d.record_type != "customerpayment" or d.currency == c.currency
+            ]
+            if not compatible:
+                continue
+            chosen = min(compatible, key=lambda d, _c=c: self._nearest_deposit_sort_key(d, _c))
             remaining_deposits.remove(chosen)
             assigned.append((c, chosen, True))
 
@@ -283,4 +295,6 @@ class OrderMatchingEngine:
         """Tier 2: Fuzzy matching on amount + date + currency."""
         from app.services.reconciliation.order_fuzzy_matcher import fuzzy_match
 
-        return fuzzy_match(unmatched_charges, unmatched_deposits)
+        # Invoice application proof belongs only to its exact order. It must
+        # never clear another order by amount/date similarity.
+        return fuzzy_match(unmatched_charges, [d for d in unmatched_deposits if d.record_type != "customerpayment"])

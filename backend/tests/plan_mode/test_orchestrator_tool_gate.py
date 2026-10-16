@@ -151,7 +151,13 @@ def test_resume_turn_skips_clarify_augmentation():
     window = source[aug_idx : aug_idx + 600]
 
     assert "maybe_augment_for_plan_mode" in window, "Augmentation block must call maybe_augment_for_plan_mode."
-    assert "plan_mode_resume_source is None" in window or "not _plan_mode_resume_active" in window, (
+    # Since 2026-10-06 the resume check lives in plan_mode_should_fire (executed in
+    # tests/plan_mode/test_plan_mode_follow_up.py); the call site reads its result.
+    assert (
+        "plan_mode_resume_source is None" in window
+        or "not _plan_mode_resume_active" in window
+        or 'if _plan_mode_decision == "force"' in window
+    ), (
         "On resume turns the orchestrator must skip the clarify augmentation. "
         "Either gate is acceptable — `plan_mode_resume_source is None` for "
         "source-pick-only flows, or `not _plan_mode_resume_active` for the "

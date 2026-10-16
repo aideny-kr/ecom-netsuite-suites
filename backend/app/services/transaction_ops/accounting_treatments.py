@@ -36,6 +36,9 @@ def treatment_batches(members):
             "tax_item_id": (proposal.get("tax_item") or {}).get("id"),
             "tax_agency": proposal.get("tax_agency"),
         }
+        if proposal.get("skill"):
+            # Only when present, so a card without a skill keeps its treatment id.
+            treatment["skill"] = proposal["skill"]
         key = business_digest(treatment)
         if key not in batches:
             batches[key] = {

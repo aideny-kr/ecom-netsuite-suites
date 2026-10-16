@@ -36,7 +36,7 @@ describe("Suite Studio WebMCP tools", () => {
     expect(paths).toContain("/tables/orders");
     expect(paths).not.toContain("/workspace");
     expect(paths).not.toContain("/reconciliation");
-    expect(paths).toContain("/memory");
+    expect(paths).toContain("/settings");
     expect(result).not.toHaveProperty("email");
   });
 
@@ -48,8 +48,8 @@ describe("Suite Studio WebMCP tools", () => {
   );
 
   it("navigates with the router and reports a request rather than claiming arrival", async () => {
-    const result = JSON.parse(await call("navigate", { path: "/connections" }));
-    expect(state.navigate).toHaveBeenCalledWith("/connections");
+    const result = JSON.parse(await call("navigate", { path: "/settings" }));
+    expect(state.navigate).toHaveBeenCalledWith("/settings");
     expect(result.status).toBe("navigation_requested");
     expect(JSON.parse(await call("get_page_context")).pathname).toBe("/dashboard");
   });
@@ -97,7 +97,7 @@ describe("Suite Studio WebMCP tools", () => {
     state.user = null;
     await expect(call("get_page_context")).rejects.toThrow("Sign in");
     controller.abort();
-    await expect(call("navigate", { path: "/connections" })).rejects.toThrow("Sign in");
+    await expect(call("navigate", { path: "/settings" })).rejects.toThrow("Sign in");
     expect(get).not.toHaveBeenCalled();
   });
 

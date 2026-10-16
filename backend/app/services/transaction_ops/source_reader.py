@@ -206,6 +206,7 @@ async def _direct_read(db, tenant_id, connection_id, relative_uri, *, client):
     from app.services.http_connector_service import ConnectorReadError, read_json
 
     connection, credentials = await direct_connection(db, tenant_id, connection_id)
+    fingerprint = hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest()
     client = await _direct_client(tenant_id, connection, credentials, client)
     try:
         body = await read_json(credentials, relative_uri, client=client)
@@ -216,7 +217,7 @@ async def _direct_read(db, tenant_id, connection_id, relative_uri, *, client):
         "source": "framework",
         "source_transport": "solidus_direct",
         "connection_id": str(connection.id),
-        "_connection_fingerprint": hashlib.sha256(connection.encrypted_credentials.encode()).hexdigest(),
+        "_connection_fingerprint": fingerprint,
         "read_at": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -359,6 +359,10 @@ def _suppress_metric_value_for_llm(result_str: str) -> str:
         parsed = json.loads(result_str)
     except (json.JSONDecodeError, TypeError):
         return result_str
+    # A result card is for the user; the model gets only its note (no rows, no totals),
+    # on every path -- streaming, non-streaming and interceptor-less runners alike.
+    if isinstance(parsed, dict) and isinstance(parsed.get("result_card"), dict):
+        return json.dumps(parsed.get("llm") or {"card_shown": True})
     if is_suppressed_metric_payload(parsed):
         if parsed.get("source_kind") == "transaction_ops":
             from app.services.transaction_ops.chat_evidence import condense_status
@@ -2384,6 +2388,7 @@ class BaseSpecialistAgent(abc.ABC):
                         "transaction_ops_accounting_evidence",
                         "transaction_ops_accounting_group",
                         "transaction_ops_propose_credit_reallocation",
+                        "transaction_ops_propose_credit",
                     }:
                         self._transaction_workflow = True
                     # Every tool that can leave a server-verified candidate is followed by the
@@ -2394,6 +2399,7 @@ class BaseSpecialistAgent(abc.ABC):
                             "transaction_ops_accounting_evidence",
                             "transaction_ops_accounting_group",
                             "transaction_ops_propose_credit_reallocation",
+                            "transaction_ops_propose_credit",
                         }
                         and not _had_error
                     ):

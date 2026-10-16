@@ -211,3 +211,18 @@ it("ignores a reconcile response after the user switches sources", async () => {
   );
   expect(state.push).not.toHaveBeenCalled();
 });
+
+it("dismisses the portaled order drawer when Records becomes inactive and retains filters", async () => {
+  const client = new QueryClient({defaultOptions:{queries:{retry:false}}});
+  const ui = (active: boolean) => <QueryClientProvider client={client}><OrdersPage active={active} /></QueryClientProvider>;
+  const {rerender} = render(ui(true));
+  fireEvent.change(screen.getByRole("combobox", {name:"Currency"}), {target:{value:"USD"}});
+  fireEvent.click(screen.getByRole("button", {name:"Open order R100120031"}));
+  expect(screen.getByRole("dialog")).toBeVisible();
+  rerender(ui(false));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  rerender(ui(true));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", {name:"Currency"})).toHaveValue("USD");
+  expect(apiClient.post).not.toHaveBeenCalled();
+});

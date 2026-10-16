@@ -1,0 +1,50 @@
+import { describe, expect, it } from "vitest";
+import { extractFollowups, splitLead, stripRanQueryLabels } from "../answer-layout";
+
+describe("answer layout helpers", () => {
+  it("lifts the followups fence out of the answer", () => {
+    const { text, followups } = extractFollowups(
+      "Yucca orders shipped to many countries.\n\n```followups\n- Compare with Metabase\nBreak down by SKU\n```\n",
+    );
+    expect(text).toBe("Yucca orders shipped to many countries.");
+    expect(followups).toEqual(["Compare with Metabase", "Break down by SKU"]);
+  });
+
+  it("lifts the server's source choices out of the source question", () => {
+    // The server appends the connected sources it is asking about (2026-10-01).
+    const { text, followups, sources } = extractFollowups(
+      "Which data source should I use for this question: BigQuery, Metabase or NetSuite?\n\n```sources\nBigQuery\nMetabase\nNetSuite\n```",
+    );
+    expect(text).toBe("Which data source should I use for this question: BigQuery, Metabase or NetSuite?");
+    expect(sources).toEqual(["BigQuery", "Metabase", "NetSuite"]);
+    expect(followups).toEqual([]);
+  });
+
+  it("offers every source the server lists, beyond the follow-up limit of four", () => {
+    // Packet review on #378 (R1): five connected sources must give five buttons.
+    const { sources } = extractFollowups(
+      "Which data source should I use?\n\n```sources\nBigQuery\nMetabase\nNetSuite\nShopify\nStripe\n```",
+    );
+    expect(sources).toEqual(["BigQuery", "Metabase", "NetSuite", "Shopify", "Stripe"]);
+  });
+
+  it("drops the 'Query I ran' label that only introduces the SQL block", () => {
+    // Verbatim shape from the Yucca thread (2026-10-01).
+    const text = "Yes. NetSuite shows sales orders.\n\n**Query I ran (SuiteQL):**\n```sql\nSELECT 1\n```\n\n**Caveats:**\n- x";
+    const stripped = stripRanQueryLabels(text);
+    expect(stripped).not.toContain("Query I ran");
+    expect(stripped).toContain("```sql\nSELECT 1\n```");
+    expect(stripped).toContain("**Caveats:**");
+    expect(stripRanQueryLabels("**Queries run (SuiteQL):**\n```sql\nSELECT 1\n```")).toBe("```sql\nSELECT 1\n```");
+  });
+
+  it("keeps a label that is not followed by SQL", () => {
+    expect(stripRanQueryLabels("**Query I ran:** none needed.")).toBe("**Query I ran:** none needed.");
+  });
+
+  it("splits the opening paragraph from the rest, but never a table or list", () => {
+    expect(splitLead("Lead sentence.\n\nRest of it.")).toEqual({ lead: "Lead sentence.", rest: "Rest of it." });
+    expect(splitLead("| a | b |\n| - | - |")).toEqual({ lead: "", rest: "| a | b |\n| - | - |" });
+    expect(splitLead("- one\n- two")).toEqual({ lead: "", rest: "- one\n- two" });
+  });
+});

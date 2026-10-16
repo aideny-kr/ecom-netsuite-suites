@@ -197,3 +197,13 @@ async def test_failed_partial_commit_prevents_batch_reservation_or_remote_read(a
         await adapter.refund(REFS[0], first, before_fetch=before)
     assert adapter.reserve.await_count == order_reservations
     staged.bulk.read_refunds.assert_not_awaited()
+
+
+async def test_prefetch_only_prepared_scope_does_not_send_remaining_candidates(adapter):
+    foreign = "R111111111"
+    adapter.progress["pending_refs"] = [REFS[0], foreign, REFS[1]]
+    await adapter.prefetch_orders(REFS[0], references=REFS)
+    assert staged.bulk.read_orders.call_args.args[5] == REFS
+    adapter.progress["pending_refs"] = [foreign]
+    assert await adapter.order(foreign) is None
+    assert staged.bulk.read_orders.await_count == 1

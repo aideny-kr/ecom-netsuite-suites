@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { isTransactionPath } from "@/components/transactions/navigation";
 import { useState, useEffect } from "react";
 import { useTheme } from "next-themes";
 import {
+  Orbit,
   LayoutDashboard,
   Plug,
   ScrollText,
@@ -29,7 +31,7 @@ import {
   CalendarClock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { NAV_ITEMS, CANONICAL_TABLES } from "@/lib/constants";
+import { NAV_ITEMS } from "@/lib/constants";
 import { useAuth } from "@/providers/auth-provider";
 import { useBranding } from "@/providers/branding-provider";
 import { useFeatures } from "@/hooks/use-features";
@@ -43,6 +45,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 const iconMap = {
+  Table2,
+  Orbit,
   LayoutDashboard,
   Plug,
   ScrollText,
@@ -82,17 +86,22 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
   const { brandName, logoUrl } = useBranding();
   const { data: features } = useFeatures();
   const { hasPermission } = usePermissions();
-  const { theme, setTheme, resolvedTheme } = useTheme();
+  const { setTheme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
+  const utilityPaths = new Set(["/queries", "/audit"]);
+  const visibleItems = NAV_ITEMS.filter((item) => {
+    return !item.featureFlag || features?.[item.featureFlag] !== false;
+  });
+
   return (
-    <aside className={cn(
+    <aside aria-label="Workspace sidebar" style={{ display: collapsed ? "none" : undefined }} className={cn(
       "flex h-full shrink-0 flex-col bg-[hsl(var(--sidebar-bg))] text-[hsl(var(--sidebar-foreground))] transition-[width] duration-200 overflow-hidden",
-      collapsed ? "w-0" : "w-[260px]"
+      collapsed ? "w-0" : "w-[218px]"
     )}>
       {/* Brand */}
       <div className="border-b border-[hsl(var(--sidebar-border))] px-5 py-5">
@@ -100,14 +109,14 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
           {logoUrl ? (
             <img src={logoUrl} alt={brandName} className="h-8 w-8 rounded-lg object-contain" />
           ) : (
-            <div className="flex h-8 w-8 items-center justify-center rounded-sm bg-[hsl(var(--sidebar-active))]">
-              <Zap className="h-4 w-4 text-black" />
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-[hsl(var(--sidebar-border))] bg-transparent">
+              <Orbit className="h-5 w-5 text-[hsl(var(--sidebar-active))]" />
             </div>
           )}
           <div>
-            <h1 className="text-[15px] font-bold tracking-tighter text-[hsl(var(--sidebar-active))]">
+            <p className="text-[15px] font-semibold tracking-tight text-white">
               {brandName}
-            </h1>
+            </p>
           </div>
           {onToggle && (
             <button
@@ -154,29 +163,29 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-0.5 overflow-auto px-3 py-4 scrollbar-thin">
+      <nav aria-label="Main navigation" className="flex-1 space-y-0.5 overflow-auto px-3 py-4 scrollbar-thin">
         <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-[hsl(var(--sidebar-muted))]">
-          Menu
+          Workspace
         </p>
-        {NAV_ITEMS.filter((item) => {
-          if (item.href === "/transaction-operations") return features?.celigo === true && features?.reconciliation === true && hasPermission("recon.run");
-          if (!item.featureFlag) return true;
-          return features?.[item.featureFlag] !== false;
-        }).map((item) => {
+        {visibleItems.filter(item => !utilityPaths.has(item.href) && item.href !== "/settings").map((item) => {
           const Icon = iconMap[item.icon];
-          const isActive = pathname === item.href || (item.href === "/transaction-operations" && pathname.startsWith(`${item.href}/`));
+          const isActive = item.href === "/transactions" ? isTransactionPath(pathname) : pathname === item.href || pathname.startsWith(`${item.href}/`);
           return (
             <Link
               key={item.href}
               href={item.href}
+              onClick={() => {
+                if (!collapsed && window.matchMedia("(max-width: 767px)").matches) onToggle?.();
+              }}
+              aria-current={isActive ? "page" : undefined}
               className={cn(
-                "group flex items-center gap-3 px-4 py-2.5 text-[13px] font-medium tracking-wide uppercase transition-all duration-150",
+                "group flex items-center gap-3 rounded-lg border-l-2 border-transparent px-3 py-2.5 text-[13px] font-medium transition-colors duration-150",
                 isActive
-                  ? "bg-[hsl(var(--sidebar-hover))] text-[hsl(var(--sidebar-active))] border-l-4 border-[hsl(var(--sidebar-active))]"
-                  : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))/0.5] hover:text-[hsl(var(--sidebar-active))/0.7]",
+                  ? "bg-[hsl(var(--sidebar-hover))] text-[hsl(var(--sidebar-active))] border-l-2 border-[hsl(var(--sidebar-active))]"
+                  : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))] hover:text-[hsl(var(--sidebar-active))]",
               )}
             >
-              <Icon className={cn("h-4 w-4", isActive ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))/0.7]")} />
+              <Icon className={cn("h-4 w-4", isActive ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))]")} />
               {item.label}
             </Link>
           );
@@ -196,13 +205,13 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
                   key={agent.agent_id}
                   onClick={() => handleSelectAgent(agent.agent_id)}
                   className={cn(
-                    "group flex w-full items-center gap-3 px-4 py-2.5 text-[13px] font-medium tracking-wide uppercase transition-all duration-150",
+                    "group flex w-full items-center gap-3 px-4 py-2.5 text-[13px] font-medium transition-colors duration-150",
                     isActive
-                      ? "bg-[hsl(var(--sidebar-hover))] text-[hsl(var(--sidebar-active))] border-l-4 border-[hsl(var(--sidebar-active))]"
-                      : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))/0.5] hover:text-[hsl(var(--sidebar-active))/0.7]",
+                      ? "bg-[hsl(var(--sidebar-hover))] text-[hsl(var(--sidebar-active))] border-l-2 border-[hsl(var(--sidebar-active))]"
+                      : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))] hover:text-[hsl(var(--sidebar-active))]",
                   )}
                 >
-                  <AgentIcon className={cn("h-4 w-4 shrink-0", isActive ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))/0.7]")} />
+                  <AgentIcon className={cn("h-4 w-4 shrink-0", isActive ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))]")} />
                   <span className="truncate">{agent.display_name}</span>
                 </button>
               );
@@ -210,29 +219,16 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
           </div>
         )}
 
-        <div className="pt-4">
-          <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-[hsl(var(--sidebar-muted))]">
-            Transactions
-          </p>
-          <div className="space-y-0.5">
-            {CANONICAL_TABLES.map((table) => {
-              const href = `/tables/${table.name}`;
-              const isActive = pathname === href;
-              return (
-                <Link key={table.name} href={href} className={cn(
-                  "flex items-center gap-3 px-4 py-2 text-[13px] transition-colors",
-                  isActive ? "bg-[hsl(var(--sidebar-hover))] font-medium text-[hsl(var(--sidebar-active))]"
-                    : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))]",
-                )}>
-                  <Table2 className="h-4 w-4 text-[hsl(var(--sidebar-muted))]" />
-                  {table.label}
-                </Link>
-              );
-            })}
-          </div>
-        </div>
+        <details className="mt-5 border-t border-[hsl(var(--sidebar-border))] pt-3" open={utilityPaths.has(pathname)}>
+          <summary className="cursor-pointer rounded-md px-3 py-2 text-xs text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))]">Utilities</summary>
+          <div className="my-2 space-y-1">{visibleItems.filter(item => utilityPaths.has(item.href)).map(item => {
+            const Icon = iconMap[item.icon];
+            return <Link key={item.href} href={item.href} aria-current={pathname === item.href ? "page" : undefined} className="flex items-center gap-3 rounded-md px-4 py-2 text-xs hover:bg-[hsl(var(--sidebar-hover))] hover:text-[hsl(var(--sidebar-active))]"><Icon className="h-4 w-4" />{item.label}</Link>;
+          })}</div>
+        </details>
       </nav>
 
+      <Link href="/settings" aria-current={pathname === "/settings" || pathname === "/connections" ? "page" : undefined} className="mx-3 mb-3 flex items-center gap-3 rounded-md px-3 py-2.5 text-[13px] hover:bg-[hsl(var(--sidebar-hover))] hover:text-[hsl(var(--sidebar-active))]"><Settings className="h-4 w-4" />Settings</Link>
       {/* User / Sign Out */}
       <div className="border-t border-[hsl(var(--sidebar-border))] px-3 py-3">
         {user && (

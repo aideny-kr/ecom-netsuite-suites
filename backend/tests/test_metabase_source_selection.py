@@ -346,3 +346,20 @@ async def test_clarification_card_accepts_the_actual_custom_metabase_connector()
     )
     assert isinstance(result, InterceptResult)
     assert result.structured_output["options"][0]["source"] == "metabase"
+
+
+def test_the_source_question_carries_its_choices_as_buttons():
+    # Pick buttons (2026-10-01): the UI renders the server's own source list, never one
+    # parsed from prose. The sentence itself is unchanged.
+    result = source_selection_question(
+        task="How many Yucca orders did we sell?", tool_definitions=inventory(), context_need="data"
+    )
+    sentence, _, fence = result.partition("\n\n")
+    assert sentence == "Which data source should I use for this question: BigQuery, Metabase or NetSuite?"
+    assert fence == "```sources\nBigQuery\nMetabase\nNetSuite\n```"
+
+
+def test_no_sources_means_no_buttons():
+    from app.services.chat.source_selection import _source_question
+
+    assert "```sources" not in _source_question({})

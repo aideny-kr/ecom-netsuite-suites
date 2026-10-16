@@ -189,6 +189,28 @@ def _replica_page_progress(page, progress, params, config):
     }
 
 
+def _append_replica_page_progress(page, progress, params, config):
+    """Validate a bounded page before extending a durable owned-candidate buffer."""
+    pending = list(progress["pending_refs"])
+    if not 0 < len(pending) < 10 or len(set(pending)) != len(pending):
+        raise ScanChangedError("invalid_source_buffer")
+    next_progress = deepcopy(progress)
+    _replica_page_progress(page, next_progress, params, config)
+    new_refs = next_progress["pending_refs"]
+    if len(set(new_refs)) != len(new_refs) or set(pending) & set(new_refs):
+        raise ScanChangedError("duplicate_source_reference")
+    next_progress["pending_refs"] = pending + new_refs  # At most9+20; never financial evidence.
+    next_progress["unscoped_replica_refs"] = [
+        ref for ref in progress.get("unscoped_replica_refs", []) if ref in pending
+    ] + next_progress["unscoped_replica_refs"]
+    next_progress["pending_source_versions"] = {
+        ref: version for ref, version in progress.get("pending_source_versions", {}).items() if ref in pending
+    } | next_progress["pending_source_versions"]
+    next_progress["source_owned_fill_pages"] = progress.get("source_owned_fill_pages", 0) + 1
+    progress.clear()
+    progress.update(next_progress)
+
+
 def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
     if len(source_evidence.get("orders") or []) == 1 and payment_failed(source_evidence["orders"][0]):
         return exclusion_report(source_evidence)
@@ -395,6 +417,9 @@ async def run_investigation(
     )
     deadline_at = run.deadline_at
     progress = _initial_progress(run)
+    from app.services.transaction_ops.period_membership import Membership
+
+    membership = Membership(db, tenant_id, run, progress, clock)
     from app.services.transaction_ops import cached_review
     from app.services.transaction_ops.run_timing import RunTiming
 
@@ -411,9 +436,14 @@ async def run_investigation(
     finding_batch = []
     batch_baseline = None
     staged_source = {}
+    scope_checked = set()
+    scope_owned = set()
+    scope_batch_disabled = False
+    scope_probe_preferred = None
 
     async def flush_findings():
         nonlocal batch_baseline
+        await membership.flush()
         if not finding_batch:
             return
         progress["finding_batch_orders"] = progress.get("finding_batch_orders", 0) + len(finding_batch)
@@ -436,6 +466,9 @@ async def run_investigation(
         if batch_baseline is not None:
             progress.clear()
             progress.update(batch_baseline)
+        # These events belonged to the rolled-back checkpoint, not a completed
+        # discovery page. Never flush them from a terminal/lease-loss handler.
+        membership.unsupported()
         finding_batch.clear()
         batch_baseline = None
 
@@ -469,9 +502,20 @@ async def run_investigation(
             db, tenant_id, run_id, ProgressUpdate(progress_json=progress), lease_token=token, now=clock()
         )
 
-    async def finish(reason):
+    async def finish(reason, *, failure=None):
         await flush_findings()
-        await state.finish_run(db, tenant_id, run_id, reason, lease_token=token, now=clock())
+        if reason == "done" and membership.active:
+            await membership.seal()
+            await save()
+        await state.finish_run(
+            db,
+            tenant_id,
+            run_id,
+            reason,
+            lease_token=token,
+            now=clock(),
+            **({"failure": failure} if failure is not None else {}),
+        )
         return {
             "run_id": str(run_id),
             "status": "finished",
@@ -481,7 +525,7 @@ async def run_investigation(
             "needs_review": progress["needs_review"],
         }
 
-    async def finish_after_failure():
+    async def finish_after_failure(exc):
         # A bounded provider read also performs local DB work. Cancelling that
         # work can invalidate its transaction. Discard it before finalization;
         # committed holds/checkpoints remain durable and finish_run still fences
@@ -490,7 +534,15 @@ async def run_investigation(
             await db.rollback()
         discard_findings()
         reason = "budget" if clock() >= deadline_at else "error"
-        return await finish(reason)
+        from app.services.transaction_ops.collection_recovery import failure_diagnostic
+
+        failure = failure_diagnostic(
+            exc,
+            run_id=run_id,
+            now=clock(),
+            stage=timing.failure_stage if timing.failure_exception is exc else "collection",
+        )
+        return await finish(reason, failure=failure)
 
     async def finish_stalled(**details):
         # This is also called from exception handlers: a failed buffer fence
@@ -603,10 +655,52 @@ async def run_investigation(
             await settle(meter)
             return result
 
+    def scope_first():
+        # Strategy only: both paths still verify exact source scope before a
+        # financial comparison. Prior authoritative work avoids adding header
+        # reads or removing provider overlap from mostly in-scope profiles.
+        if mapping.business_entity_subsidiaries.get("legacy") == config["subsidiary_id"]:
+            return False
+        outside = progress.get("outside_scope", 0)
+        owned = progress.get("processed", 0) + progress.get("excluded", 0)
+        if outside + owned >= 10:
+            return outside > owned
+        return scope_probe_preferred is not False  # One bounded cold-start probe.
+
+    async def replica_page(*, append=False):
+        if not await reserve(6):
+            return False
+        page = await bounded_read(
+            "source_page",
+            lambda: metabase_reader.read_order_page(
+                db,
+                tenant_id,
+                mapping.metabase_replica,
+                _time(run.params_json["window_start"]),
+                _time(run.params_json["window_end"]),
+                after_id=progress["last_source_id"],
+                page_size=20,
+                basis=run.params_json.get("window_basis", "updated_at"),
+                entity_keys=tuple(
+                    key
+                    for key, subsidiary in mapping.business_entity_subsidiaries.items()
+                    if subsidiary == config["subsidiary_id"]
+                ),
+                now=clock(),
+            ),
+            retry_calls=6,
+        )
+        update = _append_replica_page_progress if append else _replica_page_progress
+        update(page, progress, run.params_json, config)
+        membership.source(page, progress["pending_refs"])
+        await save()
+        return True
+
     async def prepare_concurrently(refs, workers):
         from app.services.transaction_ops import source_preparation
 
         connection_id = direct_source["source_connection_id"]
+        staged.prepared_references = None
         cached = {}
         if progress.get("phase") == "orders":
             with timing.measure("source_snapshot_batch"):
@@ -653,7 +747,16 @@ async def run_investigation(
         # have separate sessions and cannot mutate the run, its budget or cursor.
         # Each provider read retains its own paid timeout/retry policy. Do not
         # time out the join: target evidence and checkpoint commits must finish.
-        (results, peak), _ = await source_preparation.joined(fetch(), staged.prefetch_orders(refs[0]))
+        ambiguous_scope = (
+            scope_first()
+            and progress.get("phase") == "orders"
+            and bool(set(refs).intersection(progress.get("unscoped_replica_refs", [])))
+        )
+        if ambiguous_scope:
+            results, peak = await fetch()
+        else:
+            (results, peak), _ = await source_preparation.joined(fetch(), staged.prefetch_orders(refs[0]))
+        eligible = []
         progress["source_prepare_concurrency_peak"] = max(progress.get("source_prepare_concurrency_peak", 0), peak)
         progress["pipeline_prepare_batches"] = progress.get("pipeline_prepare_batches", 0) + 1
         for ref in refs:
@@ -683,6 +786,15 @@ async def run_investigation(
                 )
                 progress[counter] = progress.get(counter, 0) + 1
             staged_source[ref] = (reused, observed["read_at"])
+            orders = observed.get("orders") or []
+            if (
+                len(orders) == 1
+                and orders[0].get("number") == ref
+                and mapping.business_entity_subsidiaries.get(source_entity_key(orders[0])) == config["subsidiary_id"]
+            ):
+                eligible.append(ref)
+        if ambiguous_scope and eligible:
+            await staged.prefetch_orders(eligible[0], references=eligible)
         return True
 
     try:
@@ -860,6 +972,7 @@ async def run_investigation(
                                 progress["outside_scope"] = progress.get("outside_scope", 0) + 1
                             else:
                                 references.append(row["number"])
+                        membership.refunds(refund_page, references)
                         progress["pending_refs"] = await state.unseen_references(db, tenant_id, run_id, references)
                         progress["refund_scan_count"] = progress.get("refund_scan_count", 0) + len(rows)
                         progress["phase"] = "refunds"
@@ -901,6 +1014,11 @@ async def run_investigation(
                             continue
 
                         async def dependency_page(stream, after):
+                            membership_windows = (
+                                membership.windows()
+                                if membership.active and stream in {"transaction_lines", "transaction_links"}
+                                else ()
+                            )
                             if not await reserve(2, hold=True):
                                 raise ReadBudgetExhaustedError
                             return await metered_read(
@@ -917,6 +1035,11 @@ async def run_investigation(
                                     _time(run.params_json["window_end"]),
                                     after=after,
                                     page_size=progress.get("dependency_page_size", 250) if dependency_staging else 20,
+                                    **(
+                                        {"membership_windows": membership_windows}
+                                        if membership_windows and _dependency_page_reader is None
+                                        else {}
+                                    ),
                                 ),
                                 held=2,
                                 data_calls=1,
@@ -951,6 +1074,11 @@ async def run_investigation(
                                 run.config_id,
                                 keys,
                                 **options,
+                                **(
+                                    {"include_membership": True}
+                                    if membership.active and _dependency_index is None
+                                    else {}
+                                ),
                             )
 
                         async def unobserved(refs, **options):
@@ -963,36 +1091,15 @@ async def run_investigation(
                             indexed_owners=indexed_owners,
                             unobserved=unobserved,
                             staging=dependency_staging,
+                            membership=membership,
                         )
                         progress["dependency_step_count"] = progress.get("dependency_step_count", 0) + 1
                         await save()
                         continue
                     return await finish("done")
                 if mapping.metabase_replica:
-                    if not await reserve(6):
+                    if not await replica_page():
                         return await finish("budget")
-                    page = await bounded_read(
-                        "source_page",
-                        lambda: metabase_reader.read_order_page(
-                            db,
-                            tenant_id,
-                            mapping.metabase_replica,
-                            _time(run.params_json["window_start"]),
-                            _time(run.params_json["window_end"]),
-                            after_id=progress["last_source_id"],
-                            page_size=20,
-                            basis=run.params_json.get("window_basis", "updated_at"),
-                            entity_keys=tuple(
-                                key
-                                for key, subsidiary in mapping.business_entity_subsidiaries.items()
-                                if subsidiary == config["subsidiary_id"]
-                            ),
-                            now=clock(),
-                        ),
-                        retry_calls=6,
-                    )
-                    _replica_page_progress(page, progress, run.params_json, config)
-                    await save()
                     continue
                 keyset = progress.get("scan_mode") == "keyset"
                 if progress["next_page"] is not None and not keyset:
@@ -1065,6 +1172,26 @@ async def run_investigation(
             )
             if chunk_path and reference not in staged_source:
                 await flush_findings()
+                pending = progress["pending_refs"]
+                unknown = set(progress.get("unscoped_replica_refs", []))
+                if (
+                    mapping.metabase_replica
+                    and progress.get("phase") == "orders"
+                    and not progress["scan_complete"]
+                    and not cached_review.saved(run)
+                    and not staged_source
+                    and scope_first()
+                    and (progress.get("outside_scope", 0) >= 10 or scope_probe_preferred is True)
+                    and not scope_batch_disabled
+                    and 0 < len(pending) < 10
+                    and all(ref in scope_owned or ref not in unknown for ref in pending)
+                    and run.max_orders - run.orders_used >= len(pending) + 20
+                    and run.max_api_calls - run.api_calls_used - (run.api_calls_held or 0)
+                    >= 97 + 2 * (len(pending) + 20)
+                ):
+                    if not await replica_page(append=True):
+                        return await finish("budget")
+                    continue
                 count = min(10, len(progress["pending_refs"]), run.max_orders - run.orders_used)
                 if cached_review.saved(run):
                     count = min(count, saved_cache.fresh_prefix_size(progress["pending_refs"]))
@@ -1074,6 +1201,76 @@ async def run_investigation(
                 )
                 if count > 1:
                     refs = progress["pending_refs"][:count]
+                    # An authenticated list header proves entity routing only.
+                    # Reject foreign replica candidates before paying for their
+                    # full detail/snapshot/NetSuite preparation. Unknown rows
+                    # retain the exact existing individual-read fallback.
+                    if scope_first() and not scope_batch_disabled and progress.get("phase") == "orders":
+                        unknown = set(progress.get("unscoped_replica_refs", []))
+                        # Retained owned candidates must not shrink routing
+                        # batches to one unknown row. The entire buffer is
+                        # bounded29; this paid header read remains max10.
+                        candidates = progress["pending_refs"] if progress.get("source_owned_fill_pages") else refs
+                        scope_refs = [ref for ref in candidates if ref in unknown and ref not in scope_checked][:count]
+                        if scope_refs:
+                            from app.services.transaction_ops import source_scope
+
+                            if not await reserve(2):
+                                return await finish("budget")
+
+                            async def read_scope():
+                                nonlocal scope_batch_disabled
+                                try:
+                                    return await source_scope.read_order_scopes(
+                                        db,
+                                        tenant_id,
+                                        direct_source["source_connection_id"],
+                                        scope_refs,
+                                        minimum_versions={
+                                            ref: _time(progress.get("pending_source_versions", {}).get(ref))
+                                            for ref in scope_refs
+                                        },
+                                    )
+                                except SourceReadError as error:
+                                    if error.code in source_scope.AUTHORIZATION_ERRORS:
+                                        raise
+                                    # This optional read must not make the engine
+                                    # depend on the list endpoint's availability.
+                                    # Existing individual reads retain their paid
+                                    # recovery policy; no header retry consumes it.
+                                    scope_batch_disabled = True
+                                    progress["source_scope_read_fallbacks"] = (
+                                        progress.get("source_scope_read_fallbacks", 0) + 1
+                                    )
+                                    return {}
+
+                            scopes = await bounded_read("source_scope_batch", read_scope, retry_calls=2)
+                            if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
+                                raise FeatureRevokedError
+                            foreign = {
+                                ref
+                                for ref, entity in scopes.items()
+                                if mapping.business_entity_subsidiaries.get(entity) != config["subsidiary_id"]
+                            }
+                            if scopes:
+                                scope_probe_preferred = len(foreign) * 2 > len(scopes)
+                            if foreign and not await reserve(0, len(foreign)):
+                                return await finish("budget")
+                            scope_checked.update(scope_refs)
+                            scope_owned.update(set(scopes) - foreign)
+                            progress["source_scope_batches"] = progress.get("source_scope_batches", 0) + 1
+                            progress["source_scope_candidates"] = progress.get("source_scope_candidates", 0) + len(
+                                scope_refs
+                            )
+                            progress["source_scope_fallbacks"] = progress.get("source_scope_fallbacks", 0) + sum(
+                                ref not in scopes for ref in scope_refs
+                            )
+                            progress["source_scope_rejected"] = progress.get("source_scope_rejected", 0) + len(foreign)
+                            progress["outside_scope"] = progress.get("outside_scope", 0) + len(foreign)
+                            progress["pending_refs"] = [ref for ref in progress["pending_refs"] if ref not in foreign]
+                            await save()
+                            if foreign:
+                                continue
                     if not await reserve(0, count):
                         return await finish("budget")
                     from app.services.transaction_ops import source_preparation
@@ -1084,6 +1281,8 @@ async def run_investigation(
                         if not await prepare_concurrently(refs, workers):
                             return await finish("budget")
                     else:
+                        staged.prepared_references = None
+                        prepared_scope = []
                         for ref in refs:
                             if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
                                 return await finish("stall")
@@ -1125,6 +1324,20 @@ async def run_investigation(
                                         db, tenant_id, direct_source["source_connection_id"], ref, observed, now=clock()
                                     )
                             staged_source[ref] = (reused, observed["read_at"])
+                            orders = observed.get("orders") or []
+                            if (
+                                len(orders) == 1
+                                and orders[0].get("number") == ref
+                                and mapping.business_entity_subsidiaries.get(source_entity_key(orders[0]))
+                                == config["subsidiary_id"]
+                            ):
+                                prepared_scope.append(ref)
+                        if (
+                            scope_first()
+                            and progress.get("phase") == "orders"
+                            and set(refs).intersection(progress.get("unscoped_replica_refs", []))
+                        ):
+                            staged.prepared_references = set(prepared_scope)
                     progress["source_staged_groups"] = progress.get("source_staged_groups", 0) + 1
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
             can_validate = snapshot_floor is not None
@@ -1538,8 +1751,8 @@ async def run_investigation(
         return await finish_stalled(reason="source_subsidiary_unproven")
     except ScanChangedError:
         return await finish_stalled(restart_scan=True)
-    except TimeoutError:
-        return await finish_after_failure()
+    except TimeoutError as exc:
+        return await finish_after_failure(exc)
     except state_service.StateError as exc:
         if exc.code == "batch_disabled":
             await db.rollback()
@@ -1548,9 +1761,9 @@ async def run_investigation(
         if exc.code == "run_lease_lost":
             return await finish_lost_lease()
         raise
-    except Exception:
+    except Exception as exc:
         # Provider helpers use safe error codes, but unexpected library/DB
         # exceptions may carry SQL or bodies. Never persist/return their text.
-        return await finish_after_failure()
+        return await finish_after_failure(exc)
     finally:
         await transport.aclose()

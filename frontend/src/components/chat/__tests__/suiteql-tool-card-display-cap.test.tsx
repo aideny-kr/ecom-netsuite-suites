@@ -109,3 +109,29 @@ describe("SuiteQLToolCard CSV export routing", () => {
     expect(exportFromQueryMock.mock.calls[0][0]).toMatchObject({ format: "csv" });
   });
 });
+
+it("shows full-export failures and can export the loaded rows without rerunning the query", async () => {
+  exportFromQueryMock.mockRejectedValueOnce(new Error("No active NetSuite connection. Connect your NetSuite account first."));
+  render(<SuiteQLToolCard step={buildStep(100, {truncated:true})} />);
+  fireEvent.click(screen.getByRole("button", {name:"Export Excel"}));
+  expect(await screen.findByRole("alert")).toHaveTextContent("No active NetSuite connection");
+  expect(screen.getByText(/100 rows already loaded.*partial result/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", {name:"Download loaded rows as Excel"}));
+  expect(exportToExcelMock).toHaveBeenCalledWith(expect.objectContaining({
+    columns:["id","name","val"], rows:expect.any(Array), title:expect.stringContaining("loaded-rows"),
+  }));
+  expect(exportToExcelMock.mock.calls[0][0].rows).toHaveLength(100);
+  expect(exportFromQueryMock).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", {name:"Download loaded rows as CSV"}));
+  expect(URL.createObjectURL).toHaveBeenCalled();
+  expect(exportFromQueryMock).toHaveBeenCalledTimes(1);
+});
+
+it("labels partial MCP downloads without a rerunnable query as loaded rows", () => {
+  const step = {...buildStep(2, {truncated:true}), tool:"ns_runSavedSearch", params:{savedSearchId:"123"}};
+  render(<SuiteQLToolCard step={step} />);
+  expect(screen.getByText(/Downloads contain only the 2 rows already loaded.*partial result/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", {name:"Export Excel (loaded rows)"}));
+  expect(exportToExcelMock).toHaveBeenCalledWith(expect.objectContaining({title:expect.stringContaining("-loaded-rows-")}));
+  expect(exportFromQueryMock).not.toHaveBeenCalled();
+});

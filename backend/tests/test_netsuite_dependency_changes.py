@@ -55,6 +55,62 @@ async def read(stream="transactions", **kwargs):
     )
 
 
+@pytest.mark.parametrize("stream", ["transaction_lines", "transaction_links"])
+def test_day_membership_keeps_earlier_changes_without_changing_group_grain(monkeypatch, stream):
+    import re
+
+    monkeypatch.setattr(reader, "_utc", lambda column: column)
+    monkeypatch.setattr(reader, "_stamp", lambda expression: f"{expression} AS modified_utc")
+    monkeypatch.setattr(reader, "_dates", lambda column, lower, upper: f"{column}>='{lower}' AND {column}<'{upper}'")
+    finish = END + timedelta(days=1)
+    with sqlite3.connect(":memory:") as db:
+        db.executescript("""
+            CREATE TABLE native_transaction (id INTEGER, type TEXT, ref TEXT);
+            CREATE TABLE transactionline ("transaction" INTEGER, mainline TEXT, subsidiary INTEGER, linelastmodifieddate TEXT);
+            CREATE TABLE NextTransactionLineLink (previousdoc INTEGER, nextdoc INTEGER, lastmodifieddate TEXT);
+            INSERT INTO native_transaction VALUES (10,'SalesOrd','R000000010'),(20,'SalesOrd','R000000020');
+            INSERT INTO transactionline VALUES (10,'T',2,'2026-01-01'),(20,'T',2,'2026-01-01');
+        """)
+        for identifier, stamp in [
+            (10, "2026-09-06 18:00:00.000000"),
+            (10, "2026-09-07 18:00:00.000000"),
+            (20, "2026-09-07 19:00:00.000000"),
+        ]:
+            db.execute("INSERT INTO transactionline VALUES (?,'F',2,?)", (identifier, stamp))
+            db.execute("INSERT INTO NextTransactionLineLink VALUES (?,99,?)", (identifier, stamp))
+        queries = [
+            reader.change_query(
+                stream,
+                "2",
+                "ref",
+                START,
+                finish,
+                [0, 0] if stream == "transaction_links" else [0],
+                membership_windows=windows,
+            )
+            for windows in [(), [(START, END), (END, finish)]]
+        ]
+        results = []
+        for sql in queries:
+            sql = sql.replace("JOIN transaction t", "JOIN native_transaction t")
+            sql = re.sub(r"\b([lm])\.transaction\b", r'\1."transaction"', sql)
+            sql = re.sub(r"TO_TIMESTAMP\('([^']+)','YYYY-MM-DD HH24:MI:SS.FF6'\)", r"'\1'", sql)
+            results.append(db.execute(sql).fetchall())
+    width = len(results[0][0])
+    assert [row[:width] for row in results[1]] == results[0]
+    assert [row[width:] for row in results[1]] == [(1, 1), (0, 1)]
+
+
+async def test_membership_flags_are_optional_proof_and_never_guessed(transport):
+    transport.return_value = response([row(membership_0="1")])
+    page = await read("transaction_lines", membership_windows=[(START, END)])
+    assert page["changes"][0]["membership_windows"] == [[START.isoformat(), END.isoformat()]]
+    transport.return_value = response([row()])
+    page = await read("transaction_lines", membership_windows=[(START, END)])
+    assert page["changes"][0]["membership_windows"] is None
+    assert page["page_complete"]  # Candidate extraction still has its original proof.
+
+
 @pytest.mark.parametrize("stream", reader.STREAMS)
 async def test_query_exhaustion_is_only_candidate_inventory(transport, stream):
     transport.return_value = response([])

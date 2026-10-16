@@ -7,7 +7,7 @@ may over-nominate an order; dropping one can miss a deletion or removed link.
 
 from uuid import UUID
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
 from app.core.database import set_tenant_context
@@ -166,7 +166,9 @@ async def record_dependencies(db, tenant_id, run, finding):
     # The caller commits finding + inventory together under its existing lease.
 
 
-async def affected_order_references(db, tenant_id, config_id, record_keys, *, after_reference="", page_size=100):
+async def affected_order_references(
+    db, tenant_id, config_id, record_keys, *, after_reference="", page_size=100, include_membership=False
+):
     """Keys use SuiteQL table names, not transaction subtype/display strings.
 
     Bounded keyset pagination. An empty page is not a feed-completeness claim.
@@ -200,14 +202,23 @@ async def affected_order_references(db, tenant_id, config_id, record_keys, *, af
             tuple_(Dependency.record_type, Dependency.record_id).in_(keys),
             Dependency.order_reference > after_reference,
         )
-        .distinct()
         .order_by(Dependency.order_reference)
         .limit(page_size + 1)
     )
-    references = list(await db.scalars(query))
+    memberships = {}
+    if include_membership:
+        query = query.add_columns(
+            func.jsonb_agg(func.jsonb_build_array(Dependency.record_type, Dependency.record_id)).label("keys")
+        ).group_by(Dependency.order_reference)
+        rows = (await db.execute(query)).all()
+        references = [row.order_reference for row in rows]
+        memberships = {row.order_reference: row[1] for row in rows[:page_size]}
+    else:
+        references = list(await db.scalars(query.distinct()))
     more = len(references) > page_size
     return {
         "order_references": references[:page_size],
         "has_more": more,
         "next_after_reference": references[page_size - 1] if more else None,
+        **({"memberships": memberships} if include_membership else {}),
     }

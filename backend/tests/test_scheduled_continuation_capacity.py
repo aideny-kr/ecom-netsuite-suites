@@ -266,3 +266,29 @@ async def test_real_concurrent_resumes_create_one_scheduled_child(committed_sess
         )
         == 1
     )
+
+
+async def test_real_concurrent_error_retries_create_one_child(committed_sessions):
+    db, actor, factory = committed_sessions
+    prior, _ = await budget_run(db, actor, origin="schedule", reason="error", failure=TimeoutError())
+    await db.commit()
+    now = prior.finished_at + timedelta(minutes=5)
+
+    async def resume():
+        async with factory() as session:
+            child = await cont.continue_budget_run(session, actor.tenant_id, prior.id, now=now)
+            return child.id
+
+    ids = await asyncio.gather(resume(), resume())
+    assert ids[0] == ids[1]
+    assert (
+        await db.scalar(
+            select(func.count())
+            .select_from(TransactionRun)
+            .where(
+                TransactionRun.tenant_id == actor.tenant_id,
+                TransactionRun.progress_json["continuation_of"].astext == str(prior.id),
+            )
+        )
+        == 1
+    )

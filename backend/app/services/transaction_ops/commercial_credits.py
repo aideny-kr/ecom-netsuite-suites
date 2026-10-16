@@ -40,6 +40,19 @@ def _money(value):
     return value
 
 
+# Header money fields NetSuite drops when empty on a transaction created through the API:
+# CM12127, read 2026-10-07, has no taxTotal and no shippingCost (its invoice returns both as 0).
+SUMMARY_MONEY_FIELDS = frozenset({"taxTotal", "shippingCost", "discountTotal", "handlingCost"})
+
+
+def summary_money(document, field):
+    """A summary money field, absent meaning zero. Only for checks that also prove the
+    document's ledger, so a missing amount cannot hide a real posting."""
+    if field not in SUMMARY_MONEY_FIELDS:
+        raise ValueError(f"{field} is not a summary money field")
+    return _money(document.get(field) or 0)
+
+
 def source_adjustment_basis(source):
     """A narrow zero-shipping, additional-tax order with finalized order discounts.
 
@@ -148,7 +161,8 @@ def verify_applied_credit(basis, invoice, applications, invoice_gl):
         cm, amount = credits[0]
         if (
             amount != credit
-            or _money(cm["taxTotal"]) != 0
+            # Absent means zero: the ledger check below admits only the AR and one debit line.
+            or summary_money(cm, "taxTotal") != 0
             # Standalone credits legitimately have a blank native CreatedFrom.
             # Exact apply rows above establish the invoice binding. A conflicting
             # nonempty origin is still rejected. Oracle section_N1312521.html.

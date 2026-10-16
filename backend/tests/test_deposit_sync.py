@@ -13,8 +13,9 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from sqlalchemy import select
 
 from app.core.encryption import encrypt_credentials
@@ -418,6 +419,7 @@ def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]
         else []
     )
     return extra + [
+        patch("app.services.ingestion.netsuite_customer_payments.sync_payments", new=AsyncMock(return_value=0)),
         patch.object(
             netsuite_deposit_sync,
             "get_netsuite_rest_connection",
@@ -1057,7 +1059,8 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         ).scalar_one()
         assert posting is not None
 
-    async def test_a_failed_cursor_write_still_commits_the_deposits(self, db, tenant_a):
+    @pytest.mark.parametrize("worker_cursor", [False, True])
+    async def test_a_failed_cursor_write_still_commits_the_deposits(self, db, tenant_a, worker_cursor):
         """The risk created by writing the cursor BEFORE the final deposit commit.
 
         Earlier versions committed the cursor separately, after the deposits. That
@@ -1104,6 +1107,10 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         # what makes the savepoint load-bearing.
         from sqlalchemy import text as _sql_text
 
+        from app.core.database import worker_async_session
+
+        worker_factory = Mock(wraps=worker_async_session)
+
         async def failing_cursor_write(session, *_a, **_kw):
             await session.execute(_sql_text("SELECT 1/0"))
 
@@ -1123,6 +1130,7 @@ class TestSyncDepositsMaintainsFreshnessCursor:
                 tenant_id=str(tenant_a.id),
                 date_from=date(2026, 3, 1),
                 date_to=date(2026, 3, 31),
+                cursor_session_factory=worker_factory if worker_cursor else None,
             )
         finally:
             db.rollback = original_rollback  # type: ignore[method-assign]
@@ -1132,6 +1140,8 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         # The sync still reports success — a cursor problem is not a sync failure.
         assert not result.errors, result.errors
         assert result.records_synced > 0
+        if worker_cursor:
+            worker_factory.assert_called_once_with()
 
         # THE ASSERTION: the deposits survived a cursor write that failed inside the
         # savepoint they now share a transaction with.

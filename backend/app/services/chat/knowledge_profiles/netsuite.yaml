@@ -47,9 +47,9 @@ prompt_fragment: |
   - In query results: 'T' = Yes/True/Enabled, 'F' = No/False/Disabled, '' or NULL = not set.
   - When presenting results: ALWAYS interpret 'T' as YES and 'F' as NO. Do NOT say a field is "empty/false" when it contains 'T'.
 
-  # Prevents: filtering custom list fields by string instead of ID (2025)
+  # Prevents: filtering custom list fields by string instead of ID (2025); undated transactionline scans through BUILTIN.DF (2026-10-05)
   CUSTOM LIST FIELDS:
-  - SELECT-type fields store integer IDs. Filter: `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable — OK for small static lists only; on a JOIN-backed or large table filter the raw ID/code, because `BUILTIN.DF` is a per-row function that forces a full scan — see ADDRESS TABLES for the country case).
+  - SELECT-type fields store integer IDs. Filter: `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable). In a query that reads `transactionline`, a `BUILTIN.DF` filter needs a `t.trandate` range: without one, NetSuite converts every transaction line in the account's history to text before filtering, which takes 1-2 minutes or times out, and the tool refuses the query. If the start date is unknown, find it with a small query first, or filter on the raw ID instead (`i.custitem_x = <id>`, `tl.item IN (<ids>)`). See ADDRESS TABLES for the country case.
   - ID → name mappings in tenant schema Custom List Values. Linkage shown as `(SELECT → customlist_name)`.
 
   # Prevents: shipping-country join rediscovery loop (2026-04-09 / 2026-04-16)
@@ -58,7 +58,7 @@ prompt_fragment: |
   - The join key is `sa.nKey = t.shippingAddress`. NEVER `sa.recordOwner = t.id`, NEVER `sa.transaction = t.id`, NEVER `sa.id = t.shippingAddress`.
   - FILTER on the RAW code, NEVER `BUILTIN.DF(...)` in a WHERE clause to filter country. Use `WHERE sa.country = 'SG'`, NOT `WHERE BUILTIN.DF(sa.country) = 'Singapore'` — `BUILTIN.DF` is a per-row function that defeats the index and forces a full scan → timeout (this is the same per-row-scan principle as CUSTOM LIST FIELDS, applied to the heavy address join). Use `BUILTIN.DF(sa.country)` ONLY in the SELECT list to display the country name.
   - `sa.country` is the ISO-2 code ('SG','CH','NZ','NO','US'). Translate user country NAMES to ISO-2 before filtering: Singapore→'SG', Switzerland→'CH', New Zealand→'NZ', Norway→'NO', United States→'US'.
-  - Address-table joins are HEAVY — ALWAYS scope with a `t.trandate` predicate (e.g. `WHERE t.trandate >= TO_DATE(...)`) and `FETCH FIRST N ROWS ONLY`; an all-time address join TIMES OUT (60s) on large accounts. Do NOT substitute `t.shipcountry` — it is often NOT_EXPOSED in SuiteQL (verify via metadata before relying on it); the address join above is the reliable path.
+  - Address-table joins are HEAVY — ALWAYS scope with a `t.trandate` predicate that has a lower limit (e.g. `WHERE t.trandate >= TO_DATE(...)`; one day is `TRUNC(t.trandate) = TRUNC(SYSDATE)`; for "up to a date", state the start you use or ask, never silently narrow the period) and `FETCH FIRST N ROWS ONLY`; an all-time address join TIMES OUT (60s) on large accounts, and an upper limit alone (`t.trandate <= ...`) is still all-time. Do NOT substitute `t.shipcountry` — it is often NOT_EXPOSED in SuiteQL (verify via metadata before relying on it); the address join above is the reliable path.
   - Do NOT use custom body fields (`custbody*_ship_country*`, `custbody*_country*`) for country queries unless the user explicitly asks for the custom field. The standard address join is the source of truth.
 
   TRANSACTION NUMBER CONVENTIONS:

@@ -170,6 +170,8 @@ async def sync_netsuite_deposits(
     date_to: date,
     account_filter: list[str] | None = None,
     record_types: list[str] | None = None,
+    *,
+    cursor_session_factory=None,
 ) -> DepositSyncResult:
     """Pull bank deposits from NetSuite via SuiteQL and upsert into netsuite_postings.
 
@@ -363,6 +365,21 @@ async def sync_netsuite_deposits(
         await db.commit()
     persistence_ms = round((perf_counter() - persistence_started) * 1000)
 
+    # Payment matching also accepts money applied directly to an invoice.
+    # Keep this in the shared sync service so scheduled and manual paths agree.
+    if record_types is None and account_filter is None:
+        from app.services.ingestion.netsuite_customer_payments import sync_payments
+
+        try:
+            await sync_payments(
+                db, tenant_id, connection.id, token, account_id, date_from, date_to, pattern=order_ref_pattern
+            )
+        except Exception:
+            # The customer-payment savepoint owns its rollback. Rolling back
+            # this session would expire the API caller's User before audit.
+            result.errors.append("Customer payment applications could not be verified")
+            return result  # Do not certify a partial payment/deposit sync as fresh.
+
     # Bump the freshness cursor so the recon data-status banner reflects this run. The
     # nightly Celery task calls this service directly (not the manual trigger
     # endpoint) and never commits afterwards — `async with async_session_factory() as
@@ -398,7 +415,10 @@ async def sync_netsuite_deposits(
     # caller's connection under the test fixture, which is the opposite of the isolation
     # this is for. The factory gives a genuinely independent connection in both.
     try:
-        async with async_session_factory() as cursor_db:
+        # API callers use their app pool; Celery callers supply a disposable
+        # worker factory so this independent write cannot reuse a closed loop.
+        factory = cursor_session_factory or async_session_factory
+        async with factory() as cursor_db:
             await set_tenant_context(cursor_db, tenant_id)
             await save_cursor_async(cursor_db, connection.id, "netsuite_deposits", date_to.isoformat())
             await cursor_db.commit()

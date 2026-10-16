@@ -438,6 +438,8 @@ _CROSS_SOURCE_TOOLS: frozenset[str] = frozenset(
     {
         "pivot_query_result",
         "cross_source_query",
+        "present_result",
+        "compare_results",
         "docs_create",
         "drive_read_doc",
         "clarify",

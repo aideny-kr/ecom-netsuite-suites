@@ -36,6 +36,9 @@ async def setup(
         from app.services.transaction_ops import metabase_reader
 
         monkeypatch.setattr(metabase_reader, "_connector", AsyncMock())
+        from app.services.transaction_ops import source_scope
+
+        monkeypatch.setattr(source_scope, "read_order_scopes", AsyncMock(return_value={}))
     conn, evidence = await seed(db, actor.tenant_id)
     config = await seed_config(
         db,
@@ -68,7 +71,9 @@ async def setup(
         ),
         actor=actor,
     )
-    now = datetime.now(timezone.utc)
+    # Seed with the same database clock that production uses for claims.
+    # A host clock briefly ahead of PostgreSQL otherwise appears future-queued.
+    now = await state.run_clock(db)
     if origin == "schedule":
         config.schedule_enabled = True
         await db.flush()

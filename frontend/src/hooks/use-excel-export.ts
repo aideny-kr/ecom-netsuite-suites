@@ -35,6 +35,17 @@ function safeFilename(title: string, ext: string): string {
   return `${safe || "export"}.${ext}`;
 }
 
+async function formatExcelDownload(blob: Blob) {
+  // Load workbook presentation only after an Excel download is requested.
+  // A styling failure must never prevent the original file from downloading.
+  try {
+    const { presentExcelExport } = await import("@/lib/excel-presentation");
+    return await presentExcelExport(blob);
+  } catch {
+    return blob;
+  }
+}
+
 export function useExcelExport() {
   const [isExporting, setIsExporting] = useState(false);
 
@@ -49,7 +60,7 @@ export function useExcelExport() {
         column_types: params.columnTypes,
       });
       const blob = await response.blob();
-      triggerDownload(blob, safeFilename(params.title ?? "Query Results", "xlsx"));
+      triggerDownload(await formatExcelDownload(blob), safeFilename(params.title ?? "Query Results", "xlsx"));
     } finally {
       setIsExporting(false);
     }
@@ -67,7 +78,7 @@ export function useExcelExport() {
         column_types: params.columnTypes,
       });
       const blob = await response.blob();
-      triggerDownload(blob, safeFilename(params.title ?? "Query Results", fmt));
+      triggerDownload(fmt === "xlsx" ? await formatExcelDownload(blob) : blob, safeFilename(params.title ?? "Query Results", fmt));
     } finally {
       setIsExporting(false);
     }

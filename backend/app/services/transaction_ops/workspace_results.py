@@ -8,12 +8,12 @@ from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionCase, TransactionFinding, TransactionProposal, TransactionRun
 from app.schemas.transaction_runs import CaseOut, ProposalOut, RunOut
 from app.services.transaction_ops import state_service as state
-from app.services.transaction_ops.review_evidence import period_evidence, result_category
+from app.services.transaction_ops.review_evidence import period_evidence, resolve_review_runs, result_category
 
 CATEGORIES = ("matched", "needs_review", "not_verified")
 
 
-async def selected_evidence(db, tenant_id, run_ids):
+async def selected_evidence(db, tenant_id, run_ids, *, metadata_only=False):
     if not isinstance(run_ids, list) or not 1 <= len(run_ids) <= 20:
         raise state.StateError("invalid_review_selection", 422)
     try:
@@ -31,10 +31,13 @@ async def selected_evidence(db, tenant_id, run_ids):
     if len(roots) != len(ids):
         raise state.StateError("not_found", 404)
     by_id = {run.id: run for run in roots}
+    run_selection = await resolve_review_runs(db, tenant_id, roots)
     queries, scopes = [], []
     for run_id in ids:
         run = by_id[run_id]
-        latest, span = await period_evidence(db, tenant_id, run_id, root=run)
+        latest, span = await period_evidence(
+            db, tenant_id, run_id, root=run, metadata_only=metadata_only, _run_selection=run_selection
+        )
         queries.append(
             select(
                 latest,
@@ -93,7 +96,7 @@ def result_item(row):
 
 
 async def review_page(db, tenant_id, run_ids, *, limit=50, offset=0, status=None, search=""):
-    latest, _ = await selected_evidence(db, tenant_id, run_ids)
+    latest, _ = await selected_evidence(db, tenant_id, run_ids, metadata_only=True)
     # A single compact materialization supplies counts and the page, including
     # searches with no matches. Full reports are loaded only for returned IDs.
     evidence = (

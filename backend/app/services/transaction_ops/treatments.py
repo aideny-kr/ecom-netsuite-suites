@@ -120,6 +120,18 @@ _ROWS = (
         subledger_recheck=True,
     ),
     Treatment(
+        # Agent-proposed, accepted by outcome: credit_creation.assess (smart resolver, slice 1).
+        kind="credit_creation",
+        label="Create and apply a credit",
+        batch_label="Agent-proposed credit and invoice application",
+        record_type="creditmemo",
+        family="amendment",
+        lock="invoice",
+        reconciliation_target="sales_order",
+        verification="amendment",
+        subledger_recheck=True,
+    ),
+    Treatment(
         kind="sales_order_line_alignment",
         label="Align sales-order lines and tax with source",
         batch_label="Sales order source alignment",

@@ -8,9 +8,19 @@ from unittest.mock import patch
 import pytest
 
 from app.services.chat.write_payload import normalize_write_payload
-from app.services.transaction_ops.invoice_discount import review_for_card, verify_after
+from app.services.transaction_ops.invoice_discount import from_commercial_candidate, review_for_card, verify_after
 from app.services.transaction_ops.sales_credit import build_candidate
 from tests.test_sales_credit import inputs
+
+
+def discount_candidate(**data):
+    """A discount proposal as the agent made them before 2026-10-06.
+
+    `build_candidate` now gives an unpaid invoice the credit memo; this module still reviews,
+    refuses at approval and verifies discount proposals created before.
+    """
+    candidate = build_candidate(**data)
+    return from_commercial_candidate(candidate) if candidate else None
 
 
 def unpaid_inputs():
@@ -46,8 +56,8 @@ def unpaid_inputs():
     return d
 
 
-def test_unpaid_invoice_gets_discount_instead_of_credit():
-    p = build_candidate(**unpaid_inputs())
+def test_a_discount_proposal_edits_only_the_invoice_discount():
+    p = discount_candidate(**unpaid_inputs())
     assert p["kind"] == "invoice_sales_adjustment"
     assert (p["record_type"], p["mutation_type"]) == ("invoice", "update")
     assert p["proposed_fields"] == {"discountItem": {"id": "50"}, "discountRate": -5.0}
@@ -78,10 +88,10 @@ def test_unpaid_invoice_gets_discount_instead_of_credit():
         ("applications", "links", [{"type": "CustCred"}]),
     ],
 )
-def test_unsafe_invoice_never_falls_back_to_credit(section, key, value):
+def test_an_unsafe_invoice_gets_no_discount_proposal(section, key, value):
     d = unpaid_inputs()
     d["support"][section][key] = value
-    assert build_candidate(**d) is None
+    assert discount_candidate(**d) is None
 
 
 @pytest.mark.parametrize("variant", ["missing", "discount", "amount"])
@@ -94,11 +104,11 @@ def test_invoice_line_evidence_required(variant):
         s["invoice_lines"][0]["itemType"] = {"id": "Discount"}
     else:
         s["invoice_lines"][0]["amount"] = "99"
-    assert build_candidate(**d) is None
+    assert discount_candidate(**d) is None
 
 
 def test_discount_guard_requires_exact_scope_and_amount(monkeypatch):
-    p = build_candidate(**unpaid_inputs())
+    p = discount_candidate(**unpaid_inputs())
     p["observed_at"] = datetime.now(timezone.utc).isoformat()
     db = SimpleNamespace(info={"accounting_correction_candidate": p})
     monkeypatch.setattr("app.services.chat.tools.parse_external_tool_name", lambda _: ("connector", "ns_updateRecord"))
@@ -135,7 +145,7 @@ def test_discount_guard_requires_exact_scope_and_amount(monkeypatch):
 )
 @pytest.mark.parametrize("native_decimals", [False, True])
 async def test_native_verification(variant, native_decimals):
-    p = build_candidate(**unpaid_inputs())
+    p = discount_candidate(**unpaid_inputs())
     doc = {
         **deepcopy(p["before"]),
         **p["expected_after"],
@@ -252,7 +262,7 @@ def test_reconciliation_matches_only_proven_invoice_discount(variant):
 
 @pytest.mark.asyncio
 async def test_conflicting_receipt_cannot_be_verified():
-    result = await verify_after(None, "tenant", build_candidate(**unpaid_inputs()), {"recordId": "99"})
+    result = await verify_after(None, "tenant", discount_candidate(**unpaid_inputs()), {"recordId": "99"})
     assert result == {"status": "needs_review", "reason": "invoice_receipt_identity_conflict", "retry_allowed": False}
 
 
@@ -273,7 +283,7 @@ async def test_approval_rechecks_current_accounting_state(variant, monkeypatch):
     d["support"]["observed_at"] = d["now"].isoformat()
     for refund in d["support"]["refunds"].values():
         refund["observed_at"] = d["now"].isoformat()
-    p = build_candidate(**d)
+    p = discount_candidate(**d)
     db = SimpleNamespace(
         scalar=AsyncMock(
             return_value=SimpleNamespace(
@@ -326,7 +336,10 @@ async def test_approval_rechecks_current_accounting_state(variant, monkeypatch):
         "app.services.transaction_ops.sales_credit.collect_support", AsyncMock(return_value=current["support"])
     )
     if variant == "valid":
-        await validate_approved(db, "tenant", "tool", params, p)
+        # Aiden, 2026-10-06: an unpaid invoice now gets the credit memo, so even an unchanged
+        # discount proposal is refused and a fresh approval (a credit memo) is needed.
+        with pytest.raises(ValueError, match="credit memo"):
+            await validate_approved(db, "tenant", "tool", params, p)
     else:
         with pytest.raises(ValueError):
             await validate_approved(db, "other" if variant == "tenant" else "tenant", "tool", params, p)

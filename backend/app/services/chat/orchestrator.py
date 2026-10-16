@@ -855,6 +855,9 @@ def _stamp_result_id(condensed: str, sse_event_data: dict, result_id: str | None
     return condensed
 
 
+_RESULT_CARD_TOOLS = frozenset({"present_result", "present.result", "compare_results", "compare.results"})
+
+
 def _intercept_tool_result(
     tool_name: str, result_str: str, context_need: str = ContextNeed.DATA, result_id: str | None = None
 ) -> tuple[str | None, dict | None, str]:
@@ -909,6 +912,15 @@ def _intercept_tool_result(
             return "group_breakdown", parsed, json.dumps(condensed_for_model(parsed))
         except (KeyError, TypeError):
             return None, None, invalid
+    # --- Result card path (present_result / compare_results) ---
+    if tool_name in _RESULT_CARD_TOOLS:
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("result_card"), dict):
+            return None, None, result_str
+        return "result_card", parsed["result_card"], json.dumps(parsed.get("llm") or {"card_shown": True})
 
     # --- Report card path ---
     if tool_name in ("report_compose", "report.compose"):
@@ -1343,7 +1355,7 @@ def _keep_group_breakdown(persisted, breakdown):
     return {**(persisted or {}), "group_breakdown": breakdown}
 
 
-_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready", "group_breakdown"})
+_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready", "group_breakdown", "result_card"})
 
 # The SSE event types for which _intercept_tool_result STAMPS the result_id into
 # the LLM-facing condensed string (so the model actually SEES the id). The unified
@@ -3322,6 +3334,9 @@ async def run_chat_turn(
     # re-fire the clarify-gate / augmentation". Set after the short-circuit
     # below; consumed by the augmentation guard and the gate-arm guard.
     _plan_mode_resume_active = False
+    # How Plan Mode treats THIS turn ("force" | "offer" | "off"); decided once by
+    # plan_mode_decision and read by the augmentation, the forced tool choice and the offer.
+    _plan_mode_decision = "off"
     if plan_mode_choice and isinstance(plan_mode_choice, dict):
         from app.services.chat.plan_mode.short_circuit import (
             PlanModeChoiceError,
@@ -4214,8 +4229,8 @@ async def run_chat_turn(
                         # earlier (with the tool inventory) so we don't refetch the
                         # flag here. Imported here to keep the import close to use.
                         from app.services.chat.plan_mode.ambiguity_signal import (
-                            is_financial_ambiguous,
                             maybe_augment_for_plan_mode,
+                            plan_mode_decision,
                             try_force_tool_choice,
                         )
 
@@ -4227,12 +4242,14 @@ async def run_chat_turn(
                         # first action is `clarify`" — but the resume tool
                         # filter has stripped `clarify` from the inventory.
                         # Contradictory instructions ⇒ undefined behavior.
+                        _plan_mode_decision = plan_mode_decision(
+                            sanitized_input,
+                            plan_mode_enabled=plan_mode_enabled,
+                            resume_active=_plan_mode_resume_active,
+                            history=msg_dicts,
+                        )
                         _plan_mode_connected_sources: list[str] = []
-                        if (
-                            plan_mode_enabled
-                            and not _plan_mode_resume_active
-                            and is_financial_ambiguous(sanitized_input)
-                        ):
+                        if _plan_mode_decision == "force":
                             # Resolve connected sources so the augmentation can
                             # require options to span distinct sources when ≥2
                             # are connected. Mirrors the post-call resolution
@@ -4265,7 +4282,7 @@ async def run_chat_turn(
                                 plan_mode_enabled=plan_mode_enabled,
                                 connected_sources=_plan_mode_connected_sources,
                             )
-                            if not _plan_mode_resume_active
+                            if _plan_mode_decision == "force"
                             else None
                         )
 
@@ -4365,6 +4382,7 @@ async def run_chat_turn(
                     turn_group_breakdown: dict | None = None
                     suppress_streamed_text = False
                     _charts_output: list[dict] = []
+                    _result_cards: list[dict] = []
 
                     unified_model = model if is_byok else settings.MULTI_AGENT_SQL_MODEL
 
@@ -4464,8 +4482,10 @@ async def run_chat_turn(
                         yield {"type": "drive_sources", "sources": context["drive_sources"]}
 
                     # ── Plan Mode hard gate ─────────────────────────────────
-                    # When financial-ambiguity regex matches AND flag is on AND
-                    # clarify is in the inventory, pass `plan_mode_clarify_only=True`
+                    # When `_plan_mode_decision == "force"` (flag on, not a resume, ambiguity
+                    # regex matches, and the conversation has not already settled a source —
+                    # see plan_mode_decision) AND clarify is in the inventory, pass
+                    # `plan_mode_clarify_only=True`
                     # to run_streaming (it filters _tool_defs to clarify-only AFTER
                     # _setup_context, so we don't fight the rebuild) and force
                     # tool_choice=clarify on the adapter. plan_mode_enabled is only
@@ -4476,12 +4496,7 @@ async def run_chat_turn(
                     # (source-pick or manual clarify), the user already
                     # disambiguated. Re-firing the new-clarify gate would
                     # force another card on top of the resumed turn.
-                    if (
-                        not _is_chitchat
-                        and plan_mode_enabled
-                        and not _plan_mode_resume_active
-                        and is_financial_ambiguous(sanitized_input)
-                    ):
+                    if not _is_chitchat and _plan_mode_decision == "force":
                         _has_clarify = any(t.get("name") == "clarify" for t in (tool_definitions or []))
                         if _has_clarify:
                             _plan_mode_tool_choice = try_force_tool_choice(
@@ -4502,6 +4517,7 @@ async def run_chat_turn(
                         conversation_history=history_messages,
                         tool_choice=_plan_mode_tool_choice,
                         plan_mode_clarify_only=_plan_mode_active,
+                        plan_mode_offer_clarify=_plan_mode_decision == "offer",
                         plan_mode_resume_source=plan_mode_resume_source,
                         tool_result_interceptor=_make_tool_interceptor(
                             context_need,
@@ -4564,6 +4580,10 @@ async def run_chat_turn(
                             yield {"type": "tool_end", **payload}
                         elif event_type == "progress":
                             yield progress_event(payload)
+                        elif event_type == "tool_intercept" and payload[0] == "result_card":
+                            # Several cards may accompany one answer; persisted as a list.
+                            _result_cards.append(payload[1])
+                            yield {"type": "result_card", "data": payload[1]}
                         elif event_type == "tool_intercept":
                             # payload is (event_type_str, event_data_dict)
                             last_structured_output = {"type": payload[0], "data": payload[1]}
@@ -4678,6 +4698,8 @@ async def run_chat_turn(
                         else:
                             _persisted_output = {"charts": _charts_output}
                     _persisted_output = _keep_group_breakdown(_persisted_output, turn_group_breakdown)
+                    if _result_cards:
+                        _persisted_output = {**(_persisted_output or {}), "result_cards": _result_cards}
 
                     assistant_msg = ChatMessage(
                         tenant_id=tenant_id,
@@ -4859,6 +4881,7 @@ async def run_chat_turn(
         total_cache_read_tokens = 0
         last_structured_output: dict | None = None
         turn_group_breakdown: dict | None = None
+        legacy_result_cards: list[dict] = []
         suppress_streamed_text = False
         # Dedup workspace_propose_patch per canonical file path across the
         # whole turn so a single model response that emits two identical
@@ -5049,7 +5072,11 @@ async def run_chat_turn(
                     context_need=ContextNeed.FULL,
                     session_id=str(session.id),
                 )
-                if intercept_type is not None:
+                if intercept_type == "result_card":
+                    # Cards never replace the turn's data output; they ride beside it.
+                    legacy_result_cards.append(intercept_data)
+                    yield {"type": "result_card", "data": intercept_data}
+                elif intercept_type is not None:
                     last_structured_output = {"type": intercept_type, "data": intercept_data}
                     if intercept_type == "group_breakdown":
                         turn_group_breakdown = intercept_data
@@ -5170,7 +5197,14 @@ async def run_chat_turn(
             provider_used=provider,
             is_byok=is_byok,
             query_importance=importance_tier.value,
-            structured_output=_keep_group_breakdown(last_structured_output, turn_group_breakdown),
+            structured_output=(
+                {
+                    **(_keep_group_breakdown(last_structured_output, turn_group_breakdown) or {}),
+                    "result_cards": legacy_result_cards,
+                }
+                if legacy_result_cards
+                else _keep_group_breakdown(last_structured_output, turn_group_breakdown)
+            ),
             created_at=datetime.now(timezone.utc),
         )
         db.add(assistant_msg)

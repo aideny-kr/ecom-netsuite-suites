@@ -13,6 +13,15 @@ from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
 
 rejected_read_scope: ContextVar[tuple | None] = ContextVar("rejected_native_read_scope", default=None)
 
+# Include failures before a provider request: an unhealthy connection or a
+# failed token refresh can stop the reader without ever receiving HTTP 401.
+# These remain non-transient; only a newer usable credential can earn a resume.
+AUTH_STOP_CODES = (
+    "netsuite_upstream_http_401",
+    "netsuite_invalid_connection",
+    "netsuite_authentication_failed",
+)
+
 
 def auth_stop(previous):
     if previous is None:
@@ -24,7 +33,7 @@ def auth_stop(previous):
         or getattr(previous, "status", None) != "finished"
         or getattr(previous, "termination_reason", None) != "error"
         or not isinstance(failure, dict)
-        or failure.get("code") != "netsuite_upstream_http_401"
+        or failure.get("code") not in AUTH_STOP_CODES
         or failure.get("resolved") is not False
         or progress.get("restart_scan")
         or (getattr(previous, "params_json", None) or {}).get("review")

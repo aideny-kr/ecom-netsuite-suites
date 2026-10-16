@@ -248,6 +248,8 @@ class TestRunBaselineToolUse:
         # Both Anthropic calls happened
         assert mock_create.await_count == 2
         assert mock_execute.await_count == 1
+        # The baseline is plain Claude + MCP: our query guards must not help it.
+        assert mock_execute.await_args.kwargs["perf_guard"] is False
         # Token counts are accumulated across both turns
         assert result.input_tokens == 300 + 350
         assert result.output_tokens == 40 + 10

@@ -14,6 +14,7 @@ class StagedNetSuite:
         self.cache, self.attempted = {}, set()
         self.order_id = None
         self.reusable_references = set()
+        self.prepared_references = None
 
     def scope(self):
         from uuid import UUID
@@ -96,7 +97,8 @@ class StagedNetSuite:
             return data[reference]
         return None
 
-    async def prefetch_orders(self, reference):
+    async def prefetch_orders(self, reference, *, references=None):
+        self.prepared_references = set(references) if references is not None else None
         await self.order(reference, _count_hit=False)
 
     async def order(self, reference, *, source_updated_at=None, _count_hit=True):
@@ -104,7 +106,10 @@ class StagedNetSuite:
         # never reuses a negative result or an older parent-only observation.
         refs = list(
             dict.fromkeys(
-                ref for ref in self.progress["pending_refs"][: bulk.MAX_ORDERS] if ref not in self.reusable_references
+                ref
+                for ref in self.progress["pending_refs"][: bulk.MAX_ORDERS]
+                if ref not in self.reusable_references
+                and (self.prepared_references is None or ref in self.prepared_references)
             )
         )
         if not refs:

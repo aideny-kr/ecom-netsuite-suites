@@ -7,20 +7,26 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 
 from app.core.database import set_tenant_context
+from app.models.audit import AuditEvent
 from app.models.transaction_ops import TransactionConfig, TransactionRun
 from app.services.transaction_ops import daily_status, state_service
 from app.services.transaction_ops.auth_recovery import auth_stop
+from app.services.transaction_ops.collection_recovery import collection_stop, validated_failure
 from app.services.transaction_ops.continuation import (
     MAX_CYCLE_AGE,
     MAX_PARTS,
     READ_RETRY_DELAYS,
     SCHEDULE_MAX_PARTS,
+    auth_resume_due,
+    collection_resume_due,
     continuation_result,
+    deadline_resume_due,
     next_metadata,
     read_retry_due,
     scheduled_part_resume_candidate,
     scheduled_read_stop,
 )
+from app.services.transaction_ops.freshness import freshness
 from app.services.transaction_ops.periods import ReconciliationPolicy
 
 _ACTIVE_LIMIT = 5
@@ -102,7 +108,7 @@ def continuation_status(run, now, *, blocked=None):
         state = "waiting_for_retry"
     if blocked and not (
         blocked.get("reason") == "no_progress"
-        and read_retry_due(run, eligibility)
+        and (read_retry_due(run, eligibility) or deadline_resume_due(run, eligibility))
         or blocked.get("reason") == "part_limit"
         and scheduled_part_resume_candidate(run, eligibility)
     ):
@@ -137,6 +143,10 @@ def run_snapshot(run, now):
             "resolved": failure.get("resolved") if type(failure.get("resolved")) is bool else None,
             "blocking": bool(scheduled_read_stop(run) or _error_stopped_run(run, failure)),
         }
+        from app.services.transaction_ops.native_read_context import safe_context
+
+        if context := safe_context(failure.get("provider_read_context")):
+            diagnostic["provider_read_context"] = context
     return {
         "run_id": str(run.id),
         "origin": run.origin,
@@ -147,7 +157,9 @@ def run_snapshot(run, now):
         "window_start": (run.params_json or {}).get("window_start"),
         "window_end": (run.params_json or {}).get("window_end"),
         "run_state_updated_at": _iso(run.updated_at),
-        "last_progress_at": None,
+        "last_progress_at": _timestamp(progress.get("last_progress_at")),
+        "execution_started_at": _timestamp(progress.get("execution_started_at")),
+        "created_at": _iso(run.created_at),
         "lease_until": _iso(run.lease_until),
         "deadline_at": _iso(run.deadline_at),
         "counters": {key: _number(progress.get(key)) for key in _COUNTERS},
@@ -172,8 +184,17 @@ def run_snapshot(run, now):
             "max_read_retries": len(READ_RETRY_DELAYS),
         },
         "last_read_failure": diagnostic,
+        "last_collection_failure": _collection_diagnostic(run),
         "collection_wait": None,
     }
+
+
+def _collection_diagnostic(run):
+    failure = (run.progress_json or {}).get("last_collection_failure")
+    try:
+        return validated_failure(failure, run) if failure else None
+    except (ValueError, TypeError, KeyError):
+        return None
 
 
 def _action(kind, reason, eligible_at=None):
@@ -185,6 +206,10 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
         return _action("paused", "schedule_disabled")
     scheduled = next((r for r in active if r["origin"] in {"schedule", "recovery"}), None)
     if scheduled:
+        from app.services.transaction_ops.progress_clock import stalled_snapshot
+
+        if stalled := stalled_snapshot(scheduled, now):
+            return _action("operator_review", stalled)
         if scheduled["execution_state"] in {"lease_expired", "deadline_expired", "queue_expired"}:
             return _action("scheduler_recovery", scheduled["execution_state"], _iso(now))
         if scheduled["collection_wait"]:
@@ -197,16 +222,23 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
             return _action("continue_checkpoint", continuation["reason"], continuation["eligible_at"])
         if continuation["state"] == "connection_check_required":
             return _action("check_connection", continuation["reason"])
-        if auth_stop(latest) or continuation["reason"] not in {
-            "part_limit",
-            "cycle_expired",
-            "no_progress",
-            "read_retry_limit",
-            "paused",
-            "feature_unavailable",
-            "permission_denied",
-            "continuation_unavailable",
-        }:
+        if (
+            collection_resume_due(latest, now)
+            or auth_resume_due(latest, now)
+            or continuation["reason"]
+            not in {
+                "part_limit",
+                "cycle_expired",
+                "auth_retry_limit",
+                "no_progress",
+                "read_retry_limit",
+                "no_progress_retry_limit",
+                "paused",
+                "feature_unavailable",
+                "permission_denied",
+                "continuation_unavailable",
+            }
+        ):
             return _action("operator_review", continuation["reason"])
         # A finite continuation stop is not a permanent stop of the next daily cycle.
         from app.services.transaction_ops.scheduler import _cycle_key, _schedule_key
@@ -235,13 +267,19 @@ def _next_action(config, latest, active, coverage, planned, continuation, now):
     return _action("catch_up" if latest else "initial_scan", "scheduler_scope_due", _iso(now))
 
 
-async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=0, now=None):
+async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=0, daily_only=False, now=None):
     if type(limit) is not int or not 1 <= limit <= 50 or type(offset) is not int or offset < 0:
         raise ValueError("invalid_status_scope")
     now = await state_service.run_clock(db, now)
     await set_tenant_context(db, str(tenant_id))
     c, r = TransactionConfig, TransactionRun
     query = select(c).where(c.tenant_id == tenant_id, state_service.current_config_clause())
+    if daily_only:
+        query = query.where(
+            c.enabled.is_(True),
+            c.schedule_enabled.is_(True),
+            c.mapping_json["reconciliation_policy"].astext.is_not(None),
+        )
     if config_id is not None:
         query = query.where(c.id == UUID(str(config_id)))
     configs = list(await db.scalars(query.order_by(c.created_at, c.id).offset(offset).limit(limit + 1)))
@@ -306,6 +344,23 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
         if owner_ids
         else {}
     )
+    monitor_health = await db.scalar(
+        select(AuditEvent)
+        .where(
+            AuditEvent.tenant_id == tenant_id,
+            AuditEvent.action == "recon.watchdog.health",
+        )
+        .order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
+        .limit(1)
+    )
+    monitor_health = (
+        {
+            **(monitor_health.payload or {}),
+            "observed_at": (monitor_health.payload or {}).get("observed_at") or _iso(monitor_health.timestamp),
+        }
+        if monitor_health
+        else None
+    )
     for config in configs:
         planned = schedule(config, now)
         cover = coverage.get(
@@ -348,27 +403,39 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
             snapshots.append(snapshot)
         last = latest.get(config.id)
         recovery = None
-        if last and last.status == "finished" and (last.termination_reason == "budget" or auth_stop(last)):
+        if (
+            last
+            and last.status == "finished"
+            and (last.termination_reason == "budget" or auth_stop(last) or collection_stop(last))
+        ):
             child, blocked = await continuation_result(db, tenant_id, last.id)
             recovery = (
                 {"state": "continued", "reason": "child_exists", "eligible_at": None}
                 if child
                 else continuation_status(last, now, blocked=blocked)
             )
-        result["entities"].append(
-            {
-                "config_id": str(config.id),
-                "name": config.name,
-                "subsidiary_id": config.subsidiary_id,
-                "coverage": cover,
-                "schedule": planned,
-                "latest_schedule": run_snapshot(last, now) if last else None,
-                "active_runs": snapshots,
-                "active_runs_truncated": len(running) > _ACTIVE_LIMIT,
-                "continuation": recovery,
-                "next_action": _next_action(config, last, snapshots, cover, planned, recovery, now),
-            }
+        from app.services.transaction_ops.replica_recovery import recovery_ready
+
+        if last and not running and await recovery_ready(db, tenant_id, last, config, now):
+            recovery = {"state": "eligible", "reason": "replica_connection_verified", "eligible_at": _iso(now)}
+        entity = {
+            "config_id": str(config.id),
+            "name": config.name,
+            "subsidiary_id": config.subsidiary_id,
+            "coverage": cover,
+            "schedule": planned,
+            "latest_schedule": run_snapshot(last, now) if last else None,
+            "active_runs": snapshots,
+            "active_runs_truncated": len(running) > _ACTIVE_LIMIT,
+            "continuation": recovery,
+            "monitor": monitor_health,
+            "next_action": _next_action(config, last, snapshots, cover, planned, recovery, now),
+        }
+        policy = ReconciliationPolicy.model_validate((config.mapping_json or {}).get("reconciliation_policy") or {})
+        entity["freshness"] = freshness(
+            entity, daily_check_hour=policy.daily_check_hour, now=now, configured_at=config.created_at
         )
+        result["entities"].append(entity)
     return result
 
 

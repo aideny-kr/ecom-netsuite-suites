@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 
 import httpx
 
-from app.services.transaction_ops.metabase_reader import ReplicaReadError
+from app.services.transaction_ops.metabase_reader import (
+    REPLICA_READ_CODES,
+    TRANSIENT_REPLICA_READ_CODES,
+    ReplicaReadError,
+)
 from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
 from app.services.transaction_ops.source_reader import SourceReadError
 from app.services.transaction_ops.state_service import StateError
@@ -27,8 +31,8 @@ TRANSIENT_READ_CODES = frozenset(
         "provider_transport_failed",
         "source_transport_failed",
         "source_rate_limited",
-        "replica_transport_failed",
     }
+    | TRANSIENT_REPLICA_READ_CODES
     | {"netsuite_" + code for code in _NETSUITE_TRANSIENT_REASONS}
 )
 
@@ -44,7 +48,7 @@ def transient_read_code(exc):
         return "provider_transport_failed"
     if isinstance(exc, SourceReadError) and exc.code in {"source_transport_failed", "source_rate_limited"}:
         return exc.code
-    if isinstance(exc, ReplicaReadError) and exc.code == "replica_transport_failed":
+    if isinstance(exc, ReplicaReadError) and isinstance(exc.code, str) and exc.code in TRANSIENT_REPLICA_READ_CODES:
         return exc.code
     if isinstance(exc, NetSuiteEvidenceError) and str(exc) in _NETSUITE_TRANSIENT_REASONS:
         return "netsuite_" + str(exc)
@@ -56,6 +60,8 @@ def safe_read_code(exc):
     transient = transient_read_code(exc)
     if transient:
         return transient
+    if isinstance(exc, ReplicaReadError) and isinstance(exc.code, str) and exc.code in REPLICA_READ_CODES:
+        return exc.code
     if isinstance(exc, NetSuiteEvidenceError) and str(exc) in {
         "authentication_failed",
         "invalid_connection",
@@ -65,6 +71,7 @@ def safe_read_code(exc):
         "response_budget",
         "api_call_budget",
         "invalid_read_budget",
+        "invalid_read_timeout",
         "identity_result_budget",
         "invalid_identity_result",
         "currency_identity_mismatch",
@@ -124,6 +131,10 @@ def read_failure(exc, progress, *, stage, reference=None):
         },
         "observed_at": datetime.now(timezone.utc).isoformat(),
     }
+    from app.services.transaction_ops.native_read_context import safe_context
+
+    if context := safe_context(getattr(exc, "native_read_context", None)):
+        failure["provider_read_context"] = context
     scope = getattr(exc, "auth_read_scope", None)
     if isinstance(exc, NetSuiteEvidenceError) and str(exc) == "upstream_http_401" and scope is not None:
         failure.update(auth_connection_id=scope[1], auth_account_id=scope[2], auth_token_sha256=scope[3])

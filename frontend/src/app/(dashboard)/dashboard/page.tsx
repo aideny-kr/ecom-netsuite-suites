@@ -1,6 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
+import { CommandLaunch } from "@/components/orbital/command-launch";
+import { Button } from "@/components/ui/button";
 import { useAuth } from "@/providers/auth-provider";
 import { useDashboard } from "@/hooks/use-dashboard";
 import { DashboardWall, DashboardWallSkeleton } from "./dashboard-wall";
@@ -11,21 +14,22 @@ import {
   ScrollText,
   MessageSquare,
   Table2,
+  Orbit,
 } from "lucide-react";
 
 const quickLinks = [
   {
     title: "Connections",
     description: "Manage Shopify, Stripe, and NetSuite integrations",
-    href: "/connections",
+    href: "/settings#connections",
     icon: Plug,
     color: "from-violet-500/10 to-purple-500/10",
     iconColor: "text-violet-600",
   },
   {
-    title: "Data Tables",
+    title: "Transactions",
     description: "Browse synced orders, payments, refunds, and more",
-    href: "/tables/orders",
+    href: "/transactions",
     icon: Table2,
     color: "from-blue-500/10 to-cyan-500/10",
     iconColor: "text-blue-600",
@@ -39,7 +43,7 @@ const quickLinks = [
     iconColor: "text-amber-600",
   },
   {
-    title: "AI Chat",
+    title: "Chat",
     description: "Ask questions about your data and operations",
     href: "/chat",
     icon: MessageSquare,
@@ -49,6 +53,7 @@ const quickLinks = [
 ];
 
 export default function DashboardPage() {
+  const [launchOpen, setLaunchOpen] = useState(false);
   const { user } = useAuth();
   const { data, isLoading, isError } = useDashboard();
   const firstName = user?.full_name?.split(" ")[0];
@@ -56,6 +61,15 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8 animate-fade-in">
+      <header className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+        <p className="orbital-eyebrow">{user?.tenant_name || "Your workspace"}</p>
+        <h1 className="mt-2 text-2xl font-medium">Command Center</h1>
+        <p className="mt-2 text-[13px] text-muted-foreground">Your business at a glance. Review reports and choose your next action.</p>
+        </div>
+        {(active || data?.active_tracking) && <Button variant="outline" size="sm" aria-expanded={launchOpen} aria-controls={launchOpen ? "command-launchpad" : undefined} onClick={() => setLaunchOpen(open => !open)}><Orbit className="mr-2 h-4 w-4" />{launchOpen ? "Close launchpad" : "Open launchpad"}</Button>}
+      </header>
+      {(active || data?.active_tracking) && launchOpen && <div id="command-launchpad"><CommandLaunch /></div>}
       {isLoading ? (
         <DashboardWallSkeleton />
       ) : active ? (
@@ -82,7 +96,7 @@ export default function DashboardPage() {
             Here&apos;s where your business stands.
           </p>
           <p className="mt-4 text-[13px] text-muted-foreground">
-            Couldn&apos;t load your dashboard. Try refreshing the page.
+            Couldn&apos;t load Command Center. Try refreshing the page.
           </p>
         </div>
       ) : data?.active_tracking ? (
@@ -111,7 +125,7 @@ export default function DashboardPage() {
             <Link
               key={item.href}
               href={item.href}
-              className="group flex items-center gap-3 rounded-lg border bg-card p-3 shadow-soft transition-colors hover:bg-muted/30"
+              className="orbital-entry group flex items-center gap-3 rounded-lg border bg-card p-3"
             >
               <div
                 className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${item.color}`}

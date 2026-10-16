@@ -1,6 +1,6 @@
 import React from "react";
 import { beforeEach, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { TransactionWorkspace } from "./workspace";
@@ -168,22 +168,6 @@ it("renders server totals and exact evidence without claiming a complete financi
   ).toBeInTheDocument();
   expect(screen.queryByText("Financially reconciled")).not.toBeInTheDocument();
 });
-it("shows a reconciled order as reconciled, whatever a later scan read", async () => {
-  // Decided 2026-09-30: a reconciled order stays reconciled. The row's balance is the later
-  // scan's raw evidence (a difference), and the server says the order is reconciled.
-  const base = vi.mocked(apiClient.get).getMockImplementation()!;
-  vi.mocked(apiClient.get).mockImplementation(async (...args) => {
-    const result = (await base(...args)) as { items?: object[] };
-    if (String(args[0]).includes("/review-results?"))
-      return { ...result, items: result.items!.map((item) => ({ ...item, reconciled: true })) } as never;
-    return result as never;
-  });
-  mount();
-  const row = (await screen.findByText("R123456789")).closest("tr")!;
-  expect(within(row).getByText("Reconciled")).toBeInTheDocument();
-  expect(within(row).queryByText("Needs review")).not.toBeInTheDocument();
-});
-
 it("queues selected cases as one read/proposal batch and never submits approval", async () => {
   vi.mocked(apiClient.post).mockResolvedValue({
     runs: [{ id: "batch-run", config_id: "scope-a", case_ids: ["case-a"] }],
@@ -503,15 +487,72 @@ it("shows completed daily coverage separately from enabled schedule", async () =
   expect(screen.getByText(/Daily checks on/)).toBeInTheDocument();
 });
 
-it("makes cached evidence explicit and sends the chosen mode on the normal review endpoint", async () => {
+it("preserves review context across the unified views and does not queue work on navigation", async () => {
+  const client = new QueryClient({defaultOptions:{queries:{retry:false}}});
+  const change = vi.fn();
+  const ui = (view: "reconcile" | "cases" | "records" | "history") => <QueryClientProvider client={client}><TransactionWorkspace view={view} onViewChange={change} /></QueryClientProvider>;
+  const {rerender} = render(ui("reconcile"));
+  await screen.findByText("R123456789");
+  fireEvent.change(screen.getByRole("combobox", {name:"Review period"}), {target:{value:"last_month"}});
+  rerender(ui("cases"));
+  expect(await screen.findByRole("heading", {name:"Open cases"})).toBeVisible();
+  expect(screen.getByRole("combobox", {name:"Review period",hidden:true})).not.toBeVisible();
+  rerender(ui("records"));
+  expect(screen.getByText("Imported source orders")).toBeVisible();
+  rerender(ui("reconcile"));
+  expect(screen.getByRole("combobox", {name:"Review period"})).toHaveValue("last_month");
+  expect(screen.getByText("Imported source orders")).not.toBeVisible();
+  rerender(ui("history"));
+  fireEvent.click(await screen.findByRole("button", {name:"View period"}));
+  expect(change).toHaveBeenCalledWith("reconcile");
+  expect(apiClient.post).not.toHaveBeenCalled();
+});
+
+it("closes the portaled case drawer on view navigation without submitting a decision", async () => {
+  const client = new QueryClient({defaultOptions:{queries:{retry:false}}});
+  const ui = (view: "reconcile" | "records") => <QueryClientProvider client={client}><TransactionWorkspace view={view} /></QueryClientProvider>;
+  const {rerender} = render(ui("reconcile"));
+  fireEvent.click(await screen.findByRole("button", {name:"Review case →"}));
+  expect(screen.getByRole("dialog")).toBeVisible();
+  rerender(ui("records"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  rerender(ui("reconcile"));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(apiClient.post).not.toHaveBeenCalled();
+});
+
+it("defaults to saved observations and sends that mode on the normal review endpoint", async () => {
   vi.mocked(apiClient.post).mockResolvedValue(run);
   mount();
-  expect(screen.getByLabelText("Review evidence")).toHaveValue("current");
-  fireEvent.change(screen.getByLabelText("Review evidence"), { target: { value: "saved" } });
+  expect(screen.getByLabelText("Review evidence")).toHaveValue("saved");
   expect(screen.getByText(/original read dates/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Reconcile period" }));
   await waitFor(() => expect(apiClient.post).toHaveBeenCalledWith(
     "/api/v1/transaction-ops/configs/scope-a/review",
     expect.objectContaining({ evidence_mode: "saved", evaluation_key: expect.any(String) }),
   ));
+});
+
+it("allows an explicit standard review instead of silently forcing saved observations", async () => {
+  vi.mocked(apiClient.post).mockResolvedValue(run);
+  mount();
+  fireEvent.change(screen.getByLabelText("Review evidence"), { target: { value: "current" } });
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile period" }));
+  await waitFor(() => expect(apiClient.post).toHaveBeenCalled());
+  expect(vi.mocked(apiClient.post).mock.calls[0][1]).not.toHaveProperty("evidence_mode");
+});
+
+it("shows a resolved case as reconciled while retaining the raw observed variance", async () => {
+  const original = vi.mocked(apiClient.get).getMockImplementation()!;
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) => {
+    const response = await original(path);
+    if (path.includes("/review-results?")) {
+      const data = response as {items: Array<Record<string, unknown>>};
+      return {...data, items: data.items.map((item) => ({...item, reconciled: true}))} as never;
+    }
+    return response;
+  });
+  mount();
+  expect(await screen.findByText("Reconciled")).toBeInTheDocument();
+  expect(screen.getByText("+123456789012335.123456")).toBeInTheDocument();
 });

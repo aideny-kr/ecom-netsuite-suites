@@ -121,7 +121,8 @@ def score_accuracy(result_text: str, expected_keywords: list[str]) -> float:
 # Display use — BUILTIN.DF(sa.country) AS country, GROUP BY BUILTIN.DF(sa.country) — has
 # no adjacent operator and is NOT matched. Scoped to .country on purpose:
 # BUILTIN.DF(field) = 'Value' on small static custom lists is a blessed readability
-# pattern (netsuite.yaml CUSTOM LIST FIELDS) and must not be flagged. `BUILTIN\s*\.\s*DF`
+# pattern (netsuite.yaml CUSTOM LIST FIELDS) and must not be flagged by this check (an
+# unbounded transactionline scan is caught by _BUILTIN_DF_FILTER below). `BUILTIN\s*\.\s*DF`
 # also catches a spaced-out `BUILTIN . DF` evasion.
 _DF_COUNTRY = r"BUILTIN\s*\.\s*DF\s*\(\s*(?:\w+\.)?COUNTRY\s*\)"
 _CMP = r"(?:>=|<=|<>|!=|>|<|=|(?:NOT\s+)?IN\b|(?:NOT\s+)?LIKE\b)"
@@ -132,22 +133,72 @@ _CMP = r"(?:>=|<=|<>|!=|>|<|=|(?:NOT\s+)?IN\b|(?:NOT\s+)?LIKE\b)"
 # latency gate (follow-up #2) is the backstop for arbitrarily-shaped slow SQL.
 _BUILTIN_DF_COUNTRY_FILTER = re.compile(rf"{_DF_COUNTRY}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_COUNTRY}")
 
-# A real trandate predicate bounds the scan to a date RANGE (uses the trandate index).
-# Allow an optional ')' so both `t.trandate >= ...` and `TRUNC(t.trandate) >= ...` count;
-# a SELECT/ORDER BY mention (trandate followed by ',' or end) does NOT (no operator), and
-# `<>` / `!=` (not-equal) are NOT range bounds. FETCH FIRST / ROWNUM are deliberately NOT
-# bounds — they cap returned rows, not the scan.
-# Known residual: this is alias-blind, so a stray `<other>.trandate >=` predicate in the
-# same query would also satisfy the bound — acceptable, since an address-country query
-# scans the transaction it joins and an unrelated trandate predicate is implausible.
-_TRANDATE_PREDICATE = re.compile(r"\bTRANDATE\s*\)?\s*(?:>=|<=|<(?!>)|>|=|\bBETWEEN\b)")
+# A scan is bounded by a date range with a LOWER limit (the trandate index then reads a slice):
+# `>=`, `>`, `=` (one day) or BETWEEN, with an optional ')' for `TRUNC(t.trandate)`, or the
+# reversed forms `X <= t.trandate` / `X < t.trandate` / `X = t.trandate`. An upper limit alone
+# (`t.trandate <= today`) still reads all history: vs-MCP 2026-10-06, sales_country_canonical
+# read "as of today" that way and timed out on both sides (54-60 s). `<>` / `!=` are not ranges,
+# and FETCH FIRST / ROWNUM cap returned rows, not the scan.
+# Known residual: this is alias-blind and matches anywhere (a date in an OR branch or a CASE
+# label also counts). Structural reading was tried in #397 and failed three review rounds, so
+# this stays a deliberately simple text check.
+_TRANDATE_PREDICATE = re.compile(
+    r"\bTRANDATE\s*\)?\s*(?:>=|>|=|\bBETWEEN\b)"
+    r"|(?:<=|<(?![>=])|(?<![<>!])=)\s*(?:TRUNC\s*\(\s*)?(?:\w+\s*\.\s*)?TRANDATE\b"
+)
 
 _ADDRESS_TABLES = ("TRANSACTIONSHIPPINGADDRESS", "TRANSACTIONBILLINGADDRESS")
+
+# BUILTIN.DF(<any field>) used as a filter, same operator/wrapper shapes as the country check.
+# A two-argument wrapper (`NVL(BUILTIN.DF(x), 'NONE') = ...`) is a filter too (#390 review R3).
+_DF_ANY = r"BUILTIN\s*\.\s*DF\s*\(\s*[\w.]+\s*\)"
+_DEFAULT_ARG = r"(?:\s*,\s*(?:'S'|[\w.]+))?"  # literals are 'S' after _lex
+_BUILTIN_DF_FILTER = re.compile(rf"{_DF_ANY}{_DEFAULT_ARG}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_ANY}")
+# A CASE label (`CASE WHEN BUILTIN.DF(x) = 'A' THEN ... END`) compares but filters nothing (#390 review R1).
+_CASE_EXPRESSION = re.compile(r"\bCASE\b.*?\bEND\b", re.DOTALL)
+_TRANSACTION_LINES = re.compile(r"\bTRANSACTIONLINE\b")
+
+
+def _lex(sql: str) -> str:
+    """Upper-cased SQL with every string literal replaced by 'S' (handling '' escapes) and comments
+    removed outside literals and quoted identifiers, so a value can neither fake nor hide syntax and
+    `--` inside a quoted alias is not a comment (#390 review round 2 R1/R3/R5, #397 round 3 R3).
+    Quoted identifiers are kept as they are, so a quoted table name is still seen."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        if sql[i] == "'":
+            j = i + 1
+            while j < n and not (sql[j] == "'" and not sql.startswith("''", j)):
+                j += 2 if sql.startswith("''", j) else 1
+            out.append("'S'")
+            i = j + 1
+        elif sql[i] == '"':
+            # Kept verbatim: a quoted table ("TRANSACTIONLINE") must stay visible (#398 review R1);
+            # only its inside is opaque to the literal and comment handling.
+            j = sql.find('"', i + 1)
+            j = n - 1 if j < 0 else j
+            out.append(sql[i : j + 1])
+            i = j + 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            out.append(" ")
+            i = n if j < 0 else j
+        elif sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            out.append(" ")
+            i = n if j < 0 else j + 2
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out).upper()
+
 
 # Penalty weight for each perf anti-pattern (subtracted from the efficiency score).
 _PERF_PENALTY = {
     "builtin_df_country_filter": 0.3,
     "unbounded_address_join": 0.2,
+    "unbounded_df_line_scan": 0.3,
 }
 
 
@@ -160,24 +211,40 @@ def detect_perf_anti_patterns(sql: str) -> list[str]:
       - ``builtin_df_country_filter`` — ``BUILTIN.DF(<addr>.country)`` used as a
         filter predicate (per-row function → defeats the index → full scan).
       - ``unbounded_address_join`` — a ``transactionShippingAddress`` /
-        ``transactionBillingAddress`` join with no ``t.trandate`` predicate to
-        bound the scan.
+        ``transactionBillingAddress`` join with no lower ``t.trandate`` limit (an upper
+        limit alone still reads all history). Scoring-only in chat: on 30 days of real
+        Framework chat SQL, 2 of 4 such joins ran in 2-4 s because a subquery restricted
+        them to specific orders.
 
-    Intentionally narrow: a generic ``BUILTIN.DF(field) = 'Value'`` filter on a
-    small static custom list is a blessed readability pattern and is NOT flagged.
+    And one measured on Framework 2026-10-05 (a 7-minute chat turn):
+
+      - ``unbounded_df_line_scan`` — any ``BUILTIN.DF(...)`` filter in a query that
+        reads ``transactionline`` with no trandate range. Each such query took
+        65-116 s and timed out on the MCP; with a trandate floor the same filter
+        returned the same rows in seconds. An item subquery
+        (``tl.item IN (SELECT ... WHERE BUILTIN.DF(...) = ...)``) timed out as well,
+        so the subquery is not exempt.
+
+    A ``BUILTIN.DF(field) = 'Value'`` filter on a small static custom list is
+    still a blessed readability pattern on its own table, or once the scan is
+    bounded by date; only the unbounded transaction-line scan is flagged.
     """
     if not sql or not sql.strip():
         return []
-    # Strip SQL comments first so a commented-out predicate can't satisfy a scan bound
-    # and a commented BUILTIN.DF can't trip the filter check.
-    cleaned = re.sub(r"--[^\n]*", " ", sql)
-    cleaned = re.sub(r"/\*.*?\*/", " ", cleaned, flags=re.DOTALL)
-    sql_upper = cleaned.upper()
+    # Hide literals, quoted identifiers and comments first: a commented-out predicate can't satisfy a
+    # scan bound, a commented BUILTIN.DF can't trip the filter check, and quoted text is just a value.
+    sql_upper = _lex(sql)
     reasons: list[str] = []
     if _BUILTIN_DF_COUNTRY_FILTER.search(sql_upper):
         reasons.append("builtin_df_country_filter")
     if any(tbl in sql_upper for tbl in _ADDRESS_TABLES) and not _TRANDATE_PREDICATE.search(sql_upper):
         reasons.append("unbounded_address_join")
+    if (
+        _TRANSACTION_LINES.search(sql_upper)
+        and _BUILTIN_DF_FILTER.search(_CASE_EXPRESSION.sub(" ", sql_upper))
+        and not _TRANDATE_PREDICATE.search(sql_upper)
+    ):
+        reasons.append("unbounded_df_line_scan")
     return reasons
 
 

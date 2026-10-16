@@ -88,7 +88,15 @@ def _patch_executor(monkeypatch, result_str=None, calls=None, by_params=None):
     calls = calls if calls is not None else []
 
     async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
-        calls.append({"tool": tool_name, "params": tool_input, "tenant_id": tenant_id, "actor_id": actor_id})
+        calls.append(
+            {
+                "tool": tool_name,
+                "params": tool_input,
+                "tenant_id": tenant_id,
+                "actor_id": actor_id,
+                "perf_guard": kw.get("perf_guard"),
+            }
+        )
         if by_params is not None:
             key = (tool_input.get("report_type"), tool_input.get("period"))
             return by_params.get(key, result_str or _fresh_result_str())
@@ -141,6 +149,8 @@ async def test_refresh_publishes_new_version_with_fresh_numbers(db, monkeypatch)
     # the source replayed with the STORED params under the report's tenant/actor
     assert calls and calls[0]["tool"] == "netsuite_suiteql"
     assert calls[0]["params"] == {"query": "SELECT 1"}
+    # A refresh replays a recipe the user already accepted; the chat-time query guard must not break it.
+    assert calls[0]["perf_guard"] is False
     assert calls[0]["tenant_id"] == tenant.id
 
     # parent mirrors the new current version

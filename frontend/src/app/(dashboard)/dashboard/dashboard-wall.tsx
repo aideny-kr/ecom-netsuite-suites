@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { FileBarChart, X } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
+import { presentReportHtml } from "@/lib/report-presentation";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FreshnessChip } from "@/lib/report-utils";
 import { DashboardSwitcher } from "./dashboard-switcher";
@@ -192,6 +193,7 @@ export function DashboardWall({
 }: DashboardWallProps) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [reportWidth, setReportWidth] = useState(REPORT_WIDTH_NARROW);
+  const [responsiveReport, setResponsiveReport] = useState(false);
   const [error, setError] = useState(false);
   // Local state hides the banner immediately on click (no round-trip wait); the
   // dismiss button ALSO fires useDismissDashboardNotice() below so the dismissal
@@ -218,7 +220,9 @@ export function DashboardWall({
       .getText(`/api/v1/reports/${report.id}/view`)
       .then((html) => {
         if (cancelled) return;
-        url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+        const presented = presentReportHtml(html);
+        url = URL.createObjectURL(new Blob([presented], { type: "text/html" }));
+        setResponsiveReport(presented !== html);
         // Alongside the blob, not before/after it — the iframe width and the scale
         // denominator (below) must always agree with which document is actually loaded.
         setReportWidth(deriveReportWidth(html));
@@ -345,7 +349,7 @@ export function DashboardWall({
             title={report.title}
             sandbox=""
             className="border-0"
-            style={{
+            style={responsiveReport ? { width: "100%", height: "100%" } : {
               width: reportWidth,
               height: scale > 0 ? box.height / scale : box.height,
               transform: `scale(${scale})`,

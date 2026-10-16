@@ -694,3 +694,31 @@ def test_failed_or_malformed_construction_does_not_establish_query_handle_proven
     completed = _native_call("execute_query", {"query_handle": "h1"}, result([[65]]))
     assert "query_receipt" not in constructed
     assert "<previous_completed_mbql>" not in render_tool_trace([constructed, completed])
+
+
+@pytest.mark.parametrize(
+    "result_str",
+    [
+        '{"error": "NetSuite request failed: timeout"}',
+        '{"error": true, "message": "NetSuite API error 403: role lacks permission"}',
+        '{"isError": true, "content": [{"type": "text", "text": "Query failed"}]}',
+    ],
+)
+def test_a_failed_call_is_logged_as_failed_whatever_its_message_says(result_str):
+    # Packet review round 1 on #370 (R2): the UI marked a step failed only when its summary
+    # began with "error"; "NetSuite request failed: ..." read as a completed step.
+    from app.services.chat.tool_call_results import build_tool_call_log_entry
+
+    entry = build_tool_call_log_entry(
+        step=0, tool_name="netsuite_suiteql", params={}, result_str=result_str, duration_ms=1
+    )
+    assert entry["error"] is True
+
+
+def test_a_successful_call_carries_no_error_flag():
+    from app.services.chat.tool_call_results import build_tool_call_log_entry
+
+    entry = build_tool_call_log_entry(
+        step=0, tool_name="netsuite_suiteql", params={}, result_str='{"columns": ["a"], "rows": [[1]]}', duration_ms=1
+    )
+    assert "error" not in entry

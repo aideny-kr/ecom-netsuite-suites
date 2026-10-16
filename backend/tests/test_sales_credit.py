@@ -147,6 +147,28 @@ def test_credit_preserves_partially_paid_receivables(paid, remaining):
     assert p["proposed_fields"]["apply"]["items"] == [{"doc": {"id": "20"}, "apply": True, "amount": 5.0}]
 
 
+@pytest.mark.parametrize("field", ["taxTotal", "shippingCost", "discountTotal"])
+@pytest.mark.parametrize("absent", ["missing", "none"])
+def test_a_reference_credit_without_an_empty_summary_field_still_proves_the_treatment(field, absent):
+    """NetSuite drops empty summary money fields on a credit created through the API: CM12127
+    (read 2026-10-07) has no taxTotal and no shippingCost. The reference credit's ledger proof
+    already admits only the AR and adjustment lines, so absent means zero here."""
+    data = inputs()
+    ref = data["support"]["reference_credit"]
+    if absent == "missing":
+        ref.pop(field, None)
+    else:
+        ref[field] = None
+    assert build_candidate(**data) is not None
+
+
+@pytest.mark.parametrize("field", ["shippingCost", "discountTotal"])
+def test_a_reference_credit_with_a_nonzero_summary_field_is_still_refused(field):
+    data = inputs()
+    data["support"]["reference_credit"][field] = "1.00"
+    assert build_candidate(**data) is None
+
+
 @pytest.mark.parametrize("paid", ["-1", "102"])
 def test_credit_rejects_negative_payments_and_overpayments(paid):
     assert build_candidate(**inputs(paid=paid)) is None
@@ -235,5 +257,8 @@ def test_duplicate_search_does_not_hide_old_partial_or_unapplied_credits():
         )
 
 
-def test_unpaid_taxable_invoice_does_not_fall_back_to_credit():
-    assert build_candidate(**inputs(paid="0")) is None
+def test_an_unpaid_taxable_invoice_gets_the_credit_memo_too():
+    """Aiden, 2026-10-06: an unpaid invoice gets the credit memo (it used to get nothing here)."""
+    p = build_candidate(**inputs(paid="0"))
+    assert p["kind"] == "sales_adjustment_credit"
+    assert p["expected_after"]["credit_tax"] == "0.00" and p["expected_after"]["invoice_remaining"] == "101.00"

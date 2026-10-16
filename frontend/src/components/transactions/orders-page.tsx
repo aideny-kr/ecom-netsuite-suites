@@ -105,7 +105,7 @@ function BalanceStatus({ status }: { status: string }) {
   );
 }
 
-export function OrdersPage() {
+export function OrdersPage({ active = true }: { active?: boolean } = {}) {
   const router = useRouter();
   const access = useTransactionAccess();
   const client = useQueryClient();
@@ -142,6 +142,7 @@ export function OrdersPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [selected, setSelected] = useState<Order | null>(null);
+  useEffect(() => { if (!active) setSelected(null); }, [active]);
   const [runs, setRuns] = useState<Run[]>([]);
   const requestKeys = useRef(new Map<string, string>());
   const reconciliationRequest = useRef<{
@@ -307,8 +308,7 @@ export function OrdersPage() {
     <div className="animate-fade-in space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="mb-2 text-[13px] text-muted-foreground">Transactions</p>
-          <h1 className="text-2xl font-semibold tracking-tight">Orders</h1>
+          <h2 className="text-xl font-medium tracking-tight">Orders</h2>
           <p className="mt-2 text-[15px] text-muted-foreground">
             Compare order totals, VAT / tax, and completed refunds with
             NetSuite.
@@ -589,7 +589,7 @@ export function OrdersPage() {
         </>
       )}
       <Dialog
-        open={!!selected}
+        open={active && !!selected}
         onOpenChange={(open) => {
           if (!open) setSelected(null);
         }}

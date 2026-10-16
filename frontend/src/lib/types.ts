@@ -58,7 +58,7 @@ export const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
 export interface Connection {
   id: string;
   tenant_id: string;
-  provider: "shopify" | "stripe" | "netsuite" | "celigo" | "typesafe";
+  provider: "shopify" | "stripe" | "netsuite" | "celigo";
   label: string;
   status: "active" | "inactive" | "error" | "revoked";
   auth_type: string | null;
@@ -330,7 +330,11 @@ export interface ToolCallStep {
   params: Record<string, unknown>;
   result_summary: string;
   result_payload?: ToolCallResultPayload | null;
+  /** Conversation-wide id (r1, r2, …) a result card can reference. */
+  result_id?: string | null;
   duration_ms: number;
+  /** Set by the backend when the call failed; older messages may lack it. */
+  error?: boolean;
 }
 
 export interface ToolCallTableResultPayload {
@@ -916,6 +920,8 @@ export interface SalesCreditReview extends AccountingReviewBase {
   };
   sales_adjustment_account: string;
   sales_adjustment_account_name?: string;
+  /** The approved skill that let the order's own adjustment label take this treatment. */
+  skill?: { name: string; version: number } | null;
 }
 
 export interface InvoiceDiscountReview extends Omit<SalesCreditReview, "kind" | "expected_after"> {
@@ -968,7 +974,21 @@ export type NativeAccountingReview =
   | (NativeAccountingReviewBase & { kind: "credit_line_reallocation" })
   | (NativeAccountingReviewBase & { kind: "sales_order_line_alignment" });
 
-export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview | NativeAccountingReview;
+/** A new credit the assistant proposed and the server accepted by outcome (smart resolver). */
+export interface CreditCreationReview extends AccountingReviewBase {
+  kind: "credit_creation";
+  source: Record<string, unknown>;
+  invoice_id: string;
+  memo: string;
+  lines: Array<{ item_id: string; amount: string }>;
+  expected_after: { total: string; subtotal: string; taxTotal: string };
+  expected_ledger: { debit: Record<string, string>; credit: Record<string, string> };
+  balance: Record<"before" | "after" | "source", { gross: string; net: string; tax: string }>;
+  sales_adjustment_account: string;
+  tax_account: string;
+}
+
+export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview | NativeAccountingReview | CreditCreationReview;
 
 export interface AccountingGroup {
   group_id: string;

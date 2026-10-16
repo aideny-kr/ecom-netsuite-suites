@@ -597,7 +597,10 @@ def test_daily_routing_preserves_manual_bulk_and_one_order_recovery(monkeypatch)
     assert mod.investigation_queue("recovery", 2) == "recon"
 
 
-async def test_real_interval_candidate_recovers_transient_stop_without_daily_policy(db, admin_user, monkeypatch):
+@pytest.mark.parametrize(
+    "code", ["source_transport_failed", "replica_query_incomplete", "replica_read_not_fresh", "replica_cached_response"]
+)
+async def test_real_interval_candidate_recovers_transient_stop_without_daily_policy(db, admin_user, monkeypatch, code):
     from app.schemas.transaction_runs import ConfigControl, RunCreate
     from app.services.transaction_ops import state_service as state
     from tests.conftest import enable_feature_flag
@@ -634,7 +637,7 @@ async def test_real_interval_candidate_recovers_transient_stop_without_daily_pol
         "read_retry_count": 3,
         "read_stop_reason": "retry_limit",
         "read_stop_run_id": str(prior.id),
-        "last_read_failure": {"code": "source_transport_failed", "retryable": True, "resolved": False},
+        "last_read_failure": {"code": code, "retryable": True, "resolved": False},
     }
     await db.flush()
     assert conf.id in await mod._candidate_ids(db, actor.tenant_id, now)
@@ -650,3 +653,31 @@ async def test_real_interval_candidate_recovers_transient_stop_without_daily_pol
     assert child.progress_json["continuation_read_retry_count"] == 1
     assert child.progress_json["pending_refs"] == ["R100000001"]
     assert (await mod.collect_due_runs(db, now + timedelta(seconds=1)))["created"] == 0
+
+
+async def test_collection_error_reenters_same_cycle_without_reset_at_next_day(dependencies, monkeypatch):
+    from app.services.transaction_ops import continuation
+    from app.services.transaction_ops.collection_recovery import failure_diagnostic
+
+    conf, prior = (
+        config(),
+        previous(
+            "error",
+            finished_at=NOW - timedelta(minutes=5),
+            config_snapshot={"mapping_json": {"action_mode": "propose_actions"}},
+        ),
+    )
+    prior.progress_json = {
+        "collection_diagnostic_retry_count": 1,
+        "last_collection_failure": failure_diagnostic(
+            ValueError(), run_id=prior.id, now=prior.finished_at, stage="source_page"
+        ),
+    }
+    dependencies.get_config.return_value = conf
+    mod._candidate_ids.return_value = [conf.id]
+    mod._schedule_history.return_value = (False, prior)
+    resume = AsyncMock(return_value=None)
+    monkeypatch.setattr(continuation, "continue_budget_run", resume)
+    await mod.collect_due_runs(AsyncMock(), NOW + timedelta(days=1))
+    resume.assert_awaited_once()
+    dependencies.create_run.assert_not_awaited()  # Exhaustion cannot earn a new daily allowance.

@@ -136,3 +136,35 @@ async def test_read_preserves_decimal_and_rejects_duplicate_keys():
     ) as client:
         with pytest.raises(ConnectorReadError):
             await read_json(credentials, "orders", client=client)
+
+
+@pytest.mark.parametrize("error", [socket.gaierror("private DNS detail"), TimeoutError("private DNS detail")])
+async def test_dns_outage_is_transport_failure_without_sending_credentials(monkeypatch, error):
+    monkeypatch.setattr("app.services.public_http.resolve_addresses", AsyncMock(side_effect=error))
+    upstream = AsyncMock()
+    transport = PublicHTTPTransport("https://shop.example/api/", transport=httpx.MockTransport(upstream))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(httpx.ConnectError, match="DNS lookup failed") as caught:
+            await client.get("https://shop.example/api/orders", headers={"Authorization": "Bearer private-token"})
+    upstream.assert_not_called()
+    assert "private DNS detail" not in str(caught.value)
+    assert "private-token" not in str(caught.value)
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "10.0.0.1", "::1"])
+async def test_mixed_private_dns_stays_permanent_not_transport_failure(monkeypatch, address):
+    monkeypatch.setattr(
+        "app.services.public_http.resolve_addresses",
+        AsyncMock(
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443)),
+            ]
+        ),
+    )
+    upstream = AsyncMock()
+    transport = PublicHTTPTransport("https://shop.example/api/", transport=httpx.MockTransport(upstream))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(UnsafeEndpointError):
+            await client.get("https://shop.example/api/orders")
+    upstream.assert_not_called()

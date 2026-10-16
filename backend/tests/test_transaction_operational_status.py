@@ -164,17 +164,58 @@ def test_backoff_does_not_claim_eligibility_after_cycle_expiry():
     assert status.continuation_status(r, NOW, blocked={"reason": "no_progress"})["state"] == "waiting_for_retry"
 
 
-def test_auth_reconnect_is_not_claimed_to_bypass_finite_caps():
+@pytest.mark.parametrize(
+    "code", ["netsuite_upstream_http_401", "netsuite_invalid_connection", "netsuite_authentication_failed"]
+)
+def test_auth_reconnect_is_not_claimed_to_bypass_finite_caps(code):
     r = run(termination_reason="error")
     r.progress_json = {
         "continuation_part": 96,
         "last_read_failure": {
-            "code": "netsuite_upstream_http_401",
+            "code": code,
             "resolved": False,
             "observed_at": (NOW - timedelta(minutes=3)).isoformat(),
         },
     }
     assert status.continuation_status(r, NOW)["reason"] == "part_limit"
+
+
+@pytest.mark.parametrize("code", ["netsuite_invalid_connection", "netsuite_authentication_failed"])
+def test_pre_http_auth_stop_reports_connection_check_instead_of_tomorrow(code):
+    r = run(termination_reason="error")
+    r.progress_json = {"last_read_failure": {"code": code, "resolved": False, "observed_at": r.finished_at.isoformat()}}
+    check = status.continuation_status(r, NOW)
+    assert check["state"] == "connection_check_required"
+    assert (
+        status._next_action(config(), r, [], {"status": "behind"}, status.schedule(config(), NOW), check, NOW)["kind"]
+        == "check_connection"
+    )
+
+
+@pytest.mark.parametrize("code", ["netsuite_invalid_connection", "netsuite_authentication_failed"])
+@pytest.mark.parametrize("limit", ["cycle_expired", "auth_retry_limit", "part_limit"])
+def test_pre_http_auth_limits_report_next_daily_cycle_instead_of_permanent_stop(code, limit):
+    from app.services.transaction_ops.scheduler import _schedule_key
+
+    c = config(mapping_json={}, interval_minutes=1440)
+    r = run(termination_reason="error")
+    r.progress_json = {
+        "schedule_cycle_key": _schedule_key(c, NOW),
+        "last_read_failure": {"code": code, "resolved": False, "observed_at": r.finished_at.isoformat()},
+        **{
+            "cycle_expired": {"continuation_started_at": (NOW - timedelta(days=2)).isoformat()},
+            "auth_retry_limit": {"auth_resume_count": 1},
+            "part_limit": {"continuation_part": 96},
+        }[limit],
+    }
+    recovery = status.continuation_status(r, NOW)
+    assert recovery["state"] == "blocked" and recovery["reason"] == limit
+    assert status._next_action(c, r, [], {}, status.schedule(c, NOW), recovery, NOW)["kind"] == "scheduled_check"
+    tomorrow = NOW + timedelta(days=1)
+    assert (
+        status._next_action(c, r, [], {}, status.schedule(c, tomorrow), recovery, tomorrow)["kind"]
+        == "new_schedule_cycle"
+    )
 
 
 @pytest.mark.parametrize("reason", ["error", "stall", "done"])
@@ -395,8 +436,27 @@ async def test_api_is_gated_and_uses_shared_service(client, db, admin_user, monk
     response = await client.get(url, headers=headers)
     assert response.status_code == 200, response.text
     assert read.await_args.args[1] == actor.tenant_id
+    assert (await client.get(url + "?daily_only=true", headers=headers)).status_code == 200
+    assert read.await_args.kwargs["daily_only"] is True
     assert (await client.get(url + "?limit=51", headers=headers)).status_code == 422
     assert (await client.get(url + "?config_id=not-a-uuid", headers=headers)).status_code == 422
+
+
+async def test_daily_alert_scope_filters_before_pagination_and_preserves_tenant_and_no_write_contract(
+    db, admin_user, admin_user_b
+):
+    actor = admin_user[0]
+    paused, _ = await seed(db, actor)
+    paused.schedule_enabled = False
+    interval = await seed_config(db, actor.tenant_id, actor)
+    interval.enabled = interval.schedule_enabled = True
+    daily, _ = await seed(db, actor)
+    await seed(db, admin_user_b[0])
+    await db.flush()
+    result = await status.operational_status(db, actor.tenant_id, limit=1, daily_only=True, now=NOW)
+    assert [e["config_id"] for e in result["entities"]] == [str(daily.id)]
+    assert result["truncated"] is False
+    assert result["entities"][0]["freshness"]["state"] == "healthy"
 
 
 async def test_config_pagination_scope_and_active_rows_are_bounded(db, admin_user):

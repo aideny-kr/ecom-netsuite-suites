@@ -200,9 +200,9 @@ export default function CeligoConnectorCard() {
         </>
       ) : (
         <>
-          <div className="flex gap-2 rounded-lg border border-amber-400/60 bg-amber-500/[0.05] p-3">
+          <div className="orbital-notice items-start" data-tone="warning">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-            <p className="text-[12px] text-amber-800 dark:text-amber-300">
+            <p className="text-[12px] text-foreground">
               Create a service token in Celigo with a Custom scope limited to read access.
               Personal access tokens expire after 90 days and will stop the sync without
               warning — service tokens don&apos;t expire.

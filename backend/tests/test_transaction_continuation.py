@@ -28,7 +28,9 @@ def distinct_run_creation_times():
         event.remove(TransactionRun, "before_insert", set_created_at)
 
 
-async def budget_run(db, user, *, reason="budget", progress=None, origin="manual"):
+async def budget_run(
+    db, user, *, reason="budget", progress=None, origin="manual", failure=None, read_failure_code=None
+):
     await db.execute(
         update(TenantFeatureFlag)
         .where(
@@ -57,8 +59,21 @@ async def budget_run(db, user, *, reason="budget", progress=None, origin="manual
         "scan_complete": True,
         **(progress or {}),
     }
+    if failure is not None:
+        from app.services.transaction_ops.collection_recovery import failure_diagnostic
+
+        run.progress_json["last_collection_failure"] = failure_diagnostic(
+            failure, run_id=run.id, now=run.finished_at, stage="source_page"
+        )
     if run.progress_json.get("read_stop_reason"):
         run.progress_json.setdefault("read_stop_run_id", str(run.id))
+    if read_failure_code is not None:
+        run.progress_json["last_read_failure"] = {
+            "code": read_failure_code,
+            "run_id": str(run.id),
+            "resolved": False,
+            "observed_at": run.finished_at.isoformat(),
+        }
     await db.flush()
     return run, config
 
@@ -215,11 +230,16 @@ async def scheduled_failure(db, user, *, progress=None):
     return prior, config
 
 
-async def test_scheduled_transient_read_waits_then_resumes_old_blocked_checkpoint_once(db, admin_user):
+@pytest.mark.parametrize(
+    "code", ["source_transport_failed", "replica_query_incomplete", "replica_read_not_fresh", "replica_cached_response"]
+)
+async def test_scheduled_transient_read_waits_then_resumes_old_blocked_checkpoint_once(db, admin_user, code):
     from app.services.transaction_ops.scheduler import _recovery_ids
 
     user = admin_user[0]
-    prior, _ = await scheduled_failure(db, user)
+    prior, _ = await scheduled_failure(
+        db, user, progress={"last_read_failure": {"code": code, "retryable": True, "resolved": False}}
+    )
     before = dict(prior.progress_json)
     due = prior.finished_at + continuation.READ_RETRY_DELAYS[0]
     assert not continuation.read_retry_due(prior, due - timedelta(seconds=1))

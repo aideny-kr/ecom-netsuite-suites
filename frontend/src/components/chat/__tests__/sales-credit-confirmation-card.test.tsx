@@ -27,6 +27,25 @@ describe("Sales Adjustments approval", () => {
     expect(approve).toHaveBeenCalledWith({});
     expect(JSON.stringify(creditCard)).toBe(original);
   });
+  it("names the order's own adjustment, not the configured label, when an approved skill covers it", () => {
+    // Live 2026-10-06 (R231821517): the card said "price match to PO" for a "reseller discount" order.
+    const review = creditCard.accounting_review!;
+    if (review.kind !== "sales_adjustment_credit") throw new Error("Expected credit fixture");
+    mount({
+      ...creditCard,
+      accounting_review: {
+        ...review,
+        source: { ...review.source, adjustments: [{ id: "9", label: "reseller discount", amount: "-5.00" }] },
+        skill: { name: "unbooked-solidus-adjustment", version: 1 },
+      },
+    });
+    expect(screen.getByText("reseller discount")).toBeVisible();
+    expect(screen.queryByText("Reseller Adjustment 5%")).not.toBeInTheDocument();
+  });
+  it("keeps the configured label when the order's adjustment carries it", () => {
+    mount();
+    expect(screen.getByText("Reseller Adjustment 5%")).toBeVisible();
+  });
   it.each(["indeterminate", "executing", "approved", "failed", "rejected"] as const)("never offers a second write for %s", status => {
     mount({ ...creditCard, status });
     expect(screen.queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument();

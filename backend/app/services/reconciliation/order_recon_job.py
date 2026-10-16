@@ -9,12 +9,13 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import String, and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
+from app.models.connection import DISPATCHABLE_CONNECTION_STATUSES, Connection
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.schemas.order_reconciliation import (
     ChargeRecord,
@@ -167,6 +168,7 @@ class OrderReconJob:
         self.db = db
         self.tenant_id = tenant_id
         self.engine = OrderMatchingEngine()
+        self._observed_customer_payments: set[str] = set()
         # Cache for _load_order_ref_pattern_once — both _fetch_charges and
         # _fetch_refunds need this tenant's order_ref_pattern within the same
         # run(); caching avoids querying TenantConfig twice per run. A plain
@@ -371,7 +373,7 @@ class OrderReconJob:
         """Shared Payout-join/tenant/date/subsidiary scaffold for both the
         charge fetch and the refund fetch — the two call sites differ only
         in ``line_types`` and their date bounds (the charge path passes
-        ``_DATE_BUFFER``-widened dates; the refund path passes its own
+        the exact settlement dates; the refund path passes its own
         ``REF_MATCH_SANITY_DAYS``-widened dates), both already computed by
         the caller. Returns raw (PayoutLine, arrival_date) row tuples —
         record construction stays with each caller since it differs
@@ -419,8 +421,8 @@ class OrderReconJob:
 
         rows = await self._fetch_payout_lines(
             line_types=["charge"],
-            date_from=date_from - _DATE_BUFFER,
-            date_to=date_to + _DATE_BUFFER,
+            date_from=date_from,
+            date_to=date_to,
             subsidiary_id=subsidiary_id,
         )
 
@@ -487,9 +489,23 @@ class OrderReconJob:
 
         Sets order_reference from related_payout_id.
         """
+        # Customer payments carry proven invoice/order allocation amounts in
+        # transaction currency. Retired-connection or invalidated proof is unusable.
+        active_connections = select(Connection.id.cast(String)).where(
+            Connection.tenant_id == self.tenant_id,
+            Connection.provider == "netsuite",
+            Connection.status.in_(DISPATCHABLE_CONNECTION_STATUSES),
+        )
+        usable = or_(
+            NetsuitePosting.record_type.in_(["deposit", "custdep"]),
+            and_(
+                NetsuitePosting.record_type == "customerpayment",
+                NetsuitePosting.raw_data["connection_id"].as_string().in_(active_connections),
+            ),
+        )
         stmt = select(NetsuitePosting).where(
             NetsuitePosting.tenant_id == self.tenant_id,
-            NetsuitePosting.record_type.in_(["deposit", "custdep"]),
+            usable,
             NetsuitePosting.transaction_date >= date_from - _DATE_BUFFER,
             NetsuitePosting.transaction_date <= date_to + _DATE_BUFFER,
         )
@@ -512,7 +528,7 @@ class OrderReconJob:
                 chunk = refs[i : i + _REF_CHUNK_SIZE]
                 ref_stmt = select(NetsuitePosting).where(
                     NetsuitePosting.tenant_id == self.tenant_id,
-                    NetsuitePosting.record_type.in_(["deposit", "custdep"]),
+                    usable,
                     NetsuitePosting.related_payout_id.in_(chunk),
                     NetsuitePosting.transaction_date >= sanity_from,
                     NetsuitePosting.transaction_date <= sanity_to,
@@ -524,18 +540,26 @@ class OrderReconJob:
                 for r in ref_result.scalars().all():
                     postings_by_id[r.id] = r  # union, deduped by id
 
+        self._observed_customer_payments = {
+            r.related_payout_id for r in postings_by_id.values() if r.record_type == "customerpayment"
+        }
         return [
             NSPaymentRecord(
                 id=str(r.id),
                 netsuite_internal_id=r.netsuite_internal_id,
-                amount=r.amount,
-                currency=r.currency,
+                amount=r.foreign_amount if r.record_type == "customerpayment" else r.amount,
+                currency=r.transaction_currency if r.record_type == "customerpayment" else r.currency,
                 transaction_date=r.transaction_date,
                 record_type=r.record_type,
                 memo=r.memo,
                 order_reference=r.related_payout_id,
             )
             for r in postings_by_id.values()
+            if r.record_type != "customerpayment"
+            or (
+                (r.raw_data or {}).get("application_verified") is True
+                and (r.raw_data or {}).get("application_version") == 1
+            )
         ]
 
     async def _fetch_refund_rows(
@@ -875,6 +899,14 @@ class OrderReconJob:
         mat_abs, mat_pct = await self._load_materiality()
         buckets: list[str] = []
         for candidate in candidates:
+            known_payment = candidate.charge.order_reference in self._observed_customer_payments
+            if candidate.deposit is None and known_payment:
+                candidate.variance_type = "manual_adjustment"
+                candidate.variance_explanation = (
+                    "A customer payment was observed for this order; "
+                    "its current application does not verify this charge. "
+                    "Investigate invoice applications before any deposit booking."
+                )
             # Determine status based on confidence
             if candidate.match_type == "unmatched":
                 status = "pending"
@@ -935,6 +967,12 @@ class OrderReconJob:
                 "order_reference": candidate.charge.order_reference,
                 "charge_payout_line_id": candidate.charge.payout_line_id,
             }
+            if candidate.deposit:
+                evidence["netsuite_record_type"] = candidate.deposit.record_type
+                evidence["netsuite_internal_id"] = candidate.deposit.netsuite_internal_id
+            elif known_payment:
+                evidence["netsuite_record_type"] = "customerpayment"
+                evidence["payment_application_unverified"] = True
             if confidence_signals is not None:
                 evidence["confidence_signals"] = confidence_signals
             # Tier-1 same-ref evidence: only present when several deposits

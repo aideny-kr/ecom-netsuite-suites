@@ -47,7 +47,7 @@ export function CodeViewer({ content, filePath }: CodeViewerProps) {
           padding: "1rem",
           fontSize: "13px",
           lineHeight: "1.6",
-          background: "#1e1e1e",
+          background: "hsl(var(--sidebar-bg))",
           minHeight: "100%",
         }}
         lineNumberStyle={{

@@ -11,6 +11,15 @@ function label(value: unknown): string {
   return value == null ? "Not verified" : String(value);
 }
 
+
+/** The order's own adjustment label. An approved skill can cover a label other than the
+ * configured one (2026-10-06); otherwise the two are the same. */
+function adjustmentLabel(p: SalesCreditReview): string {
+  const adjustments = (p.source as { adjustments?: unknown }).adjustments;
+  const first = Array.isArray(adjustments) ? (adjustments[0] as { label?: unknown } | undefined) : undefined;
+  return typeof first?.label === "string" && first.label.trim() ? first.label : p.profile.source_adjustment_label;
+}
+
 export function creditAmount(value: unknown, currency: string): string {
   const n = value == null || value === "" ? NaN : Number(value);
   if (!Number.isFinite(n)) return "Not verified";
@@ -74,7 +83,7 @@ export function SalesCreditConfirmationCard({
         <p className="rounded-lg bg-muted/40 p-4 leading-relaxed">
           {verified
             ? `Credit ${label(resolution?.credit_memo_number ?? data.accounting_verification?.credit_memo_id)} covers the finalized source adjustment. Its application and general ledger entries were independently verified.`
-            : <>The source order includes a finalized <strong>{p.profile.source_adjustment_label}</strong> adjustment. This proposal creates a non-taxable credit and applies it only to this invoice.</>}
+            : <>The source order includes a finalized <strong>{adjustmentLabel(p)}</strong> adjustment. This proposal creates a non-taxable credit and applies it only to this invoice.</>}
         </p>
         <div className="overflow-x-auto">
           <table className="w-full tabular-nums" aria-label="Invoice reconciliation">

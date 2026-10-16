@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, exists, func, insert, not_, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -81,6 +81,23 @@ from app.services.reconciliation.resolution_planner import plan_run
 from app.workers.tasks.recon_resolution_agent import AGENT_FLAG, dispatch_resolution_agent
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
+
+
+@router.get("/runs/{run_id}/refund-checks")
+async def refund_checks(
+    run_id: str,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    feature: Annotated[User, Depends(require_feature("reconciliation"))],
+    source_feature: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=100),
+):
+    from app.services.reconciliation.refund_review import saved_refunds
+
+    run = await _get_run_or_404(db, user.tenant_id, run_id)
+    return await saved_refunds(db, user.tenant_id, run, limit=limit, offset=offset, search=search)
 
 
 # _parse_uuid, _ensure_run_open, _ensure_resolution_ui_enabled, _get_run_or_404,

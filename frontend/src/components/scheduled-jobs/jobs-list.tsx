@@ -247,14 +247,11 @@ export function ScheduledJobsList(): JSX.Element {
     <div className="space-y-4 animate-fade-in">
       <div className="flex flex-wrap items-center gap-3">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Scheduled jobs</h2>
+          <p className="orbital-eyebrow">Repeatable work</p><h1 className="mt-2 text-2xl font-medium tracking-tight">Workflows</h1><p className="mt-2 text-[13px] text-muted-foreground">Open a workflow to inspect its plan, runs and outputs.</p>
         </div>
         <div className="ml-auto flex gap-2">
-          <Button variant="outline" size="sm">
-            Run history
-          </Button>
           <Button asChild size="sm">
-            <Link href="/scheduled-jobs/new">+ New job</Link>
+            <Link href="/scheduled-jobs/new">+ New workflow</Link>
           </Button>
         </div>
       </div>

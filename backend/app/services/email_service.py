@@ -65,7 +65,14 @@ async def send_invite_email(
 
 
 async def _deliver(
-    label: str, *, to_email: str, subject: str, text_body: str, html_body: str, console_extra: tuple[str, ...] = ()
+    label: str,
+    *,
+    to_email: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+    console_extra: tuple[str, ...] = (),
+    idempotency_key: str | None = None,
 ) -> None:
     """The one provider dispatch for every outbound email: console prints, resend posts."""
     if EMAIL_PROVIDER == "console":
@@ -80,13 +87,15 @@ async def _deliver(
         return
 
     if EMAIL_PROVIDER == "resend":
-        await _send_via_resend(to_email, subject, html_body, text_body)
+        await _send_via_resend(
+            to_email, subject, html_body, text_body, **({"idempotency_key": idempotency_key} if idempotency_key else {})
+        )
         return
 
     raise NotImplementedError(f"Email provider '{EMAIL_PROVIDER}' not yet implemented")
 
 
-async def _send_via_resend(to: str, subject: str, html: str, text: str) -> None:
+async def _send_via_resend(to: str, subject: str, html: str, text: str, *, idempotency_key: str | None = None) -> None:
     """Send email via Resend API."""
     if not EMAIL_API_KEY:
         raise ValueError("EMAIL_API_KEY is required for Resend provider")
@@ -97,6 +106,7 @@ async def _send_via_resend(to: str, subject: str, html: str, text: str) -> None:
             headers={
                 "Authorization": f"Bearer {EMAIL_API_KEY}",
                 "Content-Type": "application/json",
+                **({"Idempotency-Key": idempotency_key} if idempotency_key else {}),
             },
             json={
                 "from": EMAIL_FROM_ADDRESS,
@@ -109,8 +119,8 @@ async def _send_via_resend(to: str, subject: str, html: str, text: str) -> None:
         )
 
     if response.status_code not in (200, 201):
-        logger.error("email.resend_failed", status=response.status_code, body=response.text)
-        raise RuntimeError(f"Resend API error: {response.status_code} — {response.text}")
+        logger.error("email.resend_failed", status=response.status_code)
+        raise RuntimeError(f"Resend API error: {response.status_code}")
 
     logger.info("email.sent", provider="resend", to=to, subject=subject)
 
@@ -118,3 +128,17 @@ async def _send_via_resend(to: str, subject: str, html: str, text: str) -> None:
 async def send_ops_digest_email(*, to_email: str, subject: str, text_body: str, html_body: str) -> None:
     """Deliver the daily ops digest through the same provider as invitations."""
     await _deliver("OPS DIGEST EMAIL", to_email=to_email, subject=subject, text_body=text_body, html_body=html_body)
+
+
+async def send_recon_alert_email(
+    *, to_email: str, subject: str, text_body: str, html_body: str, idempotency_key: str
+) -> None:
+    """Prompt, retry-safe reconciliation alert via the existing email provider."""
+    await _deliver(
+        "RECON ALERT",
+        to_email=to_email,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        idempotency_key=idempotency_key,
+    )

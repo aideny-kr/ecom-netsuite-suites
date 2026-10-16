@@ -29,6 +29,28 @@ def is_financial_ambiguous(query: str | None) -> bool:
     return bool(_FINANCIAL_AMBIGUITY_RE.search(query))
 
 
+def plan_mode_decision(query: str | None, *, plan_mode_enabled: bool, resume_active: bool, history: list[dict]) -> str:
+    """How Plan Mode treats this turn: "force", "offer" or "off".
+
+    - "force": the forced clarification card (augmentation + clarify-only tools).
+    - "offer": the question is financially ambiguous but the conversation already settled a
+      source, so nothing is forced; the clarify tool is offered next to the normal tools and
+      the model asks only if it is genuinely unsure (the agent rebuilds its tools without the
+      Plan Mode flag, so an offer must add clarify back, #394 review R1).
+    - "off": everything else, unchanged.
+
+    The orchestrator decides this ONCE and the augmentation, the forced tool choice and the
+    offer all read the result, so they cannot disagree. 2026-10-06 on Framework: a follow-up was
+    forced into a card twice after the user had picked NetSuite; 5 of the tenant's 9 forced
+    cards in 30 days came after a source was already chosen in the same chat.
+    """
+    from app.services.chat.source_selection import conversation_has_chosen_source
+
+    if not plan_mode_enabled or resume_active or not is_financial_ambiguous(query):
+        return "off"
+    return "offer" if conversation_has_chosen_source(history) else "force"
+
+
 _AUGMENTATION_PREAMBLE = """## CLARIFICATION REQUIRED
 
 This query contains financial terminology that has multiple legitimate readings.
@@ -55,9 +77,13 @@ In `ambiguity_summary`, write a one-sentence framing in your own voice that
 NAMES THE DEFAULT REASON. Example: "I'm picking NetSuite GL by default because
 that's recognized revenue — if you want pre-refund checkout dollars, B is right."
 
-Default preferences: NetSuite GL for "revenue" / "income" / "earnings" /
-"recognized revenue"; BigQuery for "GMV" / "checkout" / "online sales"; fiscal
-calendar for quarterly windows."""
+Default preferences: when the user's words or the conversation so far already names a basis,
+that basis is the default:
+- "sales order(s)" / "booked" / "bookings" -> NetSuite booked sales orders
+- "invoiced" / "recognized" / "GL" -> NetSuite GL recognized revenue
+- "GMV" / "checkout" / "online sales" -> BigQuery
+Only when nothing names a basis: NetSuite GL for "revenue" / "income" / "earnings";
+fiscal calendar for quarterly windows."""
 
 # Human-readable labels for canonical sources so the rendered prompt explains
 # what each source means rather than just naming it.

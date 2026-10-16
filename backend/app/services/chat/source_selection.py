@@ -41,13 +41,27 @@ def _chosen_card_source(history: list[dict]) -> str | None:
     return None
 
 
+def conversation_has_chosen_source(history: list[dict]) -> bool:
+    """Whether the user already settled a data source in this conversation.
+
+    Read only from server-owned state: a resolved clarification card, or the latest
+    request context. An unanswered source question (``pending_source``) is not a choice.
+    """
+    if _chosen_card_source(history):
+        return True
+    previous = previous_request_context(history)
+    return bool(previous and previous.kind == "analytics" and previous.sources)
+
+
 def _source_question(sources: dict[str, str], *, unavailable: bool = False) -> str:
     labels = sorted(sources.values())
     if not labels:
         return "None of the connected data sources meet your source choice. Which source would you like to use?"
     choices = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " or " + labels[-1]
     prefix = "The requested source selection is unavailable for this turn. " if unavailable else ""
-    return prefix + f"Which data source should I use for this question: {choices}?"
+    # The UI turns the fence into one button per source; a click sends the name, as a typed reply would.
+    buttons = "\n\n```sources\n" + "\n".join(labels) + "\n```"
+    return prefix + f"Which data source should I use for this question: {choices}?" + buttons
 
 
 def resolve_source_selection(

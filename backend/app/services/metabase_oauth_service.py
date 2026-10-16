@@ -20,6 +20,10 @@ from app.services.netsuite_oauth_service import generate_pkce_pair
 from app.services.public_http import PublicHTTPTransport, validate_endpoint
 
 READ_SCOPES = (
+    "agent:content:read",
+    "agent:query:run",
+)
+LEGACY_READ_SCOPES = (
     "agent:resource:read",
     "agent:search",
     "agent:query",
@@ -29,8 +33,33 @@ READ_SCOPES = (
 )
 
 
+def resource_read_scopes(protected, metadata):
+    """Request only read capabilities accepted by this resource, not issuer-wide aliases."""
+    issuer_scopes = metadata.get("scopes_supported")
+    if not isinstance(issuer_scopes, list) or not all(isinstance(s, str) for s in issuer_scopes):
+        raise OAuthError("Metabase returned invalid issuer permissions.")
+    supported = set(issuer_scopes)
+    resource_scopes = protected.get("scopes_supported")
+    if "scopes_supported" in protected:
+        if not isinstance(resource_scopes, list) or not all(isinstance(s, str) for s in resource_scopes):
+            raise OAuthError("Metabase returned invalid resource permissions.")
+        supported &= set(resource_scopes)
+    for scopes in (READ_SCOPES, LEGACY_READ_SCOPES):
+        if set(scopes).issubset(supported):
+            return scopes
+    raise OAuthError("Metabase does not advertise the required read permissions.")
+
+
 class OAuthError(ValueError):
     """Safe operator-facing error; never includes provider response bodies."""
+
+    def __init__(self, message, *, code="metabase_oauth_failed"):
+        self.code = code
+        super().__init__(message)
+
+    @property
+    def transient(self):
+        return self.code in {"metabase_transport_failed", "metabase_rate_limited", "metabase_upstream_unavailable"}
 
 
 def is_metabase(connector):
@@ -96,6 +125,13 @@ async def request_json(url, *, method="GET", **kwargs):
             ) as client:
                 async with client.stream(method, url, headers={"Accept": "application/json"}, **kwargs) as response:
                     if not 200 <= response.status_code < 300:
+                        if response.status_code == 429 or 500 <= response.status_code < 600:
+                            raise OAuthError(
+                                "Metabase is temporarily unavailable. Try again shortly.",
+                                code="metabase_rate_limited"
+                                if response.status_code == 429
+                                else "metabase_upstream_unavailable",
+                            )
                         raise OAuthError("Metabase could not complete sign-in. Try connecting again.")
                     body = bytearray()
                     async for chunk in response.aiter_bytes():
@@ -110,7 +146,11 @@ async def request_json(url, *, method="GET", **kwargs):
                     return result
     except OAuthError:
         raise
-    except (httpx.HTTPError, ValueError, TimeoutError):
+    except (httpx.HTTPError, TimeoutError):
+        raise OAuthError(
+            "Could not reach Metabase securely. Try again shortly.", code="metabase_transport_failed"
+        ) from None
+    except ValueError:
         raise OAuthError("Could not reach Metabase securely. Try connecting again.") from None
 
 
@@ -127,9 +167,9 @@ async def start(connector, user, app_origin):
         metadata.get("issuer") != issuer
         or "S256" not in metadata.get("code_challenge_methods_supported", [])
         or "none" not in metadata.get("token_endpoint_auth_methods_supported", [])
-        or not set(READ_SCOPES).issubset(metadata.get("scopes_supported", []))
     ):
         raise OAuthError("Metabase does not advertise the required PKCE and read permissions.")
+    requested_scopes = resource_read_scopes(protected, metadata)
     authorize = same_origin_endpoint(metadata.get("authorization_endpoint"), resource)
     token = same_origin_endpoint(metadata.get("token_endpoint"), resource)
     registration = same_origin_endpoint(metadata.get("registration_endpoint"), resource)
@@ -140,6 +180,7 @@ async def start(connector, user, app_origin):
         and credentials.get("resource") == resource
         and credentials.get("redirect_uri") == redirect
         and credentials.get("token_endpoint") == token
+        and set(requested_scopes).issubset(str(credentials.get("scope", "")).split())
     ):
         client_id = credentials.get("client_id")
     else:
@@ -154,7 +195,7 @@ async def start(connector, user, app_origin):
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
                 "token_endpoint_auth_method": "none",
-                "scope": " ".join(READ_SCOPES),
+                "scope": " ".join(requested_scopes),
             },
         )
         client_id = registered.get("client_id")
@@ -178,6 +219,7 @@ async def start(connector, user, app_origin):
         "token_endpoint": token,
         "code_verifier": verifier,
         "fingerprint": fingerprint(connector),
+        "scope": " ".join(requested_scopes),
     }
     r = state_store()
     try:
@@ -197,7 +239,7 @@ async def start(connector, user, app_origin):
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
                 "resource": resource,
-                "scope": " ".join(READ_SCOPES),
+                "scope": " ".join(requested_scopes),
             }
         ),
     }
@@ -205,14 +247,16 @@ async def start(connector, user, app_origin):
 
 def token_credentials(data, base):
     access = data.get("access_token")
-    scope = data.get("scope", base.get("scope", " ".join(READ_SCOPES)))
+    scope = data.get("scope", base.get("scope"))
     if (
         not isinstance(access, str)
         or not access
         or len(access) > 16384
         or data.get("token_type", "").lower() != "bearer"
         or not isinstance(scope, str)
-        or not set(scope.split()).issubset(READ_SCOPES)
+        or not scope.split()
+        or not set(scope.split()).issubset((*READ_SCOPES, *LEGACY_READ_SCOPES))
+        or not set(base.get("scope", "").split()).issubset(scope.split())
     ):
         raise OAuthError("Metabase returned an unsupported token or permission grant.")
     try:
@@ -282,6 +326,7 @@ async def complete(db, connector, user, state, code, error):
             "resource": connector.server_url,
             "token_endpoint": pending["token_endpoint"],
             "redirect_uri": pending["redirect_uri"],
+            "scope": pending.get("scope", " ".join(LEGACY_READ_SCOPES)),
         },
     )
     connector.encrypted_credentials = encrypt_credentials(credentials)
@@ -298,7 +343,9 @@ async def complete(db, connector, user, state, code, error):
     return result
 
 
-async def get_token(connector, db):
+async def get_token(connector, db, *, refresh_buffer_seconds=60):
+    if type(refresh_buffer_seconds) is not int or not 60 <= refresh_buffer_seconds <= 600:
+        raise ValueError("invalid_refresh_buffer")
     if not connector.encrypted_credentials:
         return None
     credentials = decrypt_credentials(connector.encrypted_credentials)
@@ -306,7 +353,7 @@ async def get_token(connector, db):
         return None
     if connector.status in ("revoked", "superseded"):
         return None
-    if time.time() < credentials.get("expires_at", 0) - 60:
+    if time.time() < credentials.get("expires_at", 0) - refresh_buffer_seconds:
         return credentials.get("access_token")
     if db is None:
         return None
@@ -321,7 +368,7 @@ async def get_token(connector, db):
     credentials = decrypt_credentials(connector.encrypted_credentials)
     if credentials.get("resource") != connector.server_url or credentials.get("oauth_provider") != "metabase":
         return None
-    if time.time() < credentials.get("expires_at", 0) - 60:
+    if time.time() < credentials.get("expires_at", 0) - refresh_buffer_seconds:
         return credentials.get("access_token")
     if not credentials.get("refresh_token") or not credentials.get("client_id"):
         return None
@@ -337,7 +384,11 @@ async def get_token(connector, db):
             },
         )
         credentials = token_credentials(data, credentials)
-    except OAuthError:
+    except OAuthError as exc:
+        # An outage is not a revoked grant. Let fixed read callers apply their
+        # bounded retry policy; leave the existing rotating credential intact.
+        if exc.transient:
+            raise
         return None
     connector.encrypted_credentials = encrypt_credentials(credentials)
     connector.encryption_key_version = get_current_key_version()
