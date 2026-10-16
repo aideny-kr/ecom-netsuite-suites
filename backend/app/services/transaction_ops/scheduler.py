@@ -239,6 +239,20 @@ async def _candidate_ids(db, tenant_id, now):
             run.progress_json["last_read_failure"]["code"].astext.in_(AUTH_STOP_CODES),
         )
     )
+    from app.services.transaction_ops.replica_recovery import RECOVERABLE_CODES
+
+    replica_error = exists(
+        select(run.id).where(
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.created_at == latest.c.latest_at,
+            run.origin == "schedule",
+            run.status == "finished",
+            run.termination_reason.in_(("budget", "error")),
+            run.progress_json["last_read_failure"]["code"].astext.in_(RECOVERABLE_CODES),
+            run.progress_json["last_read_failure"]["resolved"].astext == "false",
+        )
+    )
     collection_error = exists(
         select(run.id).where(
             run.tenant_id == tenant_id,
@@ -267,6 +281,7 @@ async def _candidate_ids(db, tenant_id, now):
                 legacy_part_stop,
                 deadline_stop,
                 auth_stop,
+                replica_error,
                 collection_error,
             ),
         )
@@ -532,7 +547,31 @@ async def collect_due_runs(db, now: datetime, *, scheduled_only=False) -> dict:
                             read_retry_due,
                             scheduled_part_resume_candidate,
                         )
+                        from app.services.transaction_ops.replica_recovery import recovery_key, recovery_ready
 
+                        verification = (
+                            await recovery_ready(db, tenant_id, latest, config, now) if latest and not active else None
+                        )
+                        if verification:
+                            # State revalidates proof, exact scope, current flags,
+                            # latest parent and idle ownership under this lock.
+                            request = request_type(
+                                **{**latest.params_json, "evaluation_key": recovery_key(latest, verification)}
+                            )
+                            recovered = await state.create_run(
+                                db,
+                                tenant_id,
+                                config_id,
+                                request,
+                                actor=None,
+                                now=now,
+                                resume_from_run_id=latest.id,
+                                automatic_replica_recovery=True,
+                            )
+                            stats["created"] += 1
+                            if recovered.status == "pending":
+                                await _dispatch(tenant_id, recovered.id, stats, DAILY_QUEUE)
+                            continue
                         resume_due = (
                             deadline_resume_due(latest, now)
                             or collection_resume_due(latest, now)
