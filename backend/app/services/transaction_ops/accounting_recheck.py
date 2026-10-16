@@ -75,7 +75,10 @@ async def queue(db, tenant_id, message, actor_id, *, now, config_id=None):
         effective = config_id or effective_config_id(so)
         if not effective:
             raise state.StateError("accounting_recheck_unscoped")
-        config = await state.get_config(db, tenant_id, UUID(str(effective)))
+        # Its successor after a config revision: the recheck verifies work already done.
+        config = await state.current_config(db, tenant_id, UUID(str(effective)))
+        if config is None:
+            raise state.StateError("config_disabled")
         snapshot = ConfigOut.model_validate(config).model_dump(mode="json")
         for field in ("source_connection_id", "source_step_id", "netsuite_account_id", "subsidiary_id", "record_type"):
             actual, approved = snapshot.get(field), p["scope"].get(field)

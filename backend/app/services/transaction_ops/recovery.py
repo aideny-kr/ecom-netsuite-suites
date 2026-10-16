@@ -29,7 +29,7 @@ async def recover_operation(db, tenant_id, operation_id, *, _clock=None):
     if operation.status not in state.SETTLED or not await enabled(db, tenant_id):
         return _result(operation)
     proposal = await state.get_proposal(db, tenant_id, operation.proposal_id)
-    if not (await state.get_config(db, tenant_id, proposal.config_id)).enabled:
+    if await state.current_config(db, tenant_id, proposal.config_id) is None:
         return _result(operation)
     run = await state.create_operation_recovery(db, tenant_id, operation_id, now=clock())
     return await reconcile_operation_run(db, tenant_id, run.id, _clock=clock)
@@ -46,9 +46,14 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
     if token is None:
         return _result(operation)
     proposal = await state.get_proposal(db, tenant_id, operation.proposal_id)
-    if run.config_id != proposal.config_id or run.params_json["order_references"] != [proposal.order_reference]:
+    # The proposal's config, or its successor after a revision (the run was created under it).
+    config = await state.current_config(db, tenant_id, proposal.config_id)
+    if (
+        config is None
+        or run.config_id != config.id
+        or run.params_json["order_references"] != [proposal.order_reference]
+    ):
         raise state.StateError("recovery_scope_mismatch")
-    config = await state.get_config(db, tenant_id, proposal.config_id)
     mapping = TransactionMapping.model_validate(config.mapping_json)
     reason, proof = "stall", None
 
