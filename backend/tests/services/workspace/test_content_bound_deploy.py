@@ -233,9 +233,7 @@ async def test_deploy_cannot_use_ambient_cli_auth_even_with_passing_receipts(db,
         )
         await db.flush()
     p = await preview(db, checked_project)
-    run = await runner_service.create_run(
-        db, ws.tenant_id, ws.id, "deploy_sandbox", user.id, changeset_id=cs.id
-    )
+    run = await runner_service.create_run(db, ws.tenant_id, ws.id, "deploy_sandbox", user.id, changeset_id=cs.id)
     command = AsyncMock(return_value=(0, "deployed", ""))
     with patch.object(runner_service, "_run_subprocess", new=command):
         result = await runner_service.execute_run(

@@ -153,9 +153,7 @@ class TestWorkerSnapshotReverify:
             patch(
                 "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
                 new=AsyncMock(
-                    return_value=SeededCredentials(
-                        path=Path("/tmp/unused"), account_id="6738075_SB1", role_id="1234"
-                    )
+                    return_value=SeededCredentials(path=Path("/tmp/unused"), account_id="6738075_SB1", role_id="1234")
                 ),
             ),
         ):
