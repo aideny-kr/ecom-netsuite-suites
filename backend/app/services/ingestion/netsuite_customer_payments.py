@@ -199,7 +199,9 @@ async def _sync_locked(db, tenant_id, connection_id, token, account_id, start, e
     )
     since = datetime.combine(start, datetime.min.time(), timezone.utc)
     if previous and previous.last_synced_at:
-        since = min(since, previous.last_synced_at)
+        # Earlier deletions were consumed atomically with this successful marker.
+        # Historical payment windows must not restart the deletion feed nightly.
+        since = previous.last_synced_at
     deleted = await _deleted_ids(token, account_id, since, observed_at)
     known = (
         await db.scalars(

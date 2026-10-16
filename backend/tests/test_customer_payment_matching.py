@@ -210,6 +210,24 @@ async def test_complete_date_population_invalidates_absent_payment(db, tenant_a,
     assert await OrderReconJob(db, str(tenant_a.id))._fetch_deposits(date(2026, 9, 1), date(2026, 9, 30)) == []
 
 
+@pytest.mark.parametrize(
+    "previous_success", [datetime(2026, 8, 19, tzinfo=timezone.utc), datetime(2026, 10, 15, tzinfo=timezone.utc)]
+)
+async def test_deletion_feed_resumes_success_cursor_even_for_historical_windows(
+    db, tenant_a, monkeypatch, deletion_feed, previous_success
+):
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    monkeypatch.setattr(service, "execute_suiteql_via_rest", AsyncMock(return_value={"rows": [application()]}))
+    args = (db, str(tenant_a.id), connection.id, "test", "6738075", date(2026, 9, 1), date(2026, 9, 30))
+    await service.sync_payments(*args)
+    assert deletion_feed.await_args.args[2] == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    cursor = await db.scalar(select(CursorState).where(CursorState.connection_id == connection.id))
+    cursor.last_synced_at = previous_success
+    await db.flush()
+    await service.sync_payments(*args)
+    assert deletion_feed.await_args.args[2] == previous_success
+
+
 async def test_overlapping_sync_cannot_read_a_stale_first_observation(db, tenant_a, monkeypatch, deletion_feed):
     connection = await _seed_netsuite_connection(db, tenant_a.id)
     remote = AsyncMock()
