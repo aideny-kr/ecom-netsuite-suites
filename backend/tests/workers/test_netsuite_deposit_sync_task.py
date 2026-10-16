@@ -16,9 +16,13 @@ preserved in the returned summary (which InstrumentedTask.on_success stores
 as `result_summary`).
 """
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
 from app.workers.tasks.netsuite_deposit_sync import (
     NetsuiteDepositSyncFailedError,
@@ -35,7 +39,14 @@ class _FakeResult:
 
 
 def _patch_sync(monkeypatch, result):
-    async def fake_sync_netsuite_deposits(*, db, tenant_id, date_from, date_to):
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    monkeypatch.setattr("app.core.database.worker_async_session", fake_session)
+    monkeypatch.setattr("app.core.database.set_tenant_context_session", AsyncMock())
+
+    async def fake_sync_netsuite_deposits(*, db, tenant_id, date_from, date_to, cursor_session_factory=None):
         return result
 
     monkeypatch.setattr(
@@ -81,6 +92,35 @@ def test_healthy_sync_completes(monkeypatch):
 
     assert summary["records_synced"] == 5
     assert summary["errors"] == []
+
+
+def test_repeated_worker_loops_use_independent_scoped_sessions(monkeypatch):
+    """Real connections cross two task loops, including the separate cursor session."""
+    from app.core.database import set_tenant_context_session, worker_async_session
+
+    tenant_id = str(uuid4())
+    scopes, factories = [], []
+
+    async def sync(*, db, tenant_id, date_from, date_to, cursor_session_factory=None):
+        factories.append(cursor_session_factory)
+        await db.execute(text("SELECT 1"))
+        await db.commit()
+        scopes.append(await db.scalar(text("SELECT current_setting('app.current_tenant_id', true)")))
+        # The legacy task supplies no cursor factory. Let its second invocation
+        # reach the closed-loop pool failure before asserting the new contract.
+        if cursor_session_factory is not None:
+            async with cursor_session_factory() as cursor_db:
+                await set_tenant_context_session(cursor_db, tenant_id)
+                await cursor_db.execute(text("SELECT 1"))
+                await cursor_db.commit()
+                scopes.append(await cursor_db.scalar(text("SELECT current_setting('app.current_tenant_id', true)")))
+        return _FakeResult(records_synced=1)
+
+    monkeypatch.setattr("app.services.ingestion.netsuite_deposit_sync.sync_netsuite_deposits", sync)
+    for _ in range(2):
+        assert netsuite_deposit_sync(tenant_id=tenant_id)["records_synced"] == 1
+    assert factories == [worker_async_session, worker_async_session]
+    assert scopes == [tenant_id] * 4
 
 
 class TestRaisedMessagePreservesAllErrors:
