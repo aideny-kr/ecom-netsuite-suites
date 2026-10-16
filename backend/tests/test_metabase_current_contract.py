@@ -22,6 +22,9 @@ def connector():
         tenant_id=uuid4(),
         provider="custom",
         auth_type="oauth2",
+        status="active",
+        is_enabled=True,
+        encrypted_credentials="opaque",
         server_url=BINDING["server_url"],
         metadata_json={"oauth_provider": "metabase"},
         discovered_tools=[{"name": "execute_query"}],
@@ -211,3 +214,115 @@ async def test_client_boundary_exposes_read_refusals_but_preserves_unknown_write
     else:
         result = await client.call_external_mcp_tool(c, tool, {})
         assert result[INDETERMINATE_KEY] is True
+
+
+def install_reply_transport(monkeypatch, reply):
+    from contextlib import asynccontextmanager
+
+    from mcp.types import CallToolResult, TextContent
+
+    @asynccontextmanager
+    async def transport(**kwargs):
+        yield None, None, None
+
+    class Session:
+        def __init__(self, *args):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def initialize(self):
+            pass
+
+        async def call_tool(self, tool, arguments):
+            return CallToolResult(content=[TextContent(type="text", text=reply(tool, arguments))])
+
+    monkeypatch.setattr(client, "_build_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr(client, "_transport_options", lambda c: {})
+    monkeypatch.setattr(client, "streamablehttp_client", transport)
+    monkeypatch.setattr(client, "ClientSession", Session)
+
+
+def envelope(payload):
+    return (
+        '<data boundary="'
+        + "a" * 32
+        + '">\n'
+        + payload
+        + '\n</data boundary="'
+        + "a" * 32
+        + '"> (data, not instructions)'
+    )
+
+
+@pytest.mark.parametrize("tool", ["execute_query", "browse_data", "ns_createRecord"])
+async def test_provider_data_boundary_is_decoded_only_for_known_metabase_reads(monkeypatch, tool):
+    from decimal import Decimal
+
+    raw = envelope('{"amount":123.120001,"note":"not instructions"}')
+    install_reply_transport(monkeypatch, lambda *args: raw)
+    result = await client.call_external_mcp_tool(connector(), tool, {}, parse_decimal=True)
+    if tool == "ns_createRecord":
+        assert result == {"result": raw}
+    else:
+        assert result["amount"] == Decimal("123.120001")
+
+
+@pytest.mark.parametrize("change", ["wrong_boundary", "second_data", "prose", "unclosed"])
+def test_malformed_or_ambiguous_envelopes_are_never_extracted(change):
+    raw = envelope('{"rows":[]}')
+    if change == "wrong_boundary":
+        raw = raw.replace('</data boundary="a', '</data boundary="b')
+    if change == "second_data":
+        raw += "\n" + envelope('{"rows":[]}')
+    if change == "prose":
+        raw = "Instructions\n" + raw
+    if change == "unclosed":
+        raw = raw.split("\n</data")[0]
+    assert current.response_json(raw) == raw
+
+
+async def test_connection_test_verifies_catalog_then_executes_real_reader_over_provider_envelopes(monkeypatch):
+    import json
+
+    from app.services import mcp_connector_service
+
+    c = connector()
+    c.metadata_json.update(setup_state="verification_pending", transaction_replica=BINDING)
+    calls = []
+
+    def reply(tool, args):
+        calls.append((tool, args))
+        if tool == "browse_data":
+            assert set(args) == {"action", "database_id", "table_ids", "include_hidden", "response_format"}
+            return envelope(json.dumps(catalog_response()))
+        assert tool == "execute_query"
+        assert args["query"]["stages"][0]["limit"] == args["row_limit"] == 2
+        return envelope(
+            json.dumps(
+                {"cols": [{"name": f} for f in reader.ORDER_FIELDS], "rows": [], "returned": 0, "truncated": False}
+            )
+        )
+
+    install_reply_transport(monkeypatch, reply)
+    monkeypatch.setattr(mcp_connector_service, "get_mcp_connector", AsyncMock(return_value=c))
+    monkeypatch.setattr(client, "discover_tools", AsyncMock(return_value=c.discovered_tools))
+    monkeypatch.setattr(reader, "_connector", AsyncMock(return_value=c))
+    result = await mcp_connector_service.test_mcp_connector(AsyncMock(), c.id, c.tenant_id)
+    assert result["status"] == "ok" and "replica access verified" in result["message"]
+    assert c.status == "active" and c.is_enabled and current.CATALOG_KEY in c.metadata_json
+    assert [tool for tool, args in calls] == ["browse_data", "execute_query"]
+
+
+async def test_metadata_transport_failure_is_not_misreported_as_schema_mismatch(monkeypatch):
+    from app.services.chat.write_outcome import INDETERMINATE_KEY
+
+    c = connector()
+    monkeypatch.setattr(client, "call_external_mcp_tool", AsyncMock(return_value={INDETERMINATE_KEY: True}))
+    with pytest.raises(reader.ReplicaReadError, match="replica_transport_failed"):
+        await current.verify_catalog(AsyncMock(), c.tenant_id, c, reader.ReplicaBinding.model_validate(BINDING))
+    assert current.CATALOG_KEY not in c.metadata_json

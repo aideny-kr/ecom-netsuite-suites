@@ -54,7 +54,9 @@ def _metabase_read_failure(connector, tool_name, exception):
     for leaf in leaves(exception):
         if isinstance(leaf, httpx.HTTPStatusError) and leaf.response.status_code in {401, 403}:
             codes.append("authentication_required")
-        elif isinstance(leaf, McpError) and leaf.error.code in {-32600, -32601, -32602}:
+        elif isinstance(leaf, McpError) and leaf.error.code == -32600:
+            codes.append("authentication_required")
+        elif isinstance(leaf, McpError) and leaf.error.code in {-32601, -32602}:
             codes.append("contract_changed")
         else:
             return None
@@ -423,6 +425,13 @@ async def call_external_mcp_tool(
         return {"result": "No content returned"}
 
     raw_text = text_parts[0]
+    if tool_name in {"execute_query", "browse_data"}:
+        from app.services.metabase_oauth_service import is_metabase
+
+        if is_metabase(connector):
+            from app.services.transaction_ops.metabase_current import response_json
+
+            raw_text = response_json(raw_text)
     try:
         if parse_decimal:
             from decimal import Decimal

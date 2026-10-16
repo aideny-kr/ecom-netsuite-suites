@@ -247,13 +247,14 @@ async def start(connector, user, app_origin):
 
 def token_credentials(data, base):
     access = data.get("access_token")
-    scope = data.get("scope", base.get("scope", " ".join(READ_SCOPES)))
+    scope = data.get("scope", base.get("scope"))
     if (
         not isinstance(access, str)
         or not access
         or len(access) > 16384
         or data.get("token_type", "").lower() != "bearer"
         or not isinstance(scope, str)
+        or not scope.split()
         or not set(scope.split()).issubset((*READ_SCOPES, *LEGACY_READ_SCOPES))
         or not set(base.get("scope", "").split()).issubset(scope.split())
     ):

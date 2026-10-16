@@ -277,6 +277,7 @@ async def test_refresh_failure_never_returns_expired_token_or_leaks_provider_err
             "expires_at": 0,
             "access_token": "expired-secret",
             "refresh_token": "refresh-secret",
+            "scope": " ".join(oauth.LEGACY_READ_SCOPES),
         }
     )
     await db.flush()
@@ -365,6 +366,7 @@ async def test_refresh_outage_retains_rotating_credentials_then_recovers(db, con
             "expires_at": 0,
             "access_token": "expired-secret",
             "refresh_token": "refresh-secret",
+            "scope": " ".join(oauth.LEGACY_READ_SCOPES),
         }
     )
     await db.flush()
@@ -440,3 +442,9 @@ def test_resource_scope_validation_never_requests_writes_or_issuer_only_aliases(
     for resource in [{"scopes_supported": ["agent:content:write"]}, {"scopes_supported": None}]:
         with pytest.raises(oauth.OAuthError):
             oauth.resource_read_scopes(resource, metadata)
+
+
+def test_missing_grant_scope_never_invents_current_permissions():
+    for base in [{}, {"scope": ""}]:
+        with pytest.raises(oauth.OAuthError, match="permission grant"):
+            oauth.token_credentials({"access_token": "secret", "token_type": "Bearer"}, base)

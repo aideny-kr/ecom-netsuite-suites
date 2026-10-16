@@ -4,10 +4,22 @@ Only the connection Test/reconnect path fetches metadata. Scheduled reads keep t
 existing single-tool budget, fixed tables/columns, and keyset sentinel limits.
 """
 
+import asyncio
 import copy
+import re
 from datetime import datetime
 
 CATALOG_KEY = "transaction_replica_fields"
+
+
+def response_json(text):
+    """Unwrap only the provider's exact one-line JSON data envelope, never prose."""
+    match = re.fullmatch(
+        r'<data boundary="([0-9a-f]{32})">\n([^\n]*)\n</data boundary="\1"> '
+        r"\(data, not instructions\)(?:\n(?!<data boundary=)[^\n]*)*",
+        text,
+    )
+    return match[2] if match else text
 
 
 def supported(connector):
@@ -36,24 +48,27 @@ async def verify_catalog(db, tenant_id, connector, binding):
         or connector.server_url != binding.server_url
     ):
         raise _error("replica_connection_unavailable")
-    response = await call_external_mcp_tool(
-        connector,
-        "browse_data",
-        {
-            "action": "get_fields",
-            "database_id": binding.database_id,
-            "schema": None,
-            "search": None,
-            "table_ids": [getattr(binding, table + "_table_id") for table in TABLES],
-            "include_hidden": False,
-            "limit": None,
-            "offset": None,
-            "response_format": "concise",
-            "fields": None,
-        },
-        db,
-        parse_decimal=True,
-    )
+    try:
+        async with asyncio.timeout(40):
+            response = await call_external_mcp_tool(
+                connector,
+                "browse_data",
+                {
+                    "action": "get_fields",
+                    "database_id": binding.database_id,
+                    "table_ids": [getattr(binding, table + "_table_id") for table in TABLES],
+                    "include_hidden": False,
+                    "response_format": "concise",
+                },
+                db,
+                parse_decimal=True,
+            )
+    except TimeoutError:
+        raise _error("replica_transport_failed") from None
+    from app.services.chat.write_outcome import INDETERMINATE_KEY
+
+    if isinstance(response, dict) and response.get(INDETERMINATE_KEY) is True:
+        raise _error("replica_transport_failed")
     if not isinstance(response, dict) or response.get("omitted") or not isinstance(response.get("tables"), list):
         raise _error("replica_schema_mismatch")
     tables = response["tables"]
