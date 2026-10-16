@@ -582,12 +582,16 @@ def test_a_tax_adjustment_credit_is_never_also_counted_as_an_invoice_credit():
     assert not any(a.get("kind") == "invoice_credit_memos" for a in result.get("adjustments") or [])
 
 
-def test_a_different_invoice_credit_still_counts_beside_a_tax_adjustment():
+def test_an_order_with_a_tax_adjustment_never_counts_its_invoice_credits():
+    # Decided 2026-10-16 after packet review rounds 2-4 (F3-F6): combining the refund tax
+    # adjustment with invoice credits let one credit be partly accounted for, or counted from
+    # two different reads. Invoice credits count only on an order with no tax adjustment;
+    # a mixed order stays a difference for a person. (Before: matched at 80.)
     s, t, c, r = _with_invoice_credit(balance_case(), "5")
     s["orders"][0]["total"] = "80"
     result = reconcile_order(s, t, c, refunds=r)
-    assert result["status"] == "matched"
-    assert result["amounts"]["order_total"] == {"source": "80.00", "target": "80.00", "delta": "0.00"}
+    assert result["status"] == "difference"
+    assert not any(a.get("kind") == "invoice_credit_memos" for a in result.get("adjustments") or [])
 
 
 # Packet review round 3, F4: reconciliation, not the reader, decides which credits a tax
@@ -613,6 +617,26 @@ def test_an_unproven_credit_never_explains_a_difference_without_an_applied_tax_a
     # Round 1, F2, at the comparison: a credit whose lines post to a tax account cannot count.
     s, t, c, r = _with_invoice_credit(balance_case(), "5", posting="unproven")
     r["target"]["tax_adjustments"] = []
+    s["orders"][0].update(total="100", included_tax_total="20")
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["status"] == "difference"
+    assert result["amounts"]["order_total"]["target"] == "120.00"
+
+
+def test_a_partly_applied_tax_reversal_never_lets_an_income_credit_close_the_order():
+    # Round 4, F5: the reversal reduced the total but not the tax (source and NetSuite tax
+    # agreed), and an income credit then closed the total while NetSuite's tax was really 0.
+    s, t, c, r = _with_invoice_credit(balance_case(), "5")
+    s["orders"][0].update(total="80", included_tax_total="20")
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["status"] == "difference"
+
+
+def test_a_read_tax_adjustment_blocks_invoice_credits_even_when_reconciliation_rejects_it():
+    # Round 4, F6, and round 3, F4: a tax proof from one read and credits from another can
+    # disagree. With any tax adjustment read, the invoice credits are not counted.
+    s, t, c, r = _with_invoice_credit(balance_case(), "5")
+    r["source"]["events"][0].update(payment_number="OTHER")  # reconciliation rejects the tax proof
     s["orders"][0].update(total="100", included_tax_total="20")
     result = reconcile_order(s, t, c, refunds=r)
     assert result["status"] == "difference"

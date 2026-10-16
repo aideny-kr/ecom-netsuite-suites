@@ -35,14 +35,11 @@ def _refund(evidence, reference, currency, precision):
     return _amount(evidence.get("amount"), precision)
 
 
-def _invoice_credits(evidence, order_id, reference, currency, precision, *, exclude=frozenset()):
+def _invoice_credits(evidence, order_id, reference, currency, precision):
     """Credit memos created from this order's invoice, from the same NetSuite refund read.
 
     Only a complete read of the same order, reference and currency counts, and the
     stated sums must equal their credits. Anything else is unknown, never zero.
-    `exclude` names the credit memos of the refund tax adjustments this comparison
-    applied; only those are left out, so a credit is never subtracted twice and never
-    lost because a tax proof it was part of was rejected.
     """
     if _refund(evidence, reference, currency, precision) is None:
         return None
@@ -60,13 +57,10 @@ def _invoice_credits(evidence, order_id, reference, currency, precision, *, excl
     total, tax = sum((t for t, _ in amounts), Decimal(0)), sum((x for _, x in amounts), Decimal(0))
     if _amount(credits.get("total"), precision) != total or _amount(credits.get("tax"), precision) != tax:
         return None
-    kept = [(row, amount) for row, amount in zip(rows, amounts) if str(row.get("id")) not in exclude]
-    if not kept:
-        return None
-    # Every credit left must be proven a sales reduction by its own lines; one that is not
-    # -- a tax-account posting no applied tax adjustment accounts for -- leaves the
-    # difference unexplained (packet review 2026-10-16, F2/F4).
-    if any(row.get("posting") != "income" for row, _ in kept):
+    # Every credit must be proven a sales reduction by its own lines; one that is not -- a
+    # tax-account or expense posting -- leaves the difference unexplained (packet review
+    # 2026-10-16, F2).
+    if any(row.get("posting") != "income" for row in rows):
         return None
     # The order's invoices, read in the same call. Credits are subtracted from the sales
     # order, so they explain it only when the invoices equal it (packet review 2026-10-16, F1).
@@ -76,12 +70,7 @@ def _invoice_credits(evidence, order_id, reference, currency, precision, *, excl
     invoiced = (_amount(invoices.get("total"), precision), _amount(invoices.get("tax"), precision))
     if None in invoiced:
         return None
-    return {
-        "rows": [row for row, _ in kept],
-        "total": sum((t for _, (t, _) in kept), Decimal(0)),
-        "tax": sum((x for _, (_, x) in kept), Decimal(0)),
-        "invoiced": invoiced,
-    }
+    return {"rows": rows, "total": total, "tax": tax, "invoiced": invoiced}
 
 
 def reconcile_order(source_evidence, target_evidence, config, *, refunds=None):
@@ -177,7 +166,6 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     credits = verified_tax_adjustments(
         refunds, config, header.get("id"), reference, currency, lambda v: _amount(v, precision)
     )
-    before_tax_adjustments = dict(values)
     if credits:
         adjustment = sum((_amount(c["amount"], precision) for c in credits), Decimal(0))
         tax_adjustment = sum((_amount(c.get("tax_amount", c["amount"]), precision) for c in credits), Decimal(0))
@@ -217,15 +205,15 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     # count only when they explain the difference exactly, total and tax together.
     # An order that already matches keeps its plain comparison, so return credits
     # booked against the invoice never create a difference.
-    invoice = _invoice_credits(
-        refunds.get("target"),
-        header.get("id"),
-        reference,
-        currency,
-        precision,
-        exclude=frozenset(str(proof.get("credit_memo_id")) for proof in credits)
-        if values != before_tax_adjustments
-        else frozenset(),
+    # They count only on an order with no refund tax adjustment at all, read or applied
+    # (decided 2026-10-16): combining the two proofs let one credit be partly accounted
+    # for, or counted from two different reads (packet review rounds 2-4, F3-F6). None of
+    # Framework's 35 credit-explained open cases has one; a mixed order stays for a person.
+    tax_adjustment_read = bool((refunds.get("target") or {}).get("tax_adjustments"))
+    invoice = (
+        None
+        if credits or tax_adjustment_read
+        else _invoice_credits(refunds.get("target"), header.get("id"), reference, currency, precision)
     )
     (source_total, target_total), (source_tax, target_tax) = values["order_total"], values["tax"]
     known = None not in (source_total, target_total, source_tax, target_tax)

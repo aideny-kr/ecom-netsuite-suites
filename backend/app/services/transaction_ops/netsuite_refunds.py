@@ -228,9 +228,8 @@ async def read_invoice_credits(request, candidates, nodes, owned, currency_id, *
     The same call reads the order's invoices: credits are subtracted from the sales order,
     so the comparison counts them only when the invoices equal it (packet review
     2026-10-16, F1). Every credit is reported with its `posting` (see `_posting`); the
-    reader never drops one. Only reconciliation knows which tax adjustments it accepted
-    and applied, so it decides which credits those account for: dropping a credit here
-    lost it whenever reconciliation later rejected its tax proof (rounds 2-3, F3/F4).
+    reader never drops one, and reconciliation counts the credits only when all are
+    "income" and the order has no refund tax adjustment (rounds 2-4, F3-F6).
     """
     if not candidates:
         return {"complete": True, "credits": [], "total": "0", "tax": "0"}
