@@ -277,6 +277,7 @@ async def test_refresh_failure_never_returns_expired_token_or_leaks_provider_err
             "expires_at": 0,
             "access_token": "expired-secret",
             "refresh_token": "refresh-secret",
+            "scope": " ".join(oauth.LEGACY_READ_SCOPES),
         }
     )
     await db.flush()
@@ -365,6 +366,7 @@ async def test_refresh_outage_retains_rotating_credentials_then_recovers(db, con
             "expires_at": 0,
             "access_token": "expired-secret",
             "refresh_token": "refresh-secret",
+            "scope": " ".join(oauth.LEGACY_READ_SCOPES),
         }
     )
     await db.flush()
@@ -383,3 +385,66 @@ async def test_refresh_outage_retains_rotating_credentials_then_recovers(db, con
     headers = await _build_headers(connector, db)
     assert headers["Authorization"] == "Bearer secret-access"
     assert decrypt_credentials(connector.encrypted_credentials)["refresh_token"] == "secret-refresh"
+
+
+@pytest.mark.parametrize("resource_current", [True, False])
+async def test_reconnect_uses_resource_scopes_and_reregisters_legacy_client_without_changing_credentials(
+    client, db, admin_user, connector, provider, resource_current
+):
+    original = provider[1].side_effect
+
+    async def request(url, **kwargs):
+        result = await original(url, **kwargs)
+        if "oauth-protected-resource" in url:
+            result["scopes_supported"] = list(oauth.READ_SCOPES if resource_current else oauth.LEGACY_READ_SCOPES)
+        if "oauth-authorization-server" in url:
+            result["scopes_supported"] = list((*oauth.READ_SCOPES, *oauth.LEGACY_READ_SCOPES))
+        return result
+
+    provider[1].side_effect = request
+    connector.encrypted_credentials = encrypt_credentials(
+        {
+            "oauth_provider": "metabase",
+            "resource": URL,
+            "redirect_uri": oauth.callback_uri(),
+            "token_endpoint": ORIGIN + "/oauth/token",
+            "client_id": "legacy-client",
+            "access_token": "old-secret",
+            "refresh_token": "old-refresh",
+            "scope": " ".join(oauth.LEGACY_READ_SCOPES),
+        }
+    )
+    await db.flush()
+    before = connector.encrypted_credentials
+    result = await begin(client, connector, admin_user[1])
+    assert result.status_code == 200, result.text
+    query = parse_qs(urlsplit(result.json()["authorize_url"]).query)
+    expected = oauth.READ_SCOPES if resource_current else oauth.LEGACY_READ_SCOPES
+    assert set(query["scope"][0].split()) == set(expected)
+    assert query["client_id"] == (["registered-client"] if resource_current else ["legacy-client"])
+    assert connector.encrypted_credentials == before
+    assert not any("write" in scope or "sql" in scope for scope in expected)
+
+
+def test_token_grant_cannot_downgrade_newly_requested_permissions_or_add_writes():
+    base = {"scope": " ".join(oauth.READ_SCOPES)}
+    for scope in ["agent:content:read", "agent:query:run agent:content:write", " ".join(oauth.LEGACY_READ_SCOPES)]:
+        with pytest.raises(oauth.OAuthError):
+            oauth.token_credentials({"access_token": "secret", "token_type": "Bearer", "scope": scope}, base)
+    # Existing legacy tokens can continue rotating without acquiring new permissions.
+    old = {"scope": " ".join(oauth.LEGACY_READ_SCOPES)}
+    assert oauth.token_credentials({"access_token": "rotated", "token_type": "Bearer"}, old)["scope"] == old["scope"]
+
+
+def test_resource_scope_validation_never_requests_writes_or_issuer_only_aliases():
+    metadata = {"scopes_supported": list((*oauth.READ_SCOPES, *oauth.LEGACY_READ_SCOPES, "agent:content:write"))}
+    assert oauth.resource_read_scopes({"scopes_supported": list(oauth.READ_SCOPES)}, metadata) == oauth.READ_SCOPES
+    for resource in [{"scopes_supported": ["agent:content:write"]}, {"scopes_supported": None}]:
+        with pytest.raises(oauth.OAuthError):
+            oauth.resource_read_scopes(resource, metadata)
+
+
+def test_missing_grant_scope_never_invents_current_permissions():
+    for base in [{}, {"scope": ""}]:
+        with pytest.raises(oauth.OAuthError, match="permission grant"):
+            oauth.token_credentials({"access_token": "secret", "token_type": "Bearer"}, base)

@@ -307,6 +307,10 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
             if binding.connector_id != connector.id or binding.server_url != connector.server_url:
                 raise ValueError("Replica binding does not match this connection")
             now = datetime.now(timezone.utc)
+            from app.services.transaction_ops import metabase_current
+
+            if metabase_current.supported(connector):
+                await metabase_current.verify_catalog(db, tenant_id, connector, binding)
             await metabase_reader.read_order_page(
                 db,
                 tenant_id,

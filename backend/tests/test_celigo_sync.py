@@ -2297,8 +2297,10 @@ class TestPhaseEHonestyGuards:
         assert len(steps) == 3, "source + one import step per branch"
         sharing = [s for s in steps if s.celigo_id == "imp_shared"]
         assert len(sharing) == 2
+        # sequence is local to each branch (both are zero), not a total order.
+        first = next(s for s in sharing if s.branch_id == "b1")
         row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_s"))).scalar_one()
-        assert row.flow_step_id == sharing[0].id, (
+        assert row.flow_step_id == first.id, (
             "the first step referencing the resource owns its errors, deterministically"
         )
 
@@ -2333,7 +2335,7 @@ class TestPhaseEHonestyGuards:
             .scalars()
             .all()
         )
-        second = [s for s in steps if s.celigo_id == "imp_shared"][1]
+        second = next(s for s in steps if s.celigo_id == "imp_shared" and s.branch_id == "b2")
         # The leftover, exactly as the pre-dedup code would have left it.
         await upsert_errors(
             db,

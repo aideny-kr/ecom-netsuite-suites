@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from app.models.mcp_connector import McpConnector
 from app.services.chat.write_outcome import INDETERMINATE_KEY
-from app.services.mcp_client_service import McpAuthenticationError, call_external_mcp_tool
+from app.services.mcp_client_service import McpAuthenticationError, McpReadContractError, call_external_mcp_tool
 from app.services.metabase_oauth_service import OAuthError, is_metabase
 from app.services.public_http import validate_endpoint
 
@@ -60,6 +60,8 @@ REPLICA_READ_CODES = TRANSIENT_REPLICA_READ_CODES | frozenset(
     {
         "replica_evidence_incomplete",
         "replica_authentication_required",
+        "replica_contract_changed",
+        "replica_schema_verification_required",
         "replica_query_failed",
         "replica_database_mismatch",
         "replica_schema_mismatch",
@@ -198,6 +200,26 @@ async def _connector(db, tenant_id, binding):
 
 async def _rows(db, tenant_id, binding, table, filters, limit, *, now):
     connector = await _connector(db, tenant_id, binding)
+    from app.services.transaction_ops import metabase_current
+
+    if metabase_current.supported(connector):
+        try:
+            async with asyncio.timeout(40):
+                return await metabase_current.rows(db, tenant_id, connector, binding, table, filters, limit, now=now)
+        except McpReadContractError as exc:
+            raise ReplicaReadError(
+                "replica_authentication_required"
+                if exc.code == "authentication_required"
+                else "replica_contract_changed"
+            ) from None
+        except McpAuthenticationError:
+            raise ReplicaReadError("replica_authentication_required") from None
+        except OAuthError as exc:
+            raise ReplicaReadError(
+                "replica_transport_failed" if exc.transient else "replica_authentication_required"
+            ) from None
+        except TimeoutError:
+            raise ReplicaReadError("replica_transport_failed") from None
     fields = TABLES[table][1]
     query = {
         "lib/type": "mbql/query",
@@ -278,6 +300,10 @@ async def _rows(db, tenant_id, binding, table, filters, limit, *, now):
         raise
     except McpAuthenticationError:
         raise ReplicaReadError("replica_authentication_required") from None
+    except McpReadContractError as exc:
+        raise ReplicaReadError(
+            "replica_authentication_required" if exc.code == "authentication_required" else "replica_contract_changed"
+        ) from None
     except OAuthError as exc:
         raise ReplicaReadError(
             "replica_transport_failed" if exc.transient else "replica_authentication_required"
