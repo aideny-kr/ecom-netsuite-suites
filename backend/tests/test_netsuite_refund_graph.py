@@ -309,7 +309,9 @@ async def test_credit_memo_created_from_the_orders_invoice_is_reported_but_never
     assert result["amount"] == 0 and result["refund_count"] == 0
     assert result["invoice_credits"] == {
         "complete": True,
-        "credits": [{"id": "3", "number": "CM11788", "invoice_id": "2", "total": "4.82", "tax": "0"}],
+        "credits": [
+            {"id": "3", "number": "CM11788", "invoice_id": "2", "total": "4.82", "tax": "0", "posting": "income"}
+        ],
         "total": "4.82",
         "tax": "0",
         "invoices": INVOICE,
@@ -458,11 +460,13 @@ async def test_the_orders_invoices_are_read_in_the_same_call_and_reported():
         [],  # no lines at all
     ],
 )
-async def test_a_credit_whose_lines_are_not_proven_sales_adjustments_is_unknown(lines):
+async def test_a_credit_whose_lines_are_not_proven_sales_adjustments_is_reported_unproven(lines):
+    # Round 3: the reader classifies; reconciliation decides with the proofs it accepted.
     reader = CreditReader([credit_row("3", "CM1", "4.82")], lines=lines)
     reader.edges = invoice_credit_edges()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
-    assert result["invoice_credits"] == {"complete": False, "reason": "invoice_credit_posting_unproven"}
+    assert result["invoice_credits"]["complete"] is True
+    assert [(c["id"], c["posting"]) for c in result["invoice_credits"]["credits"]] == [("3", "unproven")]
 
 
 async def test_a_credit_line_posting_to_a_configured_tax_account_is_unknown_even_when_typed_income():
@@ -475,9 +479,10 @@ async def test_a_credit_line_posting_to_a_configured_tax_account_is_unknown_even
         "3": {"type": "CustCred", "voided": "F"},
     }
     args = (reader.request, ["3"], nodes, {"1", "2", "3"}, "1")
-    assert (await read_invoice_credits(*args, billing=["2"], taxed=frozenset()))["complete"] is True
-    result = await read_invoice_credits(*args, billing=["2"], taxed=frozenset({"846"}))
-    assert result == {"complete": False, "reason": "invoice_credit_posting_unproven"}
+    income = await read_invoice_credits(*args, billing=["2"], taxed=frozenset())
+    assert income["credits"][0]["posting"] == "income"
+    taxed = await read_invoice_credits(*args, billing=["2"], taxed=frozenset({"846"}))
+    assert taxed["complete"] is True and taxed["credits"][0]["posting"] == "unproven"
 
 
 async def test_zero_amount_lines_and_the_native_tax_line_need_no_income_account():
@@ -540,17 +545,18 @@ async def test_a_returned_items_inventory_cost_lines_carry_no_amount_and_do_not_
         credit_line("3", None, account=None, accttype=None),
     ],
 )
-async def test_any_other_line_without_an_amount_is_unknown(line):
+async def test_any_other_line_without_an_amount_makes_the_credit_unproven(line):
     reader = CreditReader([credit_row("3", "CM1", "4.82")], lines=[credit_line("3", "4.82"), line])
     reader.edges = invoice_credit_edges()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
-    assert result["invoice_credits"] == {"complete": False, "reason": "invoice_credit_posting_unproven"}
+    assert result["invoice_credits"]["credits"][0]["posting"] == "unproven"
 
 
-# Packet review round 2, F3: a tax reversal is itself a credit created from the invoice and
-# posts to a tax account. When the refund tax adjustment has already accounted for it, it is
-# left out of the invoice-credit proof instead of making the whole read unknown, so a separate
-# income credit on the same invoice still counts.
+# Packet review rounds 2-3, F3/F4: a tax reversal is itself a credit created from the invoice
+# and posts to a tax account. The reader never drops a credit: it reports every one with its
+# classification, and reconciliation leaves out only the credits a tax adjustment it actually
+# applied accounts for. Dropping in the reader (round 2's fix) lost a credit whose tax proof
+# reconciliation later rejected, so a partial sum could close a case (F4).
 def tax_reversal_and_income_credit():
     rows = [credit_row("3", "CM3", "20.00"), credit_row("4", "CM4", "20.00")]
     lines = [credit_line("3", "20.00", account="210", accttype="OthCurrLiab"), credit_line("4", "20.00")]
@@ -559,24 +565,18 @@ def tax_reversal_and_income_credit():
     return reader
 
 
-async def test_a_credit_the_tax_adjustment_accounts_for_is_left_out_of_the_invoice_credit_proof():
-    from app.services.transaction_ops.netsuite_refunds import read_invoice_credits
-
+async def test_a_tax_reversal_is_reported_unproven_beside_an_income_credit():
     reader = tax_reversal_and_income_credit()
-    nodes = {
-        "1": {"type": "SalesOrd", "voided": "F"},
-        "2": {"type": "CustInvc", "voided": "F"},
-        "3": {"type": "CustCred", "voided": "F"},
-        "4": {"type": "CustCred", "voided": "F"},
-    }
-    args = (reader.request, ["3", "4"], nodes, set(nodes), "1")
-    assert (await read_invoice_credits(*args, billing=["2"]))["complete"] is False
-    result = await read_invoice_credits(*args, billing=["2"], accounted=frozenset({"3"}))
-    assert result["complete"] is True
-    assert [c["id"] for c in result["credits"]] == ["4"] and result["total"] == "20.00"
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"]["complete"] is True
+    assert [(c["id"], c["posting"]) for c in result["invoice_credits"]["credits"]] == [
+        ("3", "unproven"),
+        ("4", "income"),
+    ]
+    assert result["invoice_credits"]["total"] == "40.00"
 
 
-async def test_collect_refunds_passes_the_tax_adjustments_credits_to_the_invoice_credit_read(monkeypatch):
+async def test_the_reader_never_drops_a_credit_a_tax_adjustment_names(monkeypatch):
     from app.services.transaction_ops import netsuite_refunds as service
 
     async def tax_adjustments(*args, **kwargs):
@@ -593,5 +593,4 @@ async def test_collect_refunds_passes_the_tax_adjustments_credits_to_the_invoice
     }
     reader = tax_reversal_and_income_credit()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", adjustment_profile=profile)
-    assert result["invoice_credits"]["complete"] is True
-    assert [c["id"] for c in result["invoice_credits"]["credits"]] == ["4"]
+    assert [c["id"] for c in result["invoice_credits"]["credits"]] == ["3", "4"]

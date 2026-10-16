@@ -551,12 +551,21 @@ async def test_a_subsidiary_that_has_not_declared_its_tax_accounts_stays_as_it_w
 # invoice credit.
 
 
-def _with_invoice_credit(case, credit_id):
+def _with_invoice_credit(case, credit_id, posting="income"):
     s, t, c, r = case
     r["target"]["dependency_manifest"] = {"version": 1, "order_id": "77", "transaction_ids": ["77"]}
     r["target"]["invoice_credits"] = {
         "complete": True,
-        "credits": [{"id": credit_id, "number": "CM" + credit_id, "invoice_id": "9", "total": "20", "tax": "0"}],
+        "credits": [
+            {
+                "id": credit_id,
+                "number": "CM" + credit_id,
+                "invoice_id": "9",
+                "total": "20",
+                "tax": "0",
+                "posting": posting,
+            }
+        ],
         "total": "20",
         "tax": "0",
         "invoices": {"ids": ["9"], "total": "120.00", "tax": "20.00"},  # billed as the sales order
@@ -579,3 +588,32 @@ def test_a_different_invoice_credit_still_counts_beside_a_tax_adjustment():
     result = reconcile_order(s, t, c, refunds=r)
     assert result["status"] == "matched"
     assert result["amounts"]["order_total"] == {"source": "80.00", "target": "80.00", "delta": "0.00"}
+
+
+# Packet review round 3, F4: reconciliation, not the reader, decides which credits a tax
+# adjustment accounts for -- only the adjustments it actually applied.
+def test_a_tax_reversal_credit_with_unproven_lines_is_accounted_for_by_its_applied_adjustment():
+    s, t, c, r = _with_invoice_credit(balance_case(), "3", posting="unproven")
+    s["orders"][0]["total"] = "100"
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["status"] == "matched"
+    assert not any(a.get("kind") == "invoice_credit_memos" for a in result.get("adjustments") or [])
+
+
+def test_a_rejected_tax_adjustment_leaves_its_unproven_credit_blocking_the_explanation():
+    s, t, c, r = _with_invoice_credit(balance_case(), "3", posting="unproven")
+    r["source"]["events"][0].update(payment_number="OTHER")  # reconciliation rejects the tax proof
+    s["orders"][0].update(total="100", included_tax_total="20")
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["status"] == "difference"
+    assert result["amounts"]["order_total"]["target"] == "120.00"
+
+
+def test_an_unproven_credit_never_explains_a_difference_without_an_applied_tax_adjustment():
+    # Round 1, F2, at the comparison: a credit whose lines post to a tax account cannot count.
+    s, t, c, r = _with_invoice_credit(balance_case(), "5", posting="unproven")
+    r["target"]["tax_adjustments"] = []
+    s["orders"][0].update(total="100", included_tax_total="20")
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["status"] == "difference"
+    assert result["amounts"]["order_total"]["target"] == "120.00"

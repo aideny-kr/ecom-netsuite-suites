@@ -393,7 +393,9 @@ def test_invoice_credits_that_reconcile_the_order_drop_the_sales_order_amendment
     refunds["target"]["dependency_manifest"] = {"version": 1, "order_id": "5", "transaction_ids": ["5"]}
     refunds["target"]["invoice_credits"] = {
         "complete": True,
-        "credits": [{"id": "30", "number": "CM30", "invoice_id": "20", "total": "5.00", "tax": "0"}],
+        "credits": [
+            {"id": "30", "number": "CM30", "invoice_id": "20", "total": "5.00", "tax": "0", "posting": "income"}
+        ],
         "total": "5.00",
         "tax": "0",
         "invoices": {"ids": ["20"], "total": "106.00", "tax": "6.00"},  # billed as the sales order
@@ -413,7 +415,9 @@ def test_an_invoice_credit_never_overrides_a_commercial_proof_whose_invoice_diff
     refunds["target"]["dependency_manifest"] = {"version": 1, "order_id": "5", "transaction_ids": ["5"]}
     refunds["target"]["invoice_credits"] = {
         "complete": True,
-        "credits": [{"id": "30", "number": "CM30", "invoice_id": "20", "total": "5.00", "tax": "0"}],
+        "credits": [
+            {"id": "30", "number": "CM30", "invoice_id": "20", "total": "5.00", "tax": "0", "posting": "income"}
+        ],
         "total": "5.00",
         "tax": "0",
         "invoices": {"ids": ["20"], "total": "101.00", "tax": "6.00"},

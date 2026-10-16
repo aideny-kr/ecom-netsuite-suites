@@ -171,7 +171,7 @@ def credited(evidence_tuple, source_total, credits, *, source_tax="20.00", invoi
     refunds["target"]["invoice_credits"] = {
         "complete": True,
         "credits": [
-            {"id": str(30 + i), "number": f"CM{i}", "invoice_id": "9", "total": total, "tax": tax}
+            {"id": str(30 + i), "number": f"CM{i}", "invoice_id": "9", "total": total, "tax": tax, "posting": "income"}
             for i, (total, tax) in enumerate(credits)
         ],
         "total": str(sum((Decimal(t) for t, _ in credits), Decimal(0))),
@@ -248,6 +248,8 @@ def test_a_taxed_credit_matching_the_lower_source_tax_reconciles_both():
         lambda r: r["target"]["invoice_credits"]["invoices"].update(ids=[]),
         lambda r: r["target"]["invoice_credits"]["invoices"].update(total="abc"),
         lambda r: r["target"]["invoice_credits"]["invoices"].pop("tax"),
+        lambda r: r["target"]["invoice_credits"]["credits"][0].update(posting="unproven"),
+        lambda r: r["target"]["invoice_credits"]["credits"][0].pop("posting"),
     ],
 )
 def test_unproven_invoice_credits_never_explain_a_difference(change):

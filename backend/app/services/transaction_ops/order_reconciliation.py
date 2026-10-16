@@ -40,8 +40,9 @@ def _invoice_credits(evidence, order_id, reference, currency, precision, *, excl
 
     Only a complete read of the same order, reference and currency counts, and the
     stated sums must equal their credits. Anything else is unknown, never zero.
-    `exclude` names credit memos another adjustment already accounts for (a verified
-    refund tax adjustment); they are never subtracted twice.
+    `exclude` names the credit memos of the refund tax adjustments this comparison
+    applied; only those are left out, so a credit is never subtracted twice and never
+    lost because a tax proof it was part of was rejected.
     """
     if _refund(evidence, reference, currency, precision) is None:
         return None
@@ -61,6 +62,11 @@ def _invoice_credits(evidence, order_id, reference, currency, precision, *, excl
         return None
     kept = [(row, amount) for row, amount in zip(rows, amounts) if str(row.get("id")) not in exclude]
     if not kept:
+        return None
+    # Every credit left must be proven a sales reduction by its own lines; one that is not
+    # -- a tax-account posting no applied tax adjustment accounts for -- leaves the
+    # difference unexplained (packet review 2026-10-16, F2/F4).
+    if any(row.get("posting") != "income" for row, _ in kept):
         return None
     # The order's invoices, read in the same call. Credits are subtracted from the sales
     # order, so they explain it only when the invoices equal it (packet review 2026-10-16, F1).
@@ -171,6 +177,7 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     credits = verified_tax_adjustments(
         refunds, config, header.get("id"), reference, currency, lambda v: _amount(v, precision)
     )
+    before_tax_adjustments = dict(values)
     if credits:
         adjustment = sum((_amount(c["amount"], precision) for c in credits), Decimal(0))
         tax_adjustment = sum((_amount(c.get("tax_amount", c["amount"]), precision) for c in credits), Decimal(0))
@@ -216,7 +223,9 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
         reference,
         currency,
         precision,
-        exclude=frozenset(str(proof.get("credit_memo_id")) for proof in credits),
+        exclude=frozenset(str(proof.get("credit_memo_id")) for proof in credits)
+        if values != before_tax_adjustments
+        else frozenset(),
     )
     (source_total, target_total), (source_tax, target_tax) = values["order_total"], values["tax"]
     known = None not in (source_total, target_total, source_tax, target_tax)
