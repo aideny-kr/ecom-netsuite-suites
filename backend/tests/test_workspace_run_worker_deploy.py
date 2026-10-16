@@ -126,8 +126,11 @@ class TestWorkerSnapshotReverify:
         """When expected_snapshot_sha matches what the worker computes,
         the worker proceeds to invoke suitecloud project:deploy (here
         mocked). Run reaches "passed" with exit_code 0."""
+        from pathlib import Path
+
         from app.services import runner_service
         from app.services.deploy_preview_service import compute_deploy_manifest
+        from app.services.workspace.suitecloud_auth_seeder import SeededCredentials
 
         ws, cs, user, run = deploy_run_ready
 
@@ -145,9 +148,16 @@ class TestWorkerSnapshotReverify:
         async def fake_subprocess(cmd, cwd, timeout):
             return 0, "deploy succeeded", ""
 
-        with patch(
-            "app.services.runner_service._run_subprocess",
-            new=AsyncMock(side_effect=fake_subprocess),
+        with (
+            patch("app.services.runner_service._run_subprocess", new=AsyncMock(side_effect=fake_subprocess)),
+            patch(
+                "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+                new=AsyncMock(
+                    return_value=SeededCredentials(
+                        path=Path("/tmp/unused"), account_id="6738075_SB1", role_id="1234"
+                    )
+                ),
+            ),
         ):
             result = await runner_service.execute_run(
                 db,

@@ -34,6 +34,7 @@ from app.services import audit_service
 from app.services import workspace_service as ws_svc
 from app.services.deploy_service import DeployGateError
 from app.services.workspace.snapshot import materialized_snapshot_hash
+from app.services.workspace.suitecloud_auth_seeder import AuthSeederError
 
 logger = structlog.get_logger()
 
@@ -53,7 +54,7 @@ ALLOWED_COMMANDS: dict[str, dict] = {
         "timeout": 300,
     },
     "deploy_sandbox": {
-        "cmd": ["suitecloud", "project:deploy", "--destinationFolder", "/SuiteScripts"],
+        "cmd": ["suitecloud", "project:deploy", "--validate"],
         "timeout": 600,
     },
 }
@@ -153,9 +154,21 @@ def _validate_sandbox_target(sandbox_id: str) -> str:
     return target
 
 
-def _build_deploy_command(base_cmd: list[str], sandbox_id: str) -> list[str]:
+def _build_deploy_command(
+    base_cmd: list[str],
+    sandbox_id: str,
+    *,
+    authorized_account_id: str | None = None,
+    authorized_role_id: str | None = None,
+) -> list[str]:
     target = _validate_sandbox_target(sandbox_id)
-    return [*base_cmd, "--account", target]
+    if not authorized_account_id or not authorized_role_id:
+        raise ValueError("Deploy requires a verified SuiteCloud account and role")
+    if target.lower().replace("_", "-") != authorized_account_id.strip().lower().replace("_", "-"):
+        raise ValueError("Authorized SuiteCloud account does not match the confirmed sandbox")
+    # CLI 3.2 selects defaultAuthId; these project commands have no --account
+    # or --destinationFolder options. Establish isolated SDK auth first.
+    return list(base_cmd)
 
 
 async def create_run(
@@ -407,11 +420,11 @@ async def _execute_validate_run(
 
     Flow:
       1. Materialize the workspace snapshot (with optional changeset overlay).
-      2. Seed the CLI credential file from the active NetSuite connection.
-         If the seed fails, abort early with ``gate_status=block`` and a
-         clear ``stderr`` artifact (no subprocess is launched).
-      3. Run the CLI via ``_run_subprocess`` (which sets HOME=cwd so the
-         seeded credential file is discovered).
+      2. Require a supported isolated SDK authorization. The current REST
+         OAuth bridge fails closed with ``gate_status=block`` and a clear
+         ``stderr`` artifact; no subprocess is launched.
+      3. A future supported adapter must verify CLI account/role identity
+         before a subprocess can produce a server-validation receipt.
       4. Parse stdout into ``ValidationHit`` rows.
       5. Update the run record with ``has_errors``, ``has_warnings``,
          ``gate_status``, ``parser_version``, ``validator_engine``, and
@@ -438,9 +451,8 @@ async def _execute_validate_run(
         await _materialize_snapshot(db, run, tmp_dir)
         run.snapshot_hash = materialized_snapshot_hash(tmp_dir)
 
-        # Seed CLI credentials. If this fails, abort early with a clear stderr
-        # artifact and a blocking gate status. Record the resolved account ID
-        # separately from the content hash; credentials are excluded from it.
+        # The unsupported REST-token bridge currently rejects every attempt.
+        # Preserve the blocking lifecycle and actionable error artifact.
         try:
             seeded = await seed_credentials_for_run(
                 db=db,
@@ -475,9 +487,8 @@ async def _execute_validate_run(
 
         account_id = seeded.account_id
 
-        # Run the CLI. ``_run_subprocess`` sets HOME=cwd=tmp_dir, so the
-        # seeded credential file at ``$HOME/.suitecloud-sdk/credentials/...``
-        # is discoverable.
+        # Reached only by synthetic adapter tests until verified SDK seeding
+        # is implemented. HOME alone is not proof of Java SDK-store isolation.
         try:
             exit_code, stdout, stderr = await _run_subprocess(cmd_config["cmd"], tmp_dir, cmd_config["timeout"])
         except asyncio.TimeoutError:
@@ -762,9 +773,7 @@ async def execute_run(
             if permitted_actor is None:
                 raise DeployGateError("Deployment actor, company or workspace is no longer authorized")
             sandbox_id = (extra_params or {}).get("sandbox_id")
-            cmd = _build_deploy_command(cmd_config["cmd"], str(sandbox_id or ""))
-            run.command = " ".join(cmd)
-            await db.flush()
+            _validate_sandbox_target(str(sandbox_id or ""))
 
             # Compare the actual materialized tree, then re-check current receipts.
             # A database re-read alone can disagree with files already written to disk.
@@ -792,6 +801,25 @@ async def execute_run(
             )
             if not gates["allowed"]:
                 raise DeployGateError(gates["blocked_reason"])
+
+            # Passing receipts cannot authorize the CLI's ambient auth ID.
+            # The REST OAuth bridge is unsupported and currently fails closed.
+            from app.services.workspace.suitecloud_auth_seeder import seed_credentials_for_run
+
+            seeded = await seed_credentials_for_run(
+                db=db,
+                tenant_id=run.tenant_id,
+                auth_root=Path(tmp_dir),
+                project_id=str(run.workspace_id),
+            )
+            cmd = _build_deploy_command(
+                cmd_config["cmd"],
+                str(sandbox_id),
+                authorized_account_id=seeded.account_id,
+                authorized_role_id=seeded.role_id,
+            )
+            run.command = " ".join(cmd)
+            await db.flush()
 
         exit_code, stdout, stderr = await _run_subprocess(cmd, tmp_dir, cmd_config["timeout"])
         duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -896,7 +924,8 @@ async def execute_run(
             },
             error_message=actionable,
         )
-    except DeployGateError as exc:
+    except (DeployGateError, AuthSeederError) as exc:
+        category = "AUTH_REQUIRED" if isinstance(exc, AuthSeederError) else "DEPLOY_GATE"
         run.status = "error"
         run.completed_at = datetime.now(timezone.utc)
         run.duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -910,7 +939,7 @@ async def execute_run(
                     "run_id": str(run.id),
                     "run_type": run.run_type,
                     "status": run.status,
-                    "error_category": "DEPLOY_GATE",
+                    "error_category": category,
                     "error_message": str(exc),
                     "snapshot_hash": run.snapshot_hash,
                 }
@@ -921,7 +950,7 @@ async def execute_run(
             run,
             action="deploy.worker_gate_rejected",
             status="error",
-            payload={"error_category": "DEPLOY_GATE", "snapshot_hash": run.snapshot_hash},
+            payload={"error_category": category, "snapshot_hash": run.snapshot_hash},
             error_message=str(exc),
         )
     except asyncio.TimeoutError:

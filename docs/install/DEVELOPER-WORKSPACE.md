@@ -8,6 +8,20 @@ project content. Validation must also identify the destination account. Older
 receipts without this evidence are stale: rerun both checks. Approval and the
 preview confirmation remain separate requirements. Production is disabled.
 
+SuiteCloud validation and deployment are currently **unavailable**. Oracle CLI
+3.2 requires certificate-based SDK authorization and a project `defaultAuthId`;
+the application's REST OAuth connection does not provide either. The runner
+fails closed before launching the CLI or refreshing REST tokens. It does not
+write a guessed credential file or use credentials from the host. Existing
+synthetic check/dispatch tests are not proof of a supported target deployment.
+
+The certificate adapter remains unfinished. It must establish an isolated SDK
+credential store, verify the actual account and role, and pin that identity
+through validation, preview, confirmation and worker execution. A role display
+name alone is insufficient identity evidence. Configuring a certificate or
+selecting a sandbox requires the installation's existing authorization; this
+document does not grant it.
+
 A confirmed deployment is saved before delivery to the worker. If broker
 delivery fails, its run remains **queued**. Expand the run and use **Retry
 delivery** to send that same confirmed run. The original actor must still have
