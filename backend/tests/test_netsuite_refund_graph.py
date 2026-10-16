@@ -210,6 +210,7 @@ async def test_refund_entry_requires_the_exact_proven_target_scope(monkeypatch, 
 
 
 def credit_row(identifier, number, total, tax="0", createdfrom="2", **changes):
+    """A credit memo's header (main line), shaped like the live SuiteQL row."""
     row = {
         "id": identifier,
         "createdfrom": createdfrom,
@@ -220,15 +221,72 @@ def credit_row(identifier, number, total, tax="0", createdfrom="2", **changes):
         "currency": "1",
         "posting": "T",
         "voided": "F",
+        "mainline": "T",
+        "taxline": "F",
+        "foreignamount": "-" + total,
+        "expenseaccount": "119",
+        "accttype": "AcctRec",
     }
     row.update(changes)
     return row
 
 
+def credit_line(identifier, amount, account="774", accttype="Income", taxline="F"):
+    """One of a credit memo's other lines: an item posting to `account`, or its tax line."""
+    return {
+        "id": identifier,
+        "type": "CustCred",
+        "mainline": "F",
+        "taxline": taxline,
+        "foreignamount": amount,
+        "expenseaccount": account,
+        "accttype": accttype,
+    }
+
+
+def invoice_row(identifier, total, tax="0", **changes):
+    row = {
+        "id": identifier,
+        "tranid": "INV" + identifier,
+        "type": "CustInvc",
+        "foreigntotal": total,
+        "taxtotal": tax,
+        "currency": "1",
+        "posting": "T",
+        "voided": "F",
+        "mainline": "T",
+        "taxline": "F",
+        "createdfrom": "1",
+        "foreignamount": total,
+        "expenseaccount": "119",
+        "accttype": "AcctRec",
+    }
+    row.update(changes)
+    return row
+
+
+def _income_lines(headers):
+    # By default each credit posts its net amount to a sales-adjustment income account.
+    lines = []
+    for row in headers:
+        try:
+            net = -Decimal(row["foreigntotal"]) + Decimal(row["taxtotal"])
+        except Exception:
+            continue
+        lines.append(credit_line(row["id"], str(net)))
+        if Decimal(row["taxtotal"]):
+            lines.append(
+                credit_line(row["id"], str(-Decimal(row["taxtotal"])), account=None, accttype=None, taxline="T")
+            )
+    return lines
+
+
 class CreditReader(Reader):
-    def __init__(self, credit_rows=()):
+    def __init__(self, credit_rows=(), lines=None, invoices=None):
         super().__init__()
         self.credit_rows = list(credit_rows)
+        self.credit_rows += _income_lines(credit_rows) if lines is None else list(lines)
+        self.credit_rows += [invoice_row("2", "10.00")] if invoices is None else list(invoices)
         self.credit_queries = 0
 
     async def request(self, method, path, **kwargs):
@@ -241,6 +299,9 @@ class CreditReader(Reader):
         return await super().request(method, path, **kwargs)
 
 
+INVOICE = {"ids": ["2"], "total": "10.00", "tax": "0"}
+
+
 async def test_credit_memo_created_from_the_orders_invoice_is_reported_but_never_counted_as_refund():
     reader = CreditReader([credit_row("3", "CM11788", "4.82")])
     reader.edges = [edge("1", "2", "SalesOrd", "CustInvc"), edge("2", "3", "CustInvc", "CustCred")]
@@ -251,6 +312,7 @@ async def test_credit_memo_created_from_the_orders_invoice_is_reported_but_never
         "credits": [{"id": "3", "number": "CM11788", "invoice_id": "2", "total": "4.82", "tax": "0"}],
         "total": "4.82",
         "tax": "0",
+        "invoices": INVOICE,
     }
     assert reader.credit_queries == 1
     assert "3" in result["dependency_manifest"]["transaction_ids"]
@@ -341,7 +403,7 @@ async def test_a_return_credit_applied_to_the_invoice_is_not_an_invoice_credit()
         edge("2", "6", "CustInvc", "CustCred"),
     ]
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
-    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0", "invoices": INVOICE}
 
 
 async def test_a_credit_whose_origin_is_not_in_the_graph_makes_the_read_unknown():
@@ -361,4 +423,125 @@ async def test_a_standalone_credit_applied_to_the_invoice_is_not_an_invoice_cred
     reader = CreditReader([credit_row("3", "CM1", "4.82", createdfrom=None)])
     reader.edges = [edge("1", "2", "SalesOrd", "CustInvc"), edge("2", "3", "CustInvc", "CustCred")]
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
-    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0", "invoices": INVOICE}
+
+
+# --- Packet review 2026-10-16 (Codex, gpt-6-astra) ----------------------------------------
+# F1: credits are subtracted from the sales order, so the order's invoices are read in the
+# same call and reported; the comparison requires them to equal the sales order.
+# F2: header tax misses an item line posting straight into a tax account, so every other
+# line of a counted credit must post to an income account that is not a tax account, and
+# those lines must add up to the credit's net amount.
+
+
+def invoice_credit_edges():
+    return [edge("1", "2", "SalesOrd", "CustInvc"), edge("2", "3", "CustInvc", "CustCred")]
+
+
+async def test_the_orders_invoices_are_read_in_the_same_call_and_reported():
+    reader = CreditReader([credit_row("3", "CM1", "4.82")], invoices=[invoice_row("2", "106.00", "6.00")])
+    reader.edges = invoice_credit_edges()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"]["invoices"] == {"ids": ["2"], "total": "106.00", "tax": "6.00"}
+    assert reader.credit_queries == 1
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [credit_line("3", "4.82", account="210", accttype="OthCurrLiab")],  # a tax liability account
+        [credit_line("3", "4.82", account="774", accttype=None)],  # account type unknown
+        [credit_line("3", "4.82", account=None, accttype=None)],  # no posting account
+        [credit_line("3", "4.82", account="500", accttype="COGS")],
+        [credit_line("3", "4.00")],  # lines that do not add up to the credit's net amount
+        [credit_line("3", "4.82"), credit_line("3", "1.00", account="210", accttype="OthCurrLiab")],
+        [],  # no lines at all
+    ],
+)
+async def test_a_credit_whose_lines_are_not_proven_sales_adjustments_is_unknown(lines):
+    reader = CreditReader([credit_row("3", "CM1", "4.82")], lines=lines)
+    reader.edges = invoice_credit_edges()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"] == {"complete": False, "reason": "invoice_credit_posting_unproven"}
+
+
+async def test_a_credit_line_posting_to_a_configured_tax_account_is_unknown_even_when_typed_income():
+    from app.services.transaction_ops.netsuite_refunds import read_invoice_credits
+
+    reader = CreditReader([credit_row("3", "CM1", "4.82")], lines=[credit_line("3", "4.82", account="846")])
+    nodes = {
+        "1": {"type": "SalesOrd", "voided": "F"},
+        "2": {"type": "CustInvc", "voided": "F"},
+        "3": {"type": "CustCred", "voided": "F"},
+    }
+    args = (reader.request, ["3"], nodes, {"1", "2", "3"}, "1")
+    assert (await read_invoice_credits(*args, billing=["2"], taxed=frozenset()))["complete"] is True
+    result = await read_invoice_credits(*args, billing=["2"], taxed=frozenset({"846"}))
+    assert result == {"complete": False, "reason": "invoice_credit_posting_unproven"}
+
+
+async def test_zero_amount_lines_and_the_native_tax_line_need_no_income_account():
+    lines = [
+        credit_line("3", "4.82"),
+        credit_line("3", "0", account="777", accttype="Income"),  # a $0 shipping line
+        credit_line("3", "0", account=None, accttype=None, taxline="T"),  # "-Not Taxable-"
+    ]
+    reader = CreditReader([credit_row("3", "CM1", "4.82")], lines=lines)
+    reader.edges = invoice_credit_edges()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"]["complete"] is True and result["invoice_credits"]["total"] == "4.82"
+
+
+@pytest.mark.parametrize(
+    "invoices",
+    [
+        [],  # the invoice vanished between the graph and the read
+        [invoice_row("2", "10.00", voided="T")],
+        [invoice_row("2", "10.00", currency="2")],
+        [invoice_row("2", "abc")],
+        [invoice_row("2", "10.00", taxtotal=None)],
+        [invoice_row("2", "10.00"), invoice_row("2", "10.00")],  # duplicated header
+    ],
+)
+async def test_an_unproven_invoice_read_makes_the_credits_unknown(invoices):
+    reader = CreditReader([credit_row("3", "CM1", "4.82")], invoices=invoices)
+    reader.edges = invoice_credit_edges()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"]["complete"] is False
+
+
+async def test_an_order_also_billed_by_cash_sale_has_unknown_invoice_credits():
+    reader = CreditReader([credit_row("3", "CM1", "4.82")])
+    reader.edges = [*invoice_credit_edges(), edge("1", "9", "SalesOrd", "CashSale")]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"] == {"complete": False, "reason": "invoice_credit_billing_unproven"}
+
+
+async def test_a_returned_items_inventory_cost_lines_carry_no_amount_and_do_not_block_the_credit():
+    # Framework's lost-shipment and replacement credits (CM9762, CM11088 on 2026-10-16) return
+    # the items: each item line has a cost pair (COGS and inventory asset) with no transaction
+    # amount. Those lines cannot move the order total or tax; the net-amount check still has to hold.
+    lines = [
+        credit_line("3", "4.82", account="54"),
+        credit_line("3", None, account="230", accttype="COGS"),
+        credit_line("3", None, account="212", accttype="OthCurrAsset"),
+    ]
+    reader = CreditReader([credit_row("3", "CM1", "4.82")], lines=lines)
+    reader.edges = invoice_credit_edges()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"]["complete"] is True and result["invoice_credits"]["total"] == "4.82"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        credit_line("3", None, account="774", accttype="Income"),  # a sales line with its amount missing
+        credit_line("3", None, account="210", accttype="OthCurrLiab"),
+        credit_line("3", None, account=None, accttype=None),
+    ],
+)
+async def test_any_other_line_without_an_amount_is_unknown(line):
+    reader = CreditReader([credit_row("3", "CM1", "4.82")], lines=[credit_line("3", "4.82"), line])
+    reader.edges = invoice_credit_edges()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["invoice_credits"] == {"complete": False, "reason": "invoice_credit_posting_unproven"}

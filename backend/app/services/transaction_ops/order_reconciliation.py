@@ -62,10 +62,19 @@ def _invoice_credits(evidence, order_id, reference, currency, precision, *, excl
     kept = [(row, amount) for row, amount in zip(rows, amounts) if str(row.get("id")) not in exclude]
     if not kept:
         return None
+    # The order's invoices, read in the same call. Credits are subtracted from the sales
+    # order, so they explain it only when the invoices equal it (packet review 2026-10-16, F1).
+    invoices = credits.get("invoices")
+    if not isinstance(invoices, dict) or not invoices.get("ids"):
+        return None
+    invoiced = (_amount(invoices.get("total"), precision), _amount(invoices.get("tax"), precision))
+    if None in invoiced:
+        return None
     return {
         "rows": [row for row, _ in kept],
         "total": sum((t for _, (t, _) in kept), Decimal(0)),
         "tax": sum((x for _, (_, x) in kept), Decimal(0)),
+        "invoiced": invoiced,
     }
 
 
@@ -211,7 +220,8 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     )
     (source_total, target_total), (source_tax, target_tax) = values["order_total"], values["tax"]
     known = None not in (source_total, target_total, source_tax, target_tax)
-    if invoice and known and source_total != target_total:
+    billed = (original_values["order_total"][1], original_values["tax"][1])
+    if invoice and known and source_total != target_total and invoice["invoiced"] == billed:
         credited_total = target_total - invoice["total"]
         credited_tax = target_tax - invoice["tax"]
         if credited_total == source_total and credited_tax == source_tax:

@@ -396,7 +396,28 @@ def test_invoice_credits_that_reconcile_the_order_drop_the_sales_order_amendment
         "credits": [{"id": "30", "number": "CM30", "invoice_id": "20", "total": "5.00", "tax": "0"}],
         "total": "5.00",
         "tax": "0",
+        "invoices": {"ids": ["20"], "total": "106.00", "tax": "6.00"},  # billed as the sales order
     }
     result = reconcile_order(source, target, config, refunds=refunds)
     assert result["status"] == "matched"
     assert "posting_reconciliation" not in result
+    assert result["amounts"]["order_total"] == {"source": "101.00", "target": "101.00", "delta": "0.00"}
+
+
+def test_an_invoice_credit_never_overrides_a_commercial_proof_whose_invoice_differs():
+    # Packet review 2026-10-16, F1, on release's commercial path: the invoice was already
+    # discounted to 101.00, so the further 5.00 credit cannot explain the sales order.
+    from app.services.transaction_ops.order_reconciliation import reconcile_order
+
+    source, target, config, refunds = recon_fixture()
+    refunds["target"]["dependency_manifest"] = {"version": 1, "order_id": "5", "transaction_ids": ["5"]}
+    refunds["target"]["invoice_credits"] = {
+        "complete": True,
+        "credits": [{"id": "30", "number": "CM30", "invoice_id": "20", "total": "5.00", "tax": "0"}],
+        "total": "5.00",
+        "tax": "0",
+        "invoices": {"ids": ["20"], "total": "101.00", "tax": "6.00"},
+    }
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "difference"
+    assert not any(a.get("kind") == "invoice_credit_memos" for a in result.get("adjustments") or [])

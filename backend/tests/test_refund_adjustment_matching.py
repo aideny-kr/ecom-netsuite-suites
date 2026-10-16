@@ -559,6 +559,7 @@ def _with_invoice_credit(case, credit_id):
         "credits": [{"id": credit_id, "number": "CM" + credit_id, "invoice_id": "9", "total": "20", "tax": "0"}],
         "total": "20",
         "tax": "0",
+        "invoices": {"ids": ["9"], "total": "120.00", "tax": "20.00"},  # billed as the sales order
     }
     return s, t, c, r
 

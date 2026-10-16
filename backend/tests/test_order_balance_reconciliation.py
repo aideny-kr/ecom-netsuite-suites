@@ -164,7 +164,7 @@ def test_refund_from_another_order_or_currency_cannot_cover_this_order():
 # exactly, total and tax together, the order is matched and the credits are its reason.
 
 
-def credited(evidence_tuple, source_total, credits, *, source_tax="20.00"):
+def credited(evidence_tuple, source_total, credits, *, source_tax="20.00", invoiced=("120.00", "20.00")):
     source, target, config, refunds = evidence_tuple
     source["orders"][0].update(total=source_total, included_tax_total=source_tax)
     refunds["target"]["dependency_manifest"] = {"version": 1, "order_id": "77", "transaction_ids": ["77"]}
@@ -176,6 +176,8 @@ def credited(evidence_tuple, source_total, credits, *, source_tax="20.00"):
         ],
         "total": str(sum((Decimal(t) for t, _ in credits), Decimal(0))),
         "tax": str(sum((Decimal(x) for _, x in credits), Decimal(0))),
+        # The order's invoices as billed; they must equal the sales order before a credit counts.
+        "invoices": {"ids": ["9"], "total": invoiced[0], "tax": invoiced[1]},
     }
     return source, target, config, refunds
 
@@ -242,6 +244,10 @@ def test_a_taxed_credit_matching_the_lower_source_tax_reconciles_both():
         lambda r: r["target"]["invoice_credits"].update(total="4.8"),  # the sum must match its credits
         lambda r: r["target"]["invoice_credits"]["credits"][0].update(total="-4.82"),
         lambda r: r["target"]["invoice_credits"]["credits"].clear(),
+        lambda r: r["target"]["invoice_credits"].pop("invoices"),
+        lambda r: r["target"]["invoice_credits"]["invoices"].update(ids=[]),
+        lambda r: r["target"]["invoice_credits"]["invoices"].update(total="abc"),
+        lambda r: r["target"]["invoice_credits"]["invoices"].pop("tax"),
     ],
 )
 def test_unproven_invoice_credits_never_explain_a_difference(change):
@@ -259,3 +265,20 @@ def test_unknown_source_tax_never_lets_credits_erase_a_known_total_difference():
     result = reconcile_order(source, target, config, refunds=refunds)
     assert result["amounts"]["order_total"] == {"source": "115.18", "target": "120.00", "delta": "-4.82"}
     assert "adjustments" not in result
+
+
+def test_credits_on_an_invoice_that_differs_from_the_sales_order_never_explain_it():
+    # Packet review 2026-10-16, F1: the sales order says 120.00 but its invoice was already
+    # billed at 115.18. A further 4.82 credit makes sales order less credit equal the source,
+    # yet the customer was billed 110.36. The credits explain a difference only when the
+    # invoices equal the sales order they are subtracted from.
+    source, target, config, refunds = credited(evidence(), "115.18", [("4.82", "0")], invoiced=("115.18", "20.00"))
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "difference"
+    assert result["amounts"]["order_total"] == {"source": "115.18", "target": "120.00", "delta": "-4.82"}
+    assert "adjustments" not in result
+
+
+def test_credits_on_an_invoice_whose_tax_differs_from_the_sales_order_never_explain_it():
+    source, target, config, refunds = credited(evidence(), "115.18", [("4.82", "0")], invoiced=("120.00", "19.00"))
+    assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
