@@ -24,7 +24,11 @@ async def test_bound_connection_test_verifies_the_same_replica_reader(db, admin_
     )
     db.add(c)
     await db.flush()
-    c.metadata_json = {"setup_state": "connected", "transaction_replica": {**BINDING, "connector_id": str(c.id)}}
+    c.metadata_json = {
+        "setup_state": "connected",
+        "transaction_replica": {**BINDING, "connector_id": str(c.id)},
+        "transaction_replica_verification": {"id": "old-proof"},
+    }
     await db.flush()
     discovery = AsyncMock(return_value=[{"name": "query"}])
     query = create_autospec(metabase_reader.read_order_page, return_value={"orders": [], "page_complete": True})
@@ -36,5 +40,11 @@ async def test_bound_connection_test_verifies_the_same_replica_reader(db, admin_
     query.assert_awaited_once()
     assert query.call_args.args[1] == user.tenant_id
     assert result["status"] == ("error" if query_failed else "ok")
+    from app.services.transaction_ops.replica_recovery import VERIFICATION_KEY
+
     if not query_failed:
         assert "replica" in result["message"].lower()
+        assert c.metadata_json[VERIFICATION_KEY]["binding"] == {**BINDING, "connector_id": str(c.id)}
+        assert c.metadata_json[VERIFICATION_KEY]["id"]
+    else:
+        assert VERIFICATION_KEY not in c.metadata_json

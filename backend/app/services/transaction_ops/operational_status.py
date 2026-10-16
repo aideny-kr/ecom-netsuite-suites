@@ -414,6 +414,10 @@ async def operational_status(db, tenant_id, *, config_id=None, limit=20, offset=
                 if child
                 else continuation_status(last, now, blocked=blocked)
             )
+        from app.services.transaction_ops.replica_recovery import recovery_ready
+
+        if last and not running and await recovery_ready(db, tenant_id, last, config, now):
+            recovery = {"state": "eligible", "reason": "replica_connection_verified", "eligible_at": _iso(now)}
         entity = {
             "config_id": str(config.id),
             "name": config.name,

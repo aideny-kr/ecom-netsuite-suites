@@ -301,6 +301,13 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
         message = f"Connected successfully. Discovered {len(tools)} tools."
         replica = (connector.metadata_json or {}).get("transaction_replica")
         if is_metabase(connector) and replica:
+            from app.services.transaction_ops.replica_recovery import VERIFICATION_KEY
+
+            # Discovery alone must never authorize checkpoint recovery. A failed
+            # Test invalidates older proof even if its credentials still work.
+            connector.metadata_json = {
+                k: v for k, v in (connector.metadata_json or {}).items() if k != VERIFICATION_KEY
+            }
             from app.services.transaction_ops import metabase_reader
 
             binding = metabase_reader.ReplicaBinding.model_validate(replica)
@@ -320,6 +327,16 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
                 page_size=1,
                 now=now,
             )
+            connector.metadata_json = {
+                **(connector.metadata_json or {}),
+                VERIFICATION_KEY: {
+                    "schema_version": 1,
+                    "id": str(uuid.uuid4()),
+                    "verified_at": datetime.now(timezone.utc).isoformat(),
+                    "binding": binding.model_dump(mode="json"),
+                },
+            }
+            await db.flush()
             message = "Connected successfully. Transaction replica access verified."
         return {
             "connector_id": str(connector.id),

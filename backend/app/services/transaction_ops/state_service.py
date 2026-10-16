@@ -440,6 +440,7 @@ async def create_run(
     resume_from_run_id=None,
     automatic_continuation=False,
     automatic_auth_recovery=False,
+    automatic_replica_recovery=False,
     automatic_collection_recovery=False,
     operator_collection_retry=False,
     human_retry=False,
@@ -451,6 +452,17 @@ async def create_run(
         raise StateError("invalid_run_continuation")
     config = await get_config(db, tenant_id, config_id, lock=True)
     if automatic_auth_recovery and (not automatic_continuation or request.origin != "schedule" or human_retry):
+        raise StateError("invalid_run_continuation")
+    if automatic_replica_recovery and (
+        request.origin != "schedule"
+        or actor is not None
+        or resume_from_run_id is None
+        or automatic_continuation
+        or automatic_auth_recovery
+        or automatic_collection_recovery
+        or operator_collection_retry
+        or human_retry
+    ):
         raise StateError("invalid_run_continuation")
     if automatic_collection_recovery or operator_collection_retry:
         if (
@@ -502,6 +514,21 @@ async def create_run(
     initial_progress = {}
     if resume_from_run_id is not None:
         previous = await get_run(db, tenant_id, resume_from_run_id)
+        replica_verification = None
+        if automatic_replica_recovery:
+            from app.services.transaction_ops.replica_recovery import (
+                assert_latest_idle,
+                recovery_key,
+                recovery_ready,
+            )
+
+            replica_verification = await recovery_ready(db, tenant_id, previous, config, now, lock=True)
+            if (
+                replica_verification is None
+                or request.evaluation_key != recovery_key(previous, replica_verification)
+                or not await assert_latest_idle(db, tenant_id, previous)
+            ):
+                raise StateError("invalid_run_continuation")
         if automatic_collection_recovery:
             from app.services.transaction_ops.collection_recovery import collection_stop
             from app.services.transaction_ops.continuation import no_progress_deadline_stop
@@ -551,7 +578,7 @@ async def create_run(
             or previous.termination_reason
             not in (
                 {"budget", "stall", "error"}
-                if human_retry or automatic_auth_recovery or automatic_collection_recovery
+                if human_retry or automatic_auth_recovery or automatic_collection_recovery or automatic_replica_recovery
                 else {"budget", "stall"}
             )
             or previous_scope != new_scope
@@ -573,12 +600,21 @@ async def create_run(
             if not automatic_continuation:
                 # A new scheduled cycle must earn subsequent parts through new
                 # work; cumulative evidence is not new productivity.
-                initial_progress["schedule_cycle_key"] = request.evaluation_key
+                initial_progress["schedule_cycle_key"] = (
+                    replica_verification["cycle_key"] if replica_verification else request.evaluation_key
+                )
         for field in list(initial_progress):
             if field.startswith("continuation_") or (
                 not automatic_continuation and field in {"last_progress_at", "execution_started_at"}
             ):
                 initial_progress.pop(field)
+        if replica_verification:
+            initial_progress["replica_recovery"] = {
+                **replica_verification,
+                "parent_run_id": str(previous.id),
+                "previous_root_run_id": previous.progress_json.get("continuation_root_id") or str(previous.id),
+                "previous_read_retries_used": previous.progress_json.get("continuation_read_retry_count", 0),
+            }
         if human_retry:
             attempt = initial_progress.get("review_attempt", 0)
             if type(attempt) is not int or not 0 <= attempt < 512:
@@ -649,6 +685,14 @@ async def create_run(
         row.created_at = now
     db.add(row)
     await db.flush()
+    if automatic_replica_recovery:
+        await _audit(
+            db,
+            tenant_id,
+            "run.replica_recovery_authorized",
+            row,
+            payload={**initial_progress["replica_recovery"], "new_finite_cycle": True},
+        )
     if operator_collection_retry:
         await _audit(
             db,
