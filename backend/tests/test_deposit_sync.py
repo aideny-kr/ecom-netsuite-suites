@@ -418,6 +418,7 @@ def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]
         else []
     )
     return extra + [
+        patch("app.services.ingestion.netsuite_customer_payments.sync_payments", new=AsyncMock(return_value=0)),
         patch.object(
             netsuite_deposit_sync,
             "get_netsuite_rest_connection",

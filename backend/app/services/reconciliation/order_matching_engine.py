@@ -283,4 +283,6 @@ class OrderMatchingEngine:
         """Tier 2: Fuzzy matching on amount + date + currency."""
         from app.services.reconciliation.order_fuzzy_matcher import fuzzy_match
 
-        return fuzzy_match(unmatched_charges, unmatched_deposits)
+        # Invoice application proof belongs only to its exact order. It must
+        # never clear another order by amount/date similarity.
+        return fuzzy_match(unmatched_charges, [d for d in unmatched_deposits if d.record_type != "customerpayment"])

@@ -9,12 +9,13 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import String, and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
+from app.models.connection import DISPATCHABLE_CONNECTION_STATUSES, Connection
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.schemas.order_reconciliation import (
     ChargeRecord,
@@ -419,8 +420,8 @@ class OrderReconJob:
 
         rows = await self._fetch_payout_lines(
             line_types=["charge"],
-            date_from=date_from - _DATE_BUFFER,
-            date_to=date_to + _DATE_BUFFER,
+            date_from=date_from,
+            date_to=date_to,
             subsidiary_id=subsidiary_id,
         )
 
@@ -487,9 +488,25 @@ class OrderReconJob:
 
         Sets order_reference from related_payout_id.
         """
+        # Customer payments carry proven invoice/order allocation amounts in
+        # transaction currency. Retired-connection or invalidated proof is unusable.
+        active_connections = select(Connection.id.cast(String)).where(
+            Connection.tenant_id == self.tenant_id,
+            Connection.provider == "netsuite",
+            Connection.status.in_(DISPATCHABLE_CONNECTION_STATUSES),
+        )
+        usable = or_(
+            NetsuitePosting.record_type.in_(["deposit", "custdep"]),
+            and_(
+                NetsuitePosting.record_type == "customerpayment",
+                NetsuitePosting.raw_data["application_verified"].as_boolean().is_(True),
+                NetsuitePosting.raw_data["application_version"].as_integer() == 1,
+                NetsuitePosting.raw_data["connection_id"].as_string().in_(active_connections),
+            ),
+        )
         stmt = select(NetsuitePosting).where(
             NetsuitePosting.tenant_id == self.tenant_id,
-            NetsuitePosting.record_type.in_(["deposit", "custdep"]),
+            usable,
             NetsuitePosting.transaction_date >= date_from - _DATE_BUFFER,
             NetsuitePosting.transaction_date <= date_to + _DATE_BUFFER,
         )
@@ -512,7 +529,7 @@ class OrderReconJob:
                 chunk = refs[i : i + _REF_CHUNK_SIZE]
                 ref_stmt = select(NetsuitePosting).where(
                     NetsuitePosting.tenant_id == self.tenant_id,
-                    NetsuitePosting.record_type.in_(["deposit", "custdep"]),
+                    usable,
                     NetsuitePosting.related_payout_id.in_(chunk),
                     NetsuitePosting.transaction_date >= sanity_from,
                     NetsuitePosting.transaction_date <= sanity_to,
@@ -528,8 +545,8 @@ class OrderReconJob:
             NSPaymentRecord(
                 id=str(r.id),
                 netsuite_internal_id=r.netsuite_internal_id,
-                amount=r.amount,
-                currency=r.currency,
+                amount=r.foreign_amount if r.record_type == "customerpayment" else r.amount,
+                currency=r.transaction_currency if r.record_type == "customerpayment" else r.currency,
                 transaction_date=r.transaction_date,
                 record_type=r.record_type,
                 memo=r.memo,
@@ -935,6 +952,9 @@ class OrderReconJob:
                 "order_reference": candidate.charge.order_reference,
                 "charge_payout_line_id": candidate.charge.payout_line_id,
             }
+            if candidate.deposit:
+                evidence["netsuite_record_type"] = candidate.deposit.record_type
+                evidence["netsuite_internal_id"] = candidate.deposit.netsuite_internal_id
             if confidence_signals is not None:
                 evidence["confidence_signals"] = confidence_signals
             # Tier-1 same-ref evidence: only present when several deposits
