@@ -191,7 +191,9 @@ def billing_documents(nodes, reachable):
     )
 
 
-async def read_invoice_credits(request, candidates, nodes, owned, currency_id, *, billing=(), taxed=frozenset()):
+async def read_invoice_credits(
+    request, candidates, nodes, owned, currency_id, *, billing=(), taxed=frozenset(), accounted=frozenset()
+):
     """Credit memos created from one of this order's invoices, with their amounts.
 
     `complete: False` means unknown, never zero. A credit on an invoice shared with
@@ -202,7 +204,9 @@ async def read_invoice_credits(request, candidates, nodes, owned, currency_id, *
     2026-10-16, F1). Header tax misses an item line posting straight into a tax account,
     so each counted credit's other lines must post to an income account that is not one
     of `taxed` and add up to its net amount (F2) -- the rule credit_creation applies to a
-    credit it proposes.
+    credit it proposes. A credit in `accounted` -- a tax reversal the refund tax adjustment
+    already proves -- is left out rather than line-checked, so it neither counts twice nor
+    makes the other credits unknown (round 2, F3).
     """
     if not candidates:
         return {"complete": True, "credits": [], "total": "0", "tax": "0"}
@@ -271,6 +275,8 @@ async def read_invoice_credits(request, candidates, nodes, owned, currency_id, *
             total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
             if total is None or tax is None or total >= 0 or tax > 0:
                 raise ValueError("invoice_credit_amount_unproven")
+            if identifier in accounted:
+                continue  # the refund tax adjustment already accounts for this credit
             if origin is not None and origin not in nodes:
                 # An origin the graph never saw is unresolved, not "not an invoice":
                 # skipping it would certify a partial sum.
@@ -481,6 +487,7 @@ async def collect_refunds(
         currency_id,
         billing=billing_documents(nodes, reachable),
         taxed=taxed,
+        accounted=frozenset(str(a["credit_memo_id"]) for a in adjustments if a.get("credit_memo_id")),
     )
     await recheck_links()
     request_ids = sorted((link["request_id"] for link in request_links), key=int)

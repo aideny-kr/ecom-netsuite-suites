@@ -545,3 +545,53 @@ async def test_any_other_line_without_an_amount_is_unknown(line):
     reader.edges = invoice_credit_edges()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
     assert result["invoice_credits"] == {"complete": False, "reason": "invoice_credit_posting_unproven"}
+
+
+# Packet review round 2, F3: a tax reversal is itself a credit created from the invoice and
+# posts to a tax account. When the refund tax adjustment has already accounted for it, it is
+# left out of the invoice-credit proof instead of making the whole read unknown, so a separate
+# income credit on the same invoice still counts.
+def tax_reversal_and_income_credit():
+    rows = [credit_row("3", "CM3", "20.00"), credit_row("4", "CM4", "20.00")]
+    lines = [credit_line("3", "20.00", account="210", accttype="OthCurrLiab"), credit_line("4", "20.00")]
+    reader = CreditReader(rows, lines=lines, invoices=[invoice_row("2", "120.00", "20.00")])
+    reader.edges = [*invoice_credit_edges(), edge("2", "4", "CustInvc", "CustCred")]
+    return reader
+
+
+async def test_a_credit_the_tax_adjustment_accounts_for_is_left_out_of_the_invoice_credit_proof():
+    from app.services.transaction_ops.netsuite_refunds import read_invoice_credits
+
+    reader = tax_reversal_and_income_credit()
+    nodes = {
+        "1": {"type": "SalesOrd", "voided": "F"},
+        "2": {"type": "CustInvc", "voided": "F"},
+        "3": {"type": "CustCred", "voided": "F"},
+        "4": {"type": "CustCred", "voided": "F"},
+    }
+    args = (reader.request, ["3", "4"], nodes, set(nodes), "1")
+    assert (await read_invoice_credits(*args, billing=["2"]))["complete"] is False
+    result = await read_invoice_credits(*args, billing=["2"], accounted=frozenset({"3"}))
+    assert result["complete"] is True
+    assert [c["id"] for c in result["credits"]] == ["4"] and result["total"] == "20.00"
+
+
+async def test_collect_refunds_passes_the_tax_adjustments_credits_to_the_invoice_credit_read(monkeypatch):
+    from app.services.transaction_ops import netsuite_refunds as service
+
+    async def tax_adjustments(*args, **kwargs):
+        return [{"credit_memo_id": "3", "amount": "20.00", "tax_amount": "20.00"}]
+
+    monkeypatch.setattr(service, "read_tax_adjustments", tax_adjustments)
+    profile = {
+        "schema_version": 1,
+        "account_id": "123-sb1",
+        "subsidiary_id": "1",
+        "tax_reversal_reason_ids": ["102"],
+        "tax_item_accounts": {"80": "210"},
+        "tax_accounts": ["210"],
+    }
+    reader = tax_reversal_and_income_credit()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", adjustment_profile=profile)
+    assert result["invoice_credits"]["complete"] is True
+    assert [c["id"] for c in result["invoice_credits"]["credits"]] == ["4"]
