@@ -14,6 +14,7 @@ import httpx
 import structlog
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.shared.exceptions import McpError
 
 from app.core.encryption import decrypt_credentials, encrypt_credentials
 from app.services.chat.write_outcome import INDETERMINATE_KEY
@@ -28,6 +29,36 @@ logger = structlog.get_logger()
 
 class McpAuthenticationError(RuntimeError):
     """Credentials were unavailable before an external tool was sent."""
+
+
+class McpReadContractError(RuntimeError):
+    """A permanent refusal of a known Metabase read; safe code, no provider text."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def _metabase_read_failure(connector, tool_name, exception):
+    from app.services.metabase_oauth_service import is_metabase
+
+    if tool_name not in {"query", "execute_query", "browse_data"} or not is_metabase(connector):
+        return None
+
+    def leaves(exc):
+        if isinstance(exc, BaseExceptionGroup):
+            return [leaf for child in exc.exceptions for leaf in leaves(child)]
+        return [exc]
+
+    codes = []
+    for leaf in leaves(exception):
+        if isinstance(leaf, httpx.HTTPStatusError) and leaf.response.status_code in {401, 403}:
+            codes.append("authentication_required")
+        elif isinstance(leaf, McpError) and leaf.error.code in {-32600, -32601, -32602}:
+            codes.append("contract_changed")
+        else:
+            return None
+    return codes[0] if codes and len(set(codes)) == 1 else None
 
 
 def _transport_options(connector):
@@ -335,6 +366,10 @@ async def call_external_mcp_tool(
             # duplicate-inviting path this file's timeout branch was patched to
             # close, still open on the commoner failure. Found by review, not
             # by the fix that claimed to have closed it.
+            failure = _metabase_read_failure(connector, tool_name, eg)
+            if failure:
+                logger.warning("mcp_client.read_contract_refused", tool_name=tool_name, code=failure)
+                raise McpReadContractError(failure) from None
             logger.error(
                 "mcp_client.transport_failed_outcome_unknown",
                 server_url=connector.server_url,
@@ -351,6 +386,10 @@ async def call_external_mcp_tool(
         # Pre-flight failures (unknown/disabled connector) return their own
         # dicts before this point and never reach here, so this does not
         # mislabel calls that were never sent.
+        failure = _metabase_read_failure(connector, tool_name, exc)
+        if failure:
+            logger.warning("mcp_client.read_contract_refused", tool_name=tool_name, code=failure)
+            raise McpReadContractError(failure) from None
         logger.error(
             "mcp_client.transport_failed_outcome_unknown",
             server_url=connector.server_url,
