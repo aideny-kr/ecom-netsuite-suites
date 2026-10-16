@@ -106,7 +106,9 @@ async def recovery_ready(db, tenant_id, previous, config, now, *, lock=False):
         .execution_options(populate_existing=True)
     )
     if lock:
-        query = query.with_for_update()
+        # Explicit Test/refresh can hold this row during provider I/O. Never
+        # let one connector consume the entire multi-tenant collector tick.
+        query = query.with_for_update(skip_locked=True)
     connector = await db.scalar(query)
     if (
         connector is None

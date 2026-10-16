@@ -181,6 +181,7 @@ async def test_real_scheduler_resumes_verified_reconnect_without_waiting_or_rest
     [
         "no_proof",
         "old_proof",
+        "expired_proof",
         "future_proof",
         "invalid_id",
         "wrong_binding",
@@ -217,6 +218,11 @@ async def test_stored_recovery_guards_fail_closed(db, admin_user, tenant_b, monk
         meta.pop(recovery.VERIFICATION_KEY)
     elif guard == "old_proof":
         proof["verified_at"] = (now - timedelta(hours=1)).isoformat()
+    elif guard == "expired_proof":
+        prior.created_at = now - timedelta(hours=48)
+        prior.finished_at = now - timedelta(hours=26)
+        progress["last_read_failure"]["observed_at"] = (now - timedelta(hours=27)).isoformat()
+        proof["verified_at"] = (now - timedelta(hours=25)).isoformat()
     elif guard == "future_proof":
         proof["verified_at"] = (now + timedelta(seconds=1)).isoformat()
     elif guard == "invalid_id":
@@ -350,3 +356,72 @@ async def test_ops_status_exposes_eligibility_without_claiming_dispatch(db, admi
     assert entity["next_action"]["kind"] == "continue_checkpoint"
     assert entity["next_action"]["reason"] == "replica_connection_verified"
     assert entity["next_action"]["dispatch_verified"] is False
+
+
+async def test_busy_connection_does_not_block_state_gate_or_other_scopes(committed, monkeypatch):
+    db, actor, factory = committed
+    config, prior, connector, now = await stopped(db, actor, monkeypatch)
+    tenant_id, config_id, parent_id, connector_id = actor.tenant_id, config.id, prior.id, connector.id
+    proof = await recovery.recovery_ready(db, tenant_id, prior, config, now)
+    request = RunCreate(**{**prior.params_json, "evaluation_key": recovery.recovery_key(prior, proof)})
+    await db.commit()
+    async with factory() as holder:
+        await holder.scalar(select(McpConnector).where(McpConnector.id == connector_id).with_for_update())
+        async with factory() as reader:
+            with pytest.raises(state.StateError, match="invalid_run_continuation"):
+                async with asyncio.timeout(2):
+                    await state.create_run(
+                        reader,
+                        tenant_id,
+                        config_id,
+                        request,
+                        now=now,
+                        resume_from_run_id=parent_id,
+                        automatic_replica_recovery=True,
+                    )
+            await reader.rollback()
+        # Lock remains held. The scheduler must skip it and finish the tick;
+        # no blocked broker/provider operation, no recovery run was created.
+        async with factory() as collector:
+            async with asyncio.timeout(2):
+                stats = await scheduler.collect_due_runs(collector, now)
+            assert stats["created"] == 0
+            assert stats["config_failed"] == 1
+    async with factory() as reader:
+        child = await state.create_run(
+            reader,
+            tenant_id,
+            config_id,
+            request,
+            now=now,
+            resume_from_run_id=parent_id,
+            automatic_replica_recovery=True,
+        )
+        assert child.status == "pending"
+
+
+async def test_state_rejects_valid_proof_for_a_superseded_parent(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    config, prior, _, now = await stopped(db, actor, monkeypatch)
+    proof = await recovery.recovery_ready(db, actor.tenant_id, prior, config, now)
+    request = RunCreate(**{**prior.params_json, "evaluation_key": recovery.recovery_key(prior, proof)})
+    newer = await state.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(**{**prior.params_json, "evaluation_key": "next-genuine-cycle"}),
+        now=now,
+    )
+    newer.status, newer.termination_reason, newer.finished_at = "finished", "budget", now
+    await db.flush()
+    assert await recovery.recovery_ready(db, actor.tenant_id, prior, config, now) is not None
+    with pytest.raises(state.StateError, match="invalid_run_continuation"):
+        await state.create_run(
+            db,
+            actor.tenant_id,
+            config.id,
+            request,
+            now=now,
+            resume_from_run_id=prior.id,
+            automatic_replica_recovery=True,
+        )
