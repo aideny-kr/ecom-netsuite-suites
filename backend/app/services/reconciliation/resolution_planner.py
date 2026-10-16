@@ -190,6 +190,14 @@ def plan_result(
     # 2. clean match — nothing to resolve
     if match_type == "deterministic" and variance_type is None and variance_amount == Decimal("0"):
         return None
+    if evidence.get("netsuite_record_type") == "customerpayment":
+        return _mk(
+            root,
+            ACTION_NEEDS_HUMAN,
+            "Review the invoice-applied customer payment; deposit booking actions do not apply.",
+            abs_variance,
+            above,
+        )
     # 3. policy gate: never auto-propose a booking for a chargeback (beats
     #    evidence rules — a chargeback is never auto-applied regardless of
     #    what the evidence dict says)

@@ -13,6 +13,7 @@ import { BulkApprovalCard } from "@/components/reconciliation/bulk-approval-card
 import { ResolutionSummaryHeader } from "@/components/reconciliation/resolution-summary-header";
 import { ResolutionGroupsTable, NeedsHumanWorksheet } from "@/components/reconciliation/resolution-groups-table";
 import { ExportMenu } from "@/components/reconciliation/export-menu";
+import { RefundChecks } from "@/components/reconciliation/refund-checks";
 import {
   useReconRuns,
   useReconResults,
@@ -65,6 +66,7 @@ export default function ReconciliationPage() {
   const summary = useReconBucketSummary(selectedRunId);
   const approveBucket = useApproveBucket(selectedRunId || "");
   const reconEnabled = useFeature("reconciliation");
+  const refundChecksEnabled = useFeature("celigo");
   const pipeline = useReconPipeline();
 
   // Summary-first resolution surface (recon_resolution_ui, default OFF). Flag
@@ -433,6 +435,8 @@ export default function ReconciliationPage() {
           {showClassicView && renderClassicBucketView()}
         </>
       )}
+
+      {!pipeline.isRunning && selectedRunId && refundChecksEnabled && <RefundChecks runId={selectedRunId} />}
 
       {/* Close checklist — gated on the PERIOD-scoped readiness it fetches
           itself (every run the close will touch), not this run's buckets.

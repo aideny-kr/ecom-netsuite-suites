@@ -136,7 +136,7 @@ def review_run_scopes(root, span):
     return cohort_scope, replacement_filter
 
 
-async def resolve_review_runs(db, tenant_id, roots):
+async def resolve_review_runs(db, tenant_id, roots, *, reference_search=""):
     """Resolve every selected scope in one database roundtrip, with identical predicates."""
     from app.schemas.transaction_runs import ReviewSpan
     from app.services.transaction_ops import state_service as state
@@ -150,6 +150,18 @@ async def resolve_review_runs(db, tenant_id, roots):
         span = ReviewSpan.model_validate(root.params_json["review"])
         selections.append(review_run_scopes(root, span))
     columns = [flag.label(f"scope_{i}_{j}") for i, pair in enumerate(selections) for j, flag in enumerate(pair)]
+    from app.models.transaction_ops import TransactionFinding
+
+    eligible_runs = select(Run).where(Run.tenant_id == tenant_id)
+    if reference_search:
+        eligible_runs = eligible_runs.where(
+            Run.id.in_(
+                select(TransactionFinding.run_id).where(
+                    TransactionFinding.tenant_id == tenant_id,
+                    TransactionFinding.order_reference.contains(reference_search, autoescape=True),
+                )
+            )
+        )
     rows = (
         await db.execute(
             select(
@@ -159,7 +171,10 @@ async def resolve_review_runs(db, tenant_id, roots):
                 Run.params_json["window_start"].astext.label("window_start"),
                 Run.params_json["window_end"].astext.label("window_end"),
                 Run.progress_json["period_membership"].label("membership"),
-            ).where(Run.tenant_id == tenant_id, or_(*(flag for pair in selections for flag in pair)))
+            ).where(
+                Run.id.in_(eligible_runs.with_only_columns(Run.id)),
+                or_(*(flag for pair in selections for flag in pair)),
+            )
         )
     ).all()
     selections_by_root = {
@@ -189,7 +204,9 @@ async def resolve_review_runs(db, tenant_id, roots):
     return selections_by_root
 
 
-async def period_evidence(db, tenant_id, run_id, *, root=None, metadata_only=False, _run_selection=None):
+async def period_evidence(
+    db, tenant_id, run_id, *, root=None, metadata_only=False, _run_selection=None, reference_search=""
+):
     """One authorized period's cohort with compatible later rechecks."""
     from app.models.transaction_ops import TransactionFinding
     from app.schemas.transaction_runs import ReviewSpan
@@ -239,6 +256,8 @@ async def period_evidence(db, tenant_id, run_id, *, root=None, metadata_only=Fal
             final_evidence(report),
         )
     )
+    if reference_search:
+        reading_query = reading_query.where(f.order_reference.contains(reference_search, autoescape=True))
     cohort_filter = run_ids_match(f.run_id, cohort_ids)
     if len(selection) > 2:
         from app.services.transaction_ops.period_membership import member_filter

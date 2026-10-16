@@ -29,6 +29,10 @@ let mockApproveData: { approved_count: number; skipped_count: number } | undefin
 // component fetches it itself via useCloseReadiness (R3-A); it no longer
 // receives a per-run bucket summary or a paged results array.
 const closeChecklistSpy = vi.fn();
+const refundChecksSpy = vi.fn();
+vi.mock("@/components/reconciliation/refund-checks", () => ({
+  RefundChecks: (props: { runId: string }) => { refundChecksSpy(props); return null; },
+}));
 
 vi.mock("@/hooks/use-reconciliation", () => ({
   useReconRuns: () => ({ data: [mockRun] }),
@@ -108,6 +112,7 @@ import ReconciliationPage from "@/app/(dashboard)/reconciliation/page";
 beforeEach(() => {
   mutate.mockReset();
   closeChecklistSpy.mockReset();
+  refundChecksSpy.mockReset();
   routerPush.mockReset();
   resolutionUiFlag = false;
   mockRun = {

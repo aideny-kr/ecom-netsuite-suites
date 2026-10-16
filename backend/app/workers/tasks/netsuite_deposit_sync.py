@@ -63,7 +63,7 @@ def netsuite_deposit_sync(
     Uses async internals (netsuite_client, get_valid_token) so wraps in asyncio.run().
     Default: last 90 days if no dates provided.
     """
-    from app.core.database import async_session_factory
+    from app.core.database import set_tenant_context_session, worker_async_session
 
     async def _run():
         from app.services.ingestion.netsuite_deposit_sync import sync_netsuite_deposits
@@ -72,12 +72,14 @@ def netsuite_deposit_sync(
         d_from = date.fromisoformat(date_from) if date_from else today - timedelta(days=90)
         d_to = date.fromisoformat(date_to) if date_to else today
 
-        async with async_session_factory() as db:
+        async with worker_async_session() as db:
+            await set_tenant_context_session(db, tenant_id)
             result = await sync_netsuite_deposits(
                 db=db,
                 tenant_id=tenant_id,
                 date_from=d_from,
                 date_to=d_to,
+                cursor_session_factory=worker_async_session,
             )
             return {
                 "records_synced": result.records_synced,
