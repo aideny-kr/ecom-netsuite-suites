@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import func, select
@@ -296,7 +296,7 @@ async def test_application_failure_does_not_advance_sync_freshness_or_expire_cal
     with ExitStack() as stack:
         for patcher in _patch_netsuite_boundary(connection=connection, suiteql_rows=[], db=db):
             stack.enter_context(patcher)
-        monkeypatch.setattr(service, "sync_payments", actual_sync)
+        stack.enter_context(patch.object(service, "sync_payments", actual_sync))
         monkeypatch.setattr(service, "execute_suiteql_via_rest", AsyncMock(side_effect=ValueError("read_failed")))
         result = await deposits.sync_netsuite_deposits(db, str(tenant_a.id), date(2026, 9, 1), date(2026, 9, 30))
     assert result.errors
