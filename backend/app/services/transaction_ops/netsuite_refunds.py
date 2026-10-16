@@ -1,4 +1,10 @@
-"""Bounded native refund allocation graph; credits are never counted as returned money."""
+"""Bounded native refund allocation graph; credits are never counted as returned money.
+
+Credit memos created from the order's invoice are reported separately, as
+`invoice_credits`, so the order comparison can count them (decided 2026-09-30:
+Framework books a Solidus order adjustment as a credit memo created from the
+invoice). They stay out of the refund amount: a credit is not returned money.
+"""
 
 import asyncio
 import re
@@ -7,6 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from app.schemas.transaction_ops import _decimal
+from app.services.transaction_ops.credit_line_reallocation import NET_ACCOUNT_TYPES
 from app.services.transaction_ops.netsuite_reader import (
     REFUND_QUERY_READ_TIMEOUT_SECONDS,
     _account,
@@ -18,7 +25,11 @@ from app.services.transaction_ops.netsuite_reader import (
 from app.services.transaction_ops.netsuite_refund_requests import read_request_links, verify_request_allocations
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile, read_tax_adjustments
 
-MAX_REFUND_CALLS = 25  # +1 for the single batched credit-memo ledger read
+MAX_REFUND_CALLS = 26  # +1 for the batched credit-memo ledger read, +1 for the invoice-credit totals read
+MAX_INVOICE_CREDITS = 10
+# One read returns each credit's header and lines and each invoice's header.
+MAX_INVOICE_CREDIT_ROWS = 200
+INVENTORY_COST_TYPES = frozenset({"COGS", "OthCurrAsset"})
 MAX_DOCUMENTS = 100
 MAX_EDGES = 200
 MAX_DEPTH = 6
@@ -148,6 +159,174 @@ def _positive(value):
     if amount is None or amount <= 0:
         raise ValueError("invalid_refund_amount")
     return amount
+
+
+def invoice_credit_candidates(nodes, parents):
+    """Non-voided credit memos linked from an invoice: created from it, or only applied to it.
+
+    The graph cannot tell those two apart; the totals read checks `createdfrom`.
+    """
+    return sorted(
+        (
+            identifier
+            for identifier, metadata in nodes.items()
+            if metadata.get("type") == "CustCred"
+            and metadata.get("voided") != "T"
+            and any((nodes.get(p) or {}).get("type") == "CustInvc" for p in parents.get(identifier, ()))
+        ),
+        key=int,
+    )
+
+
+def billing_documents(nodes, reachable):
+    """The order's billing documents: every non-voided invoice or cash sale downstream of it."""
+    return sorted(
+        (
+            identifier
+            for identifier in reachable
+            if (nodes.get(identifier) or {}).get("type") in {"CustInvc", "CashSale"}
+            and nodes[identifier].get("voided") != "T"
+        ),
+        key=int,
+    )
+
+
+def _posting(lines, total, tax, taxed):
+    """ "income" when a credit's lines prove it a sales reduction, else "unproven".
+
+    Every line other than the native tax line must post to an income account that is not
+    one of `taxed`, and those lines must add up to the credit's net amount -- the rule
+    credit_creation applies to a credit it proposes. Header tax alone misses an item line
+    posting straight into a tax account (packet review 2026-10-16, F2).
+    """
+    net = Decimal(0)
+    for line in lines:
+        if line.get("taxline") == "T":
+            continue  # the native tax line; header tax already carries it
+        if line.get("foreignamount") is None:
+            # A returned item's cost pair carries no transaction amount, so it cannot
+            # move the order total or tax; the net check below still has to hold.
+            if line.get("accttype") in INVENTORY_COST_TYPES:
+                continue
+            return "unproven"
+        amount = _decimal(line.get("foreignamount"))
+        if amount == 0:
+            continue
+        account = _id(line.get("expenseaccount"))
+        if account is None or account in taxed or line.get("accttype") not in NET_ACCOUNT_TYPES:
+            return "unproven"
+        net += amount
+    return "income" if net == tax - total else "unproven"  # header amounts are negative
+
+
+async def read_invoice_credits(request, candidates, nodes, owned, currency_id, *, billing=(), taxed=frozenset()):
+    """Credit memos created from one of this order's invoices, with their amounts.
+
+    `complete: False` means unknown, never zero. A credit on an invoice shared with
+    another order cannot be attributed to this one.
+
+    The same call reads the order's invoices: credits are subtracted from the sales order,
+    so the comparison counts them only when the invoices equal it (packet review
+    2026-10-16, F1). Every credit is reported with its `posting` (see `_posting`); the
+    reader never drops one, and reconciliation counts the credits only when all are
+    "income" and the order has no refund tax adjustment (rounds 2-4, F3-F6).
+    """
+    if not candidates:
+        return {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    try:
+        if len(candidates) > MAX_INVOICE_CREDITS:
+            raise ValueError("invoice_credit_budget")
+        if not billing or any((nodes.get(i) or {}).get("type") != "CustInvc" for i in billing):
+            raise ValueError("invoice_credit_billing_unproven")
+        if any(identifier not in owned for identifier in billing):
+            return {"complete": False, "reason": "invoice_credit_ownership_ambiguous"}
+        ids = [*candidates, *billing]
+        result = await request(
+            "POST",
+            "/query/v1/suiteql",
+            params={"limit": MAX_INVOICE_CREDIT_ROWS + 1},
+            body={
+                "q": "SELECT t.id, t.tranid, t.type, t.foreigntotal, t.taxtotal, t.currency, t.posting, "
+                "t.voided, tl.mainline, tl.taxline, tl.createdfrom, tl.foreignamount, tl.expenseaccount, "
+                "a.accttype FROM transaction t "
+                "JOIN transactionline tl ON tl.transaction=t.id "
+                "LEFT JOIN account a ON a.id=tl.expenseaccount "
+                f"WHERE t.id IN ({','.join(ids)}) AND (t.type='CustCred' OR tl.mainline='T')"
+            },
+        )
+        rows, complete = _collection(result)
+        if not complete or len(rows) > MAX_INVOICE_CREDIT_ROWS:
+            raise ValueError("invoice_credit_read_incomplete")
+        headers, lines = {}, defaultdict(list)
+        for row in rows:
+            identifier = _id(row.get("id"))
+            if row.get("mainline") == "T" and identifier not in headers:
+                headers[identifier] = row
+            elif row.get("mainline") == "F":
+                lines[identifier].append(row)
+            else:
+                raise ValueError("invoice_credit_read_incomplete")
+        if sorted(headers, key=str) != sorted(ids, key=str) or not set(lines) <= set(candidates):
+            raise ValueError("invoice_credit_read_incomplete")
+        invoiced_total = invoiced_tax = Decimal(0)
+        for identifier in billing:
+            row = headers[identifier]
+            total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
+            if (
+                row.get("type") != "CustInvc"
+                or str(row.get("currency")) != str(currency_id)
+                or row.get("posting") != "T"
+                or row.get("voided") != "F"
+                or total is None
+                or tax is None
+                or total < 0
+                or tax < 0
+            ):
+                raise ValueError("invoice_credit_invoice_unproven")
+            invoiced_total, invoiced_tax = invoiced_total + total, invoiced_tax + tax
+        credits = []
+        for identifier in candidates:
+            row = headers[identifier]
+            origin = _id(row.get("createdfrom"))
+            if (
+                row.get("type") != "CustCred"
+                or str(row.get("currency")) != str(currency_id)
+                or row.get("posting") != "T"
+                or row.get("voided") != "F"
+            ):
+                raise ValueError("invoice_credit_unproven")
+            total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
+            if total is None or tax is None or total >= 0 or tax > 0:
+                raise ValueError("invoice_credit_amount_unproven")
+            if origin is not None and origin not in nodes:
+                # An origin the graph never saw is unresolved, not "not an invoice":
+                # skipping it would certify a partial sum.
+                raise ValueError("invoice_credit_origin_unproven")
+            if (nodes.get(origin) or {}).get("type") != "CustInvc":
+                continue  # created from a return authorization, or standalone: applied, not an invoice credit
+            if origin not in owned or identifier not in owned:
+                return {"complete": False, "reason": "invoice_credit_ownership_ambiguous"}
+            credits.append(
+                {
+                    "id": identifier,
+                    "number": row.get("tranid"),
+                    "invoice_id": origin,
+                    "total": str(Decimal(0) - total),
+                    "tax": str(Decimal(0) - tax),
+                    "posting": _posting(lines.get(identifier, ()), total, tax, taxed),
+                }
+            )
+        return {
+            "complete": True,
+            "credits": credits,
+            "total": str(sum((Decimal(c["total"]) for c in credits), Decimal(0))),
+            "tax": str(sum((Decimal(c["tax"]) for c in credits), Decimal(0))),
+            "invoices": {"ids": list(billing), "total": str(invoiced_total), "tax": str(invoiced_tax)},
+        }
+    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+        # NetSuiteEvidenceError is a ValueError. The refund proof above stands; the
+        # credits are unknown for this observation and the next scan reads them again.
+        return {"complete": False, "reason": str(exc) if isinstance(exc, ValueError) else "invoice_credit_unproven"}
 
 
 async def collect_refunds(
@@ -299,6 +478,19 @@ async def collect_refunds(
         if adjustment_profile
         else []
     )
+    taxed = frozenset()
+    if adjustment_profile:
+        profile = RefundAdjustmentProfile.model_validate(adjustment_profile)
+        taxed = frozenset(profile.tax_accounts) | frozenset(profile.tax_item_accounts.values())
+    invoice_credits = await read_invoice_credits(
+        request,
+        invoice_credit_candidates(nodes, parents),
+        nodes,
+        owned,
+        currency_id,
+        billing=billing_documents(nodes, reachable),
+        taxed=taxed,
+    )
     await recheck_links()
     request_ids = sorted((link["request_id"] for link in request_links), key=int)
     transaction_ids = [order_id, *sorted(({*nodes, *application_documents} - {order_id}), key=int)]
@@ -309,6 +501,7 @@ async def collect_refunds(
         "record_ids": included,
         "request_links": request_links,
         "tax_adjustments": adjustments,
+        "invoice_credits": invoice_credits,
         # Retain every observed participant, including voided refunds and
         # parents outside the owned set. They can invalidate the proof later.
         # This inventories this read's inputs; it is not a change-feed watermark.

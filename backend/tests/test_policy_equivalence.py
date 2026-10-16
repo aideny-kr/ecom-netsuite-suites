@@ -229,6 +229,8 @@ def test_runner_built_report_retains_the_fields_needed_for_equivalence():
     refunds["target"].update(
         connection_id=str(case.config.netsuite_connection_id), account_id="6738075-sb1", subsidiary_id="3"
     )
+    # The NetSuite refund read reports invoice credits since 2026-10-01 (none here).
+    refunds["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
     report = build_report(
         case.source,
         case.targets,
@@ -242,3 +244,36 @@ def test_runner_built_report_retains_the_fields_needed_for_equivalence():
     result = evaluate(report, before, changed_reasons(before, after), evaluated_at=case.now)
     assert result["status"] == "equivalent", result
     assert result["balance"] == report["balance"]
+
+
+# 2026-10-01: a credit memo created from the order's invoice can now explain an
+# order-total difference. A saved difference read before credits were read cannot be
+# reused as-is; only those orders are read again.
+
+
+def saved_difference(order_total_delta="-4.82", tax_delta="0.00"):
+    report = saved_report()
+    report["balance"]["status"] = "difference"
+    report["balance"]["amounts"]["order_total"] = {"source": "1.00", "target": "5.82", "delta": order_total_delta}
+    report["balance"]["amounts"]["tax"]["delta"] = tax_delta
+    return report
+
+
+def test_a_saved_order_total_difference_without_a_credit_read_is_read_again():
+    before, _ = snapshots()
+    result = evaluate(saved_difference(), before, frozenset(), evaluated_at=NOW)
+    assert result == {"status": "affected", "reason": "invoice_credits_not_read"}
+
+
+def test_a_saved_difference_already_read_with_credits_is_reused():
+    before, _ = snapshots()
+    report = saved_difference()
+    report["refund_evidence"]["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+def test_a_saved_difference_with_an_equal_order_total_is_still_reused():
+    before, _ = snapshots()
+    report = saved_difference(order_total_delta="0.00", tax_delta="0.10")
+    report["balance"]["amounts"]["order_total"] = {"source": "1.00", "target": "1.00", "delta": "0.00"}
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"

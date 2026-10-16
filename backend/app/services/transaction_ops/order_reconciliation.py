@@ -35,6 +35,44 @@ def _refund(evidence, reference, currency, precision):
     return _amount(evidence.get("amount"), precision)
 
 
+def _invoice_credits(evidence, order_id, reference, currency, precision):
+    """Credit memos created from this order's invoice, from the same NetSuite refund read.
+
+    Only a complete read of the same order, reference and currency counts, and the
+    stated sums must equal their credits. Anything else is unknown, never zero.
+    """
+    if _refund(evidence, reference, currency, precision) is None:
+        return None
+    manifest, credits = evidence.get("dependency_manifest"), evidence.get("invoice_credits")
+    if not isinstance(manifest, dict) or not isinstance(credits, dict):
+        return None
+    if str(manifest.get("order_id")) != str(order_id) or credits.get("complete") is not True:
+        return None
+    rows = credits.get("credits")
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        return None
+    amounts = [(_amount(row.get("total"), precision), _amount(row.get("tax"), precision)) for row in rows]
+    if any(total is None or tax is None or total <= 0 for total, tax in amounts):
+        return None
+    total, tax = sum((t for t, _ in amounts), Decimal(0)), sum((x for _, x in amounts), Decimal(0))
+    if _amount(credits.get("total"), precision) != total or _amount(credits.get("tax"), precision) != tax:
+        return None
+    # Every credit must be proven a sales reduction by its own lines; one that is not -- a
+    # tax-account or expense posting -- leaves the difference unexplained (packet review
+    # 2026-10-16, F2).
+    if any(row.get("posting") != "income" for row in rows):
+        return None
+    # The order's invoices, read in the same call. Credits are subtracted from the sales
+    # order, so they explain it only when the invoices equal it (packet review 2026-10-16, F1).
+    invoices = credits.get("invoices")
+    if not isinstance(invoices, dict) or not invoices.get("ids"):
+        return None
+    invoiced = (_amount(invoices.get("total"), precision), _amount(invoices.get("tax"), precision))
+    if None in invoiced:
+        return None
+    return {"rows": rows, "total": total, "tax": tax, "invoiced": invoiced}
+
+
 def reconcile_order(source_evidence, target_evidence, config, *, refunds=None):
     from app.services.transaction_ops.source_eligibility import exclusion_report, payment_failed
 
@@ -161,6 +199,47 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                     "sales_order_alignment": "required",
                 }
                 adjustments.append(commercial)
+    # Framework books a Solidus order adjustment as a credit memo created from the
+    # invoice and leaves the sales order as it was (decided 2026-09-30, and on 10-01:
+    # such an order is matched, not left for a sales-order amendment). The credits
+    # count only when they explain the difference exactly, total and tax together.
+    # An order that already matches keeps its plain comparison, so return credits
+    # booked against the invoice never create a difference.
+    # They count only on an order with no refund tax adjustment at all, read or applied
+    # (decided 2026-10-16): combining the two proofs let one credit be partly accounted
+    # for, or counted from two different reads (packet review rounds 2-4, F3-F6). None of
+    # Framework's 35 credit-explained open cases has one; a mixed order stays for a person.
+    tax_adjustment_read = bool((refunds.get("target") or {}).get("tax_adjustments"))
+    invoice = (
+        None
+        if credits or tax_adjustment_read
+        else _invoice_credits(refunds.get("target"), header.get("id"), reference, currency, precision)
+    )
+    (source_total, target_total), (source_tax, target_tax) = values["order_total"], values["tax"]
+    known = None not in (source_total, target_total, source_tax, target_tax)
+    billed = (original_values["order_total"][1], original_values["tax"][1])
+    if invoice and known and source_total != target_total and invoice["invoiced"] == billed:
+        credited_total = target_total - invoice["total"]
+        credited_tax = target_tax - invoice["tax"]
+        if credited_total == source_total and credited_tax == source_tax:
+            values["order_total"] = (source_total, credited_total)
+            values["tax"] = (source_tax, credited_tax)
+            # The order itself is matched: the 2026-09-13 note that the sales order
+            # still needs a source-backed amendment no longer applies (decided 10-01).
+            result.pop("posting_reconciliation", None)
+            adjustments.append(
+                {
+                    "kind": "invoice_credit_memos",
+                    "status": "verified",
+                    "basis": "credit memos created from the order's invoice",
+                    "credits": [
+                        {key: row.get(key) for key in ("id", "number", "invoice_id", "total", "tax")}
+                        for row in invoice["rows"]
+                    ],
+                    "total": f"{invoice['total']:.{precision}f}",
+                    "tax": f"{invoice['tax']:.{precision}f}",
+                }
+            )
     rounding = _within_rounding(values, config, precision)
     if rounding:
         adjustments.append(rounding)

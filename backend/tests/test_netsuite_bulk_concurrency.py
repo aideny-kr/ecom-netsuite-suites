@@ -296,3 +296,33 @@ async def test_refund_budget_finishes_same_proofs_as_serial(auth, monkeypatch):
             assert list(refunds["refunds"]) == REFS[:9]
             results.append(normalized(refunds["refunds"]))
     assert results[0] == results[1]
+
+
+def test_parallel_budget_reserves_the_invoice_credit_read():
+    # 2026-10-01: an order with a credit memo created from its invoice costs one more
+    # call (its totals read). Without reserving it, parallel branches overspend.
+    from types import SimpleNamespace
+
+    def row(previous, following, before, after):
+        return {"previousdoc": previous, "nextdoc": following, "previoustype": before, "nexttype": after}
+
+    reader = SimpleNamespace(max_api_calls=0, calls=0)
+    edges = [row("1", "2", "SalesOrd", "CustInvc"), row("2", "3", "CustInvc", "CustCred")]
+    batch = bulk.RefundGraphBatch(reader, [], edges, {"1", "2", "3"})
+    assert batch.parallel_fits(["1"], None) is False
+    reader.max_api_calls = 1
+    assert batch.parallel_fits(["1"], None) is True
+
+
+def test_parallel_budget_reserves_the_read_for_a_credit_linked_from_another_invoice():
+    # Packet review F3: the reader reads any credit memo with an incoming invoice link,
+    # even when that invoice belongs to another order.
+    from types import SimpleNamespace
+
+    def row(previous, following, before, after):
+        return {"previousdoc": previous, "nextdoc": following, "previoustype": before, "nexttype": after}
+
+    reader = SimpleNamespace(max_api_calls=0, calls=0)
+    edges = [row("1", "3", "SalesOrd", "CustCred"), row("900", "3", "CustInvc", "CustCred")]
+    batch = bulk.RefundGraphBatch(reader, [], edges, {"1", "3", "900"})
+    assert batch.parallel_fits(["1"], None) is False
