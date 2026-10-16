@@ -1,18 +1,28 @@
 """Regression: a posted invoice payment is not a missing customer deposit."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.canonical import NetsuitePosting
+from app.models.pipeline import CursorState
 from app.services.ingestion import netsuite_customer_payments as service
 from app.services.reconciliation.order_recon_job import OrderReconJob
 from app.services.reconciliation.resolution_planner import plan_result
-from tests.conftest import create_test_payout, create_test_payout_line
-from tests.test_deposit_sync import _seed_netsuite_connection
+from tests.conftest import create_test_payout, create_test_payout_line, create_test_recon_run
+from tests.test_deposit_sync import _patch_netsuite_boundary, _seed_netsuite_connection
+
+REAL_DELETION_READER = service._deleted_ids
+
+
+@pytest.fixture(autouse=True)
+def deletion_feed(monkeypatch):
+    read = AsyncMock(return_value=set())
+    monkeypatch.setattr(service, "_deleted_ids", read)
+    return read
 
 
 def application(**changes):
@@ -130,6 +140,14 @@ async def test_repeated_daily_and_custom_runs_keep_payment_matched_and_void_inva
     remote.return_value = {"columns": [], "rows": [application(voided="T")], "truncated": False}
     assert await service.sync_payments(*args) == 0
     assert await job._fetch_deposits(date(2026, 9, 1), date(2026, 9, 30)) == []
+    run = await create_test_recon_run(db, tenant_a.id)
+    failed = job.engine.match(charges, [])
+    await job._store_results(run.id, failed)
+    from app.models.reconciliation import ReconciliationResult
+
+    receipt = await db.scalar(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+    assert receipt.evidence["payment_application_unverified"] is True
+    assert receipt.variance_type != "missing_in_netsuite"
 
 
 async def test_reapplication_removes_old_order_and_preserves_transaction_currency(db, tenant_a, monkeypatch):
@@ -148,8 +166,140 @@ async def test_reapplication_removes_old_order_and_preserves_transaction_currenc
 
 
 async def test_partial_provider_result_cannot_invalidate_existing_proof(db, tenant_a, monkeypatch):
-    monkeypatch.setattr(service, "execute_suiteql_via_rest", AsyncMock(return_value={"rows": [], "truncated": True}))
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    remote = AsyncMock(return_value={"rows": [application()]})
+    monkeypatch.setattr(service, "execute_suiteql_via_rest", remote)
+    args = (db, str(tenant_a.id), connection.id, "test", "6738075", date(2026, 9, 1), date(2026, 9, 30))
+    await service.sync_payments(*args)
+    marker = await db.scalar(select(CursorState).where(CursorState.connection_id == connection.id))
+    cutoff = marker.cursor_value
+    remote.return_value = {"rows": [], "truncated": True}
     with pytest.raises(ValueError, match="customer_payment_read_limit"):
-        await service.sync_payments(
-            db, str(tenant_a.id), "connection", "test", "6738075", date(2026, 9, 1), date(2026, 9, 30)
-        )
+        await service.sync_payments(*args)
+    proof = await db.scalar(select(NetsuitePosting).where(NetsuitePosting.tenant_id == tenant_a.id))
+    assert proof.raw_data["application_verified"] is True
+    assert marker.cursor_value == cutoff
+
+
+@pytest.mark.parametrize("deleted", ["100", "200", "300"])
+async def test_deletion_of_old_payment_or_owned_document_invalidates_cached_match(
+    db, tenant_a, monkeypatch, deletion_feed, deleted
+):
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    remote = AsyncMock(return_value={"rows": [application()]})
+    monkeypatch.setattr(service, "execute_suiteql_via_rest", remote)
+    args = (db, str(tenant_a.id), connection.id, "test", "6738075")
+    await service.sync_payments(*args, date(2026, 9, 1), date(2026, 9, 30))
+    deletion_feed.return_value = {deleted}
+    remote.return_value = {"rows": []}
+    await service.sync_payments(*args, date(2026, 10, 9), date(2026, 10, 16))
+    assert "p.id IN (100)" in remote.await_args.kwargs["query"]
+    job = OrderReconJob(db, str(tenant_a.id))
+    assert await job._fetch_deposits(date(2026, 9, 1), date(2026, 9, 30)) == []
+    assert "R123456789" in job._observed_customer_payments
+
+
+async def test_complete_date_population_invalidates_absent_payment(db, tenant_a, monkeypatch):
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    remote = AsyncMock(return_value={"rows": [application()]})
+    monkeypatch.setattr(service, "execute_suiteql_via_rest", remote)
+    args = (db, str(tenant_a.id), connection.id, "test", "6738075", date(2026, 9, 1), date(2026, 9, 30))
+    await service.sync_payments(*args)
+    remote.return_value = {"rows": []}
+    await service.sync_payments(*args)
+    assert await OrderReconJob(db, str(tenant_a.id))._fetch_deposits(date(2026, 9, 1), date(2026, 9, 30)) == []
+
+
+async def test_overlapping_sync_cannot_read_a_stale_first_observation(db, tenant_a, monkeypatch, deletion_feed):
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    remote = AsyncMock()
+    monkeypatch.setattr(service, "execute_suiteql_via_rest", remote)
+    engine = getattr(db.bind, "engine", db.bind)
+    async with engine.connect() as other:
+        await other.execute(select(func.pg_advisory_xact_lock(service.sync_lock_key(tenant_a.id, connection.id))))
+        try:
+            with pytest.raises(ValueError, match="customer_payment_sync_in_progress"):
+                await service.sync_payments(
+                    db, str(tenant_a.id), connection.id, "test", "6738075", date(2026, 9, 1), date(2026, 9, 30)
+                )
+            remote.assert_not_awaited()
+            deletion_feed.assert_not_awaited()
+            assert connection.label == "Test NetSuite"
+        finally:
+            await other.rollback()
+
+
+async def test_retired_connection_proof_cannot_clear_an_order(db, tenant_a, monkeypatch):
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    monkeypatch.setattr(service, "execute_suiteql_via_rest", AsyncMock(return_value={"rows": [application()]}))
+    await service.sync_payments(
+        db, str(tenant_a.id), connection.id, "test", "6738075", date(2026, 9, 1), date(2026, 9, 30)
+    )
+    connection.status = "revoked"
+    await db.flush()
+    assert await OrderReconJob(db, str(tenant_a.id))._fetch_deposits(date(2026, 9, 1), date(2026, 9, 30)) == []
+
+
+async def test_deletion_feed_rejects_partial_or_malformed_records(monkeypatch):
+    remote = AsyncMock(return_value={"rows": [{"id": "100"}], "truncated": True})
+    monkeypatch.setattr(service, "execute_suiteql_via_rest", remote)
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValueError, match="customer_payment_read_limit"):
+        await REAL_DELETION_READER("test", "6738075", now, now)
+    remote.return_value = {"rows": [{"id": "not-an-id"}]}
+    with pytest.raises(ValueError, match="invalid_customer_payment_deletion"):
+        await REAL_DELETION_READER("test", "6738075", now, now)
+
+
+def test_customer_payment_requires_exact_reference_and_charge_currency():
+    from app.schemas.order_reconciliation import ChargeRecord, NSPaymentRecord
+    from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+    charge = ChargeRecord(
+        id="one",
+        source_id="charge",
+        payout_line_id="line",
+        amount=100,
+        fee=0,
+        net=100,
+        currency="USD",
+        charge_date=date(2026, 9, 24),
+        order_reference="R123456789",
+    )
+    payment = NSPaymentRecord(
+        id="two",
+        netsuite_internal_id="100",
+        amount=100,
+        currency="EUR",
+        transaction_date=date(2026, 9, 24),
+        record_type="customerpayment",
+        order_reference="R123456789",
+    )
+    assert OrderMatchingEngine().match([charge], [payment])[0].deposit is None
+    payment = payment.model_copy(update={"currency": "USD", "order_reference": "R987654321"})
+    assert OrderMatchingEngine().match([charge], [payment])[0].deposit is None
+
+
+async def test_application_failure_does_not_advance_sync_freshness_or_expire_caller(db, tenant_a, monkeypatch):
+    from contextlib import ExitStack
+
+    from app.services.ingestion import netsuite_deposit_sync as deposits
+
+    connection = await _seed_netsuite_connection(db, tenant_a.id)
+    old = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    cursor = CursorState(
+        connection_id=connection.id, object_type="netsuite_deposits", cursor_value="2026-09-01", last_synced_at=old
+    )
+    db.add(cursor)
+    await db.flush()
+    actual_sync = service.sync_payments
+    with ExitStack() as stack:
+        for patcher in _patch_netsuite_boundary(connection=connection, suiteql_rows=[], db=db):
+            stack.enter_context(patcher)
+        monkeypatch.setattr(service, "sync_payments", actual_sync)
+        monkeypatch.setattr(service, "execute_suiteql_via_rest", AsyncMock(side_effect=ValueError("read_failed")))
+        result = await deposits.sync_netsuite_deposits(db, str(tenant_a.id), date(2026, 9, 1), date(2026, 9, 30))
+    assert result.errors
+    assert connection.label == "Test NetSuite"
+    await db.refresh(cursor)
+    assert cursor.last_synced_at == old and cursor.cursor_value == "2026-09-01"

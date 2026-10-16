@@ -373,7 +373,8 @@ async def sync_netsuite_deposits(
                 db, tenant_id, connection.id, token, account_id, date_from, date_to, pattern=order_ref_pattern
             )
         except Exception:
-            await db.rollback()
+            # The customer-payment savepoint owns its rollback. Rolling back
+            # this session would expire the API caller's User before audit.
             result.errors.append("Customer payment applications could not be verified")
             return result  # Do not certify a partial payment/deposit sync as fresh.
 

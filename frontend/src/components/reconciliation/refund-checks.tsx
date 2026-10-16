@@ -84,6 +84,7 @@ export function RefundChecks({ runId }: { runId: string }) {
     queryKey: ["recon-refund-checks", runId, page, search],
     queryFn: () => apiClient.get(`/api/v1/reconciliation/runs/${runId}/refund-checks?${params}`),
     staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   return (
     <section className="rounded-xl border bg-card shadow-soft" aria-label="Refund checks">

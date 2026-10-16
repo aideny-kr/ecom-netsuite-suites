@@ -8,7 +8,7 @@ leave a reusable match behind. This service never writes to NetSuite.
 import hashlib
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -16,13 +16,17 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.core.database import set_tenant_context
 from app.models.canonical import NetsuitePosting
+from app.models.pipeline import CursorState
 from app.services.netsuite_client import execute_suiteql_via_rest
 
 VERSION = 1
 
 
-def payment_query(start, end):
+def payment_query(start, end, *, candidate_ids=()):
     lower, upper = start.isoformat(), end.isoformat()
+    if len(candidate_ids) > 1000 or any(not str(value).isdigit() for value in candidate_ids):
+        raise ValueError("invalid_customer_payment_candidates")
+    extra = " OR p.id IN (" + ",".join(sorted(candidate_ids, key=int)) + ")" if candidate_ids else ""
     return f"""SELECT DISTINCT p.id AS payment_id,p.type AS payment_type,p.tranid,
       TO_CHAR(p.trandate,'YYYY-MM-DD') AS transaction_date,p.foreigntotal AS payment_total,
       p.posting,p.voided,p.currency AS currency_id,c.symbol AS currency,
@@ -51,7 +55,7 @@ def payment_query(start, end):
         OR EXISTS(SELECT changed.nextdoc FROM nexttransactionlinelink changed
           JOIN transaction inv ON inv.id=changed.previousdoc
           WHERE changed.nextdoc=p.id AND inv.lastmodifieddate BETWEEN
-            TO_DATE('{lower}','YYYY-MM-DD') AND TO_DATE('{upper}','YYYY-MM-DD')+1))
+            TO_DATE('{lower}','YYYY-MM-DD') AND TO_DATE('{upper}','YYYY-MM-DD')+1){extra})
       ORDER BY p.id,i.id,l.previousline,l.nextline"""
 
 
@@ -141,45 +145,102 @@ def allocations(rows, pattern=None):
     return output
 
 
-async def sync_payments(db, tenant_id, connection_id, token, account_id, start, end, *, pattern=None):
-    observed_at = datetime.now(timezone.utc)
-    data = await execute_suiteql_via_rest(
-        access_token=token, account_id=account_id, query=payment_query(start, end), limit=50000, paginate=True
+def sync_lock_key(tenant_id, connection_id):
+    return int.from_bytes(
+        hashlib.sha256(f"{tenant_id}:{connection_id}:customer-payments".encode()).digest()[:8], "big", signed=True
     )
+
+
+def response_rows(data):
     rows = [dict(zip(data.get("columns", []), r)) if isinstance(r, list) else r for r in data.get("rows", [])]
-    # The REST helper's finite cap must not look like complete application proof.
     if data.get("truncated") is True or len(rows) >= 50000:
         raise ValueError("customer_payment_read_limit")
-    groups = allocations(rows, pattern)
+    return rows
+
+
+async def _deleted_ids(token, account_id, since, now):
+    # Verified account connector contract: deletedrecord IDs nominate a re-read,
+    # not proof of a transaction type. Header/application reads establish truth.
+    lower, upper = (since - timedelta(days=2)).date().isoformat(), (now + timedelta(days=3)).date().isoformat()
+    query = (
+        "SELECT DISTINCT d.recordid AS id FROM deletedrecord d "
+        f"WHERE d.deleteddate>=TO_DATE('{lower}','YYYY-MM-DD') "
+        f"AND d.deleteddate<TO_DATE('{upper}','YYYY-MM-DD') ORDER BY d.recordid"
+    )
+    data = await execute_suiteql_via_rest(
+        access_token=token, account_id=account_id, query=query, limit=50000, paginate=True
+    )
+    rows = response_rows(data)
+    if any(not str(row.get("id", "")).isdigit() for row in rows):
+        raise ValueError("invalid_customer_payment_deletion")
+    return {str(row["id"]) for row in rows}
+
+
+async def sync_payments(db, tenant_id, connection_id, token, account_id, start, end, *, pattern=None):
+    await set_tenant_context(db, tenant_id)
+    # Serialize the provider read as well as its writes. In particular, a newer
+    # empty/void observation cannot be overtaken by an older first insertion.
+    # Savepoint rollback preserves the caller's identity map and transaction.
+    async with db.begin_nested():
+        locked = await db.scalar(select(func.pg_try_advisory_xact_lock(sync_lock_key(tenant_id, connection_id))))
+        if not locked:
+            raise ValueError("customer_payment_sync_in_progress")
+        result = await _sync_locked(db, tenant_id, connection_id, token, account_id, start, end, pattern=pattern)
+    await db.commit()
+    return result
+
+
+async def _sync_locked(db, tenant_id, connection_id, token, account_id, start, end, *, pattern=None):
+    observed_at = datetime.now(timezone.utc)
+    previous = await db.scalar(
+        select(CursorState)
+        .where(CursorState.connection_id == connection_id, CursorState.object_type == "netsuite_customer_payments")
+        .execution_options(populate_existing=True)
+    )
+    since = datetime.combine(start, datetime.min.time(), timezone.utc)
+    if previous and previous.last_synced_at:
+        since = min(since, previous.last_synced_at)
+    deleted = await _deleted_ids(token, account_id, since, observed_at)
+    known = (
+        await db.scalars(
+            select(NetsuitePosting)
+            .where(
+                NetsuitePosting.tenant_id == tenant_id,
+                NetsuitePosting.record_type == "customerpayment",
+                NetsuitePosting.raw_data["connection_id"].as_string() == str(connection_id),
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    affected = {
+        item.netsuite_internal_id
+        for item in known
+        if deleted.intersection(
+            {
+                item.netsuite_internal_id,
+                (item.raw_data or {}).get("order_id"),
+                *(value["id"] for value in (item.raw_data or {}).get("invoice_applications", [])),
+            }
+        )
+    }
+    data = await execute_suiteql_via_rest(
+        access_token=token,
+        account_id=account_id,
+        query=payment_query(start, end, candidate_ids=affected),
+        limit=50000,
+        paginate=True,
+    )
+    groups = allocations(response_rows(data), pattern)
+    # Complete reads also invalidate absent headers inside the requested date
+    # population, plus old participants nominated by the deletion feed. This
+    # catches deletions years after a payment's original transaction date.
+    for item in known:
+        if item.netsuite_internal_id in affected or (item.transaction_date and start <= item.transaction_date <= end):
+            groups.setdefault(item.netsuite_internal_id, [])
     count = 0
     for pid, values in groups.items():
-        await set_tenant_context(db, tenant_id)
-        # Serialize even the first insertion. An older response must not
-        # overwrite a newer refresh that completed while its HTTP read waited.
-        lock_key = int.from_bytes(
-            hashlib.sha256(f"{tenant_id}:{connection_id}:payment:{pid}".encode()).digest()[:8], "big", signed=True
-        )
-        await db.execute(select(func.pg_advisory_xact_lock(lock_key)))
-        old = (
-            await db.scalars(
-                select(NetsuitePosting)
-                .where(
-                    NetsuitePosting.tenant_id == tenant_id,
-                    NetsuitePosting.record_type == "customerpayment",
-                    NetsuitePosting.netsuite_internal_id == pid,
-                    NetsuitePosting.raw_data["connection_id"].as_string() == str(connection_id),
-                )
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).all()
-        if any(
-            datetime.fromisoformat(item.raw_data["observed_at"]) > observed_at
-            for item in old
-            if (item.raw_data or {}).get("observed_at")
-        ):
-            await db.commit()
-            continue
+        old = [item for item in known if item.netsuite_internal_id == pid]
         for item in old:
             item.raw_data = {
                 **(item.raw_data or {}),
@@ -220,12 +281,25 @@ async def sync_payments(db, tenant_id, connection_id, token, account_id, start, 
                 updated_at=observed_at,
             )
             stmt = insert(NetsuitePosting).values(**payload)
-            await db.execute(
+            await db.scalar(
                 stmt.on_conflict_do_update(
                     constraint="uq_netsuite_postings_dedupe",
                     set_={k: getattr(stmt.excluded, k) for k in payload if k not in {"id", "tenant_id", "dedupe_key"}},
                 )
+                .returning(NetsuitePosting)
+                .execution_options(populate_existing=True)
             )
             count += 1
-        await db.commit()  # Each payment's invalidation and replacement is atomic.
+    marker = insert(CursorState).values(
+        connection_id=connection_id,
+        object_type="netsuite_customer_payments",
+        cursor_value=observed_at.isoformat(),
+        last_synced_at=observed_at,
+    )
+    await db.execute(
+        marker.on_conflict_do_update(
+            constraint="uq_cursor_states_conn_obj",
+            set_={"cursor_value": marker.excluded.cursor_value, "last_synced_at": marker.excluded.last_synced_at},
+        )
+    )
     return count
