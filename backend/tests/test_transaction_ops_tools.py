@@ -210,6 +210,13 @@ async def test_creation_is_durable_before_queue_and_never_accepts_approval(ctx, 
 async def test_a_one_order_chat_investigation_takes_the_short_job_queue(ctx, state, monkeypatch, params, queue):
     # Staging, 2026-10-16: a one-order investigation waited on `recon` behind a daily scan.
     monkeypatch.setattr("app.services.transaction_ops.scheduler.ACTIONS_QUEUE", "recon-actions")
+    state.create_run.return_value = SimpleNamespace(
+        id=RUN,
+        status="pending",
+        origin="chat",
+        max_orders=1000,
+        params_json={"order_references": params["order_references"]},
+    )
     sent = []
     monkeypatch.setattr(mod.celery_app, "send_task", lambda name, **kwargs: sent.append(kwargs["queue"]))
     result = await mod.execute_run({"config_id": str(CONFIG), **params}, context=ctx)
@@ -603,7 +610,17 @@ async def test_status_finds_an_orders_saved_case_from_its_order_number(db, admin
         assert none["success"] is True and none["status"] == "no_saved_case", none
         assert "case_id" not in none and none["findings"] == [] and none["rows"] == []
         assert isinstance(none["columns"], list)
-    for bad in ({"order_reference": ORDER, "case_id": str(case.id)}, {"order_reference": ""}, {"order_reference": 7}):
+        # Round 1, F1: without source_kind the non-streaming path condensed this as a metric
+        # table and the model lost status and every case_id.
+        from app.services.chat.agents.base_agent import _suppress_metric_value_for_llm
+
+        assert json.loads(_suppress_metric_value_for_llm(json.dumps(none)))["status"] == "no_saved_case"
+    for bad in (
+        {"order_reference": ORDER, "case_id": str(case.id)},
+        {"order_reference": ORDER, "config_id": str(config.id)},  # round 1, F3: never silently dropped
+        {"order_reference": ""},
+        {"order_reference": 7},
+    ):
         assert (await dispatch(actor, bad))["success"] is False
 
 
@@ -628,6 +645,11 @@ async def test_status_lists_every_entitys_case_when_one_order_number_has_several
     assert result["success"] is True and result["status"] == "multiple_cases", result
     assert sorted(f["case_id"] for f in result["findings"]) == sorted(str(c.id) for c in cases)
     assert "case_id" not in result and isinstance(result["rows"], list)
+    from app.services.chat.agents.base_agent import _suppress_metric_value_for_llm
+
+    condensed = json.loads(_suppress_metric_value_for_llm(json.dumps(result)))
+    assert condensed["status"] == "multiple_cases"
+    assert sorted(f["case_id"] for f in condensed["findings"]) == sorted(str(c.id) for c in cases)
 
 
 @pytest.mark.parametrize("blocked", ["permission", "actor", "case_scope", "extra_parameter"])

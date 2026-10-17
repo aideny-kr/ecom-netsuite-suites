@@ -158,6 +158,40 @@ async def test_completed_worker_dispatches_the_next_durable_review_slice(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_yielded_slice_is_republished_to_its_own_runs_queue(monkeypatch):
+    # Packet review round 1, F2: a run yields every 60 s and re-publishes itself. That publish
+    # named no queue, so a one-order run started on the short-job queue fell back to `recon`
+    # behind daily scans after its first slice (and daily runs drifted onto `recon`).
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.services.transaction_ops import runner, scheduler
+    from app.services.transaction_ops import state_service as state_module
+    from app.workers.tasks import transaction_ops as worker
+
+    db = AsyncMock()
+    tenant, run_id = uuid4(), uuid4()
+
+    @asynccontextmanager
+    async def session(**options):
+        yield db
+
+    monkeypatch.setattr(worker, "worker_async_session", session)
+    monkeypatch.setattr(worker, "set_tenant_context_session", AsyncMock())
+    monkeypatch.setattr(runner, "run_investigation", AsyncMock(return_value={"status": "yielded", "generation": 3}))
+    row = SimpleNamespace(id=run_id, origin="manual", max_orders=1000, params_json={"order_references": ["R1"]})
+    monkeypatch.setattr(state_module, "get_run", AsyncMock(return_value=row))
+    monkeypatch.setattr(scheduler, "ACTIONS_QUEUE", "recon-actions")
+    dispatch = AsyncMock()
+    monkeypatch.setattr(scheduler, "_dispatch", dispatch)
+    await asyncio.to_thread(worker.transaction_ops_run.run, str(tenant), str(run_id))
+    assert dispatch.call_args.args == (tenant, run_id, {"dispatched": 0, "dispatch_failed": 0}, "recon-actions")
+    assert dispatch.call_args.kwargs == {"generation": 3}
+
+
+@pytest.mark.asyncio
 async def test_revoked_initiator_stops_automatic_review_and_recovery_retries(db, admin_user, monkeypatch):
     from sqlalchemy import update
 

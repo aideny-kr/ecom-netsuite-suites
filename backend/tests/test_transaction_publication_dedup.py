@@ -77,5 +77,5 @@ def test_ambiguous_send_retains_bounded_reservation(broker):
 async def test_suppression_is_reported_without_claiming_dispatch(monkeypatch):
     monkeypatch.setattr(mod, "publish_investigation", Mock(return_value=False))
     stats = {"dispatched": 0, "dispatch_failed": 0}
-    await mod._dispatch(uuid4(), uuid4(), stats)
+    await mod._dispatch(uuid4(), uuid4(), stats, "recon")
     assert stats == {"dispatched": 0, "dispatch_failed": 0, "deduplicated": 1}

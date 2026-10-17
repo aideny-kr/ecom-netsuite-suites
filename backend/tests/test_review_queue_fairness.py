@@ -216,10 +216,19 @@ def test_worker_republishes_checkpoint_before_returning(monkeypatch):
     monkeypatch.setattr(transaction_ops, "set_tenant_context_session", AsyncMock())
     monkeypatch.setattr(runner, "run_investigation", investigate)
     monkeypatch.setattr(scheduler, "_dispatch", dispatch)
+    # The checkpoint is republished to its own run's queue (packet review round 1, F2).
+    from types import SimpleNamespace
+
+    from app.services.transaction_ops import state_service
+
+    row = SimpleNamespace(id=run, origin="schedule", max_orders=1000, params_json={})
+    get_run = AsyncMock(return_value=row)
+    monkeypatch.setattr(state_service, "get_run", get_run)
     result = transaction_ops.transaction_ops_run.run(str(tenant), str(run))
     assert result["status"] == "yielded"
     investigate.assert_awaited_once_with(db, tenant, run, _slice_seconds=60)
-    assert dispatch.call_args.args[:2] == (tenant, run)
+    get_run.assert_awaited_once_with(db, tenant, run)
+    assert dispatch.call_args.args == (tenant, run, {"dispatched": 0, "dispatch_failed": 0}, scheduler.DAILY_QUEUE)
     assert dispatch.call_args.kwargs == {"generation": 2}
 
 

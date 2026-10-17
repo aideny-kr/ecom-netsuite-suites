@@ -190,6 +190,20 @@ it("hands the agent the order number without queueing a new investigation", asyn
   expect(apiClient.post).not.toHaveBeenCalled();
 });
 
+it("keeps Work with agent unavailable while an investigation request is starting", async () => {
+  // Packet review round 1, F4: a pending "Investigate order" whose response lands after the
+  // user moved to chat would push its run page over the chat the user chose.
+  vi.mocked(apiClient.post).mockImplementationOnce(() => new Promise(() => {}));
+  show();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Open order R100120031" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Investigate order" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Work with agent" })).toBeDisabled(),
+  );
+});
+
 it("ignores a reconcile response after the user switches sources", async () => {
   state.extraSource = true;
   let resolve!: (value: unknown) => void;

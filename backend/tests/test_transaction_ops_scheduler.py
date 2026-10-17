@@ -299,7 +299,7 @@ def test_real_broker_socket_timeout_does_not_hold_asyncio_shutdown(monkeypatch):
     stats = {"dispatched": 0, "dispatch_failed": 0}
     started = time.monotonic()
     try:
-        asyncio.run(mod._dispatch(TENANT, uuid4(), stats))
+        asyncio.run(mod._dispatch(TENANT, uuid4(), stats, "recon"))
         assert time.monotonic() - started < 0.5
         assert stats["dispatch_failed"] == 1
     finally:
@@ -711,3 +711,29 @@ async def test_collection_error_reenters_same_cycle_without_reset_at_next_day(de
     await mod.collect_due_runs(AsyncMock(), NOW + timedelta(days=1))
     resume.assert_awaited_once()
     dependencies.create_run.assert_not_awaited()  # Exhaustion cannot earn a new daily allowance.
+
+
+def test_dispatch_has_no_default_queue():
+    # Packet review round 1, F2: publishers that named no queue silently fell back to `recon`
+    # (the API's create-run publish, the worker's slice re-dispatch), so a one-order run went
+    # back behind daily scans. Every publisher must name the queue; run_queue derives it.
+    import inspect
+
+    assert inspect.signature(mod._dispatch).parameters["queue"].default is inspect.Parameter.empty
+
+
+def test_run_queue_reads_the_durable_run(monkeypatch):
+    monkeypatch.setattr(mod, "DAILY_QUEUE", "recon-daily")
+    monkeypatch.setattr(mod, "ACTIONS_QUEUE", "recon-actions")
+
+    def run(origin, refs=None, max_orders=1000):
+        return SimpleNamespace(
+            origin=origin, max_orders=max_orders, params_json={"order_references": refs} if refs is not None else {}
+        )
+
+    assert mod.run_queue(run("manual", ["R1"])) == "recon-actions"
+    assert mod.run_queue(run("chat", ["R1"])) == "recon-actions"
+    assert mod.run_queue(run("manual", ["R1", "R2"])) == "recon"
+    assert mod.run_queue(run("manual")) == "recon"
+    assert mod.run_queue(run("schedule", ["R1"])) == "recon-daily"
+    assert mod.run_queue(run("recovery", max_orders=1)) == "recon-actions"

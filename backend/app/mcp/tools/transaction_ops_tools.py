@@ -221,9 +221,9 @@ async def _execute(operation, params, context):
             dispatch_status = "already_started"
             if run.status == "pending":
                 try:
-                    from app.services.transaction_ops.scheduler import investigation_queue, publish_investigation
+                    from app.services.transaction_ops.scheduler import publish_investigation, run_queue
 
-                    queue = investigation_queue("chat", order_references=getattr(request, "order_references", None))
+                    queue = run_queue(run)
                     published = await asyncio.wait_for(
                         asyncio.to_thread(publish_investigation, tenant_id, run.id, app=celery_app, queue=queue),
                         timeout=_PUBLISH_TIMEOUT,
@@ -296,6 +296,7 @@ async def _execute(operation, params, context):
                     "truncated": capped,
                     "query": "",
                     "suppress_llm_value": True,
+                    "source_kind": "transaction_ops",
                 }
         if set(params) not in ({"run_id"}, {"case_id"}):
             raise _ToolError("invalid_parameters")

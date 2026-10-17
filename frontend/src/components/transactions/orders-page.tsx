@@ -691,7 +691,7 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
                   </Button>
                   <Button
                     variant="outline"
-                    disabled={!access.allowed}
+                    disabled={!access.allowed || investigate.isPending}
                     onClick={() =>
                       router.push(orderChatLink(selected.order_number))
                     }

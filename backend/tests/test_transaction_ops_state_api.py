@@ -45,18 +45,32 @@ async def seed_proposal(db, actor):
     return config, run, proposal
 
 
-async def test_trigger_publishes_durable_pending_run(client, db, admin_user, publisher):
+async def test_trigger_publishes_durable_pending_run(client, db, admin_user, publisher, monkeypatch):
     actor, headers = admin_user
+    monkeypatch.setattr(scheduler, "ACTIONS_QUEUE", "recon-actions")
     config, _, _ = await seed_proposal(db, actor)
     body = {"evaluation_key": "api-request", "order_references": ["R123456789"]}
     response = await client.post(f"/api/v1/transaction-ops/configs/{config.id}/runs", json=body, headers=headers)
     assert response.status_code == 202, response.text
     assert response.json()["status"] == "pending"
-    # A human's "run now" is a full scan: it names the bulk queue, never the short-job one.
-    publisher.assert_called_once_with(actor.tenant_id, UUID(response.json()["id"]), queue="recon")
+    # One order a person waits on takes the short-job queue whatever endpoint created it
+    # (packet review round 1, F2: this publish used to name no queue and fell back to `recon`).
+    publisher.assert_called_once_with(actor.tenant_id, UUID(response.json()["id"]), queue="recon-actions")
     assert (await client.post(f"/api/v1/transaction-ops/configs/{config.id}/runs", json=body, headers=headers)).json()[
         "id"
     ] == response.json()["id"]
+
+
+async def test_a_human_run_now_over_several_orders_stays_on_the_bulk_queue(
+    client, db, admin_user, publisher, monkeypatch
+):
+    actor, headers = admin_user
+    monkeypatch.setattr(scheduler, "ACTIONS_QUEUE", "recon-actions")
+    config, _, _ = await seed_proposal(db, actor)
+    body = {"evaluation_key": "api-bulk", "order_references": ["R123456789", "R123456788"]}
+    response = await client.post(f"/api/v1/transaction-ops/configs/{config.id}/runs", json=body, headers=headers)
+    assert response.status_code == 202, response.text
+    publisher.assert_called_once_with(actor.tenant_id, UUID(response.json()["id"]), queue="recon")
 
 
 async def test_accounting_profile_api_binds_actor_tenant_and_never_approves(client, db, admin_user, admin_user_b):

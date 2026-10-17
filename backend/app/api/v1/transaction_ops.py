@@ -48,7 +48,7 @@ async def _publish_pending(run, tenant_id):
     if run.status == "pending":
         # Creation has committed. Publication is bounded and deduplicated;
         # failures leave this durable run available to scheduler recovery.
-        await scheduler._dispatch(tenant_id, run.id, {"dispatched": 0, "dispatch_failed": 0})
+        await scheduler._dispatch(tenant_id, run.id, {"dispatched": 0, "dispatch_failed": 0}, scheduler.run_queue(run))
     return run
 
 
@@ -200,7 +200,7 @@ async def retry_collection(run_id: UUID, request: CollectionRetry, user: Reader,
                 user.tenant_id,
                 child.id,
                 {"dispatched": 0, "dispatch_failed": 0},
-                scheduler.investigation_queue(child.origin, child.max_orders),
+                scheduler.run_queue(child),
             )
         return child
     except service.StateError as exc:

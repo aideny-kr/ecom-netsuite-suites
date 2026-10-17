@@ -117,7 +117,9 @@ TOOL_CONFIGS = {
         "timeout_seconds": 15,
         "rate_limit_per_minute": 30,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["run_id", "case_id", "order_reference"],
+        # Every parameter the tool accepts reaches it, so a mixed call is rejected there
+        # rather than silently narrowed here (packet review round 1, F3).
+        "allowlisted_params": ["run_id", "case_id", "order_reference", "config_id", "limit", "offset"],
     },
     "health": {
         "default_limit": None,
