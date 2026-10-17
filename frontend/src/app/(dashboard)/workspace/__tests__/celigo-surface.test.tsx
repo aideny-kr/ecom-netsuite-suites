@@ -137,6 +137,18 @@ beforeEach(() => {
   ws.fileContent.mockReset();
 });
 
+it("stacks explorer, code and tools on narrow screens and responds to resizing", async () => {
+  features.mockReturnValue(false);
+  const width = window.innerWidth;
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+  render(wrap(<WorkspacePage />));
+  await waitFor(()=>expect(screen.getByTestId("layout-final-v19").style.flexDirection).toBe("column"));
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1716 });
+  fireEvent(window, new Event("resize"));
+  await waitFor(()=>expect(screen.getByTestId("layout-final-v19").style.flexDirection).toBe("row"));
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+});
+
 describe("workspace surfaces", () => {
   it("exposes a Celigo flows surface only when the feature flag is on", async () => {
     const { CeligoSurfaceToggle } = await import("../surface-toggle");

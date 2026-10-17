@@ -5,7 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
 import type { WorkspaceRun } from "@/lib/types";
-import { useRunArtifacts, useTriggerValidate } from "@/hooks/use-runs";
+import { useDeliverQueuedDeploy, useRunArtifacts, useTriggerValidate } from "@/hooks/use-runs";
+import { usePermissions } from "@/hooks/use-permissions";
 import { ValidationHitsTable } from "./validation-hits-table";
 
 interface RunsPanelProps {
@@ -39,6 +40,8 @@ function RunDetail({ run }: { run: WorkspaceRun }) {
   // validate run against the same changeset (no run-level retry endpoint exists
   // on the backend).
   const triggerValidate = useTriggerValidate();
+  const deliverDeploy = useDeliverQueuedDeploy();
+  const { hasPermission } = usePermissions();
   const isValidate = run.run_type === "suitecloud_validate";
   const hits = run.findings ?? [];
   const showRetry =
@@ -46,6 +49,21 @@ function RunDetail({ run }: { run: WorkspaceRun }) {
 
   return (
     <div className="space-y-3">
+      {run.run_type === "deploy_sandbox" && run.status === "queued" && hasPermission("workspace.manage") && (
+        <div className="space-y-1">
+          <p className="text-[11px] text-muted-foreground">
+            Waiting to start. Retry delivery if this deployment remains queued.
+          </p>
+          <button onClick={() => deliverDeploy.mutate(run.id)} disabled={deliverDeploy.isPending}
+            className="text-[11px] text-primary underline disabled:opacity-50">
+            {deliverDeploy.isPending ? "Sending…" : "Retry delivery"}
+          </button>
+          {deliverDeploy.error && <p role="alert" className="text-[11px] text-destructive">{deliverDeploy.error.message}</p>}
+          {deliverDeploy.data?.dispatch_pending && <p role="status" className="text-[11px] text-muted-foreground">
+            Delivery is unavailable. The confirmed run is saved; retry later.
+          </p>}
+        </div>
+      )}
       {isValidate && <ValidationHitsTable hits={hits} />}
       {showRetry && run.changeset_id && (
         <button

@@ -446,6 +446,8 @@ export interface FileReadResponse {
   truncated: boolean;
   total_lines: number;
   mime_type: string | null;
+  sha256_hash?: string;
+  can_edit?: boolean;
 }
 
 export interface SearchResult {

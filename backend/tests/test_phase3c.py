@@ -326,12 +326,19 @@ class TestDeployGating:
         """Deploy should be allowed when validate + tests pass."""
         user, _ = admin_user
         ws, cs = ws_cs
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        snapshot = (
+            await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
+        )["snapshot_sha"]
         for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
                 changeset_id=cs.id,
                 run_type=rt,
+                snapshot_hash=snapshot,
+                gate_status="pass" if rt == "suitecloud_validate" else None,
                 status="passed",
                 triggered_by=user.id,
             )
@@ -347,12 +354,19 @@ class TestDeployGating:
         """Deploy should be blocked if assertions are required but haven't run."""
         user, _ = admin_user
         ws, cs = ws_cs
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        snapshot = (
+            await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
+        )["snapshot_sha"]
         for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
                 changeset_id=cs.id,
                 run_type=rt,
+                snapshot_hash=snapshot,
+                gate_status="pass" if rt == "suitecloud_validate" else None,
                 status="passed",
                 triggered_by=user.id,
             )
@@ -381,12 +395,19 @@ class TestDeployOverride:
         """Override may bypass assertions only after validate + unit tests pass."""
         user, _ = admin_user
         ws, cs = ws_cs
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        snapshot = (
+            await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
+        )["snapshot_sha"]
         for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
                 changeset_id=cs.id,
                 run_type=rt,
+                snapshot_hash=snapshot,
+                gate_status="pass" if rt == "suitecloud_validate" else None,
                 status="passed",
                 triggered_by=user.id,
             )
@@ -408,12 +429,19 @@ class TestDeployOverride:
         """Without override_reason, missing required assertions should block deploy."""
         user, _ = admin_user
         ws, cs = ws_cs
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        snapshot = (
+            await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
+        )["snapshot_sha"]
         for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
                 changeset_id=cs.id,
                 run_type=rt,
+                snapshot_hash=snapshot,
+                gate_status="pass" if rt == "suitecloud_validate" else None,
                 status="passed",
                 triggered_by=user.id,
             )
@@ -446,12 +474,19 @@ class TestUATReport:
         """UAT report should show correct status when all runs pass."""
         user, headers = admin_user
         ws, cs = ws_cs
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        snapshot = (
+            await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
+        )["snapshot_sha"]
         for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
                 changeset_id=cs.id,
                 run_type=rt,
+                snapshot_hash=snapshot,
+                gate_status="pass" if rt == "suitecloud_validate" else None,
                 status="passed",
                 triggered_by=user.id,
                 duration_ms=1000,
@@ -796,3 +831,122 @@ class TestAuditEvents:
         events = list(result.scalars().all())
         triggered = [e for e in events if e.payload and e.payload.get("run_type") == "suiteql_assertions"]
         assert len(triggered) >= 1
+
+
+@pytest.mark.asyncio
+async def test_uat_report_never_calls_stale_checks_ready(client, db, ws_cs, admin_user):
+    user, headers = admin_user
+    ws, cs = ws_cs
+    from app.services.deploy_preview_service import compute_deploy_manifest
+
+    digest = (await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id))[
+        "snapshot_sha"
+    ]
+    for kind in ("suitecloud_validate", "jest_unit_test"):
+        db.add(
+            WorkspaceRun(
+                tenant_id=cs.tenant_id,
+                workspace_id=ws.id,
+                changeset_id=cs.id,
+                run_type=kind,
+                status="passed",
+                gate_status="pass",
+                snapshot_hash=digest,
+                triggered_by=user.id,
+            )
+        )
+    await db.flush()
+    f = await db.scalar(select(WorkspaceFile).where(WorkspaceFile.workspace_id == ws.id))
+    f.content = "// changed after checking"
+    await db.flush()
+    response = await client.get(f"/api/v1/changesets/{cs.id}/uat-report", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["overall_status"] != "ready_for_deploy"
+    assert response.json()["gates"]["validate"] == "stale"
+    assert response.json()["gates"]["unit_tests"] == "stale"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["content", "manifest", "legacy"])
+async def test_uat_deployed_state_requires_current_snapshot_and_manifest(client, db, ws_cs, admin_user, change):
+    import hashlib
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.workspace import WorkspaceDeployToken, WorkspacePatch
+    from app.services.deploy_preview_service import compute_deploy_manifest
+
+    user, headers = admin_user
+    ws, cs = ws_cs
+    current = await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
+    deployment = WorkspaceRun(
+        tenant_id=cs.tenant_id,
+        workspace_id=ws.id,
+        changeset_id=cs.id,
+        run_type="deploy_sandbox",
+        status="passed",
+        snapshot_hash=current["snapshot_sha"],
+        triggered_by=user.id,
+    )
+    db.add(deployment)
+    await db.flush()
+    now = datetime.now(timezone.utc)
+    db.add(
+        WorkspaceDeployToken(
+            tenant_id=cs.tenant_id,
+            workspace_id=ws.id,
+            changeset_id=cs.id,
+            sandbox_id="123-sb1",
+            snapshot_sha=current["snapshot_sha"],
+            manifest_sha=current["manifest_sha"],
+            require_assertions=False,
+            actor_id=user.id,
+            issued_at=now,
+            expires_at=now + timedelta(minutes=10),
+            consumed_at=now,
+            consumed_run_id=deployment.id,
+            consumed_reason="confirmed",
+        )
+    )
+    await db.flush()
+    url = f"/api/v1/changesets/{cs.id}/uat-report"
+    response = await client.get(url, headers=headers)
+    assert response.json()["overall_status"] == "deployed", response.text
+    file = await db.scalar(select(WorkspaceFile).where(WorkspaceFile.workspace_id == ws.id))
+    if change == "content":
+        file.content = "// new code after deploy"
+    elif change == "manifest":
+        db.add(
+            WorkspacePatch(
+                tenant_id=cs.tenant_id,
+                changeset_id=cs.id,
+                file_path=file.path,
+                operation="modify",
+                new_content=file.content,
+                baseline_sha256=hashlib.sha256(file.content.encode()).hexdigest(),
+                apply_order=0,
+            )
+        )
+    else:
+        deployment.snapshot_hash = None
+    await db.flush()
+    # Even fresh passing checks for the new tree cannot make the old deploy current.
+    fresh = await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
+    for kind in ("suitecloud_validate", "jest_unit_test"):
+        db.add(
+            WorkspaceRun(
+                tenant_id=cs.tenant_id,
+                workspace_id=ws.id,
+                changeset_id=cs.id,
+                run_type=kind,
+                status="passed",
+                gate_status="pass",
+                snapshot_hash=fresh["snapshot_sha"],
+                triggered_by=user.id,
+            )
+        )
+    await db.flush()
+    response = await client.get(url, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["overall_status"] == "ready_for_deploy"
+    assert response.json()["gates"]["deploy"] == "stale"
+    assert next(r for r in response.json()["runs"] if r["run_type"] == "deploy_sandbox")["status"] == "passed"

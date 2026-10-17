@@ -145,7 +145,7 @@ async def test_apply_patch_to_validate_to_record_fix_intent_e2e(
     orch._create_run = _create_run_inline
 
     permission_mock = AsyncMock(return_value=True)
-    seeded_creds = SeededCredentials(path=Path("/tmp/fake.json"), account_id="1234567")
+    seeded_creds = SeededCredentials(path=Path("/tmp/fake.json"), account_id="1234567", role_id="1234")
 
     with (
         patch("app.core.dependencies.has_permission", new=permission_mock),

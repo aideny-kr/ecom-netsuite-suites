@@ -43,6 +43,13 @@ class FileReadResponse(BaseModel):
     truncated: bool
     total_lines: int
     mime_type: str | None
+    sha256_hash: str
+    can_edit: bool = False
+
+
+class FileEditProposal(BaseModel):
+    content: str = Field(max_length=256 * 1024)
+    baseline_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 # --- Search ---

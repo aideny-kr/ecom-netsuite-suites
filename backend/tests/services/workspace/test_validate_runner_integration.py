@@ -34,7 +34,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # Default fake seeded-credentials result. ``account_id`` matches the
 # ``seeded_netsuite_connection`` fixture so snapshot_hash inputs stay
 # consistent across tests.
-_FAKE_SEEDED = SeededCredentials(path=Path("/tmp/fake.json"), account_id="1234567")
+_FAKE_SEEDED = SeededCredentials(path=Path("/tmp/fake.json"), account_id="1234567", role_id="1234")
 
 
 # --- Fixtures ---
@@ -117,6 +117,28 @@ def test_sdf_validate_removed_from_allowlist() -> None:
 
 
 # --- Execution tests ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account,role", [("1234567", None), ("", "1234"), ("1234567", "Administrator")])
+async def test_validation_requires_verified_account_and_numeric_role(
+    db, seeded_workspace_with_changeset, account, role
+):
+    workspace, cs, user = seeded_workspace_with_changeset
+    run = await runner_service.create_run(
+        db, workspace.tenant_id, workspace.id, "suitecloud_validate", user.id, changeset_id=cs.id
+    )
+    process = AsyncMock(return_value=(0, "", ""))
+    with (
+        patch.object(runner_service, "_run_subprocess", process),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            AsyncMock(return_value=SeededCredentials(Path("/tmp/unused"), account, role)),
+        ),
+    ):
+        await runner_service.execute_run(db, run.id, workspace.tenant_id)
+    assert run.status == "failed" and run.gate_status == "block"
+    process.assert_not_awaited()
 
 
 @pytest.mark.asyncio
