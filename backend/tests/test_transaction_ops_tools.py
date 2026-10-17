@@ -571,6 +571,65 @@ async def test_real_dispatch_reads_case_history_and_preserves_scope(db, admin_us
     assert mixed["error"] == "invalid_parameters"
 
 
+async def test_status_finds_an_orders_saved_case_from_its_order_number(db, admin_user, admin_user_b, monkeypatch):
+    # Staging, 2026-10-16: given only "R031422379", chat could not find the order's open case
+    # and its credit tools need a case id. A user starts from an order number; so does
+    # Claude with NetSuite MCP. status now takes order_reference instead of run_id/case_id.
+    from app.services.chat.tools import execute_tool_call
+    from tests.conftest import enable_feature_flag
+    from tests.test_transaction_ops_state_db import seed_config
+    from tests.test_transaction_resolution_history import case_and_proposal
+
+    actor, foreign_actor = admin_user[0], admin_user_b[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    case, _ = await case_and_proposal(db, actor, config, ORDER)
+    for user in (actor, foreign_actor):
+        for flag in ("celigo", "reconciliation"):
+            await enable_feature_flag(db, user.tenant_id, flag)
+    monkeypatch.setattr("app.mcp.governance.check_rate_limit", lambda *args: True)
+
+    async def dispatch(user, params):
+        return json.loads(
+            await execute_tool_call("transaction_ops_status", params, user.tenant_id, user.id, "order-lookup-test", db)
+        )
+
+    found = await dispatch(actor, {"order_reference": ORDER})
+    assert found["success"] is True, found
+    assert found["case_id"] == str(case.id)
+    assert found["investigation_guidance"]["kind"] == "investigation_guidance"
+    assert (await dispatch(actor, {"order_reference": f"  {ORDER.lower()} "}))["case_id"] == str(case.id)
+    for user, reference in ((foreign_actor, ORDER), (actor, "R999999999")):
+        none = await dispatch(user, {"order_reference": reference})
+        assert none["success"] is True and none["status"] == "no_saved_case", none
+        assert "case_id" not in none and none["findings"] == [] and none["rows"] == []
+        assert isinstance(none["columns"], list)
+    for bad in ({"order_reference": ORDER, "case_id": str(case.id)}, {"order_reference": ""}, {"order_reference": 7}):
+        assert (await dispatch(actor, bad))["success"] is False
+
+
+async def test_status_lists_every_entitys_case_when_one_order_number_has_several(db, admin_user, monkeypatch):
+    from app.services.chat.tools import execute_tool_call
+    from tests.conftest import enable_feature_flag
+    from tests.test_transaction_ops_state_db import seed_config
+    from tests.test_transaction_resolution_history import case_and_proposal
+
+    actor = admin_user[0]
+    first = await seed_config(db, actor.tenant_id, actor)
+    second = await seed_config(db, actor.tenant_id, actor, subsidiary_id="99")
+    cases = [(await case_and_proposal(db, actor, config, ORDER))[0] for config in (first, second)]
+    for flag in ("celigo", "reconciliation"):
+        await enable_feature_flag(db, actor.tenant_id, flag)
+    monkeypatch.setattr("app.mcp.governance.check_rate_limit", lambda *args: True)
+    result = json.loads(
+        await execute_tool_call(
+            "transaction_ops_status", {"order_reference": ORDER}, actor.tenant_id, actor.id, "order-lookup-test", db
+        )
+    )
+    assert result["success"] is True and result["status"] == "multiple_cases", result
+    assert sorted(f["case_id"] for f in result["findings"]) == sorted(str(c.id) for c in cases)
+    assert "case_id" not in result and isinstance(result["rows"], list)
+
+
 @pytest.mark.parametrize("blocked", ["permission", "actor", "case_scope", "extra_parameter"])
 async def test_accounting_evidence_authorizes_before_native_reads(ctx, monkeypatch, blocked):
     from app.services.transaction_ops.state_service import StateError

@@ -117,7 +117,7 @@ TOOL_CONFIGS = {
         "timeout_seconds": 15,
         "rate_limit_per_minute": 30,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["run_id", "case_id"],
+        "allowlisted_params": ["run_id", "case_id", "order_reference"],
     },
     "health": {
         "default_limit": None,

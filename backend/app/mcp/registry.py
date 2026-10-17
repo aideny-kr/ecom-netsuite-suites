@@ -238,7 +238,10 @@ TOOL_REGISTRY = {
             "Read daily reconciliation operational status: verified versus expected coverage, active work, "
             "blockers and next eligible action. Omit IDs for all entities, or supply config_id to narrow. "
             "Uses saved evidence only; does not run reconciliation or query providers. "
-            "For investigation details instead provide exactly one run_id or case_id, without other parameters. "
+            "For investigation details instead provide exactly one run_id, case_id or order_reference, without "
+            "other parameters. An order_reference (order number, e.g. R123456789) returns that order's saved case; "
+            "status no_saved_case means there is none yet (investigate it with transaction_ops.run and "
+            "order_references), and multiple_cases lists one case per entity to continue with by case_id. "
             "The evidence table renders automatically; "
             "do not restate or recompute its amounts. Human decisions are made on the linked review page."
         ),
@@ -246,6 +249,11 @@ TOOL_REGISTRY = {
         "params_schema": {
             "run_id": {"type": "string", "description": "Investigation run UUID; omit when case_id is supplied"},
             "case_id": {"type": "string", "description": "Durable transaction case UUID; omit when run_id is supplied"},
+            "order_reference": {
+                "type": "string",
+                "description": "Order number (e.g. R123456789) to find its saved case; omit when run_id or case_id "
+                "is supplied",
+            },
             "config_id": {"type": "string", "description": "Optional entity configuration UUID for operational status"},
             "limit": {"type": "integer", "description": "Operational status page size, 1–50; defaults to 20"},
             "offset": {"type": "integer", "description": "Operational status page offset; defaults to zero"},
