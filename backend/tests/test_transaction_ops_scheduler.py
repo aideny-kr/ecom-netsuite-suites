@@ -597,6 +597,36 @@ def test_daily_routing_preserves_manual_bulk_and_one_order_recovery(monkeypatch)
     assert mod.investigation_queue("recovery", 2) == "recon"
 
 
+def test_a_one_order_investigation_a_person_waits_on_takes_the_short_job_queue(monkeypatch):
+    # Staging, 2026-10-16: an order panel's "Investigate order" sat queued on `recon` behind
+    # the single bulk worker's 15-minute daily scan, past its own deadline. One order that a
+    # person (order panel or chat) is waiting on is a short human-facing read, like a
+    # one-order recovery. Bulk and window runs keep the bulk queue.
+    monkeypatch.setattr(mod, "DAILY_QUEUE", "recon-daily")
+    monkeypatch.setattr(mod, "ACTIONS_QUEUE", "recon-actions")
+    assert mod.investigation_queue("manual", 1000, ["R231821517"]) == "recon-actions"
+    assert mod.investigation_queue("chat", 1000, ["R231821517"]) == "recon-actions"
+    assert mod.investigation_queue("manual", 1000, ["R1", "R2"]) == "recon"
+    assert mod.investigation_queue("manual", 1000, None) == "recon"  # a window review
+    assert mod.investigation_queue("manual", 1000, []) == "recon"
+    assert mod.investigation_queue("schedule", 1000, ["R1"]) == "recon-daily"
+
+
+async def test_run_queues_route_by_each_runs_own_order_references(monkeypatch):
+    one, many, window = uuid4(), uuid4(), uuid4()
+    rows = [
+        SimpleNamespace(id=one, origin="manual", max_orders=1000, params_json={"order_references": ["R1"]}),
+        SimpleNamespace(id=many, origin="chat", max_orders=1000, params_json={"order_references": ["R1", "R2"]}),
+        SimpleNamespace(id=window, origin="manual", max_orders=1000, params_json={"window_start": "x"}),
+    ]
+    db = AsyncMock()
+    db.execute.return_value = rows
+    monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(mod, "ACTIONS_QUEUE", "recon-actions")
+    queues = await mod._run_queues(db, TENANT, [one, many, window])
+    assert queues == {one: "recon-actions", many: "recon", window: "recon"}
+
+
 @pytest.mark.parametrize(
     "code", ["source_transport_failed", "replica_query_incomplete", "replica_read_not_fresh", "replica_cached_response"]
 )

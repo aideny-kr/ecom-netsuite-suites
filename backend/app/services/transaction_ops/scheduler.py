@@ -386,8 +386,13 @@ def _reserve_publication(connection, tenant_id, run_id, generation=None):
     return connection.default_channel.client.set(key, "1", nx=True, ex=_PUBLICATION_COOLDOWN)
 
 
-def investigation_queue(origin, max_orders=None):
+def investigation_queue(origin, max_orders=None, order_references=None):
     if origin == "recovery" and max_orders == 1:
+        return ACTIONS_QUEUE
+    # One order a person is waiting on (the order panel or chat) is a short human-facing
+    # read, like a one-order recovery. On `recon` it waited behind the single bulk worker's
+    # daily scan, past its own deadline (staging, 2026-10-16). Bulk and window runs stay.
+    if origin in ("manual", "chat") and isinstance(order_references, list | tuple) and len(order_references) == 1:
         return ACTIONS_QUEUE
     return DAILY_QUEUE if origin == "schedule" else "recon"
 
@@ -399,9 +404,14 @@ async def _run_queues(db, tenant_id, run_ids):
     _, _, _, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     rows = await db.execute(
-        select(run.id, run.origin, run.max_orders).where(run.tenant_id == tenant_id, run.id.in_(list(run_ids)))
+        select(run.id, run.origin, run.max_orders, run.params_json).where(
+            run.tenant_id == tenant_id, run.id.in_(list(run_ids))
+        )
     )
-    return {row.id: investigation_queue(row.origin, row.max_orders) for row in rows}
+    return {
+        row.id: investigation_queue(row.origin, row.max_orders, (row.params_json or {}).get("order_references"))
+        for row in rows
+    }
 
 
 def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon", generation=None):

@@ -200,6 +200,23 @@ async def test_creation_is_durable_before_queue_and_never_accepts_approval(ctx, 
     assert result["review_url"] == f"/transaction-operations/runs/{RUN}"
 
 
+@pytest.mark.parametrize(
+    ("params", "queue"),
+    [
+        ({"order_references": [ORDER]}, "recon-actions"),  # one order a person waits on
+        ({"order_references": [ORDER, "R000000002"]}, "recon"),
+    ],
+)
+async def test_a_one_order_chat_investigation_takes_the_short_job_queue(ctx, state, monkeypatch, params, queue):
+    # Staging, 2026-10-16: a one-order investigation waited on `recon` behind a daily scan.
+    monkeypatch.setattr("app.services.transaction_ops.scheduler.ACTIONS_QUEUE", "recon-actions")
+    sent = []
+    monkeypatch.setattr(mod.celery_app, "send_task", lambda name, **kwargs: sent.append(kwargs["queue"]))
+    result = await mod.execute_run({"config_id": str(CONFIG), **params}, context=ctx)
+    assert result["dispatch_status"] == "queued"
+    assert sent == [queue]
+
+
 async def test_broker_failure_keeps_committed_pending_run_for_beat(ctx, state, monkeypatch):
     send = MagicMock(side_effect=ConnectionError("secret broker URL"))
     monkeypatch.setattr(mod.celery_app, "send_task", send)

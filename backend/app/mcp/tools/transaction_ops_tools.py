@@ -220,10 +220,11 @@ async def _execute(operation, params, context):
             dispatch_status = "already_started"
             if run.status == "pending":
                 try:
-                    from app.services.transaction_ops.scheduler import publish_investigation
+                    from app.services.transaction_ops.scheduler import investigation_queue, publish_investigation
 
+                    queue = investigation_queue("chat", order_references=getattr(request, "order_references", None))
                     published = await asyncio.wait_for(
-                        asyncio.to_thread(publish_investigation, tenant_id, run.id, app=celery_app),
+                        asyncio.to_thread(publish_investigation, tenant_id, run.id, app=celery_app, queue=queue),
                         timeout=_PUBLISH_TIMEOUT,
                     )
                     dispatch_status = "pending_scheduler" if published is False else "queued"
