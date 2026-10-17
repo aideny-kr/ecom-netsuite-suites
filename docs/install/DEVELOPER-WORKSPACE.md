@@ -22,6 +22,13 @@ configuration. It has no production caller or deploy operation; the seeder still
 rejects all runs. Offline empty-store and synthetic protocol tests do not prove
 an authorized certificate handshake.
 
+Activation also requires a separate credential host or container that cannot
+co-host or be inspected by tenant-authored workspace commands. Mode 0700/0600
+files do not isolate processes sharing an OS user. JVM attach/performance data
+are disabled, but these settings do not replace that isolation boundary. The
+existing Jest runner must not share this credential context. Production seeding
+stays closed until the execution boundary is implemented and reviewed.
+
 Remaining work includes binding the current connection and certificate identity
 through validation, preview, confirmation and worker execution, a trusted project
 execution path, and actual authorized sandbox acceptance. A role display name

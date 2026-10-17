@@ -43,52 +43,82 @@ class SdkAuthError(AuthSeederError):
 class VerifiedIdentity:
     account_id: str
     role_id: str
-    certificate_id: str
-    public_key_sha256: str
+    # SDK accountInfo verifies account/role only. These two fields describe
+    # the requested credential, not independently introspected certificate data.
+    requested_certificate_id: str
+    local_public_key_sha256: str
+
+
+class _BoundedOutput(asyncio.SubprocessProtocol):
+    """Own public pipe transports so detached children cannot stall cleanup."""
+
+    def __init__(self):
+        self.result = asyncio.get_running_loop().create_future()
+        self.exited = asyncio.get_running_loop().create_future()
+        self.stdout = bytearray()
+        self.sizes = {1: 0, 2: 0}
+        self.open_pipes = {1, 2}
+
+    def pipe_data_received(self, fd, data):
+        if self.result.done():
+            return
+        self.sizes[fd] += len(data)
+        if self.sizes[fd] > MAX_OUTPUT_BYTES:
+            self.result.set_exception(SdkAuthError("SuiteCloud SDK output limit exceeded"))
+        elif fd == 1:
+            self.stdout.extend(data)
+
+    def pipe_connection_lost(self, fd, exc):
+        self.open_pipes.discard(fd)
+        if exc is not None and not self.result.done():
+            self.result.set_exception(SdkAuthError("SuiteCloud SDK output stream failed"))
+        self._complete()
+
+    def process_exited(self):
+        if not self.exited.done():
+            self.exited.set_result(None)
+        self._complete()
+
+    def _complete(self):
+        if self.exited.done() and not self.open_pipes and not self.result.done():
+            self.result.set_result(bytes(self.stdout))
 
 
 async def _run_process(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: float) -> bytes:
-    """Bound both streams and stop the whole SDK process group on every exit."""
-    proc = await asyncio.create_subprocess_exec(
+    """Bound output, runtime and cleanup; kill the owned process group.
+
+    Detached children require the dedicated credential container/uid boundary;
+    this primitive is not a sandbox for arbitrary executable code.
+    """
+    transport, protocol = await asyncio.get_running_loop().subprocess_exec(
+        _BoundedOutput,
         *cmd,
         cwd=cwd,
         env=env,
         start_new_session=True,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-
-    async def read(stream):
-        chunks = []
-        size = 0
-        while chunk := await stream.read(8192):
-            size += len(chunk)
-            if size > MAX_OUTPUT_BYTES:
-                raise SdkAuthError("SuiteCloud SDK output limit exceeded")
-            chunks.append(chunk)
-        return b"".join(chunks)
-
-    readers = [asyncio.create_task(read(proc.stdout)), asyncio.create_task(read(proc.stderr))]
     try:
         async with asyncio.timeout(timeout):
-            stdout, _ = await asyncio.gather(*readers)
-            await proc.wait()
-        if proc.returncode != 0:
+            stdout = await protocol.result
+        if transport.get_returncode() != 0:
             raise SdkAuthError("SuiteCloud SDK authentication process failed")
         return stdout
     finally:
-        # The JVM (or an erroneous wrapper) may leave children holding pipes.
-        # Kill even after its leader exits; never leave credential users alive.
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+            os.killpg(transport.get_pid(), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
             pass
-        for reader in readers:
-            reader.cancel()
-        await asyncio.gather(*readers, return_exceptions=True)
-        # Drain the finite buffered output after killing the group. Merely
-        # waiting can deadlock when asyncio paused a full pipe transport.
-        await proc.communicate()
+        # Public transport close discards pipe data instead of an unbounded
+        # communicate() drain. Escaped children cannot hold our pipes open.
+        transport.close()
+        try:
+            async with asyncio.timeout(0.5):
+                await asyncio.shield(protocol.exited)
+        except TimeoutError:
+            pass
 
 
 class IsolatedSdkSession:
@@ -96,7 +126,10 @@ class IsolatedSdkSession:
 
     Runtime paths are trusted operator inputs, never workspace files. No
     inherited JVM/Node options, SDK aliases, passkeys or credentials are read.
-    Certificate setup remains a separate authorized installation action.
+    Private directories do not isolate same-uid tenant code. Before connecting
+    a production caller, require a dedicated credential host/container that
+    cannot co-host or be inspected by workspace commands. Certificate setup
+    remains a separate authorized installation action.
     """
 
     def __init__(self, *, sdk_jar: Path, java: Path):
@@ -152,6 +185,8 @@ class IsolatedSdkSession:
             str(self._java),
             f"-Duser.home={self.root}",
             f"-Djava.io.tmpdir={self.root}",
+            "-XX:+DisableAttachMechanism",
+            "-XX:-UsePerfData",
             "-DintegrationMode",
             "--add-opens",
             "java.base/java.io=ALL-UNNAMED",

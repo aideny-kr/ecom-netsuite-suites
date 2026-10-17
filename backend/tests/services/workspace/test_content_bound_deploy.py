@@ -256,6 +256,39 @@ async def test_deploy_cannot_use_ambient_cli_auth_even_with_passing_receipts(db,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("account,role", [("456-sb1", "1234"), ("123-sb1", None)])
+async def test_worker_persists_auth_required_for_unverified_adapter_identity(db, checked_project, account, role):
+    import json
+
+    ws, cs, user, *_ = checked_project
+    p = await preview(db, checked_project)
+    run = await runner_service.create_run(db, ws.tenant_id, ws.id, "deploy_sandbox", user.id, changeset_id=cs.id)
+    process = AsyncMock(return_value=(0, "", ""))
+    with (
+        patch.object(runner_service, "_run_subprocess", process),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            AsyncMock(return_value=SeededCredentials(Path("/tmp/unused"), account, role)),
+        ),
+    ):
+        await runner_service.execute_run(
+            db,
+            run.id,
+            ws.tenant_id,
+            extra_params={
+                "sandbox_id": "123-sb1",
+                "expected_snapshot_sha": p["snapshot_sha"],
+                "expected_manifest_sha": p["manifest_sha"],
+            },
+        )
+    assert run.status == "error"
+    process.assert_not_awaited()
+    receipts = await runner_service.get_artifacts(db, run.id, ws.tenant_id)
+    receipt = next(a for a in receipts if a.artifact_type == "result_json")
+    assert json.loads(receipt.content)["error_category"] == "AUTH_REQUIRED"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("revoke", ["user", "company", "permission"])
 async def test_queued_deploy_rechecks_authority(db, checked_project, revoke):
     from sqlalchemy import delete

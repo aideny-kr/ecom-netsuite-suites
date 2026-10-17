@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -57,6 +58,8 @@ async def test_authentication_uses_private_home_pinned_copy_and_filtered_identit
         assert env["SUITECLOUD_CI"] == "1"
         assert f"-Duser.home={cwd}" in cmd
         assert f"-Djava.io.tmpdir={cwd}" in cmd
+        assert "-XX:+DisableAttachMechanism" in cmd
+        assert "-XX:-UsePerfData" in cmd
         assert cmd[cmd.index("-jar") + 1] != str(runtime["sdk_jar"])
         assert "authenticateci" in cmd and "-authid" in cmd
         return response(entityId="private entity", token="private token")
@@ -70,7 +73,8 @@ async def test_authentication_uses_private_home_pinned_copy_and_filtered_identit
         )
         assert identity.account_id == "1234567-sb1"
         assert identity.role_id == "1234"
-        assert len(identity.public_key_sha256) == 64
+        assert len(identity.local_public_key_sha256) == 64
+        assert identity.requested_certificate_id == "synthetic-cert"
         assert "private token" not in repr(identity) and "private label" not in repr(identity)
         assert "PRIVATE KEY" not in repr(session)
         assert not (root / "private-key.pem").exists()
@@ -211,6 +215,19 @@ async def test_process_error_never_exposes_raw_output(tmp_path):
             timeout=5,
         )
     assert "private token" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_detached_descendant_cannot_keep_cleanup_waiting_for_pipes(tmp_path):
+    code = (
+        "import subprocess,sys,time;"
+        "subprocess.Popen([sys.executable,'-c',\"import time;time.sleep(3)\"],start_new_session=True);"
+        "time.sleep(30)"
+    )
+    start = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        await sdk._run_process([sys.executable, "-c", code], cwd=tmp_path, env={}, timeout=0.25)
+    assert time.monotonic() - start < 1.5
 
 
 @pytest.mark.asyncio
