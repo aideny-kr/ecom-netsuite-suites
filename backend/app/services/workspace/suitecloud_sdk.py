@@ -1,0 +1,252 @@
+"""Isolated certificate authentication primitive for Oracle SDK 2026.1.
+
+Not connected to the workspace runner. The production seeder stays closed
+until current connection/certificate identity is bound through all receipts,
+preview, confirmation and execution, with authorized target acceptance.
+
+Use the SDK's integration protocol directly: workspace JavaScript hooks and
+project configuration must never execute in this credential-bearing process.
+This module exposes no validation or deployment operation.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+from app.services.workspace.suitecloud_auth_seeder import AuthSeederError
+
+SDK_VERSION = "2026.1.0"
+SDK_SHA256 = "158038cfdc552e1af4b29aea86ff59ba8c0658ec950129339c1fbace4b1ad78b"
+MAX_OUTPUT_BYTES = 64 * 1024
+_SANDBOX_ACCOUNT = re.compile(r"[a-z0-9]+-sb[0-9]+", re.ASCII)
+_ROLE = re.compile(r"[1-9][0-9]*", re.ASCII)
+
+
+class SdkAuthError(AuthSeederError):
+    """Safe, deliberately non-raw diagnostic for the credential boundary."""
+
+
+@dataclass(frozen=True)
+class VerifiedIdentity:
+    account_id: str
+    role_id: str
+    certificate_id: str
+    public_key_sha256: str
+
+
+async def _run_process(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: float) -> bytes:
+    """Bound both streams and stop the whole SDK process group on every exit."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def read(stream):
+        chunks = []
+        size = 0
+        while chunk := await stream.read(8192):
+            size += len(chunk)
+            if size > MAX_OUTPUT_BYTES:
+                raise SdkAuthError("SuiteCloud SDK output limit exceeded")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    readers = [asyncio.create_task(read(proc.stdout)), asyncio.create_task(read(proc.stderr))]
+    try:
+        async with asyncio.timeout(timeout):
+            stdout, _ = await asyncio.gather(*readers)
+            await proc.wait()
+        if proc.returncode != 0:
+            raise SdkAuthError("SuiteCloud SDK authentication process failed")
+        return stdout
+    finally:
+        # The JVM (or an erroneous wrapper) may leave children holding pipes.
+        # Kill even after its leader exits; never leave credential users alive.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        for reader in readers:
+            reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+        # Drain the finite buffered output after killing the group. Merely
+        # waiting can deadlock when asyncio paused a full pipe transport.
+        await proc.communicate()
+
+
+class IsolatedSdkSession:
+    """Single-use credential context; caller must use ``async with``.
+
+    Runtime paths are trusted operator inputs, never workspace files. No
+    inherited JVM/Node options, SDK aliases, passkeys or credentials are read.
+    Certificate setup remains a separate authorized installation action.
+    """
+
+    def __init__(self, *, sdk_jar: Path, java: Path):
+        self._source = sdk_jar
+        self._java = java
+        self._entered = False
+        self._open = False
+        self._attempted = False
+        self._env: dict[str, str] = {}
+        self.auth_id = "fw_" + secrets.token_hex(16)
+
+    async def __aenter__(self):
+        if self._entered:
+            raise SdkAuthError("SuiteCloud SDK session cannot be reused")
+        self._entered = True
+        try:
+            if not self._java.is_absolute() or not self._java.is_file() or not os.access(self._java, os.X_OK):
+                raise SdkAuthError("SuiteCloud SDK requires a trusted absolute Java executable")
+            if self._source.stat().st_size > 100 * 1024 * 1024:
+                raise SdkAuthError("SuiteCloud SDK artifact is too large")
+            artifact = self._source.read_bytes()
+        except OSError:
+            raise SdkAuthError("SuiteCloud SDK artifact is unavailable") from None
+        if hashlib.sha256(artifact).hexdigest() != SDK_SHA256:
+            raise SdkAuthError("SuiteCloud SDK artifact does not match the pinned digest")
+
+        self.root = Path(tempfile.mkdtemp(prefix="suitecloud_sdk_"))
+        try:
+            self._jar = self.root / f"cli-{SDK_VERSION}.jar"
+            self._jar.write_bytes(artifact)
+            self._jar.chmod(0o600)
+            self._env = {
+                "HOME": str(self.root),
+                "TMPDIR": str(self.root),
+                "SUITECLOUD_CI": "1",
+                "SUITECLOUD_CI_PASSKEY": secrets.token_hex(32),
+            }
+            self._open = True
+            return self
+        except BaseException:
+            shutil.rmtree(self.root)
+            raise
+
+    async def __aexit__(self, *_):
+        self._open = False
+        self._env.clear()
+        shutil.rmtree(self.root)
+
+    def _command(self, *args: str) -> list[str]:
+        if not self._open:
+            raise SdkAuthError("SuiteCloud SDK session is not open")
+        return [
+            str(self._java),
+            f"-Duser.home={self.root}",
+            f"-Djava.io.tmpdir={self.root}",
+            "-DintegrationMode",
+            "--add-opens",
+            "java.base/java.io=ALL-UNNAMED",
+            "-jar",
+            str(self._jar),
+            *args,
+        ]
+
+    async def verify_empty_store(self) -> None:
+        """Offline runtime diagnostic, only before any authentication attempt."""
+        if self._attempted:
+            raise SdkAuthError("SuiteCloud SDK authentication already attempted")
+        raw = await _run_process(
+            self._command("manageauth", "-list"),
+            cwd=self.root,
+            env=self._env,
+            timeout=30,
+        )
+        receipt = self._receipt(raw)
+        if receipt.get("data") != {}:
+            raise SdkAuthError("SuiteCloud SDK isolated credential store is not empty")
+
+    @staticmethod
+    def _receipt(raw: bytes) -> dict:
+        try:
+            receipt = json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise SdkAuthError("SuiteCloud SDK returned an invalid authentication receipt") from None
+        if not isinstance(receipt, dict) or receipt.get("status") != "SUCCESS" or receipt.get("errorMessages"):
+            raise SdkAuthError("SuiteCloud SDK did not verify authentication")
+        return receipt
+
+    async def authenticate(
+        self,
+        *,
+        account_id: str,
+        role_id: str,
+        certificate_id: str,
+        private_key: bytes,
+    ) -> VerifiedIdentity:
+        if not self._open:
+            raise SdkAuthError("SuiteCloud SDK session is not open")
+        if self._attempted:
+            raise SdkAuthError("SuiteCloud SDK authentication already attempted; reconcile before retry")
+        self._attempted = True
+        account = account_id.strip().lower().replace("_", "-")
+        if not _SANDBOX_ACCOUNT.fullmatch(account) or not _ROLE.fullmatch(role_id):
+            raise SdkAuthError("SuiteCloud SDK requires an explicit sandbox account and numeric role")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", certificate_id, re.ASCII):
+            raise SdkAuthError("SuiteCloud SDK requires a certificate identity")
+        try:
+            key = serialization.load_pem_private_key(private_key, password=None)
+            if not isinstance(key, rsa.RSAPrivateKey) or key.key_size < 2048:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise SdkAuthError("SuiteCloud SDK requires an unencrypted RSA private key of at least 2048 bits") from None
+        public_key_sha = hashlib.sha256(
+            key.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        ).hexdigest()
+        # Check context before writing any secret. Workspace files are never cwd.
+        cmd = self._command(
+            "authenticateci",
+            "-account",
+            account,
+            "-authid",
+            self.auth_id,
+            "-certificateid",
+            certificate_id,
+            "-privatekeypath",
+            str(self.root / "private-key.pem"),
+        )
+        key_file = self.root / "private-key.pem"
+        try:
+            with open(key_file, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+                output.write(private_key)
+            try:
+                raw = await _run_process(cmd, cwd=self.root, env=self._env, timeout=90)
+            except asyncio.TimeoutError:
+                raise SdkAuthError("SuiteCloud SDK authentication timed out; reconcile before retry") from None
+            receipt = self._receipt(raw)
+            data = receipt.get("data")
+            info = data.get("accountInfo") if isinstance(data, dict) else None
+            if not isinstance(info, dict):
+                raise SdkAuthError("SuiteCloud SDK did not return verified account and role")
+            actual_account, actual_role = info.get("companyId"), info.get("roleId")
+            if (
+                not isinstance(actual_account, str)
+                or not isinstance(actual_role, str)
+                or actual_account.strip().lower().replace("_", "-") != account
+                or actual_role != role_id
+            ):
+                raise SdkAuthError("SuiteCloud SDK account or role differs from the authorized identity")
+            return VerifiedIdentity(account, role_id, certificate_id, public_key_sha)
+        finally:
+            key_file.unlink(missing_ok=True)

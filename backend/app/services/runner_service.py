@@ -34,7 +34,7 @@ from app.services import audit_service
 from app.services import workspace_service as ws_svc
 from app.services.deploy_service import DeployGateError
 from app.services.workspace.snapshot import materialized_snapshot_hash
-from app.services.workspace.suitecloud_auth_seeder import AuthSeederError
+from app.services.workspace.suitecloud_auth_seeder import AuthSeederError, require_verified_identity
 
 logger = structlog.get_logger()
 
@@ -162,10 +162,7 @@ def _build_deploy_command(
     authorized_role_id: str | None = None,
 ) -> list[str]:
     target = _validate_sandbox_target(sandbox_id)
-    if not authorized_account_id or not authorized_role_id:
-        raise ValueError("Deploy requires a verified SuiteCloud account and role")
-    if target.lower().replace("_", "-") != authorized_account_id.strip().lower().replace("_", "-"):
-        raise ValueError("Authorized SuiteCloud account does not match the confirmed sandbox")
+    require_verified_identity(account_id=authorized_account_id, role_id=authorized_role_id, expected_account_id=target)
     # CLI 3.2 selects defaultAuthId; these project commands have no --account
     # or --destinationFolder options. Establish isolated SDK auth first.
     return list(base_cmd)
@@ -460,6 +457,7 @@ async def _execute_validate_run(
                 auth_root=Path(tmp_dir),
                 project_id=str(run.workspace_id),
             )
+            account_id, role_id = require_verified_identity(account_id=seeded.account_id, role_id=seeded.role_id)
         except AuthSeederError as exc:
             duration_ms = int((time.monotonic() - start_time) * 1000)
             run.status = "failed"
@@ -484,8 +482,6 @@ async def _execute_validate_run(
             )
             await db.flush()
             return run
-
-        account_id = seeded.account_id
 
         # Reached only by synthetic adapter tests until verified SDK seeding
         # is implemented. HOME alone is not proof of Java SDK-store isolation.
@@ -590,6 +586,7 @@ async def _execute_validate_run(
             "validator_engine": "suitecloud_server",
             "snapshot_hash": run.snapshot_hash,
             "account_id": account_id,
+            "role_id": role_id,
         }
         await _store_artifact(db, run, "result_json", json.dumps(result_payload, default=str))
         await _audit_run_event(

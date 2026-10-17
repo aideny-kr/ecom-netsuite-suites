@@ -64,14 +64,14 @@ async def test_peer_and_inactive_connections_do_not_supply_authority(
 def test_deploy_command_requires_verified_account_and_role():
     from app.services.runner_service import _build_deploy_command
 
-    with pytest.raises(ValueError, match="verified SuiteCloud account and role"):
+    with pytest.raises(AuthSeederError, match="verified SuiteCloud account and role"):
         _build_deploy_command(["suitecloud", "project:deploy", "--validate"], "1234567-sb1")
 
 
 def test_deploy_command_rejects_different_authorized_account():
     from app.services.runner_service import _build_deploy_command
 
-    with pytest.raises(ValueError, match="does not match"):
+    with pytest.raises(AuthSeederError, match="does not match"):
         _build_deploy_command(
             ["suitecloud", "project:deploy", "--validate"],
             "1234567-sb1",

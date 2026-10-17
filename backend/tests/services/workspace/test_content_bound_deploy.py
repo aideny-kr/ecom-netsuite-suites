@@ -53,7 +53,9 @@ async def checked_project(db, tenant_a, admin_user):
             patch.object(runner_service, "_run_subprocess", new=AsyncMock(return_value=(0, "", ""))),
             patch(
                 "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-                new=AsyncMock(return_value=SeededCredentials(path=Path("/tmp/unused"), account_id="123-sb1")),
+                new=AsyncMock(
+                    return_value=SeededCredentials(path=Path("/tmp/unused"), account_id="123-sb1", role_id="1234")
+                ),
             ),
         ):
             await runner_service.execute_run(db, run.id, tenant_a.id)

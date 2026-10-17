@@ -15,10 +15,17 @@ fails closed before launching the CLI or refreshing REST tokens. It does not
 write a guessed credential file or use credentials from the host. Existing
 synthetic check/dispatch tests are not proof of a supported target deployment.
 
-The certificate adapter remains unfinished. It must establish an isolated SDK
-credential store, verify the actual account and role, and pin that identity
-through validation, preview, confirmation and worker execution. A role display
-name alone is insufficient identity evidence. Configuring a certificate or
+The certificate adapter remains unfinished. An internal authentication primitive
+now isolates a digest-pinned SDK, Java home, private key and passkey, and checks
+the returned account and numeric role. It runs without workspace hooks or project
+configuration. It has no production caller or deploy operation; the seeder still
+rejects all runs. Offline empty-store and synthetic protocol tests do not prove
+an authorized certificate handshake.
+
+Remaining work includes binding the current connection and certificate identity
+through validation, preview, confirmation and worker execution, a trusted project
+execution path, and actual authorized sandbox acceptance. A role display name
+alone is insufficient identity evidence. Configuring a certificate or
 selecting a sandbox requires the installation's existing authorization; this
 document does not grant it.
 

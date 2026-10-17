@@ -13,6 +13,7 @@ No certificate provisioning or SDK-store import is implemented here.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,27 @@ class SeededCredentials:
     path: Path
     account_id: str
     role_id: str | None = None
+
+
+def require_verified_identity(
+    *, account_id: str | None, role_id: str | None, expected_account_id: str | None = None
+) -> tuple[str, str]:
+    """Shared runner boundary, including synthetic or future adapter results.
+
+    This checks the adapter's identity contract; it does not authenticate an
+    account or authorize a target. The production seeder remains closed.
+    """
+    if (
+        not isinstance(account_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", account_id, re.ASCII)
+        or not isinstance(role_id, str)
+        or not re.fullmatch(r"[1-9][0-9]*", role_id, re.ASCII)
+    ):
+        raise AuthSeederError("Requires a verified SuiteCloud account and role (numeric role ID)")
+    account = account_id.lower().replace("_", "-")
+    if expected_account_id is not None and account != expected_account_id.strip().lower().replace("_", "-"):
+        raise AuthSeederError("Authorized SuiteCloud account does not match the confirmed sandbox")
+    return account, role_id
 
 
 async def seed_credentials_for_run(
