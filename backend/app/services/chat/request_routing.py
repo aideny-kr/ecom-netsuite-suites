@@ -153,23 +153,28 @@ class RequestRoutingError(RuntimeError):
         self.usage = usage
 
 
+def _text(message: dict) -> str:
+    content = message.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(
+            b["text"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+        )
+    return content if isinstance(content, str) else ""
+
+
 def _history_excerpt(history: list[dict]) -> list[dict]:
     """Bound conversational context; omit tool result payloads and arguments."""
     result = []
     for message in history[-16:]:
         if message.get("role") not in {"user", "assistant"}:
             continue
-        content = message.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                b["text"]
-                for b in content
-                if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
-            )
+        content = _text(message)
         result.append(
             {
                 "role": message["role"],
-                "text": content[:1200] if isinstance(content, str) else "",
+                "text": content[:1200],
                 "tools": [c.get("tool") for c in (message.get("tool_calls") or []) if isinstance(c, dict)][:12],
             }
         )
@@ -183,6 +188,11 @@ async def classify_request(
     from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
     from app.services.chat.source_selection import _chosen_card_source
 
+    # The orchestrator saves the user message before routing. Sent again as history (and as a
+    # legacy request) it made the router answer kind=transaction while selecting NetSuite,
+    # which was rejected on both attempts (staging, 2026-10-17, 9 of 10 reconciliation prompts).
+    if history and history[-1].get("role") == "user" and _text(history[-1]).strip() == task.strip():
+        history = history[:-1]
     previous = previous_request_context(history)
     payload = {
         "active_context": previous.model_dump() if previous else None,
@@ -238,7 +248,9 @@ async def classify_request(
                 raise ValueError("Missing source intent")
             route = RequestRoute.model_validate(decision)
             if route.kind != "analytics" and route.source_intent != SourceIntent():
-                raise ValueError("Non-analytics routing cannot select query sources")
+                # Query sources only gate analytics data tools; a case, operation or conversation
+                # route never uses them. Drop them instead of refusing the user's request.
+                route = route.model_copy(update={"source_intent": SourceIntent()})
             return RoutingResult(route=route, usage=usage)
         except Exception as exc:
             # Cancellation is a BaseException and must still propagate. Retry a
