@@ -26,7 +26,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { transactionColumns } from "./columns";
 import { transactionAmount, transactionDate } from "./format";
-import { investigationChatLink } from "@/components/transaction-ops/agent-link";
+import { orderChatLink } from "@/components/transaction-ops/agent-link";
 
 type Metric = {
   source: string | null;
@@ -223,13 +223,7 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
     },
   });
   const investigate = useMutation({
-    mutationFn: ({
-      order,
-    }: {
-      order: Order;
-      chat: boolean;
-      version: number;
-    }) => {
+    mutationFn: ({ order }: { order: Order; version: number }) => {
       if (!requestKeys.current.has(order.id))
         requestKeys.current.set(order.id, crypto.randomUUID());
       return apiClient.post<Run>(
@@ -240,9 +234,7 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
     onSuccess: (run, request) => {
       if (mounted.current && request.version === sourceIdentity.current.version)
         router.push(
-          request.chat
-            ? investigationChatLink(run.id)
-            : `/transaction-operations/runs/${encodeURIComponent(run.id)}`,
+          `/transaction-operations/runs/${encodeURIComponent(run.id)}`,
         );
     },
   });
@@ -689,7 +681,6 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
                     onClick={() =>
                       investigate.mutate({
                         order: selected,
-                        chat: false,
                         version: sourceIdentity.current.version,
                       })
                     }
@@ -700,13 +691,9 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
                   </Button>
                   <Button
                     variant="outline"
-                    disabled={!access.allowed || investigate.isPending}
+                    disabled={!access.allowed}
                     onClick={() =>
-                      investigate.mutate({
-                        order: selected,
-                        chat: true,
-                        version: sourceIdentity.current.version,
-                      })
+                      router.push(orderChatLink(selected.order_number))
                     }
                   >
                     Work with agent

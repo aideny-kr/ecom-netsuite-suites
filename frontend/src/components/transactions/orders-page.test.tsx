@@ -170,7 +170,10 @@ it("shows a failed table request rather than an empty data message", () => {
   ).not.toBeInTheDocument();
 });
 
-it("opens a fresh agent conversation grounded in the saved order investigation", async () => {
+it("hands the agent the order number without queueing a new investigation", async () => {
+  // Staging, 2026-10-16: the button queued a new run and gave chat only that run's id,
+  // so the agent had no order, no case and nothing to work from until the run finished.
+  // The agent finds the order's saved case from its number (transaction_ops.status).
   show();
   fireEvent.click(
     screen.getByRole("button", { name: "Open order R100120031" }),
@@ -180,8 +183,11 @@ it("opens a fresh agent conversation grounded in the saved order investigation",
   const url = new URL(state.push.mock.calls[0][0], "https://example.test");
   expect(url.pathname).toBe("/chat");
   expect(url.searchParams.get("new_session")).toBe("true");
-  expect(url.searchParams.get("compose")).toContain("investigation-1");
-  expect(url.searchParams.get("compose")).toContain("approval");
+  const compose = url.searchParams.get("compose") ?? "";
+  expect(compose).toContain("R100120031");
+  expect(compose).toContain("approval");
+  expect(compose).not.toContain("/transaction-operations/runs/");
+  expect(apiClient.post).not.toHaveBeenCalled();
 });
 
 it("ignores a reconcile response after the user switches sources", async () => {
