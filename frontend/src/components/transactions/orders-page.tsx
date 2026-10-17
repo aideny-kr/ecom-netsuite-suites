@@ -26,7 +26,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { transactionColumns } from "./columns";
 import { transactionAmount, transactionDate } from "./format";
-import { investigationChatLink } from "@/components/transaction-ops/agent-link";
+import { orderChatLink } from "@/components/transaction-ops/agent-link";
 
 type Metric = {
   source: string | null;
@@ -43,6 +43,7 @@ type Evidence = {
   stale?: boolean;
   checked_at?: string;
   run_id?: string;
+  case_id?: string | null;
   balance?: Balance;
 };
 type Order = Record<string, unknown> & {
@@ -241,7 +242,7 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
       if (mounted.current && request.version === sourceIdentity.current.version)
         router.push(
           request.chat
-            ? investigationChatLink(run.id)
+            ? orderChatLink(request.order.order_number, { runId: run.id })
             : `/transaction-operations/runs/${encodeURIComponent(run.id)}`,
         );
     },
@@ -701,13 +702,19 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
                   <Button
                     variant="outline"
                     disabled={!access.allowed || investigate.isPending}
-                    onClick={() =>
-                      investigate.mutate({
-                        order: selected,
-                        chat: true,
-                        version: sourceIdentity.current.version,
-                      })
-                    }
+                    onClick={() => {
+                      const caseId = selected.reconciliation?.case_id;
+                      if (caseId)
+                        router.push(
+                          orderChatLink(selected.order_number, { caseId }),
+                        );
+                      else
+                        investigate.mutate({
+                          order: selected,
+                          chat: true,
+                          version: sourceIdentity.current.version,
+                        });
+                    }}
                   >
                     Work with agent
                   </Button>

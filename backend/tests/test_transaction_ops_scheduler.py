@@ -299,7 +299,7 @@ def test_real_broker_socket_timeout_does_not_hold_asyncio_shutdown(monkeypatch):
     stats = {"dispatched": 0, "dispatch_failed": 0}
     started = time.monotonic()
     try:
-        asyncio.run(mod._dispatch(TENANT, uuid4(), stats))
+        asyncio.run(mod._dispatch(TENANT, uuid4(), stats, "recon"))
         assert time.monotonic() - started < 0.5
         assert stats["dispatch_failed"] == 1
     finally:
@@ -597,6 +597,36 @@ def test_daily_routing_preserves_manual_bulk_and_one_order_recovery(monkeypatch)
     assert mod.investigation_queue("recovery", 2) == "recon"
 
 
+def test_a_one_order_investigation_a_person_waits_on_takes_the_short_job_queue(monkeypatch):
+    # Staging, 2026-10-16: an order panel's "Investigate order" sat queued on `recon` behind
+    # the single bulk worker's 15-minute daily scan, past its own deadline. One order that a
+    # person (order panel or chat) is waiting on is a short human-facing read, like a
+    # one-order recovery. Bulk and window runs keep the bulk queue.
+    monkeypatch.setattr(mod, "DAILY_QUEUE", "recon-daily")
+    monkeypatch.setattr(mod, "ACTIONS_QUEUE", "recon-actions")
+    assert mod.investigation_queue("manual", 1000, ["R231821517"]) == "recon-actions"
+    assert mod.investigation_queue("chat", 1000, ["R231821517"]) == "recon-actions"
+    assert mod.investigation_queue("manual", 1000, ["R1", "R2"]) == "recon"
+    assert mod.investigation_queue("manual", 1000, None) == "recon"  # a window review
+    assert mod.investigation_queue("manual", 1000, []) == "recon"
+    assert mod.investigation_queue("schedule", 1000, ["R1"]) == "recon-daily"
+
+
+async def test_run_queues_route_by_each_runs_own_order_references(monkeypatch):
+    one, many, window = uuid4(), uuid4(), uuid4()
+    rows = [
+        SimpleNamespace(id=one, origin="manual", max_orders=1000, params_json={"order_references": ["R1"]}),
+        SimpleNamespace(id=many, origin="chat", max_orders=1000, params_json={"order_references": ["R1", "R2"]}),
+        SimpleNamespace(id=window, origin="manual", max_orders=1000, params_json={"window_start": "x"}),
+    ]
+    db = AsyncMock()
+    db.execute.return_value = rows
+    monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
+    monkeypatch.setattr(mod, "ACTIONS_QUEUE", "recon-actions")
+    queues = await mod._run_queues(db, TENANT, [one, many, window])
+    assert queues == {one: "recon-actions", many: "recon", window: "recon"}
+
+
 @pytest.mark.parametrize(
     "code", ["source_transport_failed", "replica_query_incomplete", "replica_read_not_fresh", "replica_cached_response"]
 )
@@ -681,3 +711,29 @@ async def test_collection_error_reenters_same_cycle_without_reset_at_next_day(de
     await mod.collect_due_runs(AsyncMock(), NOW + timedelta(days=1))
     resume.assert_awaited_once()
     dependencies.create_run.assert_not_awaited()  # Exhaustion cannot earn a new daily allowance.
+
+
+def test_dispatch_has_no_default_queue():
+    # Packet review round 1, F2: publishers that named no queue silently fell back to `recon`
+    # (the API's create-run publish, the worker's slice re-dispatch), so a one-order run went
+    # back behind daily scans. Every publisher must name the queue; run_queue derives it.
+    import inspect
+
+    assert inspect.signature(mod._dispatch).parameters["queue"].default is inspect.Parameter.empty
+
+
+def test_run_queue_reads_the_durable_run(monkeypatch):
+    monkeypatch.setattr(mod, "DAILY_QUEUE", "recon-daily")
+    monkeypatch.setattr(mod, "ACTIONS_QUEUE", "recon-actions")
+
+    def run(origin, refs=None, max_orders=1000):
+        return SimpleNamespace(
+            origin=origin, max_orders=max_orders, params_json={"order_references": refs} if refs is not None else {}
+        )
+
+    assert mod.run_queue(run("manual", ["R1"])) == "recon-actions"
+    assert mod.run_queue(run("chat", ["R1"])) == "recon-actions"
+    assert mod.run_queue(run("manual", ["R1", "R2"])) == "recon"
+    assert mod.run_queue(run("manual")) == "recon"
+    assert mod.run_queue(run("schedule", ["R1"])) == "recon-daily"
+    assert mod.run_queue(run("recovery", max_orders=1)) == "recon-actions"

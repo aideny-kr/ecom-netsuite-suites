@@ -91,7 +91,7 @@ def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "app.services.transaction_ops.scheduler",
-        SimpleNamespace(_dispatch=dispatch, investigation_queue=lambda origin, orders: "recon-daily"),
+        SimpleNamespace(_dispatch=dispatch, run_queue=lambda run: "recon-daily" if run.origin == "schedule" else None),
     )
     result = mod.transaction_ops_run.run(str(tenant), str(parent))
     resume.assert_awaited_once_with(db, tenant, parent)

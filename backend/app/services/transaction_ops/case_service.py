@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from app.core.database import set_tenant_context
@@ -244,6 +244,24 @@ async def get_case(db, tenant_id, case_id):
     if row is None:
         raise StateError("not_found", 404)
     return row
+
+
+async def cases_for_order(db, tenant_id, order_reference, *, limit=10):
+    """The tenant's saved cases for one order number, newest first: one per entity scope.
+
+    Chat starts from an order number the way a person does (staging, 2026-10-16).
+    """
+    await set_tenant_context(db, str(tenant_id))
+    rows = await db.execute(
+        select(TransactionCase)
+        .where(
+            TransactionCase.tenant_id == tenant_id,
+            func.upper(TransactionCase.order_reference) == order_reference.upper(),
+        )
+        .order_by(TransactionCase.last_observed_at.desc())
+        .limit(limit)
+    )
+    return rows.scalars().all()
 
 
 async def list_cases(db, tenant_id, *, status=None, limit=100, offset=0):

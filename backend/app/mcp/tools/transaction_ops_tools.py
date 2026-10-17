@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import uuid
 from decimal import Decimal, DecimalException
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ from app.workers.celery_app import celery_app
 _PARAMS = {
     "configs": frozenset(),
     "run": frozenset({"config_id", "order_references", "window_start", "window_end"}),
-    "status": frozenset({"run_id", "case_id", "config_id", "limit", "offset"}),
+    "status": frozenset({"run_id", "case_id", "order_reference", "config_id", "limit", "offset"}),
     "groups": frozenset({"group_id", "limit", "offset", "review_run_ids", "status", "search"}),
 }
 _MAX_FINDINGS = 100
@@ -220,10 +221,11 @@ async def _execute(operation, params, context):
             dispatch_status = "already_started"
             if run.status == "pending":
                 try:
-                    from app.services.transaction_ops.scheduler import publish_investigation
+                    from app.services.transaction_ops.scheduler import publish_investigation, run_queue
 
+                    queue = run_queue(run)
                     published = await asyncio.wait_for(
-                        asyncio.to_thread(publish_investigation, tenant_id, run.id, app=celery_app),
+                        asyncio.to_thread(publish_investigation, tenant_id, run.id, app=celery_app, queue=queue),
                         timeout=_PUBLISH_TIMEOUT,
                     )
                     dispatch_status = "pending_scheduler" if published is False else "queued"
@@ -236,7 +238,7 @@ async def _execute(operation, params, context):
                 "dispatch_status": dispatch_status,
                 "review_url": f"/transaction-operations/runs/{run.id}",
             }
-        if operation == "status" and not ({"run_id", "case_id"} & set(params)):
+        if operation == "status" and not ({"run_id", "case_id", "order_reference"} & set(params)):
             from app.services.transaction_ops.operational_status import chat_table, operational_status
 
             if not await has_permission(db, actor.id, "recon.run"):
@@ -250,6 +252,52 @@ async def _execute(operation, params, context):
                 "checkpoint, not an entire period. Eligible times are not dispatch receipts. "
                 "State update time is not a last-progress timestamp. No providers were queried.",
             }
+        if "order_reference" in params:
+            # An order number resolves to that order's saved case, as a person would start
+            # (staging, 2026-10-16: chat could not find R031422379's open case without its id).
+            reference = params["order_reference"]
+            if set(params) != {"order_reference"} or not isinstance(reference, str):
+                raise _ToolError("invalid_parameters")
+            reference = reference.strip().upper()
+            if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{0,63}", reference):
+                raise _ToolError("invalid_parameters")
+            from app.services.transaction_ops import case_service
+
+            cases = await case_service.cases_for_order(db, tenant_id, reference)
+            if len(cases) == 1:
+                params = {"case_id": str(cases[0].id)}
+            else:
+                rows, capped = _finding_rows([SimpleNamespace(report_json=c.latest_report_json) for c in cases])
+                return {
+                    "success": True,
+                    # no_saved_case: start transaction_ops.run with order_references to investigate it.
+                    # multiple_cases: one order in several entity scopes; continue with one case_id.
+                    "status": "multiple_cases" if cases else "no_saved_case",
+                    "findings": [
+                        {
+                            "case_id": str(c.id),
+                            "order_reference": _text(c.order_reference),
+                            "case_status": _text(c.status),
+                            "subsidiary_id": _text((c.scope_json or {}).get("subsidiary_id")),
+                        }
+                        for c in cases
+                    ],
+                    "columns": [
+                        "order_reference",
+                        "recommended_action",
+                        "currency",
+                        "field",
+                        "source",
+                        "target",
+                        "delta",
+                    ],
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "truncated": capped,
+                    "query": "",
+                    "suppress_llm_value": True,
+                    "source_kind": "transaction_ops",
+                }
         if set(params) not in ({"run_id"}, {"case_id"}):
             raise _ToolError("invalid_parameters")
         if "case_id" in params:

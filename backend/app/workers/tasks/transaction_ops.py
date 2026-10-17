@@ -53,10 +53,12 @@ def transaction_ops_run(tenant_id: str, run_id: str):
             await set_tenant_context_session(db, str(tenant))
             result = await run_investigation(db, tenant, run, _slice_seconds=60)
             if result.get("status") == "yielded" and "generation" in result:
-                from app.services.transaction_ops.scheduler import _dispatch
+                from app.services.transaction_ops import state_service
+                from app.services.transaction_ops.scheduler import _dispatch, run_queue
 
                 stats = {"dispatched": 0, "dispatch_failed": 0}
-                await _dispatch(tenant, run, stats, generation=result["generation"])
+                row = await state_service.get_run(db, tenant, run)
+                await _dispatch(tenant, run, stats, run_queue(row), generation=result["generation"])
                 return {**result, **stats}
             child = None
             if result.get("termination_reason") in {"budget", "error"}:
@@ -68,12 +70,12 @@ def transaction_ops_run(tenant_id: str, run_id: str):
 
                 child = await continue_review(db, tenant, run)
             if child is not None:
-                from app.services.transaction_ops.scheduler import _dispatch, investigation_queue
+                from app.services.transaction_ops.scheduler import _dispatch, run_queue
 
                 result["continuation_run_id"] = str(child.id)
                 stats = {"dispatched": 0, "dispatch_failed": 0}
                 if child.status == "pending":
-                    await _dispatch(tenant, child.id, stats, investigation_queue(child.origin, child.max_orders))
+                    await _dispatch(tenant, child.id, stats, run_queue(child))
                 result.update(stats)
             return result
 

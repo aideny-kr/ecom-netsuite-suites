@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   table: vi.fn(),
   fail: false,
   extraSource: false,
+  caseId: undefined as string | undefined,
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: state.push }) }));
 vi.mock("@/lib/api-client", () => ({
@@ -79,6 +80,7 @@ vi.mock("@/hooks/use-table-data", () => ({
             tax_amount: "12.34",
             source_created_at: "2026-09-01T10:00:00Z",
             reconciliation: {
+              ...(state.caseId ? { case_id: state.caseId } : {}),
               status: "incomplete",
               balance: {
                 currency: "USD",
@@ -104,6 +106,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.fail = false;
   state.extraSource = false;
+  state.caseId = undefined;
   vi.mocked(apiClient.get).mockResolvedValue({
     status: "never_synced",
     records_imported: 0,
@@ -170,7 +173,11 @@ it("shows a failed table request rather than an empty data message", () => {
   ).not.toBeInTheDocument();
 });
 
-it("opens a fresh agent conversation grounded in the saved order investigation", async () => {
+it("hands the agent this order's own case without queueing an investigation", async () => {
+  // Staging, 2026-10-16: the button gave chat only a queued run's id, with no order or case.
+  // Packet review round 2 on #413, F5: the hand-off is bound to THIS order's case (from the
+  // table evidence, matched by source and record), never a lookup by order number.
+  state.caseId = "case-7";
   show();
   fireEvent.click(
     screen.getByRole("button", { name: "Open order R100120031" }),
@@ -180,8 +187,47 @@ it("opens a fresh agent conversation grounded in the saved order investigation",
   const url = new URL(state.push.mock.calls[0][0], "https://example.test");
   expect(url.pathname).toBe("/chat");
   expect(url.searchParams.get("new_session")).toBe("true");
-  expect(url.searchParams.get("compose")).toContain("investigation-1");
-  expect(url.searchParams.get("compose")).toContain("approval");
+  const compose = url.searchParams.get("compose") ?? "";
+  expect(compose).toContain("R100120031");
+  expect(compose).toContain("case-7");
+  expect(compose).toContain("approval");
+  expect(apiClient.post).not.toHaveBeenCalled();
+});
+
+it("starts a bound investigation for an order with no case and names the order in chat", async () => {
+  // Round 2, F6: an order with no case yet still goes through the order's own investigation
+  // endpoint (it binds the selected source and creates the default configuration on first
+  // use); chat gets the order number as well as the run.
+  show();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Open order R100120031" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Work with agent" }));
+  await waitFor(() => expect(state.push).toHaveBeenCalled());
+  expect(apiClient.post).toHaveBeenCalledWith(
+    "/api/v1/transaction-ops/orders/order-1/investigate",
+    { evaluation_key: expect.any(String) },
+  );
+  const url = new URL(state.push.mock.calls[0][0], "https://example.test");
+  expect(url.pathname).toBe("/chat");
+  const compose = url.searchParams.get("compose") ?? "";
+  expect(compose).toContain("R100120031");
+  expect(compose).toContain("/transaction-operations/runs/investigation-1");
+  expect(compose).toContain("approval");
+});
+
+it("keeps Work with agent unavailable while an investigation request is starting", async () => {
+  // Packet review round 1, F4: a pending "Investigate order" whose response lands after the
+  // user moved to chat would push its run page over the chat the user chose.
+  vi.mocked(apiClient.post).mockImplementationOnce(() => new Promise(() => {}));
+  show();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Open order R100120031" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Investigate order" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Work with agent" })).toBeDisabled(),
+  );
 });
 
 it("ignores a reconcile response after the user switches sources", async () => {

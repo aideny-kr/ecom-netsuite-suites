@@ -386,10 +386,27 @@ def _reserve_publication(connection, tenant_id, run_id, generation=None):
     return connection.default_channel.client.set(key, "1", nx=True, ex=_PUBLICATION_COOLDOWN)
 
 
-def investigation_queue(origin, max_orders=None):
+def investigation_queue(origin, max_orders=None, order_references=None):
     if origin == "recovery" and max_orders == 1:
         return ACTIONS_QUEUE
+    # One order a person is waiting on (the order panel or chat) is a short human-facing
+    # read, like a one-order recovery. On `recon` it waited behind the single bulk worker's
+    # daily scan, past its own deadline (staging, 2026-10-16). Bulk and window runs stay.
+    if origin in ("manual", "chat") and isinstance(order_references, list | tuple) and len(order_references) == 1:
+        return ACTIONS_QUEUE
     return DAILY_QUEUE if origin == "schedule" else "recon"
+
+
+def run_queue(run):
+    """The queue a durable run belongs on, read from the run itself.
+
+    Every investigation publisher uses this; a publisher that chose its own queue, or none,
+    sent one-order runs back to `recon` behind daily scans (packet review round 1, F2).
+    """
+    params = getattr(run, "params_json", None) or {}
+    return investigation_queue(
+        getattr(run, "origin", None), getattr(run, "max_orders", None), params.get("order_references")
+    )
 
 
 async def _run_queues(db, tenant_id, run_ids):
@@ -399,9 +416,11 @@ async def _run_queues(db, tenant_id, run_ids):
     _, _, _, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     rows = await db.execute(
-        select(run.id, run.origin, run.max_orders).where(run.tenant_id == tenant_id, run.id.in_(list(run_ids)))
+        select(run.id, run.origin, run.max_orders, run.params_json).where(
+            run.tenant_id == tenant_id, run.id.in_(list(run_ids))
+        )
     )
-    return {row.id: investigation_queue(row.origin, row.max_orders) for row in rows}
+    return {row.id: run_queue(row) for row in rows}
 
 
 def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon", generation=None):
@@ -443,7 +462,7 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app, queue="recon", g
         return True
 
 
-async def _dispatch(tenant_id, run_id, stats, queue="recon", *, generation=None):
+async def _dispatch(tenant_id, run_id, stats, queue, *, generation=None):
     try:
         published = await asyncio.wait_for(
             asyncio.to_thread(
@@ -597,7 +616,7 @@ async def collect_due_runs(db, now: datetime, *, scheduled_only=False) -> dict:
                             child = await continue_budget_run(db, tenant_id, latest.id, now=now)
                             if child is not None and child.status == "pending":
                                 stats["created"] += 1
-                                await _dispatch(tenant_id, child.id, stats, investigation_queue(child.origin))
+                                await _dispatch(tenant_id, child.id, stats, run_queue(child))
                             else:
                                 stats["skipped"] += 1
                             continue
