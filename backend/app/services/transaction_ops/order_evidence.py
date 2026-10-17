@@ -27,6 +27,10 @@ def latest_order_evidence(tenant_id):
                 Finding.id,
                 "run_id",
                 Finding.run_id,
+                # This order's own case (same source, record and currency as the rest), so
+                # "Work with agent" hands chat the exact case, never a lookup by number.
+                "case_id",
+                Finding.report_json["case_id"].astext,
                 "checked_at",
                 Finding.created_at,
                 "status",

@@ -10,7 +10,7 @@ from tests.test_transaction_defaults import connections
 from tests.test_transaction_tables import seed_orders
 
 
-async def finding(db, user, order, *, source=None, status="matched", at=None, saved=False):
+async def finding(db, user, order, *, source=None, status="matched", at=None, saved=False, case_id=None):
     source = source or (await connections(db, user.tenant_id))[0]
     config = (await framework_defaults.ensure_framework_configs(db, user.tenant_id, source.id, actor=user))[0]
     run = await state_service.create_run(
@@ -41,6 +41,7 @@ async def finding(db, user, order, *, source=None, status="matched", at=None, sa
                 "amounts": {"refunds": {"source": "0.00", "target": "0.00", "delta": "0.00"}},
             },
             "private_evidence": "not-for-table",
+            **({"case_id": case_id} if case_id else {}),
         },
         created_at=at or datetime.now(timezone.utc),
     )
@@ -68,6 +69,24 @@ async def test_order_table_exposes_scoped_balance_and_filters_before_count_and_e
         "/api/v1/tables/orders/export/csv", headers=headers, params={"reconciliation_status": "matched"}
     )
     assert first.order_number in export.text and second.order_number not in export.text
+
+
+async def test_order_table_names_the_orders_own_case_for_the_agent_hand_off(client, db, admin_user):
+    # Packet review round 2 on #413, F5: "Work with agent" must hand chat THIS order's case,
+    # bound by source and record like the rest of this evidence, never a lookup by number.
+    user, headers = admin_user
+    with_case, without = await seed_orders(db, user.tenant_id, ["R100120031", "R100120032"])
+    case_id = str(uuid4())
+    source, _ = await finding(db, user, with_case, case_id=case_id)
+    await finding(db, user, without, source=source, status="difference")
+    for order in (with_case, without):
+        order.source_connection_id = source.id
+    await db.flush()
+    response = await client.get("/api/v1/tables/orders", headers=headers, params={"page_size": 10})
+    assert response.status_code == 200
+    evidence = {row["order_number"]: row["reconciliation"] for row in response.json()["items"]}
+    assert evidence["R100120031"]["case_id"] == case_id
+    assert evidence["R100120032"].get("case_id") is None
 
 
 @pytest.mark.parametrize("mismatch", ["connection", "tenant", "identity", "stale", "updated"])

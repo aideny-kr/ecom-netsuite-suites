@@ -43,6 +43,7 @@ type Evidence = {
   stale?: boolean;
   checked_at?: string;
   run_id?: string;
+  case_id?: string | null;
   balance?: Balance;
 };
 type Order = Record<string, unknown> & {
@@ -223,7 +224,13 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
     },
   });
   const investigate = useMutation({
-    mutationFn: ({ order }: { order: Order; version: number }) => {
+    mutationFn: ({
+      order,
+    }: {
+      order: Order;
+      chat: boolean;
+      version: number;
+    }) => {
       if (!requestKeys.current.has(order.id))
         requestKeys.current.set(order.id, crypto.randomUUID());
       return apiClient.post<Run>(
@@ -234,7 +241,9 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
     onSuccess: (run, request) => {
       if (mounted.current && request.version === sourceIdentity.current.version)
         router.push(
-          `/transaction-operations/runs/${encodeURIComponent(run.id)}`,
+          request.chat
+            ? orderChatLink(request.order.order_number, { runId: run.id })
+            : `/transaction-operations/runs/${encodeURIComponent(run.id)}`,
         );
     },
   });
@@ -681,6 +690,7 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
                     onClick={() =>
                       investigate.mutate({
                         order: selected,
+                        chat: false,
                         version: sourceIdentity.current.version,
                       })
                     }
@@ -692,9 +702,19 @@ export function OrdersPage({ active = true }: { active?: boolean } = {}) {
                   <Button
                     variant="outline"
                     disabled={!access.allowed || investigate.isPending}
-                    onClick={() =>
-                      router.push(orderChatLink(selected.order_number))
-                    }
+                    onClick={() => {
+                      const caseId = selected.reconciliation?.case_id;
+                      if (caseId)
+                        router.push(
+                          orderChatLink(selected.order_number, { caseId }),
+                        );
+                      else
+                        investigate.mutate({
+                          order: selected,
+                          chat: true,
+                          version: sourceIdentity.current.version,
+                        });
+                    }}
                   >
                     Work with agent
                   </Button>
