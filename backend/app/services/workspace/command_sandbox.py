@@ -319,6 +319,8 @@ async def run_isolated_command(
                     except OSError:
                         raise CommandSandboxError("Command sandbox coverage artifact could not be stored") from None
                 return state["ExitCode"], result["stdout"], result["stderr"]
+        except TimeoutError:
+            raise
         except (httpx.HTTPError, OSError):
             raise CommandSandboxError("Command sandbox runtime is unavailable") from None
         finally:
