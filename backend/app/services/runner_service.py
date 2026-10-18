@@ -46,7 +46,7 @@ ALLOWED_COMMANDS: dict[str, dict] = {
         "timeout": 180,
     },
     "jest_unit_test": {
-        "cmd": ["npx", "jest", "--json", "--coverage"],
+        "cmd": ["npx", "--offline", "jest", "--runInBand", "--json", "--coverage", "--coverageReporters=json-summary"],
         "timeout": 120,
     },
     "suiteql_assertions": {
@@ -368,7 +368,7 @@ async def _run_subprocess(cmd: list[str], cwd: str, timeout: int) -> tuple[int, 
     if cmd != ALLOWED_COMMANDS["jest_unit_test"]["cmd"]:
         raise CommandSandboxError("SuiteCloud requires a separate verified credential executor")
     return await run_isolated_command(
-        ["npx", "--offline", "jest", "--json", "--coverage", "--coverageReporters=json-summary"],
+        list(cmd),
         cwd,
         timeout,
         image=settings.WORKSPACE_COMMAND_IMAGE,

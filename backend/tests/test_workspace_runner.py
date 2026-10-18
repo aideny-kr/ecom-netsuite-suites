@@ -60,7 +60,15 @@ class TestCommandAllowlist:
 
     def test_valid_jest(self):
         config = validate_run_type("jest_unit_test")
-        assert config["cmd"] == ["npx", "jest", "--json", "--coverage"]
+        assert config["cmd"] == [
+            "npx",
+            "--offline",
+            "jest",
+            "--runInBand",
+            "--json",
+            "--coverage",
+            "--coverageReporters=json-summary",
+        ]
         assert config["timeout"] == 120
 
     def test_invalid_type_rejected(self):

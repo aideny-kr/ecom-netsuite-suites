@@ -16,8 +16,8 @@ remain required before activation.
 - `WORKSPACE_COMMAND_IMAGE`: the full local `sha256:` image ID of a reviewed,
   credential-free image containing `/usr/local/bin/node`, `npx`, and the
   project's locked Jest dependencies. Tags and absent images fail closed;
-  the broker never pulls images. Image hooks, environment and baked files are
-  part of operator review. Do not reuse an application image containing private
+  the broker never pulls images and rejects image-declared volumes. Image
+  hooks, environment and baked files are part of operator review. Do not reuse an application image containing private
   configuration or credentials.
 - `WORKSPACE_COMMAND_SOCKET`: an absolute local Docker Unix socket path.
 - `WORKSPACE_COMMAND_DOCKER`: the trusted absolute Docker client executable.
@@ -33,11 +33,18 @@ check, with offline resolution and JSON coverage summary. SuiteCloud commands
 are rejected by this executor. No arbitrary command/container configuration is
 accepted from a tenant.
 
+Jest runs in band so its worker pool cannot exhaust the process/thread budget.
+The recorded command is the actual registered argv. A supervisor deadline
+retains the existing `TIMEOUT` result category.
+
 ## Boundary and lifecycle
 
 The worker reads its private materialized snapshot, rejects links/special
 files, and sends bounded UTF-8 content through the Docker client's stdin. The
-container has no host filesystem binds, host PID/IPC namespace, network,
+byte content, including CRLF and lone CR, is preserved. `coverage` is reserved
+for generated check output; a project containing that input path is rejected
+before execution so source files cannot masquerade as returned coverage.
+The container has no host filesystem binds, host PID/IPC namespace, network,
 credential environment, or writable image filesystem. Project and temporary
 files live on size-limited tmpfs mounts. PID, memory, CPU and output limits are
 fixed by trusted code.
@@ -64,3 +71,6 @@ supervisor deadline; operators must inspect the
 `suitestudio.workspace-command=1` label and remove confirmed stale resources.
 Do not delete another active run. Automatic crash-residue reconciliation and
 production broker provisioning are not certified by this change.
+An ambiguous create can also finish after a deletion returned 404, leaving an
+unstarted container. The failed run is never treated as successful or retried;
+the same pending residue-reconciliation requirement covers this case.

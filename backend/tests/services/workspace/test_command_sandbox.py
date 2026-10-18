@@ -21,6 +21,8 @@ def runtime(tmp_path, monkeypatch):
 
     def handle(request):
         requests.append(request)
+        if "/images/" in request.url.path:
+            return httpx.Response(200, json={"Id": IMAGE, "Config": {"Volumes": None}})
         if request.method == "POST":
             return httpx.Response(201, json={"Id": "synthetic"})
         if request.method == "GET":
@@ -40,7 +42,7 @@ async def test_only_materialized_content_reaches_restricted_container(runtime, m
     root, args, requests, attach, _ = runtime
     monkeypatch.setenv("ENCRYPTION_KEY", "synthetic-host-canary")
     assert await sandbox.run_isolated_command(["npx", "jest"], str(root), 5, **args) == (0, "test results", "")
-    spec = json.loads(requests[0].content)
+    spec = json.loads(next(r.content for r in requests if r.method == "POST"))
     host = spec["HostConfig"]
     assert spec["Image"] == IMAGE and spec["User"] == "0:0"
     assert spec["NetworkDisabled"] and host["NetworkMode"] == "none"
@@ -81,6 +83,8 @@ async def test_ambiguous_create_is_cleaned_without_retry(runtime, monkeypatch):
 
     def handle(request):
         requests.append(request)
+        if "/images/" in request.url.path:
+            return httpx.Response(200, json={"Id": IMAGE, "Config": {}})
         if request.method == "POST":
             raise httpx.ReadTimeout("synthetic ambiguous response", request=request)
         return httpx.Response(204)
@@ -88,8 +92,8 @@ async def test_ambiguous_create_is_cleaned_without_retry(runtime, monkeypatch):
     monkeypatch.setattr(sandbox.httpx, "AsyncHTTPTransport", lambda **_: httpx.MockTransport(handle))
     with pytest.raises(sandbox.CommandSandboxError, match="unavailable"):
         await sandbox.run_isolated_command(["npx", "jest"], str(root), 5, **args)
-    assert [r.method for r in requests] == ["POST", "DELETE"]
-    assert requests[0].url.params["name"] in requests[1].url.path
+    assert [r.method for r in requests] == ["GET", "POST", "DELETE"]
+    assert requests[1].url.params["name"] in requests[2].url.path
     attach.assert_not_awaited()
 
 
@@ -112,7 +116,7 @@ async def test_cancellation_removes_container(runtime):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exit_code", [124, 125, 126, 127])
+@pytest.mark.parametrize("exit_code", [125, 126, 127])
 async def test_runtime_limit_cannot_be_a_passing_check(runtime, exit_code):
     root, args, requests, attach, state = runtime
     state["ExitCode"] = exit_code
@@ -127,6 +131,8 @@ async def test_cleanup_failure_cannot_return_success(runtime, monkeypatch):
     root, args, _, _, _ = runtime
 
     def handle(request):
+        if "/images/" in request.url.path:
+            return httpx.Response(200, json={"Id": IMAGE, "Config": {}})
         if request.method == "DELETE":
             return httpx.Response(500, text="private daemon diagnostic")
         return httpx.Response(201, json={"State": {"ExitCode": 0}})
@@ -167,6 +173,8 @@ async def test_repeated_cancellation_does_not_cancel_container_removal(runtime, 
     release = asyncio.Event()
 
     async def handle(request):
+        if "/images/" in request.url.path:
+            return httpx.Response(200, json={"Id": IMAGE, "Config": {}})
         if request.method == "DELETE":
             deleting.set()
             await release.wait()
@@ -210,7 +218,67 @@ async def test_runner_dispatches_only_registered_test_command(tmp_path, monkeypa
         "npx",
         "--offline",
         "jest",
+        "--runInBand",
         "--json",
         "--coverage",
         "--coverageReporters=json-summary",
     ]
+
+
+def test_snapshot_preserves_exact_crlf_and_lone_cr_bytes(tmp_path):
+    original = b"first\r\nsecond\rthird\n"
+    (tmp_path / "fixture.snap").write_bytes(original)
+    assert json.loads(sandbox._snapshot(str(tmp_path)))["fixture.snap"].encode() == original
+
+
+@pytest.mark.asyncio
+async def test_input_coverage_cannot_be_reused_as_execution_evidence(runtime):
+    root, args, requests, attach, _ = runtime
+    (root / "coverage").mkdir()
+    (root / "coverage" / "coverage-summary.json").write_text('{"total":{"lines":{"pct":100}}}')
+    with pytest.raises(sandbox.CommandSandboxError, match="reserved"):
+        await sandbox.run_isolated_command(["npx", "jest"], str(root), 5, **args)
+    assert not requests
+    attach.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_coverage_write_failure_does_not_expose_host_path(runtime, monkeypatch):
+    root, args, _, attach, _ = runtime
+    attach.return_value = (0, json.dumps({"exit_code": 0, "stdout": "", "stderr": "", "coverage_summary": "{}"}), "")
+    original = type(root).mkdir
+
+    def fail_coverage(self, *args, **kwargs):
+        if self.name == "coverage":
+            raise OSError("synthetic private host path")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(root), "mkdir", fail_coverage)
+    with pytest.raises(sandbox.CommandSandboxError, match="coverage artifact") as caught:
+        await sandbox.run_isolated_command(["npx", "jest"], str(root), 5, **args)
+    assert "private host path" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_deadline_preserves_timeout_category(runtime):
+    root, args, requests, attach, state = runtime
+    state["ExitCode"] = 124
+    attach.return_value = (124, "", "")
+    with pytest.raises(TimeoutError):
+        await sandbox.run_isolated_command(["npx", "jest"], str(root), 5, **args)
+    assert requests[-1].method == "DELETE"
+
+
+@pytest.mark.asyncio
+async def test_image_volumes_are_rejected_before_creation(runtime, monkeypatch):
+    root, args, requests, attach, _ = runtime
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"Id": IMAGE, "Config": {"Volumes": {"/unbounded": {}}}})
+
+    monkeypatch.setattr(sandbox.httpx, "AsyncHTTPTransport", lambda **_: httpx.MockTransport(handle))
+    with pytest.raises(sandbox.CommandSandboxError, match="persistent volumes"):
+        await sandbox.run_isolated_command(["npx", "jest"], str(root), 5, **args)
+    assert [r.method for r in requests] == ["GET"]
+    attach.assert_not_awaited()

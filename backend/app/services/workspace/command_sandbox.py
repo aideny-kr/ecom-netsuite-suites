@@ -32,6 +32,8 @@ def _snapshot(cwd: str) -> bytes:
     root = Path(cwd)
     if not root.is_absolute() or root.is_symlink() or not root.is_dir():
         raise CommandSandboxError("Command sandbox requires a materialized project")
+    if (root / "coverage").exists():
+        raise CommandSandboxError("The coverage path is reserved for check output; remove it from project inputs")
     size = count = 0
     files = {}
     for path in root.rglob("*"):
@@ -44,7 +46,7 @@ def _snapshot(cwd: str) -> bytes:
             raise CommandSandboxError("Command sandbox project exceeds input limit")
         if stat.S_ISREG(mode):
             try:
-                files[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")
+                files[path.relative_to(root).as_posix()] = path.read_bytes().decode("utf-8")
             except (OSError, UnicodeError):
                 raise CommandSandboxError("Command sandbox requires readable UTF-8 project files") from None
     payload = json.dumps(files, ensure_ascii=False).encode("utf-8")
@@ -238,12 +240,25 @@ async def run_isolated_command(
         raise CommandSandboxError("Workspace tests require a reviewed immutable command image")
     if not Path(socket).is_absolute() or not Path(docker).is_absolute() or not 1 <= timeout <= 600:
         raise CommandSandboxError("Command sandbox runtime configuration is invalid")
-    payload = _snapshot(cwd)
+    try:
+        payload = _snapshot(cwd)
+    except OSError:
+        raise CommandSandboxError("Command sandbox project cannot be read") from None
     name = "ss-command-" + uuid.uuid4().hex
     transport = httpx.AsyncHTTPTransport(uds=socket)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://docker/v1.45", timeout=10, trust_env=False
     ) as client:
+        try:
+            response = await client.get(f"/images/{image}/json")
+            response.raise_for_status()
+            metadata = response.json()
+            if metadata.get("Id") != image or not isinstance(metadata.get("Config"), dict):
+                raise CommandSandboxError("Command sandbox image identity could not be verified")
+            if metadata["Config"].get("Volumes"):
+                raise CommandSandboxError("Command sandbox image cannot declare persistent volumes")
+        except httpx.HTTPError:
+            raise CommandSandboxError("Command sandbox immutable image is unavailable") from None
         # A generated name is known before create: even an ambiguous creation
         # response can be removed without repeating creation or execution.
         try:
@@ -275,7 +290,9 @@ async def run_isolated_command(
                 state = response.json()["State"]
                 if state.get("Running") or not isinstance(state.get("ExitCode"), int):
                     raise CommandSandboxError("Command sandbox execution failed")
-                if state.get("OOMKilled") or state["ExitCode"] in (124, 125, 126, 127) or cli_exit != state["ExitCode"]:
+                if state["ExitCode"] == 124:
+                    raise TimeoutError
+                if state.get("OOMKilled") or state["ExitCode"] in (125, 126, 127) or cli_exit != state["ExitCode"]:
                     raise CommandSandboxError("Command sandbox exceeded limits or could not execute tests")
                 try:
                     result = json.loads(stdout)
@@ -295,11 +312,14 @@ async def run_isolated_command(
                 if coverage is not None:
                     # Return only this bounded artifact to the disposable
                     # materialized snapshot; never copy a container filesystem.
-                    coverage_dir = Path(cwd) / "coverage"
-                    coverage_dir.mkdir(exist_ok=True)
-                    (coverage_dir / "coverage-summary.json").write_text(coverage, encoding="utf-8")
+                    try:
+                        coverage_dir = Path(cwd) / "coverage"
+                        coverage_dir.mkdir(exist_ok=True)
+                        (coverage_dir / "coverage-summary.json").write_text(coverage, encoding="utf-8")
+                    except OSError:
+                        raise CommandSandboxError("Command sandbox coverage artifact could not be stored") from None
                 return state["ExitCode"], result["stdout"], result["stderr"]
-        except httpx.HTTPError:
+        except (httpx.HTTPError, OSError):
             raise CommandSandboxError("Command sandbox runtime is unavailable") from None
         finally:
 
