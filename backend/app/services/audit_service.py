@@ -1,9 +1,21 @@
+import json
 import uuid
+from datetime import date, datetime
+from decimal import Decimal
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditEvent
+
+
+def _exact(value: object) -> str:
+    """Exact text for the values money and record evidence carry; never a float."""
+    if isinstance(value, Decimal | uuid.UUID):
+        return str(value)
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 async def log_event(
@@ -21,7 +33,14 @@ async def log_event(
     status: str = "success",
     error_message: str | None = None,
 ) -> AuditEvent:
-    """Append an audit event. This is insert-only — no updates or deletes."""
+    """Append an audit event. This is insert-only — no updates or deletes.
+
+    The payload is converted to JSON here, before it joins the caller's transaction: a value the
+    column could not store (a Decimal in a refusal's detail, staging 2026-10-18) used to fail at
+    flush, leaving the session unusable and ending the caller's whole request.
+    """
+    if payload is not None:
+        payload = json.loads(json.dumps(payload, default=_exact))
     if correlation_id is None:
         ctx = structlog.contextvars.get_contextvars()
         correlation_id = ctx.get("correlation_id")
