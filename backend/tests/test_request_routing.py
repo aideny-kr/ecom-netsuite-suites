@@ -369,3 +369,41 @@ async def test_classifier_receives_only_available_source_labels_and_verified_car
     assert payload["available_sources"] == {"metabase": "Metabase", "netsuite": "NetSuite"}
     assert payload["verified_source_card"] is None
     assert result.route.source_intent.excluded == ["netsuite"]
+
+
+# Staging, 2026-10-17 (head-to-head benchmark): 9 of 10 reconciliation prompts such as
+# "Reconciliation task for Framework ... Using NetSuite, find the cause ... propose the exact
+# fix" got "I couldn't determine the request context". The orchestrator saves the user
+# message before routing, so the router saw the current request twice (as history and as a
+# legacy request) and answered kind=transaction while also selecting NetSuite; that was
+# rejected on both attempts. Reproduced against the live model 3/3.
+RECON = (
+    "Reconciliation task for Framework (read-only). Order R027532832. Using NetSuite, find the cause "
+    "of the difference and propose the exact fix."
+)
+
+
+async def test_a_non_analytics_route_that_names_a_source_keeps_its_kind_without_the_source():
+    adapter = routing_adapter("transaction")
+    adapter.create_message.return_value.tool_use_blocks[0].input["source_intent"] = {
+        "action": "select",
+        "sources": ["netsuite"],
+        "excluded": [],
+    }
+    result = await classify_request(task=RECON, history=[], adapter=adapter, model="configured")
+    assert result.route.kind == "transaction"
+    assert result.route.source_intent == SourceIntent()  # sources only ever gate analytics data tools
+    assert adapter.create_message.await_count == 1  # no repair round-trip, no refusal
+
+
+async def test_the_current_request_is_not_sent_to_the_router_again_as_history():
+    adapter = routing_adapter("transaction")
+    earlier = {"role": "user", "content": "Earlier question"}
+    for history in ([{"role": "user", "content": RECON}], [earlier, {"role": "user", "content": RECON + "  "}]):
+        adapter.create_message.reset_mock()
+        await classify_request(task=RECON, history=history, adapter=adapter, model="configured")
+        payload = json.loads(adapter.create_message.call_args.kwargs["messages"][0]["content"])
+        sent = json.dumps(payload["history"]) + json.dumps(payload["legacy_user_requests"])
+        assert RECON not in sent, payload
+        assert payload["current_request"] == RECON
+    assert "Earlier question" in sent  # earlier turns still reach the router
