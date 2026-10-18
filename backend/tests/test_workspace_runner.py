@@ -77,6 +77,24 @@ class TestCommandAllowlist:
 
 class TestRunLifecycle:
     @pytest.mark.asyncio
+    async def test_unconfigured_sandbox_persists_actionable_failure_without_host_execution(
+        self, db, tenant, user, workspace, monkeypatch
+    ):
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "WORKSPACE_COMMAND_IMAGE", "")
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "jest_unit_test", user.id)
+        await db.flush()
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as host:
+            result = await runner_service.execute_run(db, run.id, tenant.id)
+        host.assert_not_awaited()
+        assert result.status == "error"
+        artifacts = await runner_service.get_artifacts(db, run.id, tenant.id)
+        receipt = next(json.loads(a.content) for a in artifacts if a.artifact_type == "result_json")
+        assert receipt["error_category"] == "COMMAND_SANDBOX"
+        assert "reviewed immutable command image" in receipt["error_message"]
+
+    @pytest.mark.asyncio
     async def test_create_run_queued(self, db, tenant, user, workspace):
         run = await runner_service.create_run(db, tenant.id, workspace.id, "suitecloud_validate", user.id)
         assert run.status == "queued"

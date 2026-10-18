@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import re
 import shutil
 import tempfile
@@ -33,6 +32,7 @@ from app.models.workspace import (
 from app.services import audit_service
 from app.services import workspace_service as ws_svc
 from app.services.deploy_service import DeployGateError
+from app.services.workspace.command_sandbox import CommandSandboxError
 from app.services.workspace.snapshot import materialized_snapshot_hash
 from app.services.workspace.suitecloud_auth_seeder import AuthSeederError, require_verified_identity
 
@@ -361,27 +361,19 @@ def _parse_json_output(raw_output: str) -> dict[str, Any] | None:
 
 
 async def _run_subprocess(cmd: list[str], cwd: str, timeout: int) -> tuple[int, str, str]:
-    """Run a subprocess and return (exit_code, stdout, stderr).
+    """Run project tests only inside the configured credential-free sandbox."""
+    from app.core.config import settings
+    from app.services.workspace.command_sandbox import run_isolated_command
 
-    This is extracted to allow mocking in tests.
-    """
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": cwd,
-        "TMPDIR": cwd,
-    }
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    return (
-        proc.returncode or 0,
-        stdout_bytes.decode("utf-8", errors="replace"),
-        stderr_bytes.decode("utf-8", errors="replace"),
+    if cmd != ALLOWED_COMMANDS["jest_unit_test"]["cmd"]:
+        raise CommandSandboxError("SuiteCloud requires a separate verified credential executor")
+    return await run_isolated_command(
+        ["npx", "--offline", "jest", "--json", "--coverage", "--coverageReporters=json-summary"],
+        cwd,
+        timeout,
+        image=settings.WORKSPACE_COMMAND_IMAGE,
+        socket=settings.WORKSPACE_COMMAND_SOCKET,
+        docker=settings.WORKSPACE_COMMAND_DOCKER,
     )
 
 
@@ -921,8 +913,14 @@ async def execute_run(
             },
             error_message=actionable,
         )
-    except (DeployGateError, AuthSeederError) as exc:
-        category = "AUTH_REQUIRED" if isinstance(exc, AuthSeederError) else "DEPLOY_GATE"
+    except (DeployGateError, AuthSeederError, CommandSandboxError) as exc:
+        category = (
+            "COMMAND_SANDBOX"
+            if isinstance(exc, CommandSandboxError)
+            else "AUTH_REQUIRED"
+            if isinstance(exc, AuthSeederError)
+            else "DEPLOY_GATE"
+        )
         run.status = "error"
         run.completed_at = datetime.now(timezone.utc)
         run.duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -945,7 +943,7 @@ async def execute_run(
         await _audit_run_event(
             db,
             run,
-            action="deploy.worker_gate_rejected",
+            action="run_failed" if isinstance(exc, CommandSandboxError) else "deploy.worker_gate_rejected",
             status="error",
             payload={"error_category": category, "snapshot_hash": run.snapshot_hash},
             error_message=str(exc),
