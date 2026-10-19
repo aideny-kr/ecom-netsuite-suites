@@ -101,7 +101,8 @@ def test_r231821517_the_agents_credit_is_accepted_because_the_order_then_equals_
         ([{"item_id": "900", "amount": "674.73"}], "item_not_allowed"),
         ([{"item_id": "777", "amount": "674.73"}], "item_not_allowed"),
         ([{"item_id": "1471", "amount": "674.7"}], None),
-        ([{"item_id": "1471", "amount": "-674.73"}], "invalid_amount"),
+        # A negative line is only ever the reversal of an existing credit's line; this order has none.
+        ([{"item_id": "1471", "amount": "-674.73"}], "item_not_allowed"),
         ([{"item_id": "1471", "amount": 674.73}], "invalid_amount"),
         ([], "invalid_amount"),
     ],
@@ -248,6 +249,168 @@ def test_an_unconfigured_item_that_posts_to_a_tax_account_is_refused():
     assert (exc.value.code, exc.value.detail.get("reason")) == ("item_not_allowed", "unconfigured_item_posts_to_tax")
 
 
+def _refunded_credit_order(**over):
+    """R166593377's shape (BV, 2026-10-18): a paid 4,071.00 invoice with 650.00 VAT, and a 450.00
+    credit, refunded to the customer, that went wholly to sales returns. Its period is locked, so the
+    VAT it should have reversed (71.85) must move in the open period, by a zero-total credit."""
+    facts = _facts(total="4071.00", tax="650.00", remaining="0.00")
+    facts["source"].update(number="R166593377", total="3621.00", tax_total="578.15", adjustments=[])
+    facts["profile"].update(tax_accounts=["846"], tax_item_accounts={"4699": "846"})
+    facts["items"].update(
+        {
+            "4699": {"id": "4699", "isInactive": False, "itemType": "NonInvtPart", "incomeAccount": {"id": "846"}},
+            "1603": {"id": "1603", "isInactive": False, "itemType": "NonInvtPart", "incomeAccount": {"id": "783"}},
+        }
+    )
+    facts["account_types"]["783"] = "Income"
+    old = {
+        "id": "15778033",
+        "total": "450.00",
+        "account": {"id": "119"},
+        "entity": {"id": "5658593"},
+        "subsidiary": {"id": "1"},
+        "currency": {"id": "1"},
+        "exchangeRate": "1.0",
+        "line_evidence": {"complete": True, "lines": [{"item": {"id": "1603"}, "amount": "450.00"}]},
+    }
+    gl = {
+        "complete": True,
+        "rows": [
+            {"account": "119", "accountingbook": "1", "credit": "450.00"},
+            {"account": "783", "accountingbook": "1", "debit": "450.00"},
+        ],
+    }
+    facts["credits"] = [(old, gl)]
+    facts.update(over)
+    return facts
+
+
+ZERO_TOTAL = [{"item_id": "4699", "amount": "71.85"}, {"item_id": "1603", "amount": "-71.85"}]
+
+
+def test_r166593377_a_zero_total_credit_moves_the_vat_the_locked_credit_missed_in_the_open_period():
+    result = cc.assess(lines=ZERO_TOTAL, memo="VAT on support exception", **_refunded_credit_order())
+    assert result["balance"]["before"] == {"gross": "3621.00", "net": "2971.00", "tax": "650.00"}
+    assert (
+        result["balance"]["after"]
+        == result["balance"]["source"]
+        == {
+            "gross": "3621.00",
+            "net": "3042.85",
+            "tax": "578.15",
+        }
+    )
+    f = result["proposed_fields"]
+    # Nothing to apply: the credit moves value between accounts and leaves AR, the paid invoice and
+    # the customer's balance untouched.
+    assert "apply" not in f
+    assert f["item"]["items"] == [
+        {"item": {"id": "4699"}, "quantity": 1, "rate": "71.85", "amount": "71.85", "isTaxable": False},
+        {"item": {"id": "1603"}, "quantity": 1, "rate": "-71.85", "amount": "-71.85", "isTaxable": False},
+    ]
+    assert result["expected_ledger"] == {"debit": {"846": "71.85"}, "credit": {"783": "71.85"}}
+    assert result["expected_after"] == {"total": "0.00", "subtotal": "-71.85", "taxTotal": "71.85"}
+
+
+@pytest.mark.parametrize(
+    "lines, code, reason",
+    [
+        # A negative line reverses part of what the order's existing credits posted to that account
+        # (their GL), so the account must be one they debited...
+        (
+            [{"item_id": "4699", "amount": "71.85"}, {"item_id": "1471", "amount": "-71.85"}],
+            "item_not_allowed",
+            "reversal_account_not_on_order_credit",
+        ),
+        # ...and it can never take back more than they debited there.
+        (
+            [{"item_id": "4699", "amount": "450.01"}, {"item_id": "1603", "amount": "-450.01"}],
+            "invalid_amount",
+            "reversal_exceeds_credited",
+        ),
+        (
+            [{"item_id": "4699", "amount": "-71.85"}, {"item_id": "1603", "amount": "71.85"}],
+            "invalid_amount",
+            "negative_tax_line",
+        ),
+        # A credit with a negative line is a pure reallocation onto tax: exactly zero in total...
+        (
+            [{"item_id": "4699", "amount": "71.85"}, {"item_id": "1603", "amount": "-100.00"}],
+            "invalid_amount",
+            "reallocation_total_not_zero",
+        ),
+        # ...and it never moves value between income accounts (packet review 2026-10-19, F1).
+        (
+            [
+                {"item_id": "4699", "amount": "71.85"},
+                {"item_id": "1603", "amount": "-450.00"},
+                {"item_id": "1471", "amount": "378.15"},
+            ],
+            "invalid_amount",
+            "reallocation_moves_only_to_tax",
+        ),
+        ([{"item_id": "4699", "amount": "71.85"}, {"item_id": "1603", "amount": "0"}], "invalid_amount", None),
+    ],
+)
+def test_a_zero_total_credit_only_reverses_what_the_orders_credits_posted(lines, code, reason):
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=lines, memo="x", **_refunded_credit_order())
+    assert exc.value.code == code
+    if reason:
+        assert exc.value.detail.get("reason") == reason
+
+
+def test_the_reversal_limit_is_what_the_credits_gl_debited_not_their_line_evidence():
+    """Packet review 2026-10-19 (F3, F4): line evidence can be duplicated or partly reversed, and an
+    item's account can change after the fact. The GL of the order's credits is the limit, by account."""
+    facts = _refunded_credit_order()
+    old, _ = facts["credits"][0]
+    old["line_evidence"]["lines"] *= 2  # duplicated evidence: 900.00 by lines
+    facts["credits"][0] = (
+        old,
+        {
+            "complete": True,
+            "rows": [
+                {"account": "119", "accountingbook": "1", "credit": "450.00"},
+                {"account": "783", "accountingbook": "1", "debit": "450.00"},
+                {"account": "783", "accountingbook": "1", "credit": "400.00"},
+                {"account": "774", "accountingbook": "1", "debit": "400.00"},
+            ],
+        },
+    )
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=ZERO_TOTAL, memo="x", **facts)  # 71.85 > the 50.00 net debit left on 783
+    assert (exc.value.code, exc.value.detail["reason"]) == ("invalid_amount", "reversal_exceeds_credited")
+    moved = _refunded_credit_order()
+    moved["items"]["1603"]["incomeAccount"] = {"id": "774"}  # the item now posts elsewhere
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=ZERO_TOTAL, memo="x", **moved)
+    assert (exc.value.code, exc.value.detail["reason"]) == ("item_not_allowed", "reversal_account_not_on_order_credit")
+
+
+def test_the_readback_counts_the_created_zero_total_credit_and_the_order_then_agrees():
+    facts = _refunded_credit_order()
+    created = {
+        "id": "16300000",
+        "total": "0.00",
+        "account": {"id": "119"},
+        "entity": {"id": "5658593"},
+        "subsidiary": {"id": "1"},
+        "currency": {"id": "1"},
+        "exchangeRate": "1.0",
+    }
+    gl = {
+        "complete": True,
+        "rows": [
+            {"account": "846", "accountingbook": "1", "debit": "71.85"},
+            {"account": "783", "accountingbook": "1", "credit": "71.85"},
+        ],
+    }
+    facts["credits"].append((created, gl))
+    booked, required = cc.booked_balance(**facts)
+    assert booked == required == {"gross": "3621.00", "net": "3042.85", "tax": "578.15"}
+
+
 # --- reads (fake NetSuite) ---------------------------------------------------------------------
 
 from contextlib import asynccontextmanager  # noqa: E402
@@ -302,7 +465,7 @@ def _netsuite(*, credits=(), named=(), graph_credits=()):
                 elif "IN ('CustInvc', 'CashSale')" in q:
                     rows = [{"id": 16029044}]
                 elif "nexttransactionlinelink" in q:
-                    rows = [{"id": int(c["id"])} for c in credits]
+                    rows = [{"id": int(c["id"])} for c in credits if c["apply"]["items"][0]["doc"]["id"] == "16029044"]
                 elif "tl.createdfrom = 16029044" in q:
                     rows = []
                 elif "t.memo LIKE" in q:
@@ -355,7 +518,7 @@ def _netsuite(*, credits=(), named=(), graph_credits=()):
     return Reader(), calls
 
 
-def _patch_reads(monkeypatch, reader, graph_ids=()):
+def _patch_reads(monkeypatch, reader, graph_ids=(), credit_refunds=None):
     case = SimpleNamespace(id=CASE, order_reference="R231821517", scope_json=SCOPE, latest_report_json={})
     review = {
         "configuration_status": "scoped_configuration_found",
@@ -389,7 +552,10 @@ def _patch_reads(monkeypatch, reader, graph_ids=()):
         return {**_facts()["source"], "business_entity": "Framework Inc"}
 
     async def refunds(reader, order_id, subsidiary, currency, *, order_reference):
-        return {"dependency_manifest": {"truncated": False, "transaction_ids": list(graph_ids)}}
+        return {
+            "credit_refunds": dict(credit_refunds or {}),
+            "dependency_manifest": {"truncated": False, "transaction_ids": list(graph_ids)},
+        }
 
     budgets = []
 
@@ -463,6 +629,29 @@ async def test_a_credit_naming_the_order_but_not_applied_to_its_invoice_stops_th
     with pytest.raises(cc.RefusalError) as exc:
         await cc.gather(db, "tenant", CASE, ["1471"])
     assert exc.value.code == "existing_credit_not_applied_to_invoice"
+
+
+@pytest.mark.asyncio
+async def test_a_credit_wholly_refunded_through_the_orders_verified_refund_counts(monkeypatch):
+    """A credit refunded to the customer (applied to a customer refund in the order's verified refund
+    graph, not to the invoice) is part of the order's posted balance, not a stray credit. The refund
+    reader proves the allocation per credit (packet review 2026-10-19, F2)."""
+    refunded = _credit("16200000", 674.73, applied_to="999", memo="R231821517 refund")
+    reader, _ = _netsuite(credits=[refunded], named=["16200000"])
+    db = _patch_reads(monkeypatch, reader, graph_ids=["16200000", "16200001"], credit_refunds={"16200000": "674.73"})
+    found, _ = await cc.gather(db, "tenant", CASE, ["1471"])
+    assert [d["id"] for d, _ in found["credits"]] == ["16200000"]
+
+
+@pytest.mark.asyncio
+async def test_a_credit_not_wholly_refunded_by_this_orders_refunds_still_stops_the_proposal(monkeypatch):
+    refunded = _credit("16200000", 674.73, applied_to="999", memo="R231821517 refund")
+    for allocated in ({}, {"16200000": "600.00"}):  # another order's refund; only partly refunded
+        reader, _ = _netsuite(credits=[refunded], named=["16200000"])
+        db = _patch_reads(monkeypatch, reader, graph_ids=["16200000"], credit_refunds=allocated)
+        with pytest.raises(cc.RefusalError) as exc:
+            await cc.gather(db, "tenant", CASE, ["1471"])
+        assert exc.value.code == "existing_credit_not_applied_to_invoice"
 
 
 # --- readback ---------------------------------------------------------------------------------
@@ -615,6 +804,13 @@ async def test_a_refusal_returns_its_code_figures_and_guidance(monkeypatch):
     assert "NetSuite is right" in out["guidance"]
     bad = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES, "record_id": "1"})
     assert bad["success"] is False
+
+    async def reallocation(*a, **k):
+        raise cc.RefusalError("invalid_amount", {"reason": "reallocation_moves_only_to_tax"})
+
+    monkeypatch.setattr(cc, "propose", reallocation)
+    out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
+    assert "tax-refund item" in out["guidance"]  # the reason's guidance, not the generic one
 
 
 def test_the_accounting_playbook_routes_an_uncovered_over_posting_to_the_new_credit():

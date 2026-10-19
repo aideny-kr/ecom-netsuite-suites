@@ -479,7 +479,9 @@ _REALLOCATION_GUIDANCE = {
     "gap; do not substitute an item or propose another document.",
     "no_difference": "The posted tax already equals the source; nothing to reallocate.",
     "gross_not_reconciled": "Gross does not reconcile, so this is not a reallocation of an existing credit.",
-    "period_locked": "The credit's period is locked; the correction needs the period policy, not this tool.",
+    "period_locked": "The credit's period is locked, so it cannot be edited. Make the same correction in the open "
+    "period with a zero-total credit from the credit tool: one line on the configured tax-refund item for the tax "
+    "part and an equal negative line on this credit's item. Leave this credit, its refund and the invoice as they are.",
     "foreign_currency_unsupported": "Foreign-currency credits are not supported by this correction.",
 }
 
@@ -581,8 +583,16 @@ _CREDIT_GUIDANCE = {
     "no_difference": "Invoices less credits already equal the source: NetSuite is right for this order. Explain it; "
     "do not propose a credit.",
     "netsuite_below_source": "NetSuite posts less than the source; a credit cannot fix that. Explain the gap.",
-    "existing_credit_not_applied_to_invoice": "A credit naming this order is not wholly applied to its invoice. "
-    "Report it for a person to decide; never create a second credit beside it.",
+    "existing_credit_not_applied_to_invoice": "A credit naming this order is neither wholly applied to its invoice "
+    "nor refunded through the order's own refunds. Report it for a person to decide; never create a second credit "
+    "beside it.",
+    "reversal_account_not_on_order_credit": "A negative line only takes back what this order's existing credits "
+    "posted to that account: use the item of the credit being corrected.",
+    "reversal_exceeds_credited": "A negative line cannot take back more than the order's credits posted to that "
+    "account.",
+    "reallocation_moves_only_to_tax": "A credit with a negative line only moves value onto the tax-refund item: its "
+    "positive lines are tax lines.",
+    "reallocation_total_not_zero": "A credit with a negative line must add up to exactly zero.",
     "item_not_allowed": "Use a non-inventory or Sales Adjustments item, and only the configured tax-refund item for "
     "tax (detail names the reason).",
     "tax_refund_items_not_configured": "This subsidiary has no configured tax-refund item. Report the configuration "
@@ -640,7 +650,9 @@ async def execute_propose_credit(params: dict, **kwargs) -> dict:
                 "success": False,
                 "refused": exc.code,
                 "detail": exc.detail,
-                "guidance": _CREDIT_GUIDANCE.get(
+                # The detailed reason, when it has its own guidance, says more than the code.
+                "guidance": _CREDIT_GUIDANCE.get(str((exc.detail or {}).get("reason")))
+                or _CREDIT_GUIDANCE.get(
                     exc.code, "Resolve the stated evidence gap; do not switch to another write path."
                 ),
                 "financial_writes": 0,

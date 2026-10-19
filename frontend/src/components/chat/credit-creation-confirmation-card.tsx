@@ -24,6 +24,8 @@ export function CreditCreationConfirmationCard({
   const blocked = Boolean(data.invariant_errors?.length || data.unfillable_line_fields?.length || data.editable_slots?.length);
   const currency = typeof p.source.currency === "string" ? p.source.currency : "Currency unknown";
   const total = p.expected_after.total;
+  // A zero-total credit corrects which accounts a locked-period credit hit; it is applied to nothing.
+  const zeroTotal = Number(total) === 0;
   const state = awaitingGroup
     ? groupState === "executing" ? "Awaiting result" : "Not submitted"
     : verified ? "Executed · verified" : {
@@ -44,7 +46,9 @@ export function CreditCreationConfirmationCard({
       <div className="space-y-4 p-5 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h3 className="text-xl font-semibold tracking-tight">{verified ? `Credit ${creditNumber ?? ""} applied`.trim() : "Create and apply a credit"}</h3>
+            <h3 className="text-xl font-semibold tracking-tight">{verified
+              ? `Credit ${creditNumber ?? ""} ${zeroTotal ? "posted" : "applied"}`.replace("  ", " ")
+              : zeroTotal ? "Create a zero-total correction credit" : "Create and apply a credit"}</h3>
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
               Order {p.order_reference} · Invoice {String(p.before.tranId ?? p.invoice_id)} (#{p.invoice_id})<br />
               {currency} · NetSuite {data.target_environment?.toLowerCase() || "environment unverified"} {p.scope.netsuite_account_id}
@@ -92,9 +96,11 @@ export function CreditCreationConfirmationCard({
               <div key={`d-${account}`} className="contents"><dt>Debit</dt><dd>Account {account} · {creditAmount(amount, currency)}</dd></div>
             ))}
             {Object.entries(p.expected_ledger.credit).map(([account, amount]) => (
-              <div key={`c-${account}`} className="contents"><dt>Credit</dt><dd>Accounts Receivable {account} · {creditAmount(amount, currency)}</dd></div>
+              <div key={`c-${account}`} className="contents"><dt>Credit</dt><dd>{account === p.ar_account ? "Accounts Receivable " : "Account "}{account} · {creditAmount(amount, currency)}</dd></div>
             ))}
-            <dt>Apply only to</dt><dd>Invoice {String(p.before.tranId ?? p.invoice_id)} · {creditAmount(total, currency)}</dd>
+            {zeroTotal
+              ? <><dt>Applied to</dt><dd>Nothing. The total is zero, so the customer&apos;s balance and the invoice are unchanged.</dd></>
+              : <><dt>Apply only to</dt><dd>Invoice {String(p.before.tranId ?? p.invoice_id)} · {creditAmount(total, currency)}</dd></>}
             <dt>Posting date / period</dt><dd>{String(p.proposed_fields.tranDate ?? "")} · {String(p.period.periodName ?? p.period.id ?? "")}</dd>
           </dl>
           <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{p.approval_basis}</p>
@@ -110,10 +116,10 @@ export function CreditCreationConfirmationCard({
       </div>
       {!readOnly && pending && (
         <div className="space-y-4 border-t bg-muted/20 p-5 sm:px-6">
-          <label className="flex items-start gap-2 text-xs leading-relaxed"><input type="checkbox" className="mt-0.5" checked={reviewed} disabled={disabled || blocked} onChange={e => setReviewed(e.target.checked)} />I reviewed the credit, its accounting impact and the invoice application.</label>
+          <label className="flex items-start gap-2 text-xs leading-relaxed"><input type="checkbox" className="mt-0.5" checked={reviewed} disabled={disabled || blocked} onChange={e => setReviewed(e.target.checked)} />{zeroTotal ? "I reviewed the credit and its accounting impact." : "I reviewed the credit, its accounting impact and the invoice application."}</label>
           <div className="flex flex-wrap justify-end gap-2">
             <button className="rounded-lg border px-4 py-2 text-xs font-medium disabled:opacity-50" disabled={disabled} onClick={onReject}>Reject</button>
-            <button className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50" disabled={disabled || blocked || !reviewed} onClick={onConfirm}>Approve {creditAmount(total, currency)} credit and application</button>
+            <button className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50" disabled={disabled || blocked || !reviewed} onClick={onConfirm}>{zeroTotal ? "Approve zero-total correction credit" : `Approve ${creditAmount(total, currency)} credit and application`}</button>
           </div>
         </div>
       )}

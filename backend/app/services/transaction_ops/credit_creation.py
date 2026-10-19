@@ -18,7 +18,6 @@ from app.services.transaction_ops.credit_line_reallocation import (
     RefusalError,
     _add,
     _adjustments,
-    _amount,
     _balance,
     _dec,
     _posted,
@@ -104,8 +103,23 @@ def facts(
             {"booked": _balance(*before, precision), "required": _balance(*required, precision)},
         )
     location = _ref(invoice, "location") or profile.get("correction_location_id")
+    # What the order's existing credits debited, net, to each non-tax account: the most a negative
+    # line may take back there. Read from their GL, which binds a reversal to the account the money
+    # actually went to; line evidence can repeat or reverse itself, and an item's account can change
+    # later (packet review 2026-10-19, F3/F4).
+    credited = {}
+    for document, gl in credits:
+        receivable = _ref(document, "account")
+        for row in (gl or {}).get("rows") or []:
+            account = str(row.get("account"))
+            if account == receivable or account in taxed:
+                continue
+            net = (_dec(row.get("debit")) or Decimal(0)) - (_dec(row.get("credit")) or Decimal(0))
+            credited[account] = credited.get(account, Decimal(0)) + net
+    credited = {account: value for account, value in credited.items() if value > 0}
     return {
         "taxed": taxed,
+        "credited": credited,
         "invoice": invoice,
         "before": before,
         "required": required,
@@ -115,15 +129,32 @@ def facts(
     }
 
 
-def _lines(lines, profile, items, taxed, precision, account_types):
+def _signed_amount(value, precision):
+    """A non-zero amount at currency precision, from a string or int only (never a binary float)."""
+    number = _dec(value) if isinstance(value, str | int) and not isinstance(value, bool) else None
+    if number is None or number == 0 or number != number.quantize(Decimal(1).scaleb(-precision)):
+        raise RefusalError("invalid_amount", {"amount": str(value)})
+    return number
+
+
+def _lines(lines, profile, items, taxed, precision, account_types, credited=None):
+    """The agent's lines, checked line by line.
+
+    A negative line takes back part of what one of the order's existing credits posted to an
+    income account -- the open-period half of a reallocation whose original credit sits in a locked
+    period (R166593377, R022012488; staging 2026-10-18). So its item must be one those credits used,
+    it can never reverse more than they gave, and tax is only ever reversed, never charged.
+    """
     configured = {str(k): str(v) for k, v in (profile.get("tax_item_accounts") or {}).items()}
+    credited = credited or {}
+    reversed_by_account = {}
     if isinstance(lines, list) and len(lines) > MAX_CREDIT_LINES:
         raise RefusalError("too_many_lines", {"max": MAX_CREDIT_LINES})
     parsed = []
     for raw in lines if isinstance(lines, list) else []:
         if not isinstance(raw, dict):
             raise RefusalError("invalid_amount", {"reason": "line_not_an_object"})
-        amount = _amount(raw.get("amount"), precision)
+        amount = _signed_amount(raw.get("amount"), precision)
         item_id = str(raw.get("item_id") or "")
         item = items.get(item_id) or {}
         if not item:
@@ -145,9 +176,43 @@ def _lines(lines, profile, items, taxed, precision, account_types):
             # A non-tax line must post to an income account; an unknown or liability type is
             # never assumed to be a sales adjustment (smart resolver, review round 1).
             raise RefusalError("account_not_supported", {"item_id": item_id, "account": account, "type": kind})
+        if amount < 0:
+            if account in taxed:
+                raise RefusalError("invalid_amount", {"reason": "negative_tax_line", "item_id": item_id})
+            if account not in credited:
+                raise RefusalError(
+                    "item_not_allowed",
+                    {"item_id": item_id, "account": account, "reason": "reversal_account_not_on_order_credit"},
+                )
+            reversed_by_account[account] = reversed_by_account.get(account, Decimal(0)) - amount
+            if reversed_by_account[account] > credited[account]:
+                raise RefusalError(
+                    "invalid_amount",
+                    {
+                        "reason": "reversal_exceeds_credited",
+                        "account": account,
+                        "credited": _q(credited[account], precision),
+                    },
+                )
         parsed.append({"item_id": item_id, "amount": amount, "account": account})
     if not parsed:
         raise RefusalError("invalid_amount", {"reason": "no_lines"})
+    if any(line["amount"] < 0 for line in parsed):
+        # A credit with a negative line is a pure reallocation onto tax: it only moves value from
+        # income the order's credits posted to the tax accounts, and adds up to exactly zero. It
+        # never moves value between income accounts, which the outcome check (net only in total)
+        # cannot see (packet review 2026-10-19, F1).
+        if any(line["amount"] > 0 and line["account"] not in taxed for line in parsed):
+            raise RefusalError("invalid_amount", {"reason": "reallocation_moves_only_to_tax"})
+        if sum((line["amount"] for line in parsed), Decimal(0)) != 0:
+            raise RefusalError("invalid_amount", {"reason": "reallocation_total_not_zero"})
+    signs = {}
+    for line in parsed:
+        signs.setdefault(line["account"], set()).add(line["amount"] > 0)
+    if any(len(seen) > 1 for seen in signs.values()):
+        # One account both debited and credited by the same credit nets out on the ledger the
+        # readback compares; refuse rather than approve a card whose ledger cannot be pinned.
+        raise RefusalError("invalid_amount", {"reason": "account_debited_and_credited"})
     return parsed
 
 
@@ -155,8 +220,18 @@ def assess(*, lines, memo, posting_date, **order):
     """Accept the agent's lines only if the order then equals the source; return the exact card data."""
     precision = order.get("precision", 2)
     found = facts(posting_date=posting_date, **order)
-    parsed = _lines(lines, order["profile"], order["items"], found["taxed"], precision, order.get("account_types"))
+    parsed = _lines(
+        lines,
+        order["profile"],
+        order["items"],
+        found["taxed"],
+        precision,
+        order.get("account_types"),
+        found["credited"],
+    )
     total = sum((line["amount"] for line in parsed), Decimal(0))
+    if total < 0:
+        raise RefusalError("invalid_amount", {"reason": "negative_total", "total": _q(total, precision)})
     new_tax = sum((line["amount"] for line in parsed if line["account"] in found["taxed"]), Decimal(0))
     by_account = {}
     for line in parsed:
@@ -180,7 +255,7 @@ def assess(*, lines, memo, posting_date, **order):
         )
     invoice = found["invoice"]
     remaining = _dec(invoice.get("amountRemaining"))
-    if remaining is None or remaining < total:
+    if total > 0 and (remaining is None or remaining < total):
         raise RefusalError(
             "invoice_remaining_too_small",
             {"invoice_remaining": invoice.get("amountRemaining"), "credit": _q(total, precision)},
@@ -190,14 +265,18 @@ def assess(*, lines, memo, posting_date, **order):
     reference = order["source"]["number"]
     text = " ".join(str(memo or "").split())
     memo_text = text if text.startswith(reference) else f"{reference} {text}".strip()
-    debit = {}
+    by_line_account = {}
     wire = []
     for line in parsed:
         amount = _q(line["amount"], precision)
         wire.append(
             {"item": {"id": line["item_id"]}, "quantity": 1, "rate": amount, "amount": amount, "isTaxable": False}
         )
-        debit[line["account"]] = debit.get(line["account"], Decimal(0)) + line["amount"]
+        by_line_account[line["account"]] = by_line_account.get(line["account"], Decimal(0)) + line["amount"]
+    # A positive line debits its account and a negative one credits it; AR takes the total, and a
+    # zero-total credit posts nothing to AR at all.
+    debit = {a: v for a, v in by_line_account.items() if v > 0}
+    credit_side = {a: -v for a, v in by_line_account.items() if v < 0}
     ar = _ref(invoice, "account")
     proposed_fields = {
         "entity": {"id": _ref(invoice, "entity")},
@@ -211,8 +290,11 @@ def assess(*, lines, memo, posting_date, **order):
         "autoApply": False,
         "toBeEmailed": False,
         "item": {"items": wire},
-        "apply": {"items": [{"doc": {"id": str(invoice["id"])}, "apply": True, "amount": _q(total, precision)}]},
     }
+    if total > 0:
+        proposed_fields["apply"] = {
+            "items": [{"doc": {"id": str(invoice["id"])}, "apply": True, "amount": _q(total, precision)}]
+        }
     if _ref(invoice, "department"):
         proposed_fields["department"] = {"id": _ref(invoice, "department")}
     return {
@@ -225,7 +307,10 @@ def assess(*, lines, memo, posting_date, **order):
         },
         "expected_ledger": {
             "debit": {account: _q(value, precision) for account, value in sorted(debit.items())},
-            "credit": {ar: _q(total, precision)},
+            "credit": {
+                **{account: _q(value, precision) for account, value in sorted(credit_side.items())},
+                **({ar: _q(total, precision)} if total > 0 else {}),
+            },
         },
         "balance": {
             "before": _balance(*found["before"], precision),
@@ -437,6 +522,9 @@ async def gather(db, tenant_id, case_id, item_ids, *, reserve=0):
         credit_ids = sorted(set(applied) | set(created) | set(named) | set(graph_credits), key=int)
         if len(credit_ids) > MAX_CREDITS:
             raise RefusalError("evidence_incomplete", {"reason": "too_many_credits", "credits": len(credit_ids)})
+        # Credits refunded to the customer: what this order's refunds paid out of each credit, as the
+        # refund reader proved it (owned allocations only; R166593377: CM11639 -> refund 15778034).
+        refunded = {str(k): _dec(v) or Decimal(0) for k, v in (graph.get("credit_refunds") or {}).items()}
         credits = []
         for ident in credit_ids:
             raw = await reader.request("GET", f"/record/v1/creditMemo/{ident}", params={"expandSubResources": "true"})
@@ -452,9 +540,12 @@ async def gather(db, tenant_id, case_id, item_ids, *, reserve=0):
             )
             if str(doc.get("id")) != ident or problems:
                 raise RefusalError("evidence_incomplete", {"reason": "credit_unreadable", "credit": ident})
-            if _dec(doc.get("unapplied")) != 0 or on_invoice != _dec(doc.get("total")):
-                # A credit naming this order that is not wholly applied to its invoice: another
-                # treatment (or a person) decides it, never a second credit beside it.
+            if _dec(doc.get("unapplied")) != 0 or on_invoice + refunded.get(ident, Decimal(0)) != _dec(
+                doc.get("total")
+            ):
+                # A credit naming this order that is not wholly applied to its invoice or refunded
+                # through the order's own refunds: another treatment (or a person) decides it, never
+                # a second credit beside it.
                 raise RefusalError(
                     "existing_credit_not_applied_to_invoice", {"credit": ident, "tranId": doc.get("tranId")}
                 )
@@ -681,9 +772,14 @@ def _proposal(tenant_id, found, context, result, lines, memo, reason):
             "tax_account": ",".join(sorted(_tax_accounts(found["profile"]))),
             "reason": str(reason or "")[:500],
             "approval_basis": (
-                f"Create a credit memo for {result['expected_after']['total']} {source.get('currency')} "
-                f"({lines_text}) and apply it to invoice {invoice.get('tranId') or invoice['id']}. "
-                f"Posted order balance after: net {balance['after']['net']}, tax {balance['after']['tax']}, "
+                (
+                    f"Create a zero-total credit memo ({lines_text}) in the open period. It moves the amounts "
+                    "between the listed items' accounts and is applied to nothing; AR is unchanged. "
+                    if Decimal(result["expected_after"]["total"]) == 0
+                    else f"Create a credit memo for {result['expected_after']['total']} {source.get('currency')} "
+                    f"({lines_text}) and apply it to invoice {invoice.get('tranId') or invoice['id']}. "
+                )
+                + f"Posted order balance after: net {balance['after']['net']}, tax {balance['after']['tax']}, "
                 "which equals the finalized source. The items and amounts were chosen by the assistant from "
                 "evidence; the server verified the outcome. The invoice, its existing credits and the sales "
                 "order are not changed. The credit, its application and GL are re-read after execution."

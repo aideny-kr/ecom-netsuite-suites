@@ -420,6 +420,10 @@ async def collect_refunds(
         raise ValueError("refund_allocation_ambiguous")
 
     total, included, amounts = Decimal(0), [], {}
+    # What this order's refunds paid out of each of its own credit memos. Only an allocation the
+    # graph proved owned counts, so a refund that also pays another order's credit never makes
+    # that credit this order's (packet review 2026-10-19, F2).
+    credit_refunds = defaultdict(Decimal)
     application_documents = set()
     for identifier in sorted(set(allocations) | cash_refunds, key=int):
         metadata = nodes[identifier]
@@ -457,6 +461,8 @@ async def collect_refunds(
                 if doc in allocations[identifier]:
                     this_order += value
                     matched_docs.add(doc)
+                    if nodes[doc]["type"] == "CustCred":
+                        credit_refunds[doc] += value
             if applied != amount or matched_docs != allocations[identifier]:
                 raise ValueError("refund_application_changed")
             amount = this_order
@@ -502,6 +508,7 @@ async def collect_refunds(
         "request_links": request_links,
         "tax_adjustments": adjustments,
         "invoice_credits": invoice_credits,
+        "credit_refunds": {doc: str(value) for doc, value in sorted(credit_refunds.items(), key=lambda x: int(x[0]))},
         # Retain every observed participant, including voided refunds and
         # parents outside the owned set. They can invalidate the proof later.
         # This inventories this read's inputs; it is not a change-feed watermark.
