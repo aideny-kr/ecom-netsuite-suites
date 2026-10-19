@@ -407,3 +407,68 @@ def test_netsuite_only_lines_are_listed_by_key():
     report["targets"][0]["lines"].append({"key": "line:999", "quantity": "1.0", "net": "5.00"})
     extra = [line for line in build(report=report)["lines"] if line.get("netsuite_only")]
     assert extra == [{"netsuite_only": "line:999", "netsuite": {"qty": "1.0", "net": "5.00", "tax": None}}]
+
+
+# --- Stripe: what was actually charged and refunded (head-to-head, 2026-10-18) ----------
+
+STRIPE = [
+    {"type": "charge", "amount": "2901.39", "fee": "0.00", "currency": "USD", "date": "2026-08-12", "id": "ch_1"},
+    {"type": "refund", "amount": "-2901.38", "fee": "0.00", "currency": "USD", "date": "2026-09-03", "id": "re_1"},
+]
+
+
+def test_stripe_lines_are_copied_as_saved():
+    """R072103456: NetSuite refunded 2,901.39 and Solidus 2,901.38. Stripe's own refund line (the
+    cash that moved) settles which is right; Claude reasoned its way there, the file can show it."""
+    result = build(stripe=deepcopy(STRIPE))
+    assert result["stripe"] == {"available": True, "lines": STRIPE}
+
+
+def test_stripe_is_named_unavailable_when_not_read_never_empty():
+    result = build()
+    assert result["stripe"] == {"available": False, "reason": "no saved Stripe lines for this order"}
+    assert build(stripe=[])["stripe"] == {"available": False, "reason": "no saved Stripe lines for this order"}
+
+
+def test_stripe_lines_are_bounded():
+    result = build(stripe=[dict(STRIPE[0], id=f"ch_{i}") for i in range(case_file.MAX_PAYMENTS + 5)])
+    assert len(result["stripe"]["lines"]) == case_file.MAX_PAYMENTS and result["truncated"] is True
+
+
+async def test_open_case_lists_only_this_orders_stripe_lines(world, tenant_b):  # noqa: F811
+    from decimal import Decimal
+
+    from app.models.canonical import PayoutLine
+
+    await world.case("R000000174")
+
+    def line(tenant, ident, kind, amount, order):
+        return PayoutLine(
+            tenant_id=tenant,
+            dedupe_key=ident,
+            source="stripe",
+            source_id=ident,
+            line_type=kind,
+            amount=Decimal(amount),
+            fee=Decimal("0"),
+            net=Decimal(amount),
+            currency="USD",
+            description=f"Framework Marketplace Order ID: {order}-XC8PUK5B",
+            related_order_id=ident,
+        )
+
+    world.db.add_all(
+        [
+            line(world.tenant.id, "ch_174", "charge", "100.00", "R000000174"),
+            line(world.tenant.id, "re_174", "refund", "-4.82", "R000000174"),
+            line(world.tenant.id, "ch_1745", "charge", "9.00", "R0000001745"),  # a longer number, not this order
+            line(tenant_b.id, "ch_b", "charge", "1.00", "R000000174"),  # another tenant
+        ]
+    )
+    await world.db.flush()
+    result = await case_file.open_case(world.db, world.tenant.id, order_reference="R000000174")
+    assert result["stripe"]["available"] is True
+    assert sorted((x["id"], x["type"], x["amount"]) for x in result["stripe"]["lines"]) == [
+        ("ch_174", "charge", "100.00"),
+        ("re_174", "refund", "-4.82"),
+    ]

@@ -139,6 +139,8 @@ def summarize(evidence):
             else difference(source.get("tax_total"), invoice.get("taxTotal")),
         },
         "posting_balance": posting or None,
+        # The cash Stripe actually moved for the order (bounded at collection).
+        "stripe": sections.get("stripe"),
         "solution_status": (evidence.get("resolution_assessment") or {}).get("status"),
         "reasons": reasons,
         "record_links": evidence.get("record_links") or [],
@@ -311,7 +313,7 @@ async def read_observation(db, tenant_id, actor_id, case_id, params, correlation
         "documents": document_section,
         "applications": {
             k: sections.get(k)
-            for k in ("deposits", "invoice_applications", "historical_refunds", "related_refund_documents")
+            for k in ("deposits", "invoice_applications", "historical_refunds", "related_refund_documents", "stripe")
         },
         "assessment": {
             **(evidence.get("resolution_assessment") or {}),
