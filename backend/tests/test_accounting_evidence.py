@@ -545,3 +545,35 @@ async def test_richer_source_observations_do_not_change_existing_approval_snapsh
     assert rich == {**old_snapshot, **detail}
     assert {k: v for k, v in rich.items() if k not in tax_correction.ACCOUNTING_DETAIL_SOURCE_FIELDS} == old_snapshot
     assert read.await_count == 2
+
+
+async def test_the_orders_saved_stripe_lines_are_a_section(native, monkeypatch):
+    """Head-to-head 2026-10-18 (R072103456): the cash Stripe actually moved settles a refund dispute."""
+    seen = []
+
+    async def lines(db, tenant_id, reference):
+        seen.append((tenant_id, reference))
+        return [
+            {
+                "type": "refund",
+                "amount": "-2901.38",
+                "fee": "0.00",
+                "currency": "USD",
+                "date": "2026-09-03",
+                "id": "re_1",
+            }
+        ]
+
+    monkeypatch.setattr("app.services.transaction_ops.stripe_evidence.order_lines", lines)
+    result = await collect()
+    assert seen == [("tenant", "R123")]
+    assert result["sections"]["stripe"] == {
+        "available": True,
+        "lines": (await lines(None, "tenant", "R123")),
+        "truncated": False,
+    }
+
+
+async def test_no_saved_stripe_lines_is_said_not_left_empty(native):
+    result = await collect()  # "R123" is not an order number the Stripe lookup accepts
+    assert result["sections"]["stripe"] == {"available": False, "reason": "no saved Stripe lines for this order"}

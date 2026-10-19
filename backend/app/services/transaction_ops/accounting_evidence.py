@@ -11,6 +11,8 @@ from app.services.transaction_ops.netsuite_reader import (
     authenticated_reader,
 )
 
+MAX_STRIPE_LINES = 10
+
 
 def _ref(value):
     return _id(value.get("id")) if isinstance(value, dict) else _id(value)
@@ -429,6 +431,14 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
             elif deposit is not None:
                 result["blockers"].append(f"deposit:{identifier}:origin_conflict")
         result["native_api_calls"] = reader.calls
+    from app.services.transaction_ops.stripe_evidence import order_lines
+
+    stripe = await order_lines(db, tenant_id, report.get("order_reference"))
+    result["sections"]["stripe"] = (
+        {"available": True, "lines": stripe[:MAX_STRIPE_LINES], "truncated": len(stripe) > MAX_STRIPE_LINES}
+        if stripe
+        else {"available": False, "reason": "no saved Stripe lines for this order"}
+    )
     result["blockers"].extend(
         [
             "all_deposit_applications_and_reversals_not_verified",
