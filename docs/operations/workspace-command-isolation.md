@@ -66,11 +66,38 @@ proof of external deployment.
 Every exit, timeout, cancellation and uncertain create response attempts
 forced deletion by a fresh name chosen before creation, including anonymous
 volumes. Creation/execution is not retried. Cleanup failure is an error, never
-a successful check. A killed worker can leave a stopped container after the
-supervisor deadline; operators must inspect the
-`suitestudio.workspace-command=1` label and remove confirmed stale resources.
-Do not delete another active run. Automatic crash-residue reconciliation and
-production broker provisioning are not certified by this change.
-An ambiguous create can also finish after a deletion returned 404, leaving an
-unstarted container. The failed run is never treated as successful or retried;
-the same pending residue-reconciliation requirement covers this case.
+a successful check. A killed worker can leave stopped metadata after the
+supervisor deadline; an ambiguous create can finish after deletion returned
+404 and leave unstarted metadata. Neither case retries execution.
+
+## Expired container reconciliation
+
+Before creation, the broker assigns immutable versioned lease labels: a fresh
+lease UUID, expiry covering the full command budget plus 30 seconds, and the
+existing workspace run, tenant and workspace UUIDs. These labels survive a
+worker crash without storing source or credentials. Direct diagnostic calls
+are explicitly labeled diagnostic rather than claiming database run identity.
+
+Each command sweeps expired leases before creating more work. Operators can
+also run the same bounded sweep from the trusted broker environment:
+
+```sh
+python -m app.services.workspace.command_sandbox --socket /var/run/docker.sock
+```
+
+The sweep lists only versioned broker leases, inspects each immutable container
+ID, checks the name/lease/identity/image/expiry, then force-removes only expired
+containers by ID, including volumes. Unexpired, legacy and unrecognized
+resources are retained. It never starts a container, recreates a run or retries
+a target action. Inventory over 100 containers, daemon failures and cleanup
+failures return an error; new commands do not launch after a failed preflight
+sweep. The sweep has a 30-second total bound and returns counts only. A later
+sweep reclaims a create that finished after an earlier delete returned 404.
+
+Before activation, provision and verify a periodic sweep in the trusted broker
+environment so residue is reclaimed even when no new commands arrive. No
+production timer or broker runtime is provisioned by this code change. Verify
+the actual socket/image, crash and late-create recovery, retained active and
+unrelated containers, zero residue, and operator error reporting under the
+normal infrastructure release gates. The separate credential executor and
+authorized target acceptance remain required.

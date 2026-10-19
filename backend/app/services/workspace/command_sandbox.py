@@ -8,13 +8,16 @@ absent runtime fails closed. This does not enable SuiteCloud authorization.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import re
 import signal
 import stat
 import tempfile
+import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -22,10 +25,129 @@ import httpx
 MAX_OUTPUT = 256 * 1024
 MAX_WIRE_OUTPUT = MAX_OUTPUT * 18 + 8192
 MAX_INPUT = 50 * 1024 * 1024
+LEASE_LABEL = "suitestudio.workspace-command"
+current_command_scope = contextvars.ContextVar("workspace_command_scope", default=None)
 
 
 class CommandSandboxError(Exception):
     """Safe runtime diagnostic; never expose Docker responses or host paths."""
+
+
+@contextmanager
+def command_run_scope(run_id: uuid.UUID, tenant_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Correlate Docker metadata with an existing run without copying content."""
+    scope = (run_id, tenant_id, workspace_id)
+    if not all(isinstance(value, uuid.UUID) for value in scope):
+        raise CommandSandboxError("Command sandbox run identity is invalid")
+    token = current_command_scope.set(scope)
+    try:
+        yield
+    finally:
+        current_command_scope.reset(token)
+
+
+def _lease_labels(lease: str, timeout: int) -> dict[str, str]:
+    labels = {
+        LEASE_LABEL: "1",
+        LEASE_LABEL + ".protocol": "1",
+        LEASE_LABEL + ".lease": lease,
+        # Include the whole create/attach budget plus cleanup grace. An
+        # ambiguous create finishing later is still discoverable by expiry.
+        LEASE_LABEL + ".expires": str(int(time.time()) + timeout + 30),
+        LEASE_LABEL + ".scope": "diagnostic",
+    }
+    scope = current_command_scope.get()
+    if scope is not None:
+        labels[LEASE_LABEL + ".scope"] = "workspace"
+        for name, value in zip(("run", "tenant", "workspace"), scope):
+            labels[LEASE_LABEL + "." + name] = str(value)
+    return labels
+
+
+def _expired_lease(metadata: dict, container_id: str, now: int) -> bool:
+    """Inspect ownership again; never delete by a reusable container name."""
+    try:
+        config = metadata["Config"]
+        labels = config["Labels"]
+        lease, expires = labels[LEASE_LABEL + ".lease"], labels[LEASE_LABEL + ".expires"]
+        scope = labels[LEASE_LABEL + ".scope"]
+        if (
+            metadata["Id"] != container_id
+            or labels.get(LEASE_LABEL) != "1"
+            or labels.get(LEASE_LABEL + ".protocol") != "1"
+            or not re.fullmatch(r"[a-f0-9]{32}", lease)
+            or metadata["Name"] != "/ss-command-" + lease
+            or not re.fullmatch(r"[0-9]{1,11}", expires)
+            or not re.fullmatch(r"sha256:[a-f0-9]{64}", config["Image"])
+            or scope not in ("workspace", "diagnostic")
+        ):
+            return False
+        if scope == "workspace":
+            for name in ("run", "tenant", "workspace"):
+                value = labels[LEASE_LABEL + "." + name]
+                if str(uuid.UUID(value)) != value:
+                    return False
+        return int(expires) <= now
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
+async def _reconcile_expired(client: httpx.AsyncClient, *, now: int, limit: int) -> dict[str, int]:
+    response = await client.get(
+        "/containers/json",
+        params={
+            "all": 1,
+            "limit": limit + 1,
+            "filters": json.dumps({"label": [LEASE_LABEL + "=1", LEASE_LABEL + ".protocol=1"]}),
+        },
+    )
+    response.raise_for_status()
+    entries = response.json()
+    if not isinstance(entries, list):
+        raise CommandSandboxError("Command sandbox reconciliation returned an invalid inventory")
+    if len(entries) > limit:
+        raise CommandSandboxError(
+            "Command sandbox reconciliation inventory exceeds limit; operator inspection required"
+        )
+    result = {"scanned": len(entries), "removed": 0, "retained": 0}
+    for entry in entries:
+        container_id = entry.get("Id") if isinstance(entry, dict) else None
+        if not isinstance(container_id, str) or not re.fullmatch(r"[a-f0-9]{64}", container_id):
+            raise CommandSandboxError("Command sandbox reconciliation returned an invalid container identity")
+        response = await client.get(f"/containers/{container_id}/json")
+        if response.status_code == 404:
+            continue
+        response.raise_for_status()
+        if not _expired_lease(response.json(), container_id, now):
+            result["retained"] += 1
+            continue
+        response = await client.delete(f"/containers/{container_id}", params={"force": 1, "v": 1})
+        if response.status_code not in (204, 404):
+            raise CommandSandboxError("Command sandbox reconciliation cleanup failed; operator inspection required")
+        result["removed"] += 1
+    return result
+
+
+async def reconcile_expired_commands(*, socket: str, now: int | None = None, limit: int = 100) -> dict[str, int]:
+    """Bounded operator/broker sweep. Never creates, starts or retries a run.
+
+    Uses Docker's immutable IDs and versioned leases only. Legacy/unrecognized
+    containers are retained for inspection. Periodic operator provisioning is
+    still required to reclaim metadata when no new commands arrive.
+    """
+    if not Path(socket).is_absolute() or not 1 <= limit <= 100:
+        raise CommandSandboxError("Command sandbox reconciliation configuration is invalid")
+    try:
+        async with asyncio.timeout(30):
+            async with httpx.AsyncClient(
+                transport=httpx.AsyncHTTPTransport(uds=socket),
+                base_url="http://docker/v1.45",
+                timeout=10,
+                trust_env=False,
+            ) as client:
+                return await _reconcile_expired(client, now=int(time.time()) if now is None else now, limit=limit)
+    except (httpx.HTTPError, TimeoutError, ValueError, TypeError):
+        raise CommandSandboxError("Command sandbox reconciliation unavailable; operator inspection required") from None
 
 
 def _snapshot(cwd: str) -> bytes:
@@ -244,7 +366,8 @@ async def run_isolated_command(
         payload = _snapshot(cwd)
     except OSError:
         raise CommandSandboxError("Command sandbox project cannot be read") from None
-    name = "ss-command-" + uuid.uuid4().hex
+    lease = uuid.uuid4().hex
+    name = "ss-command-" + lease
     transport = httpx.AsyncHTTPTransport(uds=socket)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://docker/v1.45", timeout=10, trust_env=False
@@ -259,14 +382,25 @@ async def run_isolated_command(
                 raise CommandSandboxError("Command sandbox image cannot declare persistent volumes")
         except httpx.HTTPError:
             raise CommandSandboxError("Command sandbox immutable image is unavailable") from None
+        # Sweep before issuing any new create. A failed sweep must not launch
+        # more work while cleanup is unavailable or the inventory is over budget.
+        try:
+            async with asyncio.timeout(30):
+                await _reconcile_expired(client, now=int(time.time()), limit=100)
+        except (httpx.HTTPError, TimeoutError, ValueError, TypeError):
+            raise CommandSandboxError(
+                "Command sandbox reconciliation unavailable; operator inspection required"
+            ) from None
         # A generated name is known before create: even an ambiguous creation
         # response can be removed without repeating creation or execution.
         try:
             async with asyncio.timeout(timeout + 15):
+                spec = _container_spec(image, cmd, timeout)
+                spec["Labels"] = _lease_labels(lease, timeout)
                 response = await client.post(
                     "/containers/create",
                     params={"name": name},
-                    json=_container_spec(image, cmd, timeout),
+                    json=spec,
                 )
                 response.raise_for_status()
                 with tempfile.TemporaryDirectory(prefix="ss-docker-client-") as config_dir:
@@ -346,3 +480,16 @@ async def run_isolated_command(
             cleanup.result()
             if cancelled:
                 raise asyncio.CancelledError
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Reconcile expired workspace command containers; never restart work")
+    parser.add_argument("--socket", required=True, help="Trusted broker Docker Unix socket")
+    parser.add_argument("--limit", type=int, default=100, help="Maximum inventory size (1-100); excess fails closed")
+    args = parser.parse_args()
+    try:
+        print(json.dumps(asyncio.run(reconcile_expired_commands(socket=args.socket, limit=args.limit))))
+    except CommandSandboxError as exc:
+        parser.exit(1, str(exc) + "\n")

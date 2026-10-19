@@ -21,6 +21,8 @@ def runtime(tmp_path, monkeypatch):
 
     def handle(request):
         requests.append(request)
+        if request.url.path.endswith("/containers/json"):
+            return httpx.Response(200, json=[])
         if "/images/" in request.url.path:
             return httpx.Response(200, json={"Id": IMAGE, "Config": {"Volumes": None}})
         if request.method == "POST":
@@ -83,6 +85,8 @@ async def test_ambiguous_create_is_cleaned_without_retry(runtime, monkeypatch):
 
     def handle(request):
         requests.append(request)
+        if request.url.path.endswith("/containers/json"):
+            return httpx.Response(200, json=[])
         if "/images/" in request.url.path:
             return httpx.Response(200, json={"Id": IMAGE, "Config": {}})
         if request.method == "POST":
@@ -92,8 +96,8 @@ async def test_ambiguous_create_is_cleaned_without_retry(runtime, monkeypatch):
     monkeypatch.setattr(sandbox.httpx, "AsyncHTTPTransport", lambda **_: httpx.MockTransport(handle))
     with pytest.raises(sandbox.CommandSandboxError, match="unavailable"):
         await sandbox.run_isolated_command(["npx", "jest"], str(root), 5, **args)
-    assert [r.method for r in requests] == ["GET", "POST", "DELETE"]
-    assert requests[1].url.params["name"] in requests[2].url.path
+    assert [r.method for r in requests] == ["GET", "GET", "POST", "DELETE"]
+    assert requests[2].url.params["name"] in requests[3].url.path
     attach.assert_not_awaited()
 
 
@@ -131,6 +135,8 @@ async def test_cleanup_failure_cannot_return_success(runtime, monkeypatch):
     root, args, _, _, _ = runtime
 
     def handle(request):
+        if request.url.path.endswith("/containers/json"):
+            return httpx.Response(200, json=[])
         if "/images/" in request.url.path:
             return httpx.Response(200, json={"Id": IMAGE, "Config": {}})
         if request.method == "DELETE":
@@ -173,6 +179,8 @@ async def test_repeated_cancellation_does_not_cancel_container_removal(runtime, 
     release = asyncio.Event()
 
     async def handle(request):
+        if request.url.path.endswith("/containers/json"):
+            return httpx.Response(200, json=[])
         if "/images/" in request.url.path:
             return httpx.Response(200, json={"Id": IMAGE, "Config": {}})
         if request.method == "DELETE":

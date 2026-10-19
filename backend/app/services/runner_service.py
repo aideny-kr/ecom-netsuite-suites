@@ -32,7 +32,7 @@ from app.models.workspace import (
 from app.services import audit_service
 from app.services import workspace_service as ws_svc
 from app.services.deploy_service import DeployGateError
-from app.services.workspace.command_sandbox import CommandSandboxError
+from app.services.workspace.command_sandbox import CommandSandboxError, command_run_scope
 from app.services.workspace.snapshot import materialized_snapshot_hash
 from app.services.workspace.suitecloud_auth_seeder import AuthSeederError, require_verified_identity
 
@@ -810,7 +810,8 @@ async def execute_run(
             run.command = " ".join(cmd)
             await db.flush()
 
-        exit_code, stdout, stderr = await _run_subprocess(cmd, tmp_dir, cmd_config["timeout"])
+        with command_run_scope(run.id, run.tenant_id, run.workspace_id):
+            exit_code, stdout, stderr = await _run_subprocess(cmd, tmp_dir, cmd_config["timeout"])
         duration_ms = int((time.monotonic() - start_time) * 1000)
 
         run.exit_code = exit_code
