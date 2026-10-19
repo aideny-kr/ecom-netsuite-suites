@@ -53,7 +53,7 @@ def _lease_labels(lease: str, timeout: int) -> dict[str, str]:
         LEASE_LABEL + ".lease": lease,
         # Include the whole create/attach budget plus cleanup grace. An
         # ambiguous create finishing later is still discoverable by expiry.
-        LEASE_LABEL + ".expires": str(int(time.time()) + timeout + 30),
+        LEASE_LABEL + ".expires": str(int(time.time()) + timeout + 120),
         LEASE_LABEL + ".scope": "diagnostic",
     }
     scope = current_command_scope.get()
@@ -122,6 +122,25 @@ async def _reconcile_expired(client: httpx.AsyncClient, *, now: int, limit: int)
             result["retained"] += 1
             continue
         response = await client.delete(f"/containers/{container_id}", params={"force": 1, "v": 1})
+        if response.status_code == 409:
+            # Concurrent sweeps may race with Docker's in-progress removal.
+            # Reconcile once without retrying DELETE or trusting raw text.
+            current = await client.get(f"/containers/{container_id}/json")
+            if current.status_code != 404:
+                current.raise_for_status()
+                metadata = current.json()
+                state = metadata.get("State") if isinstance(metadata, dict) else None
+                if (
+                    _expired_lease(metadata, container_id, now)
+                    and isinstance(state, dict)
+                    and state.get("Status") == "removing"
+                ):
+                    result["retained"] += 1
+                    continue
+                raise CommandSandboxError(
+                    "Command sandbox reconciliation cleanup conflict; operator inspection required"
+                )
+            response = current
         if response.status_code not in (204, 404):
             raise CommandSandboxError("Command sandbox reconciliation cleanup failed; operator inspection required")
         result["removed"] += 1

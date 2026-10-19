@@ -73,7 +73,7 @@ supervisor deadline; an ambiguous create can finish after deletion returned
 ## Expired container reconciliation
 
 Before creation, the broker assigns immutable versioned lease labels: a fresh
-lease UUID, expiry covering the full command budget plus 30 seconds, and the
+lease UUID, expiry covering the full command budget plus 120 seconds, and the
 existing workspace run, tenant and workspace UUIDs. These labels survive a
 worker crash without storing source or credentials. Direct diagnostic calls
 are explicitly labeled diagnostic rather than claiming database run identity.
@@ -91,7 +91,9 @@ containers by ID, including volumes. Unexpired, legacy and unrecognized
 resources are retained. It never starts a container, recreates a run or retries
 a target action. Inventory over 100 containers, daemon failures and cleanup
 failures return an error; new commands do not launch after a failed preflight
-sweep. The sweep has a 30-second total bound and returns counts only. A later
+sweep. Concurrent removal conflicts receive one read-back: absence or verified
+removal in progress is safe; other conflicts fail closed without another
+delete. The sweep has a 30-second total bound and returns counts only. A later
 sweep reclaims a create that finished after an earlier delete returned 404.
 
 Before activation, provision and verify a periodic sweep in the trusted broker

@@ -184,3 +184,42 @@ async def test_real_runner_attaches_existing_run_tenant_workspace_ids(db, tenant
     monkeypatch.setattr(runner, "_materialize_snapshot", AsyncMock(return_value=0))
     assert (await runner.execute_run(db, run.id, tenant_a.id)).status == "passed"
     assert sandbox.current_command_scope.get() is None
+
+
+def test_lease_has_generous_fixed_grace(monkeypatch):
+    monkeypatch.setattr(sandbox.time, "time", lambda: 100.9)
+    assert sandbox._lease_labels(LEASE, 5)[PREFIX + ".expires"] == "225"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["removing", "gone"])
+async def test_concurrent_removal_is_reconciled_without_another_delete(monkeypatch, state):
+    gets = deletes = 0
+
+    def handle(r):
+        nonlocal gets, deletes
+        if r.url.path.endswith("/containers/json"):
+            return httpx.Response(200, json=[{"Id": CID}])
+        if r.method == "DELETE":
+            deletes += 1
+            return httpx.Response(409)
+        gets += 1
+        if gets == 2 and state == "gone":
+            return httpx.Response(404)
+        result = inspect()
+        if gets == 2:
+            result["State"]["Status"] = "removing"
+        return httpx.Response(200, json=result)
+
+    monkeypatch.setattr(sandbox.httpx, "AsyncHTTPTransport", lambda **_: httpx.MockTransport(handle))
+    result = await sandbox.reconcile_expired_commands(socket="/trusted/socket", now=100)
+    assert result["removed"] == int(state == "gone")
+    assert result["retained"] == int(state == "removing")
+    assert deletes == 1 and gets == 2
+
+
+@pytest.mark.asyncio
+async def test_unverified_delete_conflict_still_fails_closed(daemon):
+    daemon["status"] = 409
+    with pytest.raises(sandbox.CommandSandboxError, match="reconciliation"):
+        await sandbox.reconcile_expired_commands(socket="/trusted/socket", now=100)
