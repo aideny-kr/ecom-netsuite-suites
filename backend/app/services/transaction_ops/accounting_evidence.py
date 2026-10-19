@@ -429,6 +429,10 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
             elif deposit is not None:
                 result["blockers"].append(f"deposit:{identifier}:origin_conflict")
         result["native_api_calls"] = reader.calls
+    from app.services.transaction_ops.stripe_evidence import order_section
+
+    currency = (report.get("source") or {}).get("currency") or (report.get("balance") or {}).get("currency")
+    result["sections"]["stripe"] = await order_section(db, tenant_id, report.get("order_reference"), currency)
     result["blockers"].extend(
         [
             "all_deposit_applications_and_reversals_not_verified",
@@ -505,6 +509,8 @@ def completion_evidence_summary(evidence):
         "gl_basis": "Native accounting-book debit/credit values; do not assume transaction-currency amounts. "
         "Read saved documents detail for omitted rows and establish account classifications before tax conclusions.",
         "related_refund_graph_complete": related.get("complete", False),
+        # The cash Stripe actually moved for the order (bounded at collection).
+        "stripe": sections.get("stripe"),
         "blockers": evidence.get("blockers") or [],
         "assessment": evidence.get("assessment"),
         "candidate_available": bool(evidence.get("correction_candidate")),

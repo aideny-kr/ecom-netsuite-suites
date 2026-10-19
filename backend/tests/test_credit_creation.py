@@ -1118,3 +1118,42 @@ def test_r5_a_credit_has_at_most_max_credit_lines():
     with pytest.raises(cc.RefusalError) as exc:
         cc.assess(lines=lines, memo="x", **_facts())
     assert exc.value.code == "too_many_lines"
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_with_exact_figures_reaches_the_agent_through_the_real_audit_log(monkeypatch, db):
+    """Staging 2026-10-18 (R035714377, invoice paid in full): the refusal carried amountRemaining as
+    the reader parsed it, a Decimal. With the real log_event that failed the flush and the chat turn
+    died instead of returning the refusal. The test above stubs log_event, so it never saw it."""
+    from sqlalchemy import select
+
+    from app.mcp.tools import transaction_ops_tools as tools
+    from app.models.audit import AuditEvent
+    from tests.conftest import create_test_tenant, create_test_user
+
+    tenant = await create_test_tenant(db, name="Refusal Figures Corp")
+    user, _ = await create_test_user(db, tenant, email="refusal-figures@test.com")
+    await db.commit()
+
+    async def authorize(context, create):
+        return db, tenant.id, user
+
+    async def no_scope(*a, **k):
+        return None
+
+    async def propose(*a, **k):
+        # The shape propose raises for a paid invoice: amountRemaining as the reader parsed it.
+        raise cc.RefusalError("invoice_remaining_too_small", {"invoice_remaining": Decimal("0.0"), "credit": "1000.00"})
+
+    monkeypatch.setattr(tools, "_authorize", authorize)
+    monkeypatch.setattr("app.services.transaction_ops.case_resolution_scope.load", no_scope)
+    monkeypatch.setattr(cc, "propose", propose)
+    out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
+    assert (out["success"], out["refused"]) == (False, "invoice_remaining_too_small")
+    await db.commit()
+    stored = await db.scalar(
+        select(AuditEvent.payload).where(
+            AuditEvent.tenant_id == tenant.id, AuditEvent.action == "accounting.credit_creation.refused"
+        )
+    )
+    assert stored["detail"] == {"invoice_remaining": "0.0", "credit": "1000.00"}

@@ -264,3 +264,54 @@ class TestAuditEndpoint:
         assert "page" in data
         assert data["page"] == 1
         assert data["page_size"] == 5
+
+
+class TestAuditPayloadIsJsonSafe:
+    """Staging 2026-10-18 (R035714377): a refused credit proposal audited its refusal detail, which
+    carries exact Decimal amounts. The JSON column could not serialize them; the flush failed,
+    the session was left in a failed transaction, and the whole chat turn died ("Chat service
+    temporarily unavailable") instead of the agent seeing the refusal and correcting its lines."""
+
+    async def test_exact_values_are_stored_and_the_session_stays_usable(self, db: AsyncSession):
+        from datetime import date, datetime, timezone
+        from decimal import Decimal
+
+        from app.services.audit_service import log_event
+
+        tenant = await create_test_tenant(db, name="Audit Decimal Corp")
+        await db.commit()
+        case_id = uuid.uuid4()
+        event = await log_event(
+            db,
+            tenant.id,
+            category="transaction_ops",
+            action="accounting.credit_creation.refused",
+            resource_type="transaction_case",
+            resource_id=str(case_id),
+            payload={
+                "code": "outcome_does_not_match_source",
+                "detail": {"before": {"total": Decimal("1000.10")}, "required": [Decimal("0.70"), case_id]},
+                "at": (date(2026, 10, 18), datetime(2026, 10, 18, 5, 28, tzinfo=timezone.utc)),
+            },
+            status="error",
+        )
+        await db.commit()
+
+        stored = await db.scalar(select(AuditEvent.payload).where(AuditEvent.id == event.id))
+        assert stored["detail"] == {"before": {"total": "1000.10"}, "required": ["0.70", str(case_id)]}
+        assert stored["at"] == ["2026-10-18", "2026-10-18T05:28:00+00:00"]
+        assert (await db.scalar(select(AuditEvent.id).where(AuditEvent.id == event.id))) == event.id
+
+    async def test_an_unserializable_payload_fails_before_touching_the_session(self, db: AsyncSession):
+        import pytest
+
+        from app.services.audit_service import log_event
+
+        tenant = await create_test_tenant(db, name="Audit Object Corp")
+        await db.commit()
+        with pytest.raises(TypeError):
+            await log_event(db, tenant.id, category="t", action="t.object", payload={"x": object()})
+        # The caller's transaction is still usable: nothing unserializable was added to it.
+        event = await log_event(db, tenant.id, category="t", action="t.after", payload={"ok": True})
+        await db.commit()
+        assert (await db.scalar(select(AuditEvent.action).where(AuditEvent.id == event.id))) == "t.after"

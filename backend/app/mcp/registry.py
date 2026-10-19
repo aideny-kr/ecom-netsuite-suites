@@ -214,7 +214,8 @@ TOOL_REGISTRY = {
     "transaction_ops.accounting_evidence": {
         "description": "Read scoped native accounting evidence for a transaction case in one bounded call. "
         "Use FIRST after investigation status, before ad-hoc SuiteQL. Returns native lifecycle labels, linked "
-        "invoices/cash sales, tax defaults versus transaction rates, posting-period locks, GL and deposits. "
+        "invoices/cash sales, tax defaults versus transaction rates, posting-period locks, GL, deposits, and the "
+        "order's saved Stripe charges and refunds (the cash that actually moved; it settles refund disputes). "
         "Returns explicit missing evidence; never infers tax legality, root cause or available cash. Read-only. "
         "If correction_candidate is present, use its exact tool/params to display the human approval card; "
         "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence. "

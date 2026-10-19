@@ -298,7 +298,24 @@ def _refunds(report):
     }
 
 
-def build_case_file(*, case, report, source_order, observation, corrections):
+def _stripe(lines, cuts):
+    if isinstance(lines, dict):  # a section from stripe_evidence.order_section
+        if lines.get("available") is not True:
+            return {"available": False, "reason": lines.get("reason") or "no saved Stripe lines for this order"}
+        if lines.get("truncated"):
+            cuts.any = True
+        lines = lines.get("lines") or []
+    """The order's Stripe charges and refunds as saved, copied: the cash that actually moved.
+
+    R072103456 (2026-10-18): NetSuite refunded 2,901.39 and Solidus 2,901.38; Stripe's refund line,
+    2,901.38, settles which side is right without reasoning about it.
+    """
+    if not lines:
+        return {"available": False, "reason": "no saved Stripe lines for this order"}
+    return {"available": True, "lines": cuts.take(lines, MAX_PAYMENTS)}
+
+
+def build_case_file(*, case, report, source_order, observation, corrections, stripe=None):
     """Pure: the same inputs always give the same file. No reads, no clock."""
     cuts = _Cuts()
     report = report or {}
@@ -343,6 +360,7 @@ def build_case_file(*, case, report, source_order, observation, corrections):
             "documents": cuts.take(_documents(observation, report, cuts), MAX_DOCUMENTS),
             "refunds": _refunds(report),
         },
+        "stripe": _stripe(stripe, cuts),
         "history": {
             "verified_fixes": cuts.take(
                 ({"record_type": t, "record_id": r} for t, r in sorted(corrections or [])), MAX_FIXES
@@ -470,6 +488,11 @@ async def open_case(db, tenant_id, *, case_id=None, order_reference=None):
         else None
     )
     corrected = await group_breakdown._verified_corrections(db, tenant_id, [case.id])
+    from app.services.transaction_ops.stripe_evidence import order_section
+
+    report = case.latest_report_json or {}
+    currency = (report.get("source") or {}).get("currency") or (report.get("balance") or {}).get("currency")
+    stripe = await order_section(db, tenant_id, case.order_reference, currency, limit=MAX_PAYMENTS)
     return build_case_file(
         case={
             "id": str(case.id),
@@ -482,4 +505,5 @@ async def open_case(db, tenant_id, *, case_id=None, order_reference=None):
         source_order=group_breakdown._source_order(snapshots.get(case.order_reference), case.order_reference),
         observation=observation,
         corrections=corrected.get(str(case.id), set()),
+        stripe=stripe,
     )
