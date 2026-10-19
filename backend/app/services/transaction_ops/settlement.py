@@ -35,7 +35,9 @@ async def queue(db, tenant_id, operation, proposal, *, now):
     )
     if existing is not None:
         return existing
-    config = await state.get_config(db, tenant_id, proposal.config_id)
+    config = await state.current_config(db, tenant_id, proposal.config_id)  # its successor after a revision
+    if config is None:
+        raise state.StateError("config_disabled")
     row = TransactionRun(
         tenant_id=tenant_id,
         config_id=config.id,
