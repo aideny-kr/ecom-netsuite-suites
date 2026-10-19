@@ -103,15 +103,20 @@ def facts(
             {"booked": _balance(*before, precision), "required": _balance(*required, precision)},
         )
     location = _ref(invoice, "location") or profile.get("correction_location_id")
+    # What the order's existing credits debited, net, to each non-tax account: the most a negative
+    # line may take back there. Read from their GL, which binds a reversal to the account the money
+    # actually went to; line evidence can repeat or reverse itself, and an item's account can change
+    # later (packet review 2026-10-19, F3/F4).
     credited = {}
-    for document, _ in credits:
-        evidence = document.get("line_evidence") or {}
-        if evidence.get("complete") is not True:
-            continue  # unread lines prove nothing a reversal could rest on
-        for line in evidence.get("lines") or []:
-            item, amount = _ref(line, "item"), _dec(line.get("amount"))
-            if item and amount is not None and amount > 0:
-                credited[item] = credited.get(item, Decimal(0)) + amount
+    for document, gl in credits:
+        receivable = _ref(document, "account")
+        for row in (gl or {}).get("rows") or []:
+            account = str(row.get("account"))
+            if account == receivable or account in taxed:
+                continue
+            net = (_dec(row.get("debit")) or Decimal(0)) - (_dec(row.get("credit")) or Decimal(0))
+            credited[account] = credited.get(account, Decimal(0)) + net
+    credited = {account: value for account, value in credited.items() if value > 0}
     return {
         "taxed": taxed,
         "credited": credited,
@@ -142,7 +147,7 @@ def _lines(lines, profile, items, taxed, precision, account_types, credited=None
     """
     configured = {str(k): str(v) for k, v in (profile.get("tax_item_accounts") or {}).items()}
     credited = credited or {}
-    reversed_by_item = {}
+    reversed_by_account = {}
     if isinstance(lines, list) and len(lines) > MAX_CREDIT_LINES:
         raise RefusalError("too_many_lines", {"max": MAX_CREDIT_LINES})
     parsed = []
@@ -174,23 +179,33 @@ def _lines(lines, profile, items, taxed, precision, account_types, credited=None
         if amount < 0:
             if account in taxed:
                 raise RefusalError("invalid_amount", {"reason": "negative_tax_line", "item_id": item_id})
-            if item_id not in credited:
+            if account not in credited:
                 raise RefusalError(
-                    "item_not_allowed", {"item_id": item_id, "reason": "reversal_item_not_on_order_credit"}
+                    "item_not_allowed",
+                    {"item_id": item_id, "account": account, "reason": "reversal_account_not_on_order_credit"},
                 )
-            reversed_by_item[item_id] = reversed_by_item.get(item_id, Decimal(0)) - amount
-            if reversed_by_item[item_id] > credited[item_id]:
+            reversed_by_account[account] = reversed_by_account.get(account, Decimal(0)) - amount
+            if reversed_by_account[account] > credited[account]:
                 raise RefusalError(
                     "invalid_amount",
                     {
                         "reason": "reversal_exceeds_credited",
-                        "item_id": item_id,
-                        "credited": _q(credited[item_id], precision),
+                        "account": account,
+                        "credited": _q(credited[account], precision),
                     },
                 )
         parsed.append({"item_id": item_id, "amount": amount, "account": account})
     if not parsed:
         raise RefusalError("invalid_amount", {"reason": "no_lines"})
+    if any(line["amount"] < 0 for line in parsed):
+        # A credit with a negative line is a pure reallocation onto tax: it only moves value from
+        # income the order's credits posted to the tax accounts, and adds up to exactly zero. It
+        # never moves value between income accounts, which the outcome check (net only in total)
+        # cannot see (packet review 2026-10-19, F1).
+        if any(line["amount"] > 0 and line["account"] not in taxed for line in parsed):
+            raise RefusalError("invalid_amount", {"reason": "reallocation_moves_only_to_tax"})
+        if sum((line["amount"] for line in parsed), Decimal(0)) != 0:
+            raise RefusalError("invalid_amount", {"reason": "reallocation_total_not_zero"})
     signs = {}
     for line in parsed:
         signs.setdefault(line["account"], set()).add(line["amount"] > 0)
@@ -507,22 +522,9 @@ async def gather(db, tenant_id, case_id, item_ids, *, reserve=0):
         credit_ids = sorted(set(applied) | set(created) | set(named) | set(graph_credits), key=int)
         if len(credit_ids) > MAX_CREDITS:
             raise RefusalError("evidence_incomplete", {"reason": "too_many_credits", "credits": len(credit_ids)})
-        # Credits refunded to the customer: applied to a customer refund that the order's verified
-        # refund graph already proved belongs to this order (R166593377: CM11639 -> refund 15778034).
-        refunds_in_graph = {str(i) for i in graph.get("record_ids") or [] if _id(str(i))}
-        refunded = {}
-        if credit_ids and refunds_in_graph:
-            links = await _suiteql(
-                reader,
-                "SELECT l.nextdoc AS credit, l.previousdoc AS refund, l.foreignamount AS amount "
-                "FROM nexttransactionlinelink l JOIN transaction r ON r.id = l.previousdoc "
-                f"WHERE l.linktype = 'Payment' AND r.type = 'CustRfnd' AND l.nextdoc IN ({','.join(credit_ids)})",
-                200,
-            )
-            for link in links:
-                if str(link.get("refund")) in refunds_in_graph:
-                    key = str(link.get("credit"))
-                    refunded[key] = refunded.get(key, Decimal(0)) + (_dec(link.get("amount")) or Decimal(0))
+        # Credits refunded to the customer: what this order's refunds paid out of each credit, as the
+        # refund reader proved it (owned allocations only; R166593377: CM11639 -> refund 15778034).
+        refunded = {str(k): _dec(v) or Decimal(0) for k, v in (graph.get("credit_refunds") or {}).items()}
         credits = []
         for ident in credit_ids:
             raw = await reader.request("GET", f"/record/v1/creditMemo/{ident}", params={"expandSubResources": "true"})

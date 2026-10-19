@@ -315,16 +315,16 @@ def test_r166593377_a_zero_total_credit_moves_the_vat_the_locked_credit_missed_i
 @pytest.mark.parametrize(
     "lines, code, reason",
     [
-        # A negative line reverses part of what an existing credit of this order posted, so its item
-        # must be one that credit used...
+        # A negative line reverses part of what the order's existing credits posted to that account
+        # (their GL), so the account must be one they debited...
         (
             [{"item_id": "4699", "amount": "71.85"}, {"item_id": "1471", "amount": "-71.85"}],
             "item_not_allowed",
-            "reversal_item_not_on_order_credit",
+            "reversal_account_not_on_order_credit",
         ),
-        # ...and it can never take back more than that credit gave.
+        # ...and it can never take back more than they debited there.
         (
-            [{"item_id": "4699", "amount": "71.85"}, {"item_id": "1603", "amount": "-450.01"}],
+            [{"item_id": "4699", "amount": "450.01"}, {"item_id": "1603", "amount": "-450.01"}],
             "invalid_amount",
             "reversal_exceeds_credited",
         ),
@@ -333,10 +333,21 @@ def test_r166593377_a_zero_total_credit_moves_the_vat_the_locked_credit_missed_i
             "invalid_amount",
             "negative_tax_line",
         ),
+        # A credit with a negative line is a pure reallocation onto tax: exactly zero in total...
         (
             [{"item_id": "4699", "amount": "71.85"}, {"item_id": "1603", "amount": "-100.00"}],
             "invalid_amount",
-            "negative_total",
+            "reallocation_total_not_zero",
+        ),
+        # ...and it never moves value between income accounts (packet review 2026-10-19, F1).
+        (
+            [
+                {"item_id": "4699", "amount": "71.85"},
+                {"item_id": "1603", "amount": "-450.00"},
+                {"item_id": "1471", "amount": "378.15"},
+            ],
+            "invalid_amount",
+            "reallocation_moves_only_to_tax",
         ),
         ([{"item_id": "4699", "amount": "71.85"}, {"item_id": "1603", "amount": "0"}], "invalid_amount", None),
     ],
@@ -347,6 +358,34 @@ def test_a_zero_total_credit_only_reverses_what_the_orders_credits_posted(lines,
     assert exc.value.code == code
     if reason:
         assert exc.value.detail.get("reason") == reason
+
+
+def test_the_reversal_limit_is_what_the_credits_gl_debited_not_their_line_evidence():
+    """Packet review 2026-10-19 (F3, F4): line evidence can be duplicated or partly reversed, and an
+    item's account can change after the fact. The GL of the order's credits is the limit, by account."""
+    facts = _refunded_credit_order()
+    old, _ = facts["credits"][0]
+    old["line_evidence"]["lines"] *= 2  # duplicated evidence: 900.00 by lines
+    facts["credits"][0] = (
+        old,
+        {
+            "complete": True,
+            "rows": [
+                {"account": "119", "accountingbook": "1", "credit": "450.00"},
+                {"account": "783", "accountingbook": "1", "debit": "450.00"},
+                {"account": "783", "accountingbook": "1", "credit": "400.00"},
+                {"account": "774", "accountingbook": "1", "debit": "400.00"},
+            ],
+        },
+    )
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=ZERO_TOTAL, memo="x", **facts)  # 71.85 > the 50.00 net debit left on 783
+    assert (exc.value.code, exc.value.detail["reason"]) == ("invalid_amount", "reversal_exceeds_credited")
+    moved = _refunded_credit_order()
+    moved["items"]["1603"]["incomeAccount"] = {"id": "774"}  # the item now posts elsewhere
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=ZERO_TOTAL, memo="x", **moved)
+    assert (exc.value.code, exc.value.detail["reason"]) == ("item_not_allowed", "reversal_account_not_on_order_credit")
 
 
 def test_the_readback_counts_the_created_zero_total_credit_and_the_order_then_agrees():
@@ -387,7 +426,7 @@ SCOPE = {
 }
 
 
-def _netsuite(*, credits=(), named=(), graph_credits=(), refund_links=None):
+def _netsuite(*, credits=(), named=(), graph_credits=()):
     """A NetSuite with order R231821517, invoice 16029044 and the given credits."""
     invoice = {
         "id": "16029044",
@@ -425,12 +464,6 @@ def _netsuite(*, credits=(), named=(), graph_credits=(), refund_links=None):
                     rows = [{"id": 15945327, "tranid": "R231821517"}]
                 elif "IN ('CustInvc', 'CashSale')" in q:
                     rows = [{"id": 16029044}]
-                elif "nexttransactionlinelink" in q and "CustRfnd" in q:
-                    rows = [
-                        {"credit": int(credit), "refund": int(refund), "amount": Decimal(amount)}
-                        for credit, links in (refund_links or {}).items()
-                        for refund, amount in links
-                    ]
                 elif "nexttransactionlinelink" in q:
                     rows = [{"id": int(c["id"])} for c in credits if c["apply"]["items"][0]["doc"]["id"] == "16029044"]
                 elif "tl.createdfrom = 16029044" in q:
@@ -485,7 +518,7 @@ def _netsuite(*, credits=(), named=(), graph_credits=(), refund_links=None):
     return Reader(), calls
 
 
-def _patch_reads(monkeypatch, reader, graph_ids=(), refund_ids=()):
+def _patch_reads(monkeypatch, reader, graph_ids=(), credit_refunds=None):
     case = SimpleNamespace(id=CASE, order_reference="R231821517", scope_json=SCOPE, latest_report_json={})
     review = {
         "configuration_status": "scoped_configuration_found",
@@ -520,7 +553,7 @@ def _patch_reads(monkeypatch, reader, graph_ids=(), refund_ids=()):
 
     async def refunds(reader, order_id, subsidiary, currency, *, order_reference):
         return {
-            "record_ids": list(refund_ids),
+            "credit_refunds": dict(credit_refunds or {}),
             "dependency_manifest": {"truncated": False, "transaction_ids": list(graph_ids)},
         }
 
@@ -601,25 +634,24 @@ async def test_a_credit_naming_the_order_but_not_applied_to_its_invoice_stops_th
 @pytest.mark.asyncio
 async def test_a_credit_wholly_refunded_through_the_orders_verified_refund_counts(monkeypatch):
     """A credit refunded to the customer (applied to a customer refund in the order's verified refund
-    graph, not to the invoice) is part of the order's posted balance, not a stray credit."""
+    graph, not to the invoice) is part of the order's posted balance, not a stray credit. The refund
+    reader proves the allocation per credit (packet review 2026-10-19, F2)."""
     refunded = _credit("16200000", 674.73, applied_to="999", memo="R231821517 refund")
-    reader, calls = _netsuite(
-        credits=[refunded], named=["16200000"], refund_links={"16200000": [("16200001", "674.73")]}
-    )
-    db = _patch_reads(monkeypatch, reader, graph_ids=["16200000", "16200001"], refund_ids=["16200001"])
+    reader, _ = _netsuite(credits=[refunded], named=["16200000"])
+    db = _patch_reads(monkeypatch, reader, graph_ids=["16200000", "16200001"], credit_refunds={"16200000": "674.73"})
     found, _ = await cc.gather(db, "tenant", CASE, ["1471"])
     assert [d["id"] for d, _ in found["credits"]] == ["16200000"]
-    assert any("CustRfnd" in (q or "") for _, _, q in calls)
 
 
 @pytest.mark.asyncio
-async def test_a_credit_refunded_through_a_refund_outside_the_verified_graph_still_stops_the_proposal(monkeypatch):
+async def test_a_credit_not_wholly_refunded_by_this_orders_refunds_still_stops_the_proposal(monkeypatch):
     refunded = _credit("16200000", 674.73, applied_to="999", memo="R231821517 refund")
-    reader, _ = _netsuite(credits=[refunded], named=["16200000"], refund_links={"16200000": [("16200009", "674.73")]})
-    db = _patch_reads(monkeypatch, reader, graph_ids=["16200000"], refund_ids=["16200001"])
-    with pytest.raises(cc.RefusalError) as exc:
-        await cc.gather(db, "tenant", CASE, ["1471"])
-    assert exc.value.code == "existing_credit_not_applied_to_invoice"
+    for allocated in ({}, {"16200000": "600.00"}):  # another order's refund; only partly refunded
+        reader, _ = _netsuite(credits=[refunded], named=["16200000"])
+        db = _patch_reads(monkeypatch, reader, graph_ids=["16200000"], credit_refunds=allocated)
+        with pytest.raises(cc.RefusalError) as exc:
+            await cc.gather(db, "tenant", CASE, ["1471"])
+        assert exc.value.code == "existing_credit_not_applied_to_invoice"
 
 
 # --- readback ---------------------------------------------------------------------------------
@@ -772,6 +804,13 @@ async def test_a_refusal_returns_its_code_figures_and_guidance(monkeypatch):
     assert "NetSuite is right" in out["guidance"]
     bad = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES, "record_id": "1"})
     assert bad["success"] is False
+
+    async def reallocation(*a, **k):
+        raise cc.RefusalError("invalid_amount", {"reason": "reallocation_moves_only_to_tax"})
+
+    monkeypatch.setattr(cc, "propose", reallocation)
+    out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
+    assert "tax-refund item" in out["guidance"]  # the reason's guidance, not the generic one
 
 
 def test_the_accounting_playbook_routes_an_uncovered_over_posting_to_the_new_credit():

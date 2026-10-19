@@ -586,8 +586,13 @@ _CREDIT_GUIDANCE = {
     "existing_credit_not_applied_to_invoice": "A credit naming this order is neither wholly applied to its invoice "
     "nor refunded through the order's own refunds. Report it for a person to decide; never create a second credit "
     "beside it.",
-    "reversal_item_not_on_order_credit": "A negative line only reverses part of an existing credit of this order: use "
-    "the item that credit used.",
+    "reversal_account_not_on_order_credit": "A negative line only takes back what this order's existing credits "
+    "posted to that account: use the item of the credit being corrected.",
+    "reversal_exceeds_credited": "A negative line cannot take back more than the order's credits posted to that "
+    "account.",
+    "reallocation_moves_only_to_tax": "A credit with a negative line only moves value onto the tax-refund item: its "
+    "positive lines are tax lines.",
+    "reallocation_total_not_zero": "A credit with a negative line must add up to exactly zero.",
     "item_not_allowed": "Use a non-inventory or Sales Adjustments item, and only the configured tax-refund item for "
     "tax (detail names the reason).",
     "tax_refund_items_not_configured": "This subsidiary has no configured tax-refund item. Report the configuration "
@@ -645,7 +650,9 @@ async def execute_propose_credit(params: dict, **kwargs) -> dict:
                 "success": False,
                 "refused": exc.code,
                 "detail": exc.detail,
-                "guidance": _CREDIT_GUIDANCE.get(
+                # The detailed reason, when it has its own guidance, says more than the code.
+                "guidance": _CREDIT_GUIDANCE.get(str((exc.detail or {}).get("reason")))
+                or _CREDIT_GUIDANCE.get(
                     exc.code, "Resolve the stated evidence gap; do not switch to another write path."
                 ),
                 "financial_writes": 0,

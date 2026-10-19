@@ -134,6 +134,24 @@ async def test_credit_refunds_use_the_same_exact_allocation_and_shared_invoices_
         await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
 
 
+async def test_each_owned_credit_reports_only_what_this_orders_refunds_paid_out_of_it():
+    """Packet review 2026-10-19 (F2): a refund that also pays another order's credit (999) must not
+    make that credit this order's. Only allocations the graph proved owned count, per credit."""
+    reader = Reader()
+    reader.edges = [
+        edge("1", "2", "SalesOrd", "CustInvc"),
+        edge("2", "3", "CustInvc", "CustCred"),
+        edge("4", "3", "CustRfnd", "CustCred"),
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["credit_refunds"] == {"3": "100.00"}
+
+
+async def test_a_deposit_refund_names_no_credit():
+    result = await collect_refunds(Reader(), "1", "1", "1", order_reference="R123456789")
+    assert result["credit_refunds"] == {}
+
+
 async def test_many_refunds_stop_within_the_native_read_budget():
     from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS
 

@@ -26,6 +26,6 @@ Use this when NetSuite's invoice, less every credit already applied to it, is mo
 - one line on the configured tax-refund item, for the tax part;
 - one equal negative line on the existing credit's item.
 
-It posts in the open period, moves that amount from the return account to the tax account, and is applied to nothing. A negative line can only use an item one of the order's credits used, and never take back more than that credit gave. The server checks the outcome exactly as for any other credit.
+It posts in the open period, moves that amount from the return account to the tax account, and is applied to nothing. The server allows this shape only: positive lines on tax-refund items, negative lines on accounts the order's existing credits debited (never more than they debited there), and a total of exactly zero. It checks the outcome exactly as for any other credit.
 
 Do not use this when NetSuite posts less than the source, for refunds that still need booking (a return or a customer refund), or when an existing credit posts to the wrong account in an open period (that is `credit_reallocation`).
