@@ -479,7 +479,9 @@ _REALLOCATION_GUIDANCE = {
     "gap; do not substitute an item or propose another document.",
     "no_difference": "The posted tax already equals the source; nothing to reallocate.",
     "gross_not_reconciled": "Gross does not reconcile, so this is not a reallocation of an existing credit.",
-    "period_locked": "The credit's period is locked; the correction needs the period policy, not this tool.",
+    "period_locked": "The credit's period is locked, so it cannot be edited. Make the same correction in the open "
+    "period with a zero-total credit from the credit tool: one line on the configured tax-refund item for the tax "
+    "part and an equal negative line on this credit's item. Leave this credit, its refund and the invoice as they are.",
     "foreign_currency_unsupported": "Foreign-currency credits are not supported by this correction.",
 }
 
@@ -581,8 +583,11 @@ _CREDIT_GUIDANCE = {
     "no_difference": "Invoices less credits already equal the source: NetSuite is right for this order. Explain it; "
     "do not propose a credit.",
     "netsuite_below_source": "NetSuite posts less than the source; a credit cannot fix that. Explain the gap.",
-    "existing_credit_not_applied_to_invoice": "A credit naming this order is not wholly applied to its invoice. "
-    "Report it for a person to decide; never create a second credit beside it.",
+    "existing_credit_not_applied_to_invoice": "A credit naming this order is neither wholly applied to its invoice "
+    "nor refunded through the order's own refunds. Report it for a person to decide; never create a second credit "
+    "beside it.",
+    "reversal_item_not_on_order_credit": "A negative line only reverses part of an existing credit of this order: use "
+    "the item that credit used.",
     "item_not_allowed": "Use a non-inventory or Sales Adjustments item, and only the configured tax-refund item for "
     "tax (detail names the reason).",
     "tax_refund_items_not_configured": "This subsidiary has no configured tax-refund item. Report the configuration "

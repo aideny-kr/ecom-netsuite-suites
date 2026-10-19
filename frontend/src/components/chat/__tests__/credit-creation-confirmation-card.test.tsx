@@ -40,6 +40,25 @@ describe("Agent-proposed credit approval", () => {
     expect(approve).toHaveBeenCalled();
   });
 
+  it("a zero-total correction says it moves the amount between accounts and is applied to nothing", () => {
+    const zero: WriteConfirmationData = {
+      ...card,
+      accounting_review: {
+        ...(card.accounting_review as Extract<NonNullable<WriteConfirmationData["accounting_review"]>, { kind: "credit_creation" }>),
+        order_reference: "R166593377", source: { currency: "EUR" }, ar_account: "119",
+        lines: [{ item_id: "4699", amount: "71.85" }, { item_id: "1603", amount: "-71.85" }],
+        expected_after: { total: "0.00", subtotal: "-71.85", taxTotal: "71.85" },
+        expected_ledger: { debit: { "846": "71.85" }, credit: { "783": "71.85" } },
+      },
+    };
+    render(<WriteConfirmationCard data={zero} onConfirm={vi.fn()} onReject={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Create a zero-total correction credit" })).toBeVisible();
+    expect(screen.getByText("Nothing. The total is zero, so the customer's balance and the invoice are unchanged.")).toBeInTheDocument();
+    expect(screen.getByText("Account 783 · €71.85")).toBeInTheDocument();
+    expect(screen.queryByText(/Accounts Receivable 783/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve zero-total correction credit" })).toBeDisabled();
+  });
+
   it("names the credit once verified and never offers a second write", () => {
     render(
       <WriteConfirmationCard
