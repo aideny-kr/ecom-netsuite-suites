@@ -49,10 +49,16 @@ async def order_section(db, tenant_id, order_reference, currency, *, limit=MAX_L
                 .select_from(TransactionCase)
                 .where(TransactionCase.tenant_id == tenant_id, TransactionCase.order_reference == reference)
             )
+            # A store is a direct source connection or a Celigo step (a config has exactly one of the
+            # two; ck_tx_config_source). Counting connections alone missed Celigo-fed stores (R7).
             stores = await db.scalar(
-                select(func.count(func.distinct(TransactionConfig.source_connection_id))).where(
-                    TransactionConfig.tenant_id == tenant_id, TransactionConfig.enabled.is_(True)
-                )
+                select(
+                    func.count(
+                        func.distinct(
+                            func.coalesce(TransactionConfig.source_connection_id, TransactionConfig.source_step_id)
+                        )
+                    )
+                ).where(TransactionConfig.tenant_id == tenant_id, TransactionConfig.enabled.is_(True))
             )
             if stores and stores > 1:
                 # One store: an order number names one order. Two stores can share numbers, and a

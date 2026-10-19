@@ -202,3 +202,18 @@ async def test_a_refund_line_in_stripes_refund_wording_is_found(db):
     await db.flush()
     section = await stripe_evidence.order_section(db, tenant.id, "R072103456", "USD")
     assert sorted((x["id"], x["amount"]) for x in section["lines"]) == [("ch_r", "2901.39"), ("re_r", "-2901.38")]
+
+
+async def test_a_celigo_fed_store_counts_as_a_store(world):  # noqa: F811
+    """Round 4 (R7): a store fed through a Celigo step has no source connection. Counting only
+    connections took a direct store plus a Celigo store for one store."""
+    from tests.test_transaction_ops_state_db import seed_config
+
+    db, tenant = world.db, world.tenant
+    await world.config()
+    db.add(_line(tenant.id, "ch_two", "R777777777"))
+    await db.flush()
+    assert (await stripe_evidence.order_section(db, tenant.id, "R777777777", "USD"))["available"] is True
+    await seed_config(db, tenant.id, world.user)
+    section = await stripe_evidence.order_section(db, tenant.id, "R777777777", "USD")
+    assert section == {"available": False, "reason": "several stores; Stripe lines carry no store to attribute them"}
