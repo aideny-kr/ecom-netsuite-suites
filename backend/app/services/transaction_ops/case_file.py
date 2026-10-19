@@ -299,6 +299,12 @@ def _refunds(report):
 
 
 def _stripe(lines, cuts):
+    if isinstance(lines, dict):  # a section from stripe_evidence.order_section
+        if lines.get("available") is not True:
+            return {"available": False, "reason": lines.get("reason") or "no saved Stripe lines for this order"}
+        if lines.get("truncated"):
+            cuts.any = True
+        lines = lines.get("lines") or []
     """The order's Stripe charges and refunds as saved, copied: the cash that actually moved.
 
     R072103456 (2026-10-18): NetSuite refunded 2,901.39 and Solidus 2,901.38; Stripe's refund line,
@@ -482,9 +488,11 @@ async def open_case(db, tenant_id, *, case_id=None, order_reference=None):
         else None
     )
     corrected = await group_breakdown._verified_corrections(db, tenant_id, [case.id])
-    from app.services.transaction_ops.stripe_evidence import order_lines
+    from app.services.transaction_ops.stripe_evidence import order_section
 
-    stripe = await order_lines(db, tenant_id, case.order_reference)
+    report = case.latest_report_json or {}
+    currency = (report.get("source") or {}).get("currency") or (report.get("balance") or {}).get("currency")
+    stripe = await order_section(db, tenant_id, case.order_reference, currency, limit=MAX_PAYMENTS)
     return build_case_file(
         case={
             "id": str(case.id),

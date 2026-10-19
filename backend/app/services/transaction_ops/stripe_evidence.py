@@ -3,47 +3,76 @@
 Head-to-head, 2026-10-18 (R072103456): NetSuite refunded 2,901.39 and Solidus 2,901.38. Stripe's
 own refund line, 2,901.38, settles which side is right; both agents had to reason about it. These
 are the payout lines the hourly Stripe sync already saved. Nothing here calls Stripe.
+
+On staging every saved line is the Inc account's (USD, no subsidiary), so only lines in the
+order's own currency are this order's; an order in another currency has none, and says so.
 """
 
 import re
+from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.models.canonical import PayoutLine
 
-# Stripe lines for one order are a handful; a reader keeps fewer and marks the cut.
 MAX_ROWS = 200
+MAX_LINES = 10
+NONE = {"available": False, "reason": "no saved Stripe lines for this order"}
 
 
-async def order_lines(db, tenant_id, order_reference):
-    """Saved Stripe payout lines whose description names exactly this order. Never reads Stripe."""
+def _stripe_date(raw):
+    """The day Stripe moved the money (its own `created`), never the day our sync stored the row."""
+    created = (raw or {}).get("created") if isinstance(raw, dict) else None
+    if not isinstance(created, int) or isinstance(created, bool):
+        return None
+    return datetime.fromtimestamp(created, tz=timezone.utc).date().isoformat()
+
+
+async def order_section(db, tenant_id, order_reference, currency, *, limit=MAX_LINES):
+    """The order's saved Stripe lines as an evidence section; unknown is named, never empty.
+
+    The exact order number is matched in SQL ("Order ID: R1234" not followed by a letter or digit),
+    so the row cap never hides a match behind longer numbers. The read runs in its own savepoint:
+    a failure here is reported and never aborts the caller's transaction or its other evidence.
+    """
     reference = str(order_reference or "")
     if not re.fullmatch(r"[A-Z]\d{4,20}", reference):
-        return []
-    # Stripe writes "Framework Marketplace Order ID: R072103456-XC8PUK5B": the number then a
-    # payment suffix. The LIKE narrows; the pattern below rejects a longer number (R0721034560).
-    exact = re.compile(rf"Order ID: {reference}(?![0-9A-Za-z])")
-    rows = (
-        await db.execute(
-            select(PayoutLine)
-            .where(
-                PayoutLine.tenant_id == tenant_id,
-                PayoutLine.source == "stripe",
-                PayoutLine.description.like(f"%Order ID: {reference}%"),
+        return dict(NONE)
+    if not isinstance(currency, str) or not re.fullmatch(r"[A-Za-z]{3}", currency):
+        return {"available": False, "reason": "order currency unknown"}
+    try:
+        async with db.begin_nested():
+            rows = (
+                (
+                    await db.execute(
+                        select(PayoutLine)
+                        .where(
+                            PayoutLine.tenant_id == tenant_id,
+                            PayoutLine.source == "stripe",
+                            PayoutLine.currency == currency.upper(),
+                            PayoutLine.description.op("~")(f"Order ID: {reference}([^0-9A-Za-z]|$)"),
+                        )
+                        .order_by(PayoutLine.created_at, PayoutLine.source_id)
+                        .limit(MAX_ROWS)
+                    )
+                )
+                .scalars()
+                .all()
             )
-            .order_by(PayoutLine.created_at, PayoutLine.source_id)
-            .limit(MAX_ROWS)
-        )
-    ).scalars()
-    return [
+    except SQLAlchemyError:
+        return {"available": False, "reason": "stripe lines unreadable"}
+    lines = [
         {
             "type": row.line_type,
             "amount": str(row.amount),
             "fee": str(row.fee),
             "currency": row.currency,
-            "date": row.created_at.date().isoformat() if row.created_at else None,
+            "date": _stripe_date(row.raw_data),
             "id": row.source_id,
         }
         for row in rows
-        if exact.search(row.description or "")
     ]
+    if not lines:
+        return dict(NONE)
+    return {"available": True, "lines": lines[:limit], "truncated": len(lines) > limit}

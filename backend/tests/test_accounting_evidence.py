@@ -550,28 +550,17 @@ async def test_richer_source_observations_do_not_change_existing_approval_snapsh
 async def test_the_orders_saved_stripe_lines_are_a_section(native, monkeypatch):
     """Head-to-head 2026-10-18 (R072103456): the cash Stripe actually moved settles a refund dispute."""
     seen = []
+    section = {"available": True, "lines": [{"type": "refund", "amount": "-2901.38", "id": "re_1"}], "truncated": False}
 
-    async def lines(db, tenant_id, reference):
-        seen.append((tenant_id, reference))
-        return [
-            {
-                "type": "refund",
-                "amount": "-2901.38",
-                "fee": "0.00",
-                "currency": "USD",
-                "date": "2026-09-03",
-                "id": "re_1",
-            }
-        ]
+    async def order_section(db, tenant_id, reference, currency):
+        seen.append((tenant_id, reference, currency))
+        return section
 
-    monkeypatch.setattr("app.services.transaction_ops.stripe_evidence.order_lines", lines)
+    monkeypatch.setattr("app.services.transaction_ops.stripe_evidence.order_section", order_section)
     result = await collect()
-    assert seen == [("tenant", "R123")]
-    assert result["sections"]["stripe"] == {
-        "available": True,
-        "lines": (await lines(None, "tenant", "R123")),
-        "truncated": False,
-    }
+    assert seen == [("tenant", "R123", "USD")]  # the order's own currency scopes the lines
+    assert result["sections"]["stripe"] == section
+    assert mod.completion_evidence_summary(result)["stripe"] == section  # what the agent reads
 
 
 async def test_no_saved_stripe_lines_is_said_not_left_empty(native):
