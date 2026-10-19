@@ -14,7 +14,7 @@ from app.services.transaction_ops import stripe_evidence
 from tests.conftest import create_test_tenant
 
 
-def _line(tenant, ident, order, *, amount="100.00", kind="charge", currency="USD", created=1786253784):
+def _line(tenant, ident, order, *, amount="100.00", kind="charge", currency="USD", created=1786253784, refund=False):
     return PayoutLine(
         tenant_id=tenant,
         dedupe_key=ident,
@@ -25,7 +25,11 @@ def _line(tenant, ident, order, *, amount="100.00", kind="charge", currency="USD
         fee=Decimal("0"),
         net=Decimal(amount),
         currency=currency,
-        description=f"Framework Marketplace Order ID: {order}-XC8PUK5B",
+        description=(
+            f"REFUND FOR CHARGE (Framework Marketplace Order ID: {order}-XC8PUK5B)"
+            if refund
+            else f"Framework Marketplace Order ID: {order}-XC8PUK5B"
+        ),
         related_order_id=ident,
         raw_data={"created": created} if created is not None else {},
     )
@@ -155,3 +159,46 @@ async def test_saved_stripe_lines_are_read_back_with_the_applications(db):
         db, tenant.id, None, case_id, {"observation_id": str(event.id), "section": "applications"}, "test"
     )
     assert result["evidence"]["stripe"] == section
+
+
+async def test_a_suffixed_order_number_never_takes_the_plain_numbers_lines(db):
+    """Round 3 (R3): Stripe writes "Order ID: <number>-<payment code>". An order numbered
+    R123456789-EU has lines "Order ID: R123456789-EU-<code>", never R123456789's."""
+    tenant = await create_test_tenant(db, name="Stripe Suffix Corp")
+    db.add(_line(tenant.id, "ch_eu", "R123456789-EU"))
+    await db.flush()
+    section = await stripe_evidence.order_section(db, tenant.id, "R123456789", "USD")
+    assert section == {"available": False, "reason": "no saved Stripe lines for this order"}
+
+
+from tests.test_transaction_group_breakdown import world  # noqa: E402,F401  (fixture)
+
+
+async def test_a_tenant_with_several_stores_gets_no_stripe_lines(world):  # noqa: F811
+    """Round 3 (R3): Stripe lines carry no store. With one store an order number names one order; a
+    second store's order (with or without a case) could share it, so then nothing is attributed."""
+    from app.models.connection import Connection
+
+    db, tenant = world.db, world.tenant
+    await world.config()
+    db.add(_line(tenant.id, "ch_one", "R777777777"))
+    await db.flush()
+    assert (await stripe_evidence.order_section(db, tenant.id, "R777777777", "USD"))["available"] is True
+    other = Connection(tenant_id=tenant.id, provider="solidus", label="Second store", encrypted_credentials="x")
+    db.add(other)
+    await db.flush()
+    world.source = other
+    await world.config()
+    section = await stripe_evidence.order_section(db, tenant.id, "R777777777", "USD")
+    assert section == {"available": False, "reason": "several stores; Stripe lines carry no store to attribute them"}
+
+
+async def test_a_refund_line_in_stripes_refund_wording_is_found(db):
+    """Stripe describes a refund as "REFUND FOR CHARGE (... Order ID: R072103456-XC8PUK5B)": the
+    line that settled R072103456 must match the strict format too."""
+    tenant = await create_test_tenant(db, name="Stripe Refund Wording Corp")
+    db.add(_line(tenant.id, "ch_r", "R072103456", amount="2901.39"))
+    db.add(_line(tenant.id, "re_r", "R072103456", amount="-2901.38", kind="refund", refund=True))
+    await db.flush()
+    section = await stripe_evidence.order_section(db, tenant.id, "R072103456", "USD")
+    assert sorted((x["id"], x["amount"]) for x in section["lines"]) == [("ch_r", "2901.39"), ("re_r", "-2901.38")]
