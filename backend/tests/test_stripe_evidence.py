@@ -91,3 +91,67 @@ def test_the_agents_evidence_summary_carries_the_stripe_section():
     section = {"available": True, "lines": [{"type": "refund", "amount": "-2901.38", "id": "re_1"}], "truncated": False}
     summary = completion_evidence_summary({"sections": {"stripe": section}})
     assert summary["stripe"] == section
+
+
+async def test_an_order_number_two_of_the_tenants_orders_share_gets_no_stripe_lines(db):
+    """Round 2 (R3): Stripe lines carry no store or entity, so they belong to an order only when the
+    number names one order in the tenant. Two orders sharing it (another store or entity) make any
+    line unattributable: said, never guessed."""
+    from datetime import datetime, timezone
+
+    from app.models.transaction_ops import TransactionCase
+
+    tenant = await create_test_tenant(db, name="Stripe Shared Number Corp")
+    now = datetime.now(timezone.utc)
+    for key, subsidiary in (("a", "1"), ("b", "2")):
+        db.add(
+            TransactionCase(
+                tenant_id=tenant.id,
+                case_key=f"shared-{key}",
+                order_reference="R444444444",
+                scope_json={"subsidiary_id": subsidiary},
+                status="open",
+                first_observed_at=now,
+                last_observed_at=now,
+                latest_report_json={},
+            )
+        )
+    db.add(_line(tenant.id, "ch_shared", "R444444444"))
+    await db.flush()
+    section = await stripe_evidence.order_section(db, tenant.id, "R444444444", "USD")
+    assert section == {
+        "available": False,
+        "reason": "order number shared by more than one order; Stripe lines cannot be attributed",
+    }
+
+
+def test_the_group_handoff_carries_the_stripe_section():
+    from app.services.transaction_ops.group_investigation import summarize
+
+    section = {"available": True, "lines": [{"type": "refund", "amount": "-2901.38", "id": "re_1"}], "truncated": False}
+    assert summarize({"sections": {"stripe": section}})["stripe"] == section
+
+
+async def test_saved_stripe_lines_are_read_back_with_the_applications(db):
+    """Round 2 (R6): already-collected Stripe evidence is readable from the saved observation."""
+    from uuid import uuid4
+
+    from app.services.audit_service import log_event
+    from app.services.transaction_ops.group_investigation import read_observation
+
+    tenant = await create_test_tenant(db, name="Stripe Saved Corp")
+    case_id = uuid4()
+    section = {"available": True, "lines": [{"type": "refund", "amount": "-2901.38", "id": "re_1"}], "truncated": False}
+    event = await log_event(
+        db,
+        tenant.id,
+        category="transaction_ops",
+        action="accounting.evidence.observed",
+        resource_type="transaction_case",
+        resource_id=str(case_id),
+        payload={"evidence": {"observed_at": "2026-10-18T20:00:00Z", "sections": {"stripe": section}}},
+    )
+    result = await read_observation(
+        db, tenant.id, None, case_id, {"observation_id": str(event.id), "section": "applications"}, "test"
+    )
+    assert result["evidence"]["stripe"] == section

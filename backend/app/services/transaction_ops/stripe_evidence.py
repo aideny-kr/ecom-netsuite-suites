@@ -11,10 +11,11 @@ order's own currency are this order's; an order in another currency has none, an
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.models.canonical import PayoutLine
+from app.models.transaction_ops import TransactionCase
 
 MAX_ROWS = 200
 MAX_LINES = 10
@@ -43,6 +44,17 @@ async def order_section(db, tenant_id, order_reference, currency, *, limit=MAX_L
         return {"available": False, "reason": "order currency unknown"}
     try:
         async with db.begin_nested():
+            orders = await db.scalar(
+                select(func.count())
+                .select_from(TransactionCase)
+                .where(TransactionCase.tenant_id == tenant_id, TransactionCase.order_reference == reference)
+            )
+            if orders and orders > 1:
+                # Stripe lines carry no store or entity: a number two orders share names neither.
+                return {
+                    "available": False,
+                    "reason": "order number shared by more than one order; Stripe lines cannot be attributed",
+                }
             rows = (
                 (
                     await db.execute(
