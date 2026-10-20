@@ -22,10 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.connection import Connection
-
-
-class AuthSeederError(Exception):
-    """The run has no verified, isolated SuiteCloud account/role authorization."""
+from app.services.workspace.credential_contract import AuthSeederError  # noqa: F401
 
 
 @dataclass(frozen=True)

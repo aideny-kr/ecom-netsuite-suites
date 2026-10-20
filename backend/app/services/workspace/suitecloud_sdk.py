@@ -26,7 +26,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from app.services.workspace.suitecloud_auth_seeder import AuthSeederError
+from app.services.workspace.credential_contract import AuthSeederError
 
 SDK_VERSION = "2026.1.0"
 SDK_SHA256 = "158038cfdc552e1af4b29aea86ff59ba8c0658ec950129339c1fbace4b1ad78b"
