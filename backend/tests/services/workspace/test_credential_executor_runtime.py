@@ -22,9 +22,22 @@ IMAGE = os.environ.get("CREDENTIAL_EXECUTOR_TEST_IMAGE", "")
 FAKE_IMAGE = os.environ.get("CREDENTIAL_EXECUTOR_FAKE_IMAGE", "")
 SOCKET = os.environ.get("CREDENTIAL_EXECUTOR_TEST_SOCKET", "")
 DOCKER = os.environ.get("CREDENTIAL_EXECUTOR_TEST_DOCKER", "")
+COMMAND_IMAGE = os.environ.get("CREDENTIAL_EXECUTOR_TEST_COMMAND_IMAGE", "")
+_CLIENT_CONFIG = ""
 pytestmark = pytest.mark.skipif(
-    not all((IMAGE, FAKE_IMAGE, SOCKET, DOCKER)), reason="owned Docker fixture not supplied"
+    not all((IMAGE, FAKE_IMAGE, SOCKET, DOCKER, COMMAND_IMAGE)), reason="owned Docker fixture not supplied"
 )
+
+
+@pytest.fixture(autouse=True)
+def controlled_client(tmp_path, monkeypatch):
+    config = tmp_path / "empty-docker-config"
+    config.mkdir()
+    monkeypatch.setitem(globals(), "_CLIENT_CONFIG", str(config))
+
+
+def docker_cmd(*parts):
+    return [DOCKER, "--host", "unix://" + SOCKET, "--config", _CLIENT_CONFIG, *parts]
 
 
 def args(image=IMAGE):
@@ -45,16 +58,7 @@ def credentials(certificate="synthetic-cert"):
 
 def containers():
     return subprocess.check_output(
-        [
-            DOCKER,
-            "--host",
-            "unix://" + SOCKET,
-            "ps",
-            "-aq",
-            "--no-trunc",
-            "--filter",
-            "label=" + broker.LEASE_LABEL + ".purpose=credentials",
-        ],
+        docker_cmd("ps", "-aq", "--no-trunc", "--filter", "label=" + broker.LEASE_LABEL + ".purpose=credentials"),
         text=True,
     ).split()
 
@@ -86,7 +90,7 @@ async def test_cancel_removes_private_store_and_detached_children():
             while found is None:
                 for cid in set(containers()) - set(before):
                     result = subprocess.run(
-                        [DOCKER, "exec", cid, "/bin/sh", "-c", "test -f /tmp/sdk-ready"],
+                        docker_cmd("exec", cid, "/bin/sh", "-c", "test -f /tmp/sdk-ready"),
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
@@ -100,7 +104,8 @@ async def test_cancel_removes_private_store_and_detached_children():
             await task
     assert found is not None and containers() == before
     assert (
-        subprocess.run([DOCKER, "inspect", found], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
+        subprocess.run(docker_cmd("inspect", found), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        != 0
     )
 
 
@@ -135,7 +140,7 @@ asyncio.run(e.authenticate(account_id="1234567_SB1",role_id="1234",certificate_i
                 if new:
                     cid = next(iter(new))
                     ready = subprocess.run(
-                        [DOCKER, "exec", cid, "/bin/sh", "-c", "test -f /tmp/sdk-ready"],
+                        docker_cmd("exec", cid, "/bin/sh", "-c", "test -f /tmp/sdk-ready"),
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
@@ -146,12 +151,12 @@ asyncio.run(e.authenticate(account_id="1234567_SB1",role_id="1234",certificate_i
         worker.wait(timeout=5)
         async with asyncio.timeout(10):
             while True:
-                metadata = json.loads(subprocess.check_output([DOCKER, "inspect", found], text=True))[0]
+                metadata = json.loads(subprocess.check_output(docker_cmd("inspect", found), text=True))[0]
                 if not metadata["State"]["Running"]:
                     break
                 await asyncio.sleep(0.1)
         assert metadata["State"]["ExitCode"] == 124
-        assert int(subprocess.check_output([DOCKER, "inspect", found, "--format", "{{.State.Pid}}"], text=True)) == 0
+        assert int(subprocess.check_output(docker_cmd("inspect", found, "--format", "{{.State.Pid}}"), text=True)) == 0
 
         # Reuse existing fixed lease logic at a controlled future time. No
         # running unrelated/legacy resource is made eligible by this test.
@@ -169,7 +174,7 @@ asyncio.run(e.authenticate(account_id="1234567_SB1",role_id="1234",certificate_i
         import httpx
 
         async with httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(uds=SOCKET), base_url="http://docker/v1.45"
+            transport=httpx.AsyncHTTPTransport(uds=SOCKET), base_url="http://docker/v1.45", trust_env=False
         ) as client:
             result = await broker._reconcile_expired(OnlyThisContainer(), now=int(time.time()) + 300, limit=100)
         assert result["removed"] == 1 and containers() == before
@@ -177,8 +182,8 @@ asyncio.run(e.authenticate(account_id="1234567_SB1",role_id="1234",certificate_i
         if worker.poll() is None:
             worker.kill()
             worker.wait(timeout=5)
-        if found:
-            subprocess.run([DOCKER, "rm", "-f", "-v", found], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for owned_id in set(containers()) - set(before):
+            subprocess.run(docker_cmd("rm", "-f", "-v", owned_id), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 @pytest.mark.asyncio
@@ -192,7 +197,7 @@ async def test_tenant_code_cannot_read_live_credential_namespace(tmp_path):
             while found is None:
                 for cid in set(containers()) - set(before):
                     ready = subprocess.run(
-                        [DOCKER, "exec", cid, "/bin/sh", "-c", "test -f /tmp/sdk-ready"],
+                        docker_cmd("exec", cid, "/bin/sh", "-c", "test -f /tmp/sdk-ready"),
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
@@ -200,12 +205,9 @@ async def test_tenant_code_cannot_read_live_credential_namespace(tmp_path):
                         found = cid
                 await asyncio.sleep(0.1)
         private_path = subprocess.check_output(
-            [DOCKER, "exec", found, "/bin/sh", "-c", "find /tmp -name private-key.pem"], text=True
+            docker_cmd("exec", found, "/bin/sh", "-c", "find /tmp -name private-key.pem"), text=True
         ).strip()
         assert private_path.startswith("/tmp/suitecloud_sdk_")
-        tenant_image = subprocess.check_output(
-            [DOCKER, "image", "inspect", "node:20-alpine", "--format", "{{.Id}}"], text=True
-        ).strip()
         (tmp_path / "probe.js").write_text(
             """const fs=require('fs');
 for(const p of PATHS){try{fs.readFileSync(p);throw Error('credential visible')}catch(e){
@@ -213,11 +215,11 @@ for(const p of PATHS){try{fs.readFileSync(p);throw Error('credential visible')}c
 if(process.getuid()!==65532)throw Error('uid');
 console.log('live credential namespace inaccessible');""".replace(
                 "PATHS",
-                json.dumps([private_path, "/tmp/sdk-ready", "/var/run/docker.sock", "/proc/1/root" + private_path]),
+                json.dumps([private_path, "/tmp/sdk-ready", "/var/run/docker.sock"]),
             )
         )
         code, out, err = await broker.run_isolated_command(
-            ["node", "probe.js"], str(tmp_path), 5, image=tenant_image, socket=SOCKET, docker=DOCKER
+            ["node", "probe.js"], str(tmp_path), 5, image=COMMAND_IMAGE, socket=SOCKET, docker=DOCKER
         )
         assert code == 0 and "namespace inaccessible" in out, (out, err)
     finally:

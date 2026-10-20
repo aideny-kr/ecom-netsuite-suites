@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends default-jre-hea
 RUN pip install --no-cache-dir cryptography==46.0.3
 COPY backend/app/services/workspace/credential_contract.py /opt/suitestudio/app/services/workspace/credential_contract.py
 COPY backend/app/services/workspace/suitecloud_sdk.py /opt/suitestudio/app/services/workspace/suitecloud_sdk.py
+RUN touch /opt/suitestudio/app/__init__.py /opt/suitestudio/app/services/__init__.py /opt/suitestudio/app/services/workspace/__init__.py
 # Stage only the public Oracle SDK artifact here; never a credential store/key.
 COPY infra/credential-executor/cli-2026.1.0.jar /opt/sdk/cli-2026.1.0.jar
 RUN python -c "import hashlib; assert hashlib.sha256(open('/opt/sdk/cli-2026.1.0.jar','rb').read()).hexdigest() == '158038cfdc552e1af4b29aea86ff59ba8c0658ec950129339c1fbace4b1ad78b'"

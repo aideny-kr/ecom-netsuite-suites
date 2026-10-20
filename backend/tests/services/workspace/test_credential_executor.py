@@ -65,6 +65,7 @@ async def test_offline_fixed_operation_and_namespace(runtime, monkeypatch):
     assert host["CapDrop"] == ["ALL"] and "CapAdd" not in host
     assert host["Mounts"] == [] and host["ReadonlyRootfs"]
     assert set(host["Tmpfs"]) == {"/tmp"} and host["LogConfig"]["Type"] == "none"
+    assert "LD_PRELOAD=" in spec["Env"] and "LD_LIBRARY_PATH=" in spec["Env"]
     assert "SYNTHETIC-WORKER-SECRET" not in json.dumps(spec)
     assert json.loads(attach.call_args.args[1]) == {"operation": "verify_empty_store"}
     assert spec["Labels"][broker.LEASE_LABEL + ".purpose"] == "credentials"

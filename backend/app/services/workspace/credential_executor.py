@@ -80,7 +80,7 @@ def _spec(image: str, *, online: bool) -> dict:
         User="65532:65532",
         Entrypoint=["/usr/local/bin/python", "-I", "-c", _BOOTSTRAP],
         Cmd=[],
-        Env=["HOME=/tmp", "TMPDIR=/tmp", "LANG=C.UTF-8"],
+        Env=["HOME=/tmp", "TMPDIR=/tmp", "LANG=C.UTF-8", "LD_PRELOAD=", "LD_LIBRARY_PATH="],
         NetworkDisabled=not online,
     )
     host = spec["HostConfig"]
