@@ -787,9 +787,14 @@ async def execute_run(
                 require_assertions=(extra_params or {}).get("require_assertions", False),
                 expected_snapshot_hash=run.snapshot_hash,
                 expected_account_id=str(sandbox_id),
+                expected_target_identity=(extra_params or {}).get("expected_target_identity"),
             )
             if not gates["allowed"]:
                 raise DeployGateError(gates["blocked_reason"])
+
+            confirmed_identity = (extra_params or {}).get("expected_target_identity")
+            if not confirmed_identity or confirmed_identity != gates["gates"]["validate"].get("identity"):
+                raise AuthSeederError("Deployment requires the confirmed validation account and numeric role")
 
             # Passing receipts cannot authorize the CLI's ambient auth ID.
             # The REST OAuth bridge is unsupported and currently fails closed.
@@ -801,6 +806,11 @@ async def execute_run(
                 auth_root=Path(tmp_dir),
                 project_id=str(run.workspace_id),
             )
+            account, role = require_verified_identity(
+                account_id=seeded.account_id, role_id=seeded.role_id, expected_account_id=str(sandbox_id)
+            )
+            if {"account_id": account, "role_id": role} != confirmed_identity:
+                raise AuthSeederError("SuiteCloud execution identity differs from the confirmed validation identity")
             cmd = _build_deploy_command(
                 cmd_config["cmd"],
                 str(sandbox_id),

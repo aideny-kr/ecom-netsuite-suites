@@ -4,7 +4,11 @@ Manual edits save review drafts. Reopen the changeset to inspect its diff, then
 use the existing approval and apply controls. Saving a draft does not deploy it.
 
 Sandbox deployment requires current validation and test receipts for the exact
-project content. Validation must also identify the destination account. Older
+project content. Validation must also identify the destination account and numeric
+role. Preview signs and persists both values; confirmation rejects changed
+validation identity, and the worker rejects an adapter returning a different role.
+Migration `103_workspace_target_identity` adds this binding. Existing previews
+must be recreated after upgrade; no identity is inferred for an old token. Older
 receipts without this evidence are stale: rerun both checks. Approval and the
 preview confirmation remain separate requirements. Production is disabled.
 

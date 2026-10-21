@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import WorkspaceArtifact, WorkspaceRun
+from app.services.workspace.suitecloud_auth_seeder import AuthSeederError, require_verified_identity
 
 logger = structlog.get_logger()
 
@@ -36,6 +37,7 @@ async def check_deploy_prerequisites(
     override_reason: str | None = None,
     expected_snapshot_hash: str | None = None,
     expected_account_id: str | None = None,
+    expected_target_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Check all prerequisites for sandbox deploy.
 
@@ -120,14 +122,17 @@ async def check_deploy_prerequisites(
                 )
             ).scalar_one_or_none()
             try:
-                account_id = json.loads(artifact.content or "{}").get("account_id") if artifact else None
-            except (ValueError, AttributeError):
-                account_id = None
-
-            def normalize(value):
-                return str(value or "").strip().lower().replace("_", "-")
-
-            if not account_id or normalize(account_id) != normalize(expected_account_id):
+                receipt = json.loads(artifact.content or "{}") if artifact else {}
+                account, role = require_verified_identity(
+                    account_id=receipt.get("account_id"),
+                    role_id=receipt.get("role_id"),
+                    expected_account_id=expected_account_id,
+                )
+                identity = {"account_id": account, "role_id": role}
+                if expected_target_identity is not None and identity != expected_target_identity:
+                    raise AuthSeederError("Validation identity changed since preview")
+                gates["validate"]["identity"] = identity
+            except (ValueError, AttributeError, AuthSeederError):
                 gates["validate"]["status"] = "target_mismatch"
 
     # Check unit tests

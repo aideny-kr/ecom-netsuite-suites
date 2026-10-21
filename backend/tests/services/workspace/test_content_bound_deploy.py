@@ -18,6 +18,98 @@ from app.services.deploy_preview_service import (
 from app.services.workspace.suitecloud_auth_seeder import SeededCredentials
 
 
+@pytest.mark.asyncio
+async def test_confirm_rejects_changed_validation_role(db, checked_project):
+    import json
+
+    from sqlalchemy import select
+
+    from app.models.workspace import WorkspaceArtifact
+
+    ws, cs, user, *_, validation, tests = checked_project
+    p = await preview(db, checked_project)
+    minted = await mint_deploy_token(db=db, preview=p)
+    artifact = (
+        await db.execute(
+            select(WorkspaceArtifact).where(
+                WorkspaceArtifact.run_id == validation.id,
+                WorkspaceArtifact.artifact_type == "result_json",
+            )
+        )
+    ).scalar_one()
+    receipt = json.loads(artifact.content)
+    receipt["role_id"] = "5678"
+    artifact.content = json.dumps(receipt)
+    await db.flush()
+    with pytest.raises(DeployGateNotMetError):
+        await verify_and_consume_deploy_token(
+            db=db,
+            jti=minted["jti"],
+            confirmation_token=minted["confirmation_token"],
+            actor_id=user.id,
+            tenant_id=ws.tenant_id,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [None, "Administrator", "0", True, ["1234"]])
+async def test_preview_requires_numeric_validation_role(db, checked_project, role):
+    import json
+
+    from sqlalchemy import select
+
+    from app.models.workspace import WorkspaceArtifact
+
+    validation = checked_project[-2]
+    artifact = (
+        await db.execute(
+            select(WorkspaceArtifact).where(
+                WorkspaceArtifact.run_id == validation.id,
+                WorkspaceArtifact.artifact_type == "result_json",
+            )
+        )
+    ).scalar_one()
+    receipt = json.loads(artifact.content)
+    receipt["role_id"] = role
+    artifact.content = json.dumps(receipt)
+    await db.flush()
+    with pytest.raises(DeployGateNotMetError):
+        await preview(db, checked_project)
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_different_numeric_role_before_command(db, checked_project):
+    import json
+
+    ws, cs, user, *_ = checked_project
+    p = await preview(db, checked_project)
+    run = await runner_service.create_run(db, ws.tenant_id, ws.id, "deploy_sandbox", user.id, changeset_id=cs.id)
+    process = AsyncMock(return_value=(0, "", ""))
+    with (
+        patch.object(runner_service, "_run_subprocess", process),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            AsyncMock(return_value=SeededCredentials(Path("/tmp/unused"), "123-sb1", "5678")),
+        ),
+    ):
+        await runner_service.execute_run(
+            db,
+            run.id,
+            ws.tenant_id,
+            extra_params={
+                "sandbox_id": "123-sb1",
+                "expected_snapshot_sha": p["snapshot_sha"],
+                "expected_manifest_sha": p["manifest_sha"],
+                "expected_target_identity": p["target_identity"],
+            },
+        )
+    assert run.status == "error"
+    process.assert_not_awaited()
+    artifacts = await runner_service.get_artifacts(db, run.id, ws.tenant_id)
+    receipt = next(a for a in artifacts if a.artifact_type == "result_json")
+    assert json.loads(receipt.content)["error_category"] == "AUTH_REQUIRED"
+
+
 @pytest_asyncio.fixture
 async def checked_project(db, tenant_a, admin_user):
     user, _ = admin_user
@@ -153,6 +245,7 @@ async def test_worker_rejects_drift_before_subprocess(db, checked_project, mutat
         "sandbox_id": "123-sb1",
         "expected_snapshot_sha": p["snapshot_sha"],
         "expected_manifest_sha": p["manifest_sha"],
+        "expected_target_identity": p["target_identity"],
         "require_assertions": False,
     }
     materialize = runner_service._materialize_snapshot
@@ -246,6 +339,7 @@ async def test_deploy_cannot_use_ambient_cli_auth_even_with_passing_receipts(db,
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_target_identity": p["target_identity"],
             },
         )
     assert result.status == "error"
@@ -279,6 +373,7 @@ async def test_worker_persists_auth_required_for_unverified_adapter_identity(db,
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_target_identity": p["target_identity"],
             },
         )
     assert run.status == "error"
@@ -323,6 +418,7 @@ async def test_queued_deploy_rechecks_authority(db, checked_project, revoke):
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_target_identity": p["target_identity"],
             },
         )
     assert result.status == "error"
@@ -345,6 +441,7 @@ async def test_duplicate_deploy_delivery_does_not_dispatch_again(db, checked_pro
         "sandbox_id": "123-sb1",
         "expected_snapshot_sha": p["snapshot_sha"],
         "expected_manifest_sha": p["manifest_sha"],
+        "expected_target_identity": p["target_identity"],
     }
     command = AsyncMock(return_value=(0, "", ""))
     with (

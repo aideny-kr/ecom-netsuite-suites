@@ -139,7 +139,7 @@ async def mcp_deploy_eligible(db: AsyncSession, tenant_a, admin_user):
             tenant_id=tenant_a.id,
             run_id=validation.id,
             artifact_type="result_json",
-            content='{"account_id":"6738075-sb1"}',
+            content='{"account_id":"6738075-sb1","role_id":"1234"}',
         )
     )
     await db.flush()
@@ -216,6 +216,10 @@ class TestMcpDeployConfirm:
             call_kwargs = fake_task.delay.call_args.kwargs
             assert call_kwargs["extra_params"]["expected_snapshot_sha"] == preview["snapshot_sha"]
             assert call_kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
+            assert call_kwargs["extra_params"]["expected_target_identity"] == {
+                "account_id": "6738075-sb1",
+                "role_id": "1234",
+            }
             assert call_kwargs["extra_params"]["require_assertions"] is False
 
         # Token row marked consumed + linked to the run.

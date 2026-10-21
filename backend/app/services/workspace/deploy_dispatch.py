@@ -42,6 +42,7 @@ async def dispatch_confirmed_deploy(db, *, run_id: uuid.UUID, tenant_id: uuid.UU
         "expected_snapshot_sha": token.snapshot_sha,
         "expected_manifest_sha": token.manifest_sha,
         "require_assertions": token.require_assertions,
+        "expected_target_identity": token.target_identity,
     }
     correlation_id = run.correlation_id
     await audit_service.log_event(

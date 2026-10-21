@@ -373,6 +373,7 @@ async def build_deploy_preview(
         "snapshot_sha": manifest_payload["snapshot_sha"],
         "manifest_sha": manifest_payload["manifest_sha"],
         "gates": gate_result.get("gates", {}),
+        "target_identity": gate_result["gates"]["validate"]["identity"],
     }
 
 
@@ -397,6 +398,7 @@ def _canonical_payload(
     require_assertions: bool,
     actor_id: str,
     issued_at: str,
+    target_identity: dict[str, str] | None = None,
 ) -> str:
     """Canonical JSON used as HMAC body. ``sort_keys=True`` +
     ``separators=(",", ":")`` matches write_confirmation_service so the
@@ -414,6 +416,7 @@ def _canonical_payload(
             "require_assertions": require_assertions,
             "actor_id": actor_id,
             "issued_at": issued_at,
+            "target_identity": target_identity,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -478,6 +481,7 @@ async def mint_deploy_token(
         workspace_id=uuid.UUID(preview["workspace_id"]),
         changeset_id=uuid.UUID(preview["changeset_id"]),
         sandbox_id=preview["sandbox_id"],
+        target_identity=preview["target_identity"],
         snapshot_sha=preview["snapshot_sha"],
         manifest_sha=preview["manifest_sha"],
         require_assertions=preview["require_assertions"],
@@ -499,6 +503,7 @@ async def mint_deploy_token(
         require_assertions=preview["require_assertions"],
         actor_id=preview["actor_id"],
         issued_at=issued_at.isoformat(),
+        target_identity=row.target_identity,
     )
     # session_id keyed off the actor — codex P2 #8 noted that pinning to
     # the user (not cs_id) is the strongest binding short of WebAuthn.
@@ -598,6 +603,7 @@ async def verify_and_consume_deploy_token(
         require_assertions=row.require_assertions,
         actor_id=str(row.actor_id),
         issued_at=row.issued_at.isoformat(),
+        target_identity=row.target_identity,
     )
     is_valid = verify_confirmation_token(
         confirmation_token,
@@ -611,6 +617,9 @@ async def verify_and_consume_deploy_token(
     # Codex P1 #4 — the user at confirm must match preview's actor.
     if row.actor_id != actor_id:
         raise CrossUserReplayError(f"Token issued to actor {row.actor_id} cannot be confirmed by {actor_id}")
+
+    if not row.target_identity:
+        raise DeployGateNotMetError("Preview has no bound validation identity; preview again", {})
 
     # Codex P1 #6 — re-run gate check with snapshot pinning AND confirm
     # state didn't flip between preview and confirm.
@@ -647,6 +656,7 @@ async def verify_and_consume_deploy_token(
         require_assertions=row.require_assertions,
         expected_snapshot_hash=row.snapshot_sha,
         expected_account_id=row.sandbox_id,
+        expected_target_identity=row.target_identity,
     )
     if not gate_result["allowed"]:
         raise DeployGateNotMetError(
