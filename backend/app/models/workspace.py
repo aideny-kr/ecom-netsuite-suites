@@ -234,7 +234,7 @@ class WorkspaceDeployToken(Base, UUIDPrimaryKeyMixin):
     )
     sandbox_id: Mapped[str] = mapped_column(Text, nullable=False)
     # Nullable only for pre-migration previews, which cannot authorize execution.
-    target_identity: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    target_identity: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     snapshot_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     require_assertions: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

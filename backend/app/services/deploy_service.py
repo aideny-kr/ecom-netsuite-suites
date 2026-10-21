@@ -58,6 +58,8 @@ async def check_deploy_prerequisites(
         "blocked_reason": str|None,
     }
     """
+    if expected_target_identity is not None and expected_account_id is None:
+        raise ValueError("Confirmed validation identity requires an explicit destination account")
     if expected_snapshot_hash is None:
         # Every caller enforces freshness; omission cannot disable this gate.
         from app.models.workspace import WorkspaceChangeSet

@@ -110,6 +110,117 @@ async def test_worker_rejects_different_numeric_role_before_command(db, checked_
     assert json.loads(receipt.content)["error_category"] == "AUTH_REQUIRED"
 
 
+@pytest.mark.asyncio
+async def test_legacy_identity_preview_can_be_replaced_without_waiting(db, checked_project):
+    import uuid
+
+    from app.models.workspace import WorkspaceDeployToken
+
+    ws, cs, user, *_ = checked_project
+    p = await preview(db, checked_project)
+    old = await mint_deploy_token(db=db, preview=p)
+    row = await db.get(WorkspaceDeployToken, uuid.UUID(old["jti"]))
+    row.target_identity = None
+    await db.flush()
+    with pytest.raises(DeployGateNotMetError, match="preview again"):
+        await verify_and_consume_deploy_token(
+            db=db,
+            jti=row.id,
+            confirmation_token=old["confirmation_token"],
+            actor_id=user.id,
+            tenant_id=ws.tenant_id,
+        )
+    assert row.consumed_at is None
+    replacement = await mint_deploy_token(db=db, preview=await preview(db, checked_project))
+    assert replacement["jti"] != old["jti"]
+    assert row.consumed_reason == "superseded"
+
+
+@pytest.mark.asyncio
+async def test_stored_identity_tamper_invalidates_confirmation(db, checked_project):
+    import uuid
+
+    from app.models.workspace import WorkspaceDeployToken
+    from app.services.deploy_preview_service import TokenInvalidError
+
+    ws, cs, user, *_ = checked_project
+    p = await preview(db, checked_project)
+    minted = await mint_deploy_token(db=db, preview=p)
+    row = await db.get(WorkspaceDeployToken, uuid.UUID(minted["jti"]))
+    row.target_identity = {**row.target_identity, "role_id": "5678"}
+    await db.flush()
+    with pytest.raises(TokenInvalidError):
+        await verify_and_consume_deploy_token(
+            db=db, jti=row.id, confirmation_token=minted["confirmation_token"], actor_id=user.id, tenant_id=ws.tenant_id
+        )
+    assert row.consumed_at is None
+
+
+@pytest.mark.asyncio
+async def test_missing_worker_identity_pin_never_reads_credentials(db, checked_project):
+    import json
+
+    ws, cs, user, *_ = checked_project
+    p = await preview(db, checked_project)
+    run = await runner_service.create_run(db, ws.tenant_id, ws.id, "deploy_sandbox", user.id, changeset_id=cs.id)
+    with (
+        patch.object(runner_service, "_run_subprocess", AsyncMock()) as process,
+        patch("app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run", AsyncMock()) as seeder,
+    ):
+        await runner_service.execute_run(
+            db,
+            run.id,
+            ws.tenant_id,
+            extra_params={
+                "sandbox_id": "123-sb1",
+                "expected_snapshot_sha": p["snapshot_sha"],
+                "expected_manifest_sha": p["manifest_sha"],
+            },
+        )
+    process.assert_not_awaited()
+    seeder.assert_not_awaited()
+    artifacts = await runner_service.get_artifacts(db, run.id, ws.tenant_id)
+    receipt = next(a for a in artifacts if a.artifact_type == "result_json")
+    assert json.loads(receipt.content)["error_category"] == "AUTH_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_identity_prerequisite_cannot_silently_omit_destination(db, checked_project):
+    ws, cs, *_ = checked_project
+    with pytest.raises(ValueError, match="destination account"):
+        await deploy_service.check_deploy_prerequisites(
+            db, cs.id, ws.tenant_id, expected_target_identity={"account_id": "123-sb1", "role_id": "1234"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_identity_is_present_in_confirmation_audit(db, checked_project):
+    from sqlalchemy import select
+
+    from app.models.audit import AuditEvent
+
+    ws, cs, user, *_ = checked_project
+    p = await preview(db, checked_project)
+    minted = await mint_deploy_token(db=db, preview=p)
+    await verify_and_consume_deploy_token(
+        db=db,
+        jti=minted["jti"],
+        confirmation_token=minted["confirmation_token"],
+        actor_id=user.id,
+        tenant_id=ws.tenant_id,
+    )
+    events = (
+        await db.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == ws.tenant_id,
+                AuditEvent.action.in_(["workspace.deploy.preview_issued", "workspace.deploy.confirmed"]),
+            )
+        )
+    ).all()
+    assert len(events) == 2
+    assert all(e.payload.get("target_identity") == p["target_identity"] for e in events)
+
+
 @pytest_asyncio.fixture
 async def checked_project(db, tenant_a, admin_user):
     user, _ = admin_user

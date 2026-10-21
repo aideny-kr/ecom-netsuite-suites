@@ -8,7 +8,8 @@ project content. Validation must also identify the destination account and numer
 role. Preview signs and persists both values; confirmation rejects changed
 validation identity, and the worker rejects an adapter returning a different role.
 Migration `103_workspace_target_identity` adds this binding. Existing previews
-must be recreated after upgrade; no identity is inferred for an old token. Older
+must be recreated after upgrade; the next preview supersedes an unbound token
+without waiting for expiry. No identity is inferred for an old token. Older
 receipts without this evidence are stale: rerun both checks. Approval and the
 preview confirmation remain separate requirements. Production is disabled.
 
@@ -39,6 +40,10 @@ execution path, and actual authorized sandbox acceptance. A role display name
 alone is insufficient identity evidence. Configuring a certificate or
 selecting a sandbox requires the installation's existing authorization; this
 document does not grant it.
+
+Activation must use matching reviewed API and worker images. An older worker
+does not enforce the new identity pin; the always-closed seeder remains required
+throughout any rollout until the complete target path is accepted.
 
 A confirmed deployment is saved before delivery to the worker. If broker
 delivery fails, its run remains **queued**. Expand the run and use **Retry

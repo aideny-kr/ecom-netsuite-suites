@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import (
@@ -440,7 +440,7 @@ async def mint_deploy_token(
     # In-flight check — partial unique index would catch this at flush
     # time, but raising up-front lets us return the existing jti so the
     # UI re-renders the live preview instead of starting fresh.
-    # First sweep expired-but-unconsumed rows so they release the unique
+    # First sweep expired or pre-identity previews so they release the unique
     # slot. Postgres can't put now() in an index predicate, so TTL
     # enforcement has to happen here, app-side. Without this an
     # abandoned/expired preview would permanently block deploys on the
@@ -452,12 +452,12 @@ async def mint_deploy_token(
             WorkspaceDeployToken.tenant_id == uuid.UUID(preview["tenant_id"]),
             WorkspaceDeployToken.changeset_id == uuid.UUID(preview["changeset_id"]),
             WorkspaceDeployToken.consumed_at.is_(None),
-            WorkspaceDeployToken.expires_at < now,
+            or_(WorkspaceDeployToken.expires_at < now, WorkspaceDeployToken.target_identity.is_(None)),
         )
     )
     for stale in expired_rows.scalars().all():
         stale.consumed_at = now
-        stale.consumed_reason = "expired"
+        stale.consumed_reason = "expired" if stale.expires_at < now else "superseded"
     await db.flush()
 
     inflight = await db.execute(
@@ -526,6 +526,7 @@ async def mint_deploy_token(
             "sandbox_id": preview["sandbox_id"],
             "snapshot_sha": preview["snapshot_sha"],
             "manifest_sha": preview["manifest_sha"],
+            "target_identity": row.target_identity,
             "file_count": len(preview["manifest"]),
             "gates": preview.get("gates", {}),
             "expires_at": expires_at.isoformat(),
@@ -592,6 +593,9 @@ async def verify_and_consume_deploy_token(
         await db.flush()
         raise TokenExpiredError(f"Token {jti} expired at {row.expires_at.isoformat()}")
 
+    if not row.target_identity:
+        raise DeployGateNotMetError("Preview has no bound validation identity; preview again", {})
+
     payload_json = _canonical_payload(
         jti=str(row.id),
         tenant_id=str(row.tenant_id),
@@ -617,9 +621,6 @@ async def verify_and_consume_deploy_token(
     # Codex P1 #4 — the user at confirm must match preview's actor.
     if row.actor_id != actor_id:
         raise CrossUserReplayError(f"Token issued to actor {row.actor_id} cannot be confirmed by {actor_id}")
-
-    if not row.target_identity:
-        raise DeployGateNotMetError("Preview has no bound validation identity; preview again", {})
 
     # Codex P1 #6 — re-run gate check with snapshot pinning AND confirm
     # state didn't flip between preview and confirm.
@@ -685,6 +686,7 @@ async def verify_and_consume_deploy_token(
             "snapshot_sha": row.snapshot_sha,
             "manifest_sha": row.manifest_sha,
             "token_fingerprint": _token_fingerprint(confirmation_token),
+            "target_identity": row.target_identity,
         },
     )
 

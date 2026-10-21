@@ -54,7 +54,7 @@ async def dispatch_confirmed_deploy(db, *, run_id: uuid.UUID, tenant_id: uuid.UU
         resource_type="workspace_run",
         resource_id=str(run_id),
         correlation_id=correlation_id,
-        payload={"delivery": "same_confirmed_queued_run"},
+        payload={"delivery": "same_confirmed_queued_run", "target_identity": token.target_identity},
     )
     # Never publish a run that another database session cannot yet see.
     await db.commit()
