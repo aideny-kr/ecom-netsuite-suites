@@ -400,6 +400,23 @@ async def _audit_run_event(
     )
 
 
+def _identity_outcome(identity, *, attempted=False, checked_after=False, expected=None) -> dict[str, Any]:
+    """Public provenance only; requested intent is never execution verification."""
+    result: dict[str, Any] = {}
+    if expected is not None:
+        result["expected_target_identity"] = expected
+    if identity is not None:
+        result["target_identity"] = identity
+        result["target_identity_verification"] = (
+            "verified_after_command" if checked_after else "verified_before_command"
+        )
+    if result:
+        result["external_outcome"] = (
+            "command_returned" if checked_after else "uncertain" if attempted else "not_attempted"
+        )
+    return result
+
+
 async def _execute_validate_run(
     db: AsyncSession,
     run: WorkspaceRun,
@@ -479,8 +496,15 @@ async def _execute_validate_run(
 
         # Reached only by synthetic adapter tests until verified SDK seeding
         # is implemented. HOME alone is not proof of Java SDK-store isolation.
+        validation_attempted = False
         try:
+            # Release the short identity lock before any external work. Holding
+            # the REST row here could prevent persistence of a rotated OAuth token.
+            await db.commit()
+            await set_tenant_context(db, str(run.tenant_id))
+            validation_attempted = True
             exit_code, stdout, stderr = await _run_subprocess(cmd_config["cmd"], tmp_dir, cmd_config["timeout"])
+            await require_current_target(db, run.tenant_id, target_identity)
         except asyncio.TimeoutError:
             duration_ms = int((time.monotonic() - start_time) * 1000)
             run.status = "failed"
@@ -496,6 +520,21 @@ async def _execute_validate_run(
                 "stderr",
                 f"timeout: suitecloud project:validate --server exceeded {cmd_config['timeout']}s",
             )
+            outcome = _identity_outcome(target_identity, attempted=validation_attempted)
+            await _store_artifact(
+                db,
+                run,
+                "result_json",
+                json.dumps(
+                    {
+                        "run_id": str(run.id),
+                        "run_type": run.run_type,
+                        "status": run.status,
+                        "error_category": "TIMEOUT",
+                        **outcome,
+                    }
+                ),
+            )
             await _audit_run_event(
                 db,
                 run,
@@ -504,9 +543,41 @@ async def _execute_validate_run(
                 payload={
                     "run_type": run.run_type,
                     "error_category": "TIMEOUT",
+                    **outcome,
                     "duration_ms": duration_ms,
                 },
                 error_message="timeout",
+            )
+            await db.flush()
+            return run
+
+        except Exception as exc:
+            # The command may have run. Never certify stale identity or replay an
+            # uncertain outcome; retain the pre-command identity for reconciliation.
+            run.status = "failed"
+            run.exit_code = -1
+            run.gate_status = "block"
+            run.has_errors = True
+            run.validator_engine = "suitecloud_server"
+            run.completed_at = datetime.now(timezone.utc)
+            run.duration_ms = int((time.monotonic() - start_time) * 1000)
+            category = "AUTH_REQUIRED" if isinstance(exc, AuthSeederError) else "INTERNAL_ERROR"
+            payload = {
+                "run_id": str(run.id),
+                "run_type": run.run_type,
+                "status": run.status,
+                "error_category": category,
+                **_identity_outcome(target_identity, attempted=validation_attempted),
+            }
+            await _store_artifact(db, run, "stderr", "Validation outcome requires reconciliation")
+            await _store_artifact(db, run, "result_json", json.dumps(payload))
+            await _audit_run_event(
+                db,
+                run,
+                action="run_failed",
+                status="error",
+                payload=payload,
+                error_message="Validation outcome requires reconciliation",
             )
             await db.flush()
             return run
@@ -580,6 +651,7 @@ async def _execute_validate_run(
             "validator_engine": "suitecloud_server",
             "snapshot_hash": run.snapshot_hash,
             **target_identity,
+            **_identity_outcome(target_identity, attempted=True, checked_after=True),
         }
         await _store_artifact(db, run, "result_json", json.dumps(result_payload, default=str))
         await _audit_run_event(
@@ -736,30 +808,56 @@ async def execute_run(
     tmp_dir = tempfile.mkdtemp(prefix=f"workspace_run_{run.tenant_id}_")
     start_time = time.monotonic()
 
+    execution_identity = None
+    command_attempted = False
+    identity_checked_after = False
+    expected_identity = None
+    if run.run_type == "deploy_sandbox":
+        from app.services.workspace.target_identity import receipt_identity
+
+        try:
+            expected_identity = receipt_identity((extra_params or {}).get("expected_target_identity"))
+        except AuthSeederError:
+            pass  # A malformed delivery is rejected by the ordinary gates below.
+
+    def identity_evidence():
+        return _identity_outcome(
+            execution_identity,
+            attempted=command_attempted,
+            checked_after=identity_checked_after,
+            expected=expected_identity,
+        )
+
     try:
         file_count = await _materialize_snapshot(db, run, tmp_dir)
         run.snapshot_hash = materialized_snapshot_hash(tmp_dir)
 
         cmd = cmd_config["cmd"]
         if run.run_type == "deploy_sandbox":
-            permitted_actor = await db.scalar(
+            actor_query = (
                 select(User.id)
                 .join(Tenant, Tenant.id == User.tenant_id)
                 .join(UserRole, UserRole.user_id == User.id)
                 .join(RolePermission, RolePermission.role_id == UserRole.role_id)
                 .join(Permission, Permission.id == RolePermission.permission_id)
                 .join(Workspace, Workspace.tenant_id == Tenant.id)
+                .join(WorkspaceChangeSet, WorkspaceChangeSet.workspace_id == Workspace.id)
                 .where(
                     User.id == run.triggered_by,
                     User.tenant_id == tenant_id,
                     User.is_active.is_(True),
                     Tenant.is_active.is_(True),
                     Workspace.id == run.workspace_id,
+                    WorkspaceChangeSet.id == run.changeset_id,
+                    WorkspaceChangeSet.tenant_id == run.tenant_id,
+                    WorkspaceChangeSet.workspace_id == run.workspace_id,
+                    WorkspaceChangeSet.status == "approved",
                     Workspace.status == "active",
                     Permission.codename == "workspace.manage",
                 )
                 .limit(1)
             )
+            permitted_actor = await db.scalar(actor_query)
             if permitted_actor is None:
                 raise DeployGateError("Deployment actor, company or workspace is no longer authorized")
             sandbox_id = (extra_params or {}).get("sandbox_id")
@@ -801,6 +899,8 @@ async def execute_run(
             # The REST OAuth bridge is unsupported and currently fails closed.
             from app.services.workspace.suitecloud_auth_seeder import seed_credentials_for_run
 
+            await db.commit()
+            await set_tenant_context(db, str(run.tenant_id))
             seeded = await seed_credentials_for_run(
                 db=db,
                 tenant_id=run.tenant_id,
@@ -809,10 +909,31 @@ async def execute_run(
             )
             from app.services.workspace.target_identity import require_current_target, seeded_identity
 
-            execution_identity = seeded_identity(seeded)
-            if execution_identity != confirmed_identity:
+            adapter_identity = seeded_identity(seeded)
+            if adapter_identity != confirmed_identity:
                 raise AuthSeederError("SuiteCloud execution identity differs from the confirmed validation identity")
-            await require_current_target(db, run.tenant_id, execution_identity)
+            await require_current_target(db, run.tenant_id, adapter_identity)
+            execution_identity = adapter_identity
+            if await db.scalar(actor_query) is None:
+                raise DeployGateError(
+                    "Deployment actor, company, workspace or approval changed during credential preparation"
+                )
+            current = await compute_deploy_manifest(
+                db=db, changeset_id=run.changeset_id, tenant_id=run.tenant_id, workspace_id=run.workspace_id
+            )
+            if current["snapshot_sha"] != expected_sha or current["manifest_sha"] != expected_manifest:
+                raise DeployGateError("Changeset changed during credential preparation")
+            current_gates = await check_deploy_prerequisites(
+                db,
+                run.changeset_id,
+                run.tenant_id,
+                require_assertions=(extra_params or {}).get("require_assertions", False),
+                expected_snapshot_hash=run.snapshot_hash,
+                expected_account_id=str(sandbox_id),
+                expected_target_identity=confirmed_identity,
+            )
+            if not current_gates["allowed"]:
+                raise DeployGateError(current_gates["blocked_reason"])
             cmd = _build_deploy_command(
                 cmd_config["cmd"],
                 str(sandbox_id),
@@ -822,8 +943,15 @@ async def execute_run(
             run.command = " ".join(cmd)
             await db.flush()
 
+        if run.run_type == "deploy_sandbox":
+            await db.commit()
+            await set_tenant_context(db, str(run.tenant_id))
         with command_run_scope(run.id, run.tenant_id, run.workspace_id):
+            command_attempted = run.run_type == "deploy_sandbox"
             exit_code, stdout, stderr = await _run_subprocess(cmd, tmp_dir, cmd_config["timeout"])
+        if run.run_type == "deploy_sandbox":
+            await require_current_target(db, run.tenant_id, execution_identity)
+            identity_checked_after = True
         duration_ms = int((time.monotonic() - start_time) * 1000)
 
         run.exit_code = exit_code
@@ -861,7 +989,7 @@ async def execute_run(
             "snapshot_hash": run.snapshot_hash,
         }
         if run.run_type == "deploy_sandbox":
-            result_payload["target_identity"] = execution_identity
+            result_payload.update(identity_evidence())
         await _store_artifact(db, run, "result_json", json.dumps(result_payload, default=str))
         artifact_count += 1
 
@@ -903,6 +1031,7 @@ async def execute_run(
                 {
                     "run_id": str(run.id),
                     "run_type": run.run_type,
+                    **identity_evidence(),
                     "status": run.status,
                     "error_category": "STALE_PATCH",
                     "error_message": actionable,
@@ -948,6 +1077,7 @@ async def execute_run(
                 {
                     "run_id": str(run.id),
                     "run_type": run.run_type,
+                    **identity_evidence(),
                     "status": run.status,
                     "error_category": category,
                     "error_message": str(exc),
@@ -960,7 +1090,7 @@ async def execute_run(
             run,
             action="run_failed" if isinstance(exc, CommandSandboxError) else "deploy.worker_gate_rejected",
             status="error",
-            payload={"error_category": category, "snapshot_hash": run.snapshot_hash},
+            payload={"error_category": category, "snapshot_hash": run.snapshot_hash, **identity_evidence()},
             error_message=str(exc),
         )
     except asyncio.TimeoutError:
@@ -979,6 +1109,7 @@ async def execute_run(
                 {
                     "run_id": str(run.id),
                     "run_type": run.run_type,
+                    **identity_evidence(),
                     "status": run.status,
                     "error_category": "TIMEOUT",
                     "error_message": timeout_error,
@@ -991,7 +1122,12 @@ async def execute_run(
             run,
             action="run_failed",
             status="error",
-            payload={"run_type": run.run_type, "error_category": "TIMEOUT", "duration_ms": duration_ms},
+            payload={
+                "run_type": run.run_type,
+                "error_category": "TIMEOUT",
+                "duration_ms": duration_ms,
+                **identity_evidence(),
+            },
             error_message=timeout_error,
         )
     except Exception as exc:
@@ -1011,6 +1147,7 @@ async def execute_run(
                 {
                     "run_id": str(run.id),
                     "run_type": run.run_type,
+                    **identity_evidence(),
                     "status": run.status,
                     "error_category": "INTERNAL_ERROR",
                     "error_message": str(exc),
@@ -1023,7 +1160,12 @@ async def execute_run(
             run,
             action="run_failed",
             status="error",
-            payload={"run_type": run.run_type, "error_category": "INTERNAL_ERROR", "duration_ms": duration_ms},
+            payload={
+                "run_type": run.run_type,
+                "error_category": "INTERNAL_ERROR",
+                "duration_ms": duration_ms,
+                **identity_evidence(),
+            },
             error_message=str(exc),
         )
     finally:

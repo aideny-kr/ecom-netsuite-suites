@@ -458,6 +458,7 @@ async def mint_deploy_token(
                 WorkspaceDeployToken.target_identity["connection_id"].astext.is_(None),
                 WorkspaceDeployToken.target_identity["requested_certificate_id"].astext.is_(None),
                 WorkspaceDeployToken.target_identity["local_public_key_sha256"].astext.is_(None),
+                WorkspaceDeployToken.target_identity != preview["target_identity"],
             ),
         )
     )

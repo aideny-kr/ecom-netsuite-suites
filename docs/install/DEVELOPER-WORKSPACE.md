@@ -75,8 +75,15 @@ account and numeric role. Preview, confirmation and execution require the same
 current active or healthy NetSuite connection and encrypted certificate material.
 Revocation, replacement, a changed role/certificate/key, another company or a
 missing legacy binding blocks execution. No alternate connection is selected.
-The connection row is read afresh and locked against concurrent mutation until
-that transaction ends. The worker checks it again after credential preparation.
+The connection row is read afresh under a short transaction lock. The runner
+releases that lock before credential preparation and external commands so REST
+OAuth token refresh can persist rotated tokens without waiting on deployment.
+The worker checks identity, permissions, approval, content and receipts again
+after credential preparation, and rechecks identity after command return. A
+change during command execution prevents success certification and records an
+uncertain outcome for reconciliation. It never triggers automatic deployment
+replay. Timeout and error receipts distinguish requested intent from verified
+pre-command identity.
 The signed persistent identity also appears in validation and deployment result
 receipts and their audits; private key material is never included.
 
@@ -93,3 +100,10 @@ old deployment workers and queued work before activating matching reviewed API
 and worker revisions. Trusted SDF construction, isolated credential networking,
 a real authorized SDK handshake, target deployment/readback/health/rollback and
 all existing release gates remain required.
+
+An OAuth reauthorization currently replaces the encrypted connection credential
+blob, dropping any `suitecloud_ci` material. That fails closed and requires a
+new explicit certificate binding and fresh checks. No callback preservation or
+credential provisioning is enabled here. Before activating the future seeder,
+align its connection selection with this explicit UUID/status contract; its
+current always-rejecting active-only lookup supplies no execution authority.

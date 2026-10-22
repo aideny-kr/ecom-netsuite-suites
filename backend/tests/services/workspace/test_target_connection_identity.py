@@ -114,7 +114,16 @@ async def test_worker_rejects_adapter_identity_drift_before_command(db, bound_pr
     ws, cs, user, *_ = project
     p = await preview(db, project)
     run = await runner_service.create_run(db, ws.tenant_id, ws.id, "deploy_sandbox", user.id, changeset_id=cs.id)
-    changed = {**identity, field: "replacement"}
+    import uuid
+
+    replacement = (
+        str(uuid.uuid4())
+        if field == "connection_id"
+        else "0" * 64
+        if field == "local_public_key_sha256"
+        else "replacement"
+    )
+    changed = {**identity, field: replacement}
     seeded = SimpleNamespace(path=Path("/tmp/unused"), **changed)
     with (
         patch.object(runner_service, "_run_subprocess", AsyncMock(return_value=(0, "", ""))) as process,
@@ -252,3 +261,152 @@ async def test_worker_success_receipt_preserves_bound_identity(db, bound_project
         select(AuditEvent).where(AuditEvent.resource_id == str(run.id), AuditEvent.action == "run_succeeded")
     )
     assert audit.payload["target_identity"] == identity
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [TimeoutError(), RuntimeError("synthetic transport failure")])
+async def test_uncertain_deploy_retains_verified_identity(db, bound_project, failure):
+    project, _, _, identity, _ = bound_project
+    ws, cs, user, *_ = project
+    p = await preview(db, project)
+    run = await runner_service.create_run(db, ws.tenant_id, ws.id, "deploy_sandbox", user.id, changeset_id=cs.id)
+    with (
+        patch.object(runner_service, "_run_subprocess", AsyncMock(side_effect=failure)),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            AsyncMock(return_value=SimpleNamespace(path=Path("/tmp/unused"), **identity)),
+        ),
+    ):
+        await runner_service.execute_run(
+            db,
+            run.id,
+            ws.tenant_id,
+            extra_params={
+                "sandbox_id": "123-sb1",
+                "expected_snapshot_sha": p["snapshot_sha"],
+                "expected_manifest_sha": p["manifest_sha"],
+                "expected_target_identity": p["target_identity"],
+            },
+        )
+    artifact = await db.scalar(
+        select(WorkspaceArtifact).where(
+            WorkspaceArtifact.run_id == run.id, WorkspaceArtifact.artifact_type == "result_json"
+        )
+    )
+    result = json.loads(artifact.content)
+    assert result["target_identity"] == identity
+    assert result["target_identity_verification"] == "verified_before_command"
+    assert result["external_outcome"] == "uncertain"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["suitecloud_validate", "deploy_sandbox"])
+async def test_connection_rotation_during_command_cannot_certify_success(db, bound_project, kind):
+    project, connection, credentials, identity, _ = bound_project
+    ws, cs, user, *_ = project
+    p = await preview(db, project)
+    run = await runner_service.create_run(db, ws.tenant_id, ws.id, kind, user.id, changeset_id=cs.id)
+
+    async def rotate(*_):
+        credentials["suitecloud_ci"]["certificate_id"] = "rotated-during-command"
+        connection.encrypted_credentials = encrypt_credentials(credentials)
+        await db.flush()
+        return 0, "", ""
+
+    with (
+        patch.object(runner_service, "_run_subprocess", AsyncMock(side_effect=rotate)),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            AsyncMock(return_value=SimpleNamespace(path=Path("/tmp/unused"), **identity)),
+        ),
+    ):
+        await runner_service.execute_run(
+            db,
+            run.id,
+            ws.tenant_id,
+            extra_params={
+                "sandbox_id": "123-sb1",
+                "expected_snapshot_sha": p["snapshot_sha"],
+                "expected_manifest_sha": p["manifest_sha"],
+                "expected_target_identity": p["target_identity"],
+            },
+        )
+    assert run.status in {"error", "failed"}
+    artifact = await db.scalar(
+        select(WorkspaceArtifact).where(
+            WorkspaceArtifact.run_id == run.id, WorkspaceArtifact.artifact_type == "result_json"
+        )
+    )
+    assert json.loads(artifact.content)["external_outcome"] == "uncertain"
+
+
+@pytest.mark.asyncio
+async def test_rotated_full_identity_preview_can_be_replaced(db, bound_project):
+    import uuid
+
+    from app.models.workspace import WorkspaceDeployToken
+
+    project, connection, credentials, identity, artifact = bound_project
+    old = await mint_deploy_token(db=db, preview=await preview(db, project))
+    credentials["suitecloud_ci"]["certificate_id"] = "new-certificate"
+    connection.encrypted_credentials = encrypt_credentials(credentials)
+    receipt = json.loads(artifact.content)
+    receipt["requested_certificate_id"] = "new-certificate"
+    artifact.content = json.dumps(receipt)
+    await db.flush()
+    new = await mint_deploy_token(db=db, preview=await preview(db, project))
+    token = await db.get(WorkspaceDeployToken, uuid.UUID(old["jti"]))
+    assert token.consumed_reason == "superseded" and new["jti"] != old["jti"]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_key_algorithm_is_a_safe_gate_failure(db, bound_project):
+    from cryptography.exceptions import UnsupportedAlgorithm
+
+    project = bound_project[0]
+    with patch(
+        "app.services.workspace.target_identity.serialization.load_pem_private_key",
+        side_effect=UnsupportedAlgorithm("synthetic"),
+    ):
+        with pytest.raises(DeployGateNotMetError):
+            await preview(db, project)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["permission", "approval", "content"])
+async def test_worker_rechecks_authority_after_credential_preparation(db, bound_project, drift):
+    from app.models.user import User
+
+    project, _, _, identity, _ = bound_project
+    ws, cs, user, file, *_ = project
+    p = await preview(db, project)
+    run = await runner_service.create_run(db, ws.tenant_id, ws.id, "deploy_sandbox", user.id, changeset_id=cs.id)
+
+    async def seed(**_):
+        if drift == "permission":
+            actor = await db.get(User, user.id)
+            actor.is_active = False
+        elif drift == "approval":
+            cs.status = "draft"
+        else:
+            file.content = "// changed during auth\n"
+        await db.flush()
+        return SimpleNamespace(path=Path("/tmp/unused"), **identity)
+
+    with (
+        patch.object(runner_service, "_run_subprocess", AsyncMock(return_value=(0, "", ""))) as command,
+        patch("app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run", AsyncMock(side_effect=seed)),
+    ):
+        await runner_service.execute_run(
+            db,
+            run.id,
+            ws.tenant_id,
+            extra_params={
+                "sandbox_id": "123-sb1",
+                "expected_snapshot_sha": p["snapshot_sha"],
+                "expected_manifest_sha": p["manifest_sha"],
+                "expected_target_identity": p["target_identity"],
+            },
+        )
+    assert run.status == "error"
+    command.assert_not_awaited()

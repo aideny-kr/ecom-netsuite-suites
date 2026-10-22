@@ -12,6 +12,7 @@ import re
 import uuid
 from collections.abc import Mapping
 
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.fernet import InvalidToken
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -100,6 +101,6 @@ async def require_current_target(db: AsyncSession, tenant_id: uuid.UUID, identit
         )
         if actual != expected:
             raise ValueError()
-    except (ValueError, TypeError, KeyError, AttributeError, InvalidToken, AuthSeederError):
+    except (ValueError, TypeError, KeyError, AttributeError, InvalidToken, UnsupportedAlgorithm, AuthSeederError):
         raise AuthSeederError(_ERROR) from None
     return expected
