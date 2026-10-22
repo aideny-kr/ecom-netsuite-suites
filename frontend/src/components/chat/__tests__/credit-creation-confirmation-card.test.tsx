@@ -59,6 +59,20 @@ describe("Agent-proposed credit approval", () => {
     expect(screen.getByRole("button", { name: "Approve zero-total correction credit" })).toBeDisabled();
   });
 
+  it("a credit for a paid invoice says it stays on the customer's account and finance refunds by ACH/wire", () => {
+    const onAccount: WriteConfirmationData = {
+      ...card,
+      accounting_review: {
+        ...(card.accounting_review as Extract<NonNullable<WriteConfirmationData["accounting_review"]>, { kind: "credit_creation" }>),
+        settlement: "customer_credit_on_account",
+      },
+    };
+    render(<WriteConfirmationCard data={onAccount} onConfirm={vi.fn()} onReject={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Create a credit on the customer's account" })).toBeVisible();
+    expect(screen.getByText(/Left as the customer's credit: invoice INV371382 is already paid/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve $674.73 credit on account" })).toBeDisabled();
+  });
+
   it("names the credit once verified and never offers a second write", () => {
     render(
       <WriteConfirmationCard

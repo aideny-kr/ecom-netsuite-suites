@@ -568,6 +568,15 @@ class TestReviewRoundThree:
         facts["profile"].pop("correction_location_id")
         assert _refused(facts, BV_FIX) == "credit_location_required"
 
+    def test_a_locked_period_is_reported_before_a_missing_location(self):
+        """Staging 2026-10-21 (R166593377): the BV credit had no location and its period was locked.
+        The location refusal came first, so the agent never got the period_locked guidance that
+        points to the open-period zero-total credit. A location cannot fix a locked period."""
+        facts = _bv()
+        facts["profile"].pop("correction_location_id")
+        facts["period"].update(closed=True, arLocked=True, allLocked=True)
+        assert _refused(facts, BV_FIX) == "period_locked"
+
     def test_a_credit_with_its_own_location_keeps_it(self):
         result = reallocation.assess(lines=US_FIX, **_us())
         assert "location" not in result["proposed_fields"] and "location" not in result["expected_after"]
