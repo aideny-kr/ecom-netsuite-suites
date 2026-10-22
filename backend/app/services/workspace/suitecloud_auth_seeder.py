@@ -6,8 +6,10 @@ are not that store. Writing a guessed JSON file neither authorizes the CLI nor
 binds its account/role. Never refresh REST credentials or use host credentials
 as a substitute.
 
-A future certificate adapter must verify the actual account/role and bind that
-identity across check receipts, preview, confirmation and worker execution.
+A future certificate adapter must verify the actual account/role and supply the
+full identity contract now enforced across check receipts, preview, confirmation
+and worker execution. Requested certificate/local-key fields do not establish
+independently introspected remote certificate identity.
 No certificate provisioning or SDK-store import is implemented here.
 """
 
@@ -36,6 +38,9 @@ class SeededCredentials:
     path: Path
     account_id: str
     role_id: str | None = None
+    connection_id: str | None = None
+    requested_certificate_id: str | None = None
+    local_public_key_sha256: str | None = None
 
 
 def require_verified_identity(

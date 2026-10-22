@@ -491,12 +491,17 @@ async def fully_ready_changeset(db: AsyncSession, tenant_a, admin_user):
             )
         )
     ).scalar_one()
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "6738075-sb1")
+    import json
+
     db.add(
         WorkspaceArtifact(
             tenant_id=tenant_a.id,
             run_id=validation.id,
             artifact_type="result_json",
-            content='{"account_id":"6738075-sb1","role_id":"1234"}',
+            content=json.dumps(identity),
         )
     )
     await db.flush()

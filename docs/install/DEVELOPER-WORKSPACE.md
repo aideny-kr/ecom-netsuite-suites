@@ -66,3 +66,30 @@ workers together: old workers do not enforce the new gates.
 These controls do not establish operational readiness of an installation.
 Release acceptance still requires actual checks against an authorized sandbox,
 the exact deployed artifact, health verification and a demonstrated rollback.
+
+### Current connection and certificate identity
+
+Validation receipts now include the explicit company connection UUID, requested
+certificate ID and local RSA public-key SHA-256 alongside the normalized sandbox
+account and numeric role. Preview, confirmation and execution require the same
+current active or healthy NetSuite connection and encrypted certificate material.
+Revocation, replacement, a changed role/certificate/key, another company or a
+missing legacy binding blocks execution. No alternate connection is selected.
+The connection row is read afresh and locked against concurrent mutation until
+that transaction ends. The worker checks it again after credential preparation.
+The signed persistent identity also appears in validation and deployment result
+receipts and their audits; private key material is never included.
+
+The future adapter's encrypted connection contract is `account_id` plus a
+`suitecloud_ci` object with `role_id`, `certificate_id` and PEM `private_key`.
+The local public-key hash is computed from the key's DER SubjectPublicKeyInfo.
+These are requested local credential fields; SDK accountInfo verifies only the
+account and role. This contract does not provision credentials, enable the SDK
+adapter or authorize an external target. Production seeding still always rejects.
+
+Existing account/role-only validation receipts must be replaced by fresh checks.
+A fresh preview supersedes an older partially bound preview immediately. Drain
+old deployment workers and queued work before activating matching reviewed API
+and worker revisions. Trusted SDF construction, isolated credential networking,
+a real authorized SDK handshake, target deployment/readback/health/rollback and
+all existing release gates remain required.

@@ -1,8 +1,9 @@
 """Isolated certificate authentication primitive for Oracle SDK 2026.1.
 
 Not connected to the workspace runner. The production seeder stays closed
-until current connection/certificate identity is bound through all receipts,
-preview, confirmation and execution, with authorized target acceptance.
+until a trusted SDF project, credential network and real SDK handshake are
+verified with authorized target acceptance. Current connection/certificate/key
+binding is enforced separately; it does not activate this primitive.
 
 Use the SDK's integration protocol directly: workspace JavaScript hooks and
 project configuration must never execute in this credential-bearing process.

@@ -243,6 +243,10 @@ async def checked_project(db, tenant_a, admin_user):
     db.add_all([file, cs])
     await db.flush()
 
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id)
+
     async def check(kind):
         run = await runner_service.create_run(
             db,
@@ -256,9 +260,7 @@ async def checked_project(db, tenant_a, admin_user):
             patch.object(runner_service, "_run_subprocess", new=AsyncMock(return_value=(0, "", ""))),
             patch(
                 "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-                new=AsyncMock(
-                    return_value=SeededCredentials(path=Path("/tmp/unused"), account_id="123-sb1", role_id="1234")
-                ),
+                new=AsyncMock(return_value=SeededCredentials(path=Path("/tmp/unused"), **identity)),
             ),
         ):
             await runner_service.execute_run(db, run.id, tenant_a.id)
@@ -559,9 +561,7 @@ async def test_duplicate_deploy_delivery_does_not_dispatch_again(db, checked_pro
         patch.object(runner_service, "_run_subprocess", new=command),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(
-                return_value=SeededCredentials(path=Path("/tmp/unused"), account_id="123-sb1", role_id="1234")
-            ),
+            new=AsyncMock(return_value=SeededCredentials(path=Path("/tmp/unused"), **p["target_identity"])),
         ),
     ):
         await runner_service.execute_run(db, run.id, ws.tenant_id, extra_params=params)

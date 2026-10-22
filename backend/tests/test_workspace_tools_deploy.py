@@ -134,12 +134,17 @@ async def mcp_deploy_eligible(db: AsyncSession, tenant_a, admin_user):
             )
         )
     ).scalar_one()
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "6738075-sb1")
+    import json
+
     db.add(
         WorkspaceArtifact(
             tenant_id=tenant_a.id,
             run_id=validation.id,
             artifact_type="result_json",
-            content='{"account_id":"6738075-sb1","role_id":"1234"}',
+            content=json.dumps(identity),
         )
     )
     await db.flush()
@@ -216,10 +221,9 @@ class TestMcpDeployConfirm:
             call_kwargs = fake_task.delay.call_args.kwargs
             assert call_kwargs["extra_params"]["expected_snapshot_sha"] == preview["snapshot_sha"]
             assert call_kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
-            assert call_kwargs["extra_params"]["expected_target_identity"] == {
-                "account_id": "6738075-sb1",
-                "role_id": "1234",
-            }
+            assert call_kwargs["extra_params"]["expected_target_identity"]["account_id"] == "6738075-sb1"
+            assert len(call_kwargs["extra_params"]["expected_target_identity"]) == 5
+            assert call_kwargs["extra_params"]["expected_target_identity"]["role_id"] == "1234"
             assert call_kwargs["extra_params"]["require_assertions"] is False
 
         # Token row marked consumed + linked to the run.
@@ -229,6 +233,7 @@ class TestMcpDeployConfirm:
             select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == _uuid.UUID(preview["jti"]))
         )
         row = token_row.scalar_one()
+        assert call_kwargs["extra_params"]["expected_target_identity"] == row.target_identity
         assert row.consumed_at is not None
         assert str(row.consumed_run_id) == confirm_result["run_id"]
 

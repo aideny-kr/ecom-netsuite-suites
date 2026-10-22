@@ -11,7 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import WorkspaceArtifact, WorkspaceRun
-from app.services.workspace.suitecloud_auth_seeder import AuthSeederError, require_verified_identity
+from app.services.workspace.suitecloud_auth_seeder import AuthSeederError
+from app.services.workspace.target_identity import receipt_identity, require_current_target
 
 logger = structlog.get_logger()
 
@@ -125,12 +126,10 @@ async def check_deploy_prerequisites(
             ).scalar_one_or_none()
             try:
                 receipt = json.loads(artifact.content or "{}") if artifact else {}
-                account, role = require_verified_identity(
-                    account_id=receipt.get("account_id"),
-                    role_id=receipt.get("role_id"),
-                    expected_account_id=expected_account_id,
-                )
-                identity = {"account_id": account, "role_id": role}
+                identity = receipt_identity(receipt)
+                if identity["account_id"] != expected_account_id.strip().lower().replace("_", "-"):
+                    raise AuthSeederError("Validation destination changed")
+                await require_current_target(db, tenant_id, identity)
                 if expected_target_identity is not None and identity != expected_target_identity:
                     raise AuthSeederError("Validation identity changed since preview")
                 gates["validate"]["identity"] = identity

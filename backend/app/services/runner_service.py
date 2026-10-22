@@ -449,7 +449,9 @@ async def _execute_validate_run(
                 auth_root=Path(tmp_dir),
                 project_id=str(run.workspace_id),
             )
-            account_id, role_id = require_verified_identity(account_id=seeded.account_id, role_id=seeded.role_id)
+            from app.services.workspace.target_identity import require_current_target, seeded_identity
+
+            target_identity = await require_current_target(db, run.tenant_id, seeded_identity(seeded))
         except AuthSeederError as exc:
             duration_ms = int((time.monotonic() - start_time) * 1000)
             run.status = "failed"
@@ -577,8 +579,7 @@ async def _execute_validate_run(
             "parser_version": PARSER_VERSION,
             "validator_engine": "suitecloud_server",
             "snapshot_hash": run.snapshot_hash,
-            "account_id": account_id,
-            "role_id": role_id,
+            **target_identity,
         }
         await _store_artifact(db, run, "result_json", json.dumps(result_payload, default=str))
         await _audit_run_event(
@@ -806,11 +807,12 @@ async def execute_run(
                 auth_root=Path(tmp_dir),
                 project_id=str(run.workspace_id),
             )
-            account, role = require_verified_identity(
-                account_id=seeded.account_id, role_id=seeded.role_id, expected_account_id=str(sandbox_id)
-            )
-            if {"account_id": account, "role_id": role} != confirmed_identity:
+            from app.services.workspace.target_identity import require_current_target, seeded_identity
+
+            execution_identity = seeded_identity(seeded)
+            if execution_identity != confirmed_identity:
                 raise AuthSeederError("SuiteCloud execution identity differs from the confirmed validation identity")
+            await require_current_target(db, run.tenant_id, execution_identity)
             cmd = _build_deploy_command(
                 cmd_config["cmd"],
                 str(sandbox_id),
@@ -858,6 +860,8 @@ async def execute_run(
             "materialized_file_count": file_count,
             "snapshot_hash": run.snapshot_hash,
         }
+        if run.run_type == "deploy_sandbox":
+            result_payload["target_identity"] = execution_identity
         await _store_artifact(db, run, "result_json", json.dumps(result_payload, default=str))
         artifact_count += 1
 

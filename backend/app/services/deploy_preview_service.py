@@ -452,7 +452,13 @@ async def mint_deploy_token(
             WorkspaceDeployToken.tenant_id == uuid.UUID(preview["tenant_id"]),
             WorkspaceDeployToken.changeset_id == uuid.UUID(preview["changeset_id"]),
             WorkspaceDeployToken.consumed_at.is_(None),
-            or_(WorkspaceDeployToken.expires_at < now, WorkspaceDeployToken.target_identity.is_(None)),
+            or_(
+                WorkspaceDeployToken.expires_at < now,
+                WorkspaceDeployToken.target_identity.is_(None),
+                WorkspaceDeployToken.target_identity["connection_id"].astext.is_(None),
+                WorkspaceDeployToken.target_identity["requested_certificate_id"].astext.is_(None),
+                WorkspaceDeployToken.target_identity["local_public_key_sha256"].astext.is_(None),
+            ),
         )
     )
     for stale in expired_rows.scalars().all():

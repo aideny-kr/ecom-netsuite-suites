@@ -106,12 +106,17 @@ async def deploy_run_ready(db: AsyncSession, tenant_a, admin_user):
             )
         )
     ).scalar_one()
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "6738075-sb1")
+    import json
+
     db.add(
         WorkspaceArtifact(
             tenant_id=tenant_a.id,
             run_id=validation.id,
             artifact_type="result_json",
-            content='{"account_id":"6738075-sb1","role_id":"1234"}',
+            content=json.dumps(identity),
         )
     )
     await db.flush()
@@ -144,6 +149,22 @@ class TestWorkerSnapshotReverify:
         )
         expected_sha = manifest["snapshot_sha"]
 
+        import json
+
+        from app.models.workspace import WorkspaceArtifact
+
+        artifact = await db.scalar(
+            select(WorkspaceArtifact).where(
+                WorkspaceArtifact.artifact_type == "result_json",
+                WorkspaceArtifact.run_id.in_(
+                    select(WorkspaceRun.id).where(
+                        WorkspaceRun.changeset_id == cs.id, WorkspaceRun.run_type == "suitecloud_validate"
+                    )
+                ),
+            )
+        )
+        identity = json.loads(artifact.content)
+
         # Mock the subprocess so the test doesn't actually call out.
         async def fake_subprocess(cmd, cwd, timeout):
             return 0, "deploy succeeded", ""
@@ -152,9 +173,7 @@ class TestWorkerSnapshotReverify:
             patch("app.services.runner_service._run_subprocess", new=AsyncMock(side_effect=fake_subprocess)),
             patch(
                 "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-                new=AsyncMock(
-                    return_value=SeededCredentials(path=Path("/tmp/unused"), account_id="6738075_SB1", role_id="1234")
-                ),
+                new=AsyncMock(return_value=SeededCredentials(path=Path("/tmp/unused"), **identity)),
             ),
         ):
             result = await runner_service.execute_run(
@@ -165,7 +184,7 @@ class TestWorkerSnapshotReverify:
                     "sandbox_id": "6738075-sb1",
                     "expected_snapshot_sha": expected_sha,
                     "expected_manifest_sha": manifest["manifest_sha"],
-                    "expected_target_identity": {"account_id": "6738075-sb1", "role_id": "1234"},
+                    "expected_target_identity": identity,
                 },
             )
 

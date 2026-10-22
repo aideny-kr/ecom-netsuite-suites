@@ -134,12 +134,17 @@ async def deploy_eligible_changeset(db: AsyncSession, tenant_a, admin_user):
             )
         )
     ).scalar_one()
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "6738075-sb1")
+    import json
+
     db.add(
         WorkspaceArtifact(
             tenant_id=tenant_a.id,
             run_id=validation.id,
             artifact_type="result_json",
-            content='{"account_id":"6738075-sb1","role_id":"1234"}',
+            content=json.dumps(identity),
         )
     )
     await db.flush()
@@ -217,10 +222,9 @@ class TestDeployConfirmEndpoint:
             assert call_kwargs["extra_params"]["sandbox_id"] == "6738075-sb1"
             assert call_kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
             assert call_kwargs["extra_params"]["require_assertions"] is False
-            assert call_kwargs["extra_params"]["expected_target_identity"] == {
-                "account_id": "6738075-sb1",
-                "role_id": "1234",
-            }
+            assert call_kwargs["extra_params"]["expected_target_identity"]["account_id"] == "6738075-sb1"
+            assert len(call_kwargs["extra_params"]["expected_target_identity"]) == 5
+            assert call_kwargs["extra_params"]["expected_target_identity"]["role_id"] == "1234"
 
         # Test 17 — token row consumed + consumed_run_id linked.
         # We must re-query in a fresh transaction context because the
@@ -235,6 +239,7 @@ class TestDeployConfirmEndpoint:
         # The dep-overridden db session in the test client is the same as
         # `db` here, so the consumed_at/consumed_run_id updates are visible.
         row = token_row.scalar_one()
+        assert call_kwargs["extra_params"]["expected_target_identity"] == row.target_identity
         assert row.consumed_at is not None
         assert str(row.consumed_run_id) == run_id
 
