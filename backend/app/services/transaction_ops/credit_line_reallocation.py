@@ -132,6 +132,20 @@ def _adjustments(source):
         yield from (owner or {}).get("adjustments") or []
 
 
+# Solidus recalculates tax-rate adjustments from the order's lines and leaves them unfinalized on
+# completed orders (staging 2026-10-22, R183209823: "VAT (Included in Price)"); they are not an
+# open change to the order. Every other unfinalized adjustment still is.
+OPEN_BY_DESIGN_ADJUSTMENTS = frozenset({"Spree::TaxRate"})
+
+
+def adjustments_final(source):
+    """True when no source adjustment is still open, apart from Solidus's own tax-rate adjustments."""
+    return not any(
+        "finalized" in a and a["finalized"] is not True and a.get("source_type") not in OPEN_BY_DESIGN_ADJUSTMENTS
+        for a in _adjustments(source)
+    )
+
+
 def _balance(gross, tax, precision):
     return {"gross": _q(gross, precision), "net": _q(gross - tax, precision), "tax": _q(tax, precision)}
 
@@ -206,7 +220,7 @@ def _facts(
         or source.get("payment_state") != "paid"
         or None in (total, paid, source_tax)
         or paid != total
-        or any("finalized" in a and a["finalized"] is not True for a in _adjustments(source))
+        or not adjustments_final(source)
     ):
         raise RefusalError("source_not_final")
     if (_dec(credit.get("taxTotal")) or Decimal(0)) != 0:

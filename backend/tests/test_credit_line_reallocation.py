@@ -448,6 +448,16 @@ class TestReviewRoundOne:
         facts["source"] = {**facts["source"], "adjustments": [{"id": 1, "amount": "-2.8", "finalized": False}]}
         assert _refused(facts, US_FIX) == "source_not_final"
 
+    def test_an_unfinalized_solidus_tax_rate_adjustment_is_not_an_open_change(self):
+        """Staging 2026-10-22 (R183209823): Solidus leaves its tax-rate adjustments unfinalized on
+        completed orders; only those may stay open."""
+        facts = _us()
+        open_tax = {"id": 2, "amount": "2.8", "finalized": False, "source_type": "Spree::TaxRate"}
+        facts["source"] = {**facts["source"], "line_items": [{"adjustments": [open_tax]}]}
+        assert reallocation.assess(lines=US_FIX, **facts)["proposed_fields"]
+        facts["source"]["line_items"][0]["adjustments"][0]["source_type"] = "Spree::PromotionAction"
+        assert _refused(facts, US_FIX) == "source_not_final"
+
     def test_readback_ledger_is_compared_exactly(self):
         expected = {"debit": {"783": "185.95", "846": "39.05"}, "credit": {"119": "225.00"}}
         sub_cent = _gl(("119", "credit", "225"), ("783", "debit", "185.946"), ("846", "debit", "39.054"))
