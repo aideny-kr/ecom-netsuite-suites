@@ -134,7 +134,8 @@ async def test_current_read_refreshes_cache_and_blocks_rotation_until_commit(ins
                 await set_tenant_context(other, str(i["company"]))
                 await other.execute(text("SET LOCAL lock_timeout = '5s'"))
                 started.set()
-                await other.execute(text("UPDATE connections SET status='revoked' WHERE id=:id"), {"id": connection.id})
+                current = await other.get(Connection, connection.id)
+                current.status = "revoked"
                 await other.commit()
 
         pending = asyncio.create_task(rotate())
