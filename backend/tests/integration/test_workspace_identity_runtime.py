@@ -160,6 +160,7 @@ async def test_current_read_refreshes_cache_and_blocks_rotation_until_commit(ins
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["deploy_sandbox", "suitecloud_validate"])
 async def test_token_refresh_writer_not_blocked_by_external_command(installation, monkeypatch, kind):  # noqa: F811
+    requested_kind = kind
     import json
 
     from app.models.workspace import WorkspaceArtifact, WorkspaceRun
@@ -185,12 +186,12 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
         db.add(cs)
         await db.flush()
         p = await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=i["company"], workspace_id=ws.id)
-        for kind in ("suitecloud_validate", "jest_unit_test"):
+        for check_kind in ("suitecloud_validate", "jest_unit_test"):
             check = WorkspaceRun(
                 tenant_id=i["company"],
                 workspace_id=ws.id,
                 changeset_id=cs.id,
-                run_type=kind,
+                run_type=check_kind,
                 status="passed",
                 gate_status="pass",
                 snapshot_hash=p["snapshot_sha"],
@@ -198,7 +199,7 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
             )
             db.add(check)
             await db.flush()
-            if kind == "suitecloud_validate":
+            if check_kind == "suitecloud_validate":
                 db.add(
                     WorkspaceArtifact(
                         tenant_id=i["company"],
@@ -208,12 +209,14 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
                     )
                 )
         run = await runner_service.create_run(db, i["company"], ws.id, kind, user.id, changeset_id=cs.id)
+        assert run.run_type == requested_kind
         await db.commit()
         refreshed = False
         attempts = 0
+        validation_redeliveries = 0
 
         async def command(*_):
-            nonlocal refreshed, attempts
+            nonlocal refreshed, attempts, validation_redeliveries
             attempts += 1
             assert attempts == 1
             async with factory() as other:
@@ -222,6 +225,7 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
                 if kind == "suitecloud_validate":
                     duplicate = await runner_service.execute_run(other, run.id, i["company"])
                     assert duplicate.status == "running"
+                    validation_redeliveries += 1
                 current = await other.get(Connection, connection.id)
                 credentials["access_token"] = "synthetic-rotated-token"
                 current.encrypted_credentials = encrypt_credentials(credentials)
@@ -249,4 +253,6 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
                 },
             )
         assert refreshed and run.status == "passed" and attempts == 1
+        assert validation_redeliveries == (1 if requested_kind == "suitecloud_validate" else 0)
+        print("VERIFIED_KIND", requested_kind, "VALIDATION_REDELIVERIES", validation_redeliveries)
     print("REAL_RESTRICTED_ROLE token refresh writer committed during synthetic external command")
