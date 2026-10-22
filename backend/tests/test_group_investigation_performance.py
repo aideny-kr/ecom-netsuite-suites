@@ -590,6 +590,14 @@ async def test_preparation_reports_what_it_has_checked_as_it_goes(monkeypatch):
     monkeypatch.setattr(group, "log_event", AsyncMock())
     monkeypatch.setattr("app.mcp.tools.transaction_ops_tools.execute_accounting_evidence", evidence)
     monkeypatch.setattr("app.services.transaction_ops.credit_line_reallocation.prepare_group_member", reallocate)
+
+    async def not_a_reclass(child_db, tenant_id, case_id):
+        # The locked member's zero-total fallback does not fit it either: still "period is locked".
+        from app.services.transaction_ops import credit_creation
+
+        raise credit_creation.RefusalError("derive_unsupported_shape")
+
+    monkeypatch.setattr("app.services.transaction_ops.credit_creation.prepare_group_member", not_a_reclass)
     monkeypatch.setattr("app.services.transaction_ops.tax_correction.candidate_confirmation", candidate)
     monkeypatch.setattr("app.services.transaction_ops.chat_confirmation.attempt_blocker", AsyncMock(return_value=None))
     monkeypatch.setattr("app.services.transaction_ops.group_investigation.summarize", lambda e: {})
