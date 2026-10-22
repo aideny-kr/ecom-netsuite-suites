@@ -107,3 +107,9 @@ new explicit certificate binding and fresh checks. No callback preservation or
 credential provisioning is enabled here. Before activating the future seeder,
 align its connection selection with this explicit UUID/status contract; its
 current always-rejecting active-only lookup supplies no execution authority.
+
+Validation deliveries also use the durable exclusive run claim before network
+work. Redelivery of a started or completed run does not execute another command;
+a fresh validation needs a fresh run. Returned command exit/output are retained
+even if the post-command identity check detects drift. Such deployment audits
+use `deploy.outcome_uncertain` and require reconciliation before another action.

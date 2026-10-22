@@ -311,7 +311,7 @@ async def test_connection_rotation_during_command_cannot_certify_success(db, bou
         credentials["suitecloud_ci"]["certificate_id"] = "rotated-during-command"
         connection.encrypted_credentials = encrypt_credentials(credentials)
         await db.flush()
-        return 0, "", ""
+        return 0, "synthetic command evidence", "synthetic command diagnostic"
 
     with (
         patch.object(runner_service, "_run_subprocess", AsyncMock(side_effect=rotate)),
@@ -338,6 +338,20 @@ async def test_connection_rotation_during_command_cannot_certify_success(db, bou
         )
     )
     assert json.loads(artifact.content)["external_outcome"] == "uncertain"
+    assert run.exit_code == 0
+    stdout = await db.scalar(
+        select(WorkspaceArtifact).where(WorkspaceArtifact.run_id == run.id, WorkspaceArtifact.artifact_type == "stdout")
+    )
+    assert stdout.content == "synthetic command evidence"
+    if kind == "deploy_sandbox":
+        from app.models.audit import AuditEvent
+
+        event = await db.scalar(
+            select(AuditEvent).where(
+                AuditEvent.resource_id == str(run.id), AuditEvent.action == "deploy.outcome_uncertain"
+            )
+        )
+        assert event is not None
 
 
 @pytest.mark.asyncio
@@ -410,3 +424,21 @@ async def test_worker_rechecks_authority_after_credential_preparation(db, bound_
         )
     assert run.status == "error"
     command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_validation_delivery_does_not_repeat_command(db, bound_project):
+    project, _, _, identity, _ = bound_project
+    ws, cs, user, *_ = project
+    run = await runner_service.create_run(db, ws.tenant_id, ws.id, "suitecloud_validate", user.id, changeset_id=cs.id)
+    with (
+        patch.object(runner_service, "_run_subprocess", AsyncMock(return_value=(0, "", ""))) as command,
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            AsyncMock(return_value=SimpleNamespace(path=Path("/tmp/unused"), **identity)),
+        ),
+    ):
+        await runner_service.execute_run(db, run.id, ws.tenant_id)
+        await runner_service.execute_run(db, run.id, ws.tenant_id)
+    assert command.await_count == 1
+    assert run.status == "passed"

@@ -158,7 +158,8 @@ async def test_current_read_refreshes_cache_and_blocks_rotation_until_commit(ins
 
 
 @pytest.mark.asyncio
-async def test_token_refresh_writer_not_blocked_by_external_command(installation, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("kind", ["deploy_sandbox", "suitecloud_validate"])
+async def test_token_refresh_writer_not_blocked_by_external_command(installation, monkeypatch, kind):  # noqa: F811
     import json
 
     from app.models.workspace import WorkspaceArtifact, WorkspaceRun
@@ -206,15 +207,21 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
                         content=json.dumps(identity),
                     )
                 )
-        run = await runner_service.create_run(db, i["company"], ws.id, "deploy_sandbox", user.id, changeset_id=cs.id)
+        run = await runner_service.create_run(db, i["company"], ws.id, kind, user.id, changeset_id=cs.id)
         await db.commit()
         refreshed = False
+        attempts = 0
 
         async def command(*_):
-            nonlocal refreshed
+            nonlocal refreshed, attempts
+            attempts += 1
+            assert attempts == 1
             async with factory() as other:
                 await set_tenant_context(other, str(i["company"]))
                 await other.execute(text("SET LOCAL lock_timeout = '300ms'"))
+                if kind == "suitecloud_validate":
+                    duplicate = await runner_service.execute_run(other, run.id, i["company"])
+                    assert duplicate.status == "running"
                 current = await other.get(Connection, connection.id)
                 credentials["access_token"] = "synthetic-rotated-token"
                 current.encrypted_credentials = encrypt_credentials(credentials)
@@ -241,5 +248,5 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
                     "expected_target_identity": identity,
                 },
             )
-        assert refreshed and run.status == "passed"
+        assert refreshed and run.status == "passed" and attempts == 1
     print("REAL_RESTRICTED_ROLE token refresh writer committed during synthetic external command")

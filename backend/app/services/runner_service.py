@@ -504,6 +504,11 @@ async def _execute_validate_run(
             await set_tenant_context(db, str(run.tenant_id))
             validation_attempted = True
             exit_code, stdout, stderr = await _run_subprocess(cmd_config["cmd"], tmp_dir, cmd_config["timeout"])
+            run.exit_code = exit_code
+            if stdout:
+                await _store_artifact(db, run, "stdout", stdout)
+            if stderr:
+                await _store_artifact(db, run, "stderr", stderr)
             await require_current_target(db, run.tenant_id, target_identity)
         except asyncio.TimeoutError:
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -555,7 +560,8 @@ async def _execute_validate_run(
             # The command may have run. Never certify stale identity or replay an
             # uncertain outcome; retain the pre-command identity for reconciliation.
             run.status = "failed"
-            run.exit_code = -1
+            if run.exit_code is None:
+                run.exit_code = -1
             run.gate_status = "block"
             run.has_errors = True
             run.validator_engine = "suitecloud_server"
@@ -584,13 +590,6 @@ async def _execute_validate_run(
 
         duration_ms = int((time.monotonic() - start_time) * 1000)
         parsed = parse_suitecloud_validate_output(stdout)
-
-        # Persist raw stdout/stderr always — the parser is best-effort and
-        # the raw artifact is the fallback for inspection / parser_error hits.
-        if stdout:
-            await _store_artifact(db, run, "stdout", stdout)
-        if stderr:
-            await _store_artifact(db, run, "stderr", stderr)
 
         # Persist hits. ``rule_id`` is left NULL here — Task 10 (agent
         # narration helper) populates Oracle rule IDs as a follow-up.
@@ -773,7 +772,7 @@ async def execute_run(
     )
     run = result.scalar_one()
 
-    if run.run_type == "deploy_sandbox" and run.status != "queued":
+    if run.run_type in {"deploy_sandbox", "suitecloud_validate"} and run.status != "queued":
         # A running deployment may already have reached the external system.
         # Redelivery must never turn an uncertain outcome into another write.
         return run
@@ -789,8 +788,8 @@ async def execute_run(
         payload={"run_type": run.run_type, "workspace_id": str(run.workspace_id)},
     )
 
-    if run.run_type == "deploy_sandbox":
-        # Persist the exclusive claim before any external write. If the worker
+    if run.run_type in {"deploy_sandbox", "suitecloud_validate"}:
+        # Persist the exclusive claim before network work. If the worker
         # dies, this stays running for operator reconciliation, never auto-replay.
         await db.commit()
         await set_tenant_context(db, str(tenant_id))
@@ -949,6 +948,15 @@ async def execute_run(
         with command_run_scope(run.id, run.tenant_id, run.workspace_id):
             command_attempted = run.run_type == "deploy_sandbox"
             exit_code, stdout, stderr = await _run_subprocess(cmd, tmp_dir, cmd_config["timeout"])
+        run.exit_code = exit_code
+        artifact_count = 0
+        if stdout:
+            await _store_artifact(db, run, "stdout", stdout)
+            artifact_count += 1
+        if stderr:
+            await _store_artifact(db, run, "stderr", stderr)
+            artifact_count += 1
+
         if run.run_type == "deploy_sandbox":
             await require_current_target(db, run.tenant_id, execution_identity)
             identity_checked_after = True
@@ -958,14 +966,6 @@ async def execute_run(
         run.status = "passed" if exit_code == 0 else "failed"
         run.completed_at = datetime.now(timezone.utc)
         run.duration_ms = duration_ms
-
-        artifact_count = 0
-        if stdout:
-            await _store_artifact(db, run, "stdout", stdout)
-            artifact_count += 1
-        if stderr:
-            await _store_artifact(db, run, "stderr", stderr)
-            artifact_count += 1
 
         if run.run_type == "jest_unit_test":
             report = _parse_json_output(stdout)
@@ -1088,7 +1088,11 @@ async def execute_run(
         await _audit_run_event(
             db,
             run,
-            action="run_failed" if isinstance(exc, CommandSandboxError) else "deploy.worker_gate_rejected",
+            action="deploy.outcome_uncertain"
+            if command_attempted
+            else "run_failed"
+            if isinstance(exc, CommandSandboxError)
+            else "deploy.worker_gate_rejected",
             status="error",
             payload={"error_category": category, "snapshot_hash": run.snapshot_hash, **identity_evidence()},
             error_message=str(exc),
@@ -1120,7 +1124,7 @@ async def execute_run(
         await _audit_run_event(
             db,
             run,
-            action="run_failed",
+            action="deploy.outcome_uncertain" if command_attempted else "run_failed",
             status="error",
             payload={
                 "run_type": run.run_type,
@@ -1158,7 +1162,7 @@ async def execute_run(
         await _audit_run_event(
             db,
             run,
-            action="run_failed",
+            action="deploy.outcome_uncertain" if command_attempted else "run_failed",
             status="error",
             payload={
                 "run_type": run.run_type,
