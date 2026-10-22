@@ -1330,3 +1330,33 @@ def test_the_resolution_plan_names_the_credit_and_shows_the_orders_posted_balanc
     }
     posting = proposal_plan(p, {})["steps"][0]
     assert (posting["title"], posting["current_total"], posting["target_total"]) == (title, "13494.75", "12820.02")
+
+
+TAX_RATE_OPEN = {
+    "label": "VAT (Included in Price)",
+    "amount": "106.98",
+    "finalized": False,
+    "source_type": "Spree::TaxRate",
+}
+
+
+@pytest.mark.parametrize(
+    "adjustment, refused",
+    [
+        # Solidus leaves its own tax-rate adjustments unfinalized on completed orders (staging
+        # 2026-10-22, R183209823): that is not an open change to the order.
+        (TAX_RATE_OPEN, False),
+        # Any other open adjustment still means the source may change.
+        ({**TAX_RATE_OPEN, "source_type": "Spree::PromotionAction", "label": "Promo"}, True),
+        ({**TAX_RATE_OPEN, "source_type": None, "label": "Adjusted to zero"}, True),
+    ],
+)
+def test_only_solidus_tax_rate_adjustments_may_stay_unfinalized(adjustment, refused):
+    facts = _facts()
+    facts["source"]["line_items"] = [{"adjustments": [dict(adjustment)]}]
+    if refused:
+        with pytest.raises(cc.RefusalError) as exc:
+            cc.assess(lines=LINES, memo="x", **facts)
+        assert exc.value.code == "source_not_final"
+    else:
+        assert cc.assess(lines=LINES, memo="x", **facts)["balance"]["after"]["gross"] == "12820.02"

@@ -17,13 +17,13 @@ from app.services.transaction_ops.credit_line_reallocation import (
     NET_ACCOUNT_TYPES,
     RefusalError,
     _add,
-    _adjustments,
     _balance,
     _dec,
     _posted,
     _q,
     _ref,
     _tax_accounts,
+    adjustments_final,
 )
 
 KIND = "credit_creation"
@@ -82,7 +82,7 @@ def facts(
         or source.get("requires_review") not in (False, None)
         or not source.get("completed_at")
         or None in (total, source_tax)
-        or any("finalized" in a and a["finalized"] is not True for a in _adjustments(source))
+        or not adjustments_final(source)
     ):
         raise RefusalError("source_not_final")
     if require_difference and own_external_id and any(d.get("externalId") == own_external_id for d, _ in credits):
