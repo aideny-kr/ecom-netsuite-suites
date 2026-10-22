@@ -59,7 +59,9 @@ CAUSES = {
         "next_pill": "Group fix",
         "label": "Refund credit left the tax in place",
         "why": "A credit memo refunded the order, but NetSuite still carries the tax: the difference is all tax "
-        "and no tax reversal was recognised. This is the shape the credit reallocation corrects.",
+        "(or the total agrees and the refund's tax was booked to income), and no tax reversal was recognised. "
+        "The group fix moves that tax out of income: by correcting the credit, or, when the credit is in a "
+        "locked period, by a zero-total correction in the open period.",
         "next_step": "prepare_corrections",
         "next_label": "Run the group fix. It prepares only the orders it can prove and sets the rest aside.",
     },
@@ -367,8 +369,11 @@ def _classify(member, invoices, tax_reasons):
             "counted_as_tax_refund": None if tax_reasons is None else [r for r in reasons if r in tax_reasons],
         }
     target = (report.get("refund_evidence") or {}).get("target") or {}
+    # The same refund, booked with its VAT in income: the total already agrees, and NetSuite's tax is
+    # high and its net low by that VAT (staging 2026-10-22, 75 open cases).
+    tax_split_gap = tax is not None and tax < 0 and delta == 0 and _known_zero(member, "refunds")
     if (
-        tax_only_gap
+        (tax_only_gap or tax_split_gap)
         and any(link.get("credit_memo_id") for link in member["links"])
         # An ordinary credit proof without tax recognises none of it; one that carries tax does.
         and not any(
