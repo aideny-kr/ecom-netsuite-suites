@@ -602,8 +602,16 @@ _CREDIT_GUIDANCE = {
     "invoice_remaining_too_small": "The credit is larger than the invoice's open amount, and it is not a paid order "
     "whose customer Solidus owes (payment_state credit_owed, paid by ACH/wire), so it can neither be applied nor left "
     "on the customer's account. Report it.",
-    "invoice_paid_by_card": "The invoice was paid through Stripe. Solidus must record the refund, and NetSuite then "
-    "needs the credit and the customer refund together, which this tool does not create. Report it for a person.",
+    "invoice_paid_by_card": "The invoice was paid by card (Stripe or another card). Solidus must record the refund, "
+    "and NetSuite then needs the credit and the customer refund together, which this tool does not create. Report it "
+    "for a person.",
+    "credit_exceeds_amount_owed": "Solidus owes the customer less than this credit (part was already refunded). "
+    "Report the difference; do not leave a larger credit on the account.",
+    "amount_owed_differs": "Solidus owes the customer a different amount than this credit. Report it for a person.",
+    "netsuite_refund_already_recorded": "NetSuite already refunded this order, so finance must not refund again. "
+    "Report it for a person.",
+    "case_credit_exists": "This case already has the credit this tool created. A further correction is a person's "
+    "call; report it.",
     "period_locked": "The current posting period is closed or AR-locked; report it.",
     "foreign_currency_unsupported": "Foreign-currency invoices are not supported by this correction.",
     "credit_location_required": "The invoice has no location and the subsidiary has no configured correction "

@@ -54,6 +54,8 @@ def facts(
     account_types=None,
     precision=2,
     require_difference=True,
+    netsuite_refunded=None,
+    own_external_id=None,
 ):
     """Everything about the order that does not depend on the proposal; refuses early and specifically.
 
@@ -83,6 +85,10 @@ def facts(
         or any("finalized" in a and a["finalized"] is not True for a in _adjustments(source))
     ):
         raise RefusalError("source_not_final")
+    if require_difference and own_external_id and any(d.get("externalId") == own_external_id for d, _ in credits):
+        # The case's own credit exists: another create would reuse its idempotency key, which NetSuite
+        # refuses. A further correction is a person's call (packet review round 1, F4).
+        raise RefusalError("case_credit_exists")
     if require_difference and len(credits) >= MAX_CREDITS:
         raise RefusalError("too_many_credits", {"credits": len(credits), "max_existing": MAX_CREDITS - 1})
     taxed = _tax_accounts(profile)
@@ -120,6 +126,7 @@ def facts(
     return {
         "taxed": taxed,
         "credited": credited,
+        "netsuite_refunded": _dec(netsuite_refunded) if netsuite_refunded is not None else None,
         "invoice": invoice,
         "before": before,
         "required": required,
@@ -216,22 +223,40 @@ def _lines(lines, profile, items, taxed, precision, account_types, credited=None
     return parsed
 
 
-def _paid_invoice_settlement(source, remaining):
+def _paid_invoice_settlement(source, remaining, credit, netsuite_refunded, precision):
     """How a credit for an invoice that is already paid in full is settled, or None to refuse.
 
     Decided by Aiden, 2026-10-21 (R035714377): when the customer paid by ACH/wire and Solidus owes
-    them the difference (payment_state credit_owed, so no refund yet), NetSuite gets only the credit
-    memo, left on the customer's account; finance refunds by ACH/wire and records the customer
-    refund by hand. When the customer paid through Stripe, Solidus records the automatic refund and
-    NetSuite needs the credit and the customer refund together, which this tool does not create.
+    them the difference, NetSuite gets only the credit memo, left on the customer's account;
+    finance refunds by ACH/wire and records the customer refund by hand. When the customer paid
+    by card (Stripe), Solidus records the automatic refund and NetSuite needs the credit and the
+    customer refund together, which this tool does not create.
+
+    Packet review round 1: ACH/wire is a payment with no card or payment source at all (an
+    allow-list, not "not Stripe": a Spree::CreditCard is a card too, F2), the credit must equal
+    exactly what Solidus says it owes (payments less the order total), and NetSuite must not have
+    refunded the order already (F1).
     """
     if remaining != 0 or source.get("payment_state") != "credit_owed":
         return None
     completed = [p for p in source.get("payments") or [] if isinstance(p, dict) and p.get("state") == "completed"]
     if not completed:
         return None
-    if any("stripe" in str(p.get("source_type") or "").lower() for p in completed):
+    if any(p.get("source_type") is not None for p in completed):
         raise RefusalError("invoice_paid_by_card", {"reason": "credit_and_customer_refund_not_supported"})
+    if netsuite_refunded is None:
+        return None
+    if netsuite_refunded != 0:
+        raise RefusalError("netsuite_refund_already_recorded", {"refunded": _q(netsuite_refunded, precision)})
+    paid, total = _dec(source.get("payment_total")), _dec(source.get("total"))
+    if paid is None or total is None:
+        return None
+    owed = paid - total
+    if credit != owed:
+        raise RefusalError(
+            "credit_exceeds_amount_owed" if credit > owed else "amount_owed_differs",
+            {"owed": _q(owed, precision), "credit": _q(credit, precision)},
+        )
     return "customer_credit_on_account"
 
 
@@ -276,7 +301,7 @@ def assess(*, lines, memo, posting_date, **order):
     remaining = _dec(invoice.get("amountRemaining"))
     settlement = "applied_to_invoice" if total > 0 else "none"
     if total > 0 and (remaining is None or remaining < total):
-        settlement = _paid_invoice_settlement(order["source"], remaining)
+        settlement = _paid_invoice_settlement(order["source"], remaining, total, found["netsuite_refunded"], precision)
         if settlement is None:
             raise RefusalError(
                 "invoice_remaining_too_small",
@@ -655,6 +680,10 @@ async def gather(db, tenant_id, case_id, item_ids, *, reserve=0):
         "posting_date": posting_date,
         "subsidiary_id": subsidiary,
         "precision": precision,
+        # What NetSuite already refunded for the order (the verified refund graph) and this case's own
+        # credit identity: a credit on account and a second proposal depend on both (round 1, F1/F4).
+        "netsuite_refunded": str(graph.get("amount")) if graph.get("amount") is not None else None,
+        "own_external_id": ext,
     }
     context = {
         "case_id": str(case.id),

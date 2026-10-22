@@ -420,7 +420,10 @@ def _paid_by_ach(**source):
     credit_owed, no refund). NetSuite gets only the credit memo, left as the customer's credit;
     finance refunds by ACH/wire and records the customer refund by hand."""
     facts = _facts(remaining="0.00")
-    facts["source"].update({"payment_state": "credit_owed", "payments": [dict(ACH_PAYMENT)], **source})
+    facts["source"].update(
+        {"payment_state": "credit_owed", "payments": [dict(ACH_PAYMENT)], "payment_total": "13494.75", **source}
+    )
+    facts["netsuite_refunded"] = "0"
     return facts
 
 
@@ -442,6 +445,14 @@ def test_r035714377_a_paid_by_ach_order_gets_a_credit_left_on_the_customers_acco
             "0.00",
             "invoice_paid_by_card",
         ),
+        # Any card, not just Stripe: only a payment with no card source is ACH/wire (round 1, F2).
+        (
+            {"payments": [{**ACH_PAYMENT, "payment_method_id": "2", "source_type": "Spree::CreditCard"}]},
+            "0.00",
+            "invoice_paid_by_card",
+        ),
+        # Solidus owes less than the credit (a partial refund already went out): round 1, F1.
+        ({"payment_total": "13020.02"}, "0.00", "credit_exceeds_amount_owed"),
         # Solidus does not say the customer is owed anything: no credit on account.
         ({"payment_state": "paid"}, "0.00", "invoice_remaining_too_small"),
         ({"payments": []}, "0.00", "invoice_remaining_too_small"),
@@ -455,6 +466,16 @@ def test_a_credit_on_account_needs_a_paid_invoice_paid_by_ach_and_owed_by_solidu
     with pytest.raises(cc.RefusalError) as exc:
         cc.assess(lines=LINES, memo="x", **facts)
     assert exc.value.code == code
+
+
+def test_a_refund_netsuite_already_paid_out_blocks_a_credit_on_account():
+    """Round 1, F1: NetSuite already refunded the customer (a refund the order's graph found), so
+    finance must not be told to refund again."""
+    facts = _paid_by_ach()
+    facts["netsuite_refunded"] = "674.73"
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=LINES, memo="x", **facts)
+    assert exc.value.code == "netsuite_refund_already_recorded"
 
 
 # --- reads (fake NetSuite) ---------------------------------------------------------------------
@@ -833,6 +854,11 @@ async def test_only_this_cases_own_credit_may_sit_unapplied_on_the_order(monkeyp
     db = _patch_reads(monkeypatch, reader)
     found, _ = await cc.gather(db, "tenant", CASE, ["1471"])
     assert [d["id"] for d, _ in found["credits"]] == ["16300000"]
+    # Round 1, F4: once the case has its own credit, a further proposal would reuse its idempotency
+    # key, which NetSuite refuses: say so instead of showing an approval that cannot execute.
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=LINES, memo="x", **found)
+    assert exc.value.code == "case_credit_exists"
     stray = _credit("16300001", 674.73, applied_to="999", unapplied="674.73", ext="someone-else")
     stray["apply"] = {"items": []}
     reader, _ = _netsuite(credits=[stray], named=["16300001"])
