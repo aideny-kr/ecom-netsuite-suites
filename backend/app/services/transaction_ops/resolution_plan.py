@@ -110,6 +110,14 @@ def operation_identity(proposal):
     )
 
 
+# How a new agent-proposed credit is settled (credit_creation.assess) names its plan step.
+CREDIT_CREATION_TITLES = {
+    "none": "Create a zero-total correction credit",
+    "customer_credit_on_account": "Create a credit on the customer's account",
+    "applied_to_invoice": "Create and apply a credit",
+}
+
+
 def proposal_plan(proposal, report):
     kind = proposal.get("kind") or "invoice_tax"
     if kind not in KINDS:
@@ -164,7 +172,17 @@ def proposal_plan(proposal, report):
         if order_step
         else "After posting verification, read the sales order again and prepare an exact amendment if needed.",
     }
-    if existing_credit:
+    if kind == "credit_creation":
+        # A new credit changes the order's posted balance (invoices less credits); the invoice's own
+        # total against the credit's read as "19.70 -> 0.00" above a zero-total card (2026-10-21).
+        balance = proposal.get("balance") or {}
+        posting.update(
+            title=CREDIT_CREATION_TITLES.get(proposal.get("settlement"), KINDS[kind]),
+            record_id=proposal["record_id"],
+            current_total=(balance.get("before") or {}).get("gross"),
+            target_total=(balance.get("after") or {}).get("gross"),
+        )
+    elif existing_credit:
         posting.update(
             record_id=proposal["record_id"],
             current_total=before.get("total"),

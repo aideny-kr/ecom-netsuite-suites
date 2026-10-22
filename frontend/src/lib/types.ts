@@ -977,6 +977,8 @@ export type NativeAccountingReview =
 /** A new credit the assistant proposed and the server accepted by outcome (smart resolver). */
 export interface CreditCreationReview extends AccountingReviewBase {
   kind: "credit_creation";
+  /** How the credit is settled: applied to the invoice, left on the customer's account, or none (zero total). */
+  settlement?: "applied_to_invoice" | "customer_credit_on_account" | "none";
   source: Record<string, unknown>;
   invoice_id: string;
   memo: string;

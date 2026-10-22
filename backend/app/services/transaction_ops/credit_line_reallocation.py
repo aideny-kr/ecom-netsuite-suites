@@ -174,6 +174,12 @@ def _facts(
         raise RefusalError("credit_has_non_item_charges")
     if _dec(credit.get("unapplied")) != 0 or _dec(credit.get("applied")) != _dec(credit.get("total")):
         raise RefusalError("credit_not_applied")
+    # The period first: a location cannot fix a locked period, and the period_locked guidance is
+    # what points to the open-period zero-total credit (staging 2026-10-21, R166593377).
+    if period.get("id") is not None and str(period["id"]) != _ref(credit, "postingPeriod"):
+        raise RefusalError("evidence_incomplete", {"reason": "period_is_not_the_credits"})
+    if any(period.get(flag) is not False for flag in ("closed", "arLocked", "allLocked")):
+        raise RefusalError("period_locked", {"period_id": _ref(credit, "postingPeriod")})
     # NetSuite's record API refuses any save of a credit without a location; such a credit gets the
     # subsidiary's configured correction location, stamped on the header (and so on every line).
     correction_location = None
@@ -191,10 +197,6 @@ def _facts(
         raise RefusalError("credit_scope_mismatch")
     if any(_dec(d.get("exchangeRate")) != 1 for d in documents):
         raise RefusalError("foreign_currency_unsupported")
-    if period.get("id") is not None and str(period["id"]) != _ref(credit, "postingPeriod"):
-        raise RefusalError("evidence_incomplete", {"reason": "period_is_not_the_credits"})
-    if any(period.get(flag) is not False for flag in ("closed", "arLocked", "allLocked")):
-        raise RefusalError("period_locked", {"period_id": _ref(credit, "postingPeriod")})
     total, paid = _dec(source.get("total")), _dec(source.get("payment_total"))
     source_tax = _dec(source.get("tax_total"))
     if (

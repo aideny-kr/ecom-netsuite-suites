@@ -599,7 +599,11 @@ _CREDIT_GUIDANCE = {
     "gap; do not substitute an item or propose another document.",
     "tax_reversal_exceeds_posted": "A credit cannot reverse more tax than the invoice posted.",
     "invoice_count_unsupported": "The order must have exactly one invoice for this correction.",
-    "invoice_remaining_too_small": "The credit is larger than the invoice's open amount; it cannot be applied.",
+    "invoice_remaining_too_small": "The credit is larger than the invoice's open amount, and it is not a paid order "
+    "whose customer Solidus owes (payment_state credit_owed, paid by ACH/wire), so it can neither be applied nor left "
+    "on the customer's account. Report it.",
+    "invoice_paid_by_card": "The invoice was paid through Stripe. Solidus must record the refund, and NetSuite then "
+    "needs the credit and the customer refund together, which this tool does not create. Report it for a person.",
     "period_locked": "The current posting period is closed or AR-locked; report it.",
     "foreign_currency_unsupported": "Foreign-currency invoices are not supported by this correction.",
     "credit_location_required": "The invoice has no location and the subsidiary has no configured correction "

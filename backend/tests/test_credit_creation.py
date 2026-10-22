@@ -411,6 +411,52 @@ def test_the_readback_counts_the_created_zero_total_credit_and_the_order_then_ag
     assert booked == required == {"gross": "3621.00", "net": "3042.85", "tax": "578.15"}
 
 
+ACH_PAYMENT = {"state": "completed", "payment_method_id": "3", "source_type": None, "amount": "13494.75"}
+
+
+def _paid_by_ach(**source):
+    """R035714377's shape (decided by Aiden 2026-10-21): the invoice is paid in full by ACH/wire,
+    Solidus lowered the order afterwards and owes the customer the difference (payment_state
+    credit_owed, no refund). NetSuite gets only the credit memo, left as the customer's credit;
+    finance refunds by ACH/wire and records the customer refund by hand."""
+    facts = _facts(remaining="0.00")
+    facts["source"].update({"payment_state": "credit_owed", "payments": [dict(ACH_PAYMENT)], **source})
+    return facts
+
+
+def test_r035714377_a_paid_by_ach_order_gets_a_credit_left_on_the_customers_account():
+    result = cc.assess(lines=LINES, memo="price correction", **_paid_by_ach())
+    assert result["balance"]["after"] == result["balance"]["source"]
+    assert "apply" not in result["proposed_fields"]  # nothing is applied to the paid invoice
+    assert result["settlement"] == "customer_credit_on_account"
+    assert result["expected_ledger"] == {"debit": {"774": "674.73"}, "credit": {"119": "674.73"}}
+
+
+@pytest.mark.parametrize(
+    "source, remaining, code",
+    [
+        # Paid by Stripe: Solidus records the automatic refund, and then NetSuite needs the credit
+        # AND the customer refund, which this tool does not create (Aiden, 2026-10-21).
+        (
+            {"payments": [{**ACH_PAYMENT, "payment_method_id": "4", "source_type": "StripeGateway::PaymentSource"}]},
+            "0.00",
+            "invoice_paid_by_card",
+        ),
+        # Solidus does not say the customer is owed anything: no credit on account.
+        ({"payment_state": "paid"}, "0.00", "invoice_remaining_too_small"),
+        ({"payments": []}, "0.00", "invoice_remaining_too_small"),
+        # Partly paid: the existing rule (apply to the open amount) still decides.
+        ({}, "100.00", "invoice_remaining_too_small"),
+    ],
+)
+def test_a_credit_on_account_needs_a_paid_invoice_paid_by_ach_and_owed_by_solidus(source, remaining, code):
+    facts = _paid_by_ach(**source)
+    facts["invoices"][0][0]["amountRemaining"] = remaining
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=LINES, memo="x", **facts)
+    assert exc.value.code == code
+
+
 # --- reads (fake NetSuite) ---------------------------------------------------------------------
 
 from contextlib import asynccontextmanager  # noqa: E402
@@ -465,7 +511,11 @@ def _netsuite(*, credits=(), named=(), graph_credits=()):
                 elif "IN ('CustInvc', 'CashSale')" in q:
                     rows = [{"id": 16029044}]
                 elif "nexttransactionlinelink" in q:
-                    rows = [{"id": int(c["id"])} for c in credits if c["apply"]["items"][0]["doc"]["id"] == "16029044"]
+                    rows = [
+                        {"id": int(c["id"])}
+                        for c in credits
+                        if any(a["doc"]["id"] == "16029044" for a in c["apply"]["items"])
+                    ]
                 elif "tl.createdfrom = 16029044" in q:
                     rows = []
                 elif "t.memo LIKE" in q:
@@ -734,6 +784,62 @@ async def test_readback_requires_the_approved_credit_and_an_order_that_now_agree
         assert result["balance"]["booked"] == result["balance"]["source"]
     else:
         assert (result["status"], result["reason"]) == ("needs_review", outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "credit, outcome",
+    [
+        ({"applied": "0", "unapplied": "674.73"}, "verified"),
+        # Approved as the customer's credit, but applied to something: not the approved write.
+        ({"applied": "674.73", "unapplied": "0"}, "credit_creation_not_left_on_account"),
+    ],
+)
+async def test_the_readback_of_a_credit_on_account_requires_it_to_stay_unapplied(monkeypatch, credit, outcome):
+    found_at_proposal = _paid_by_ach()
+    result = cc.assess(lines=LINES, memo="price correction", **found_at_proposal)
+    p = {
+        **_approved_proposal(),
+        "memo": result["proposed_fields"]["memo"],
+        "proposed_fields": {**result["proposed_fields"], "externalId": "ss-credit-abc"},
+        "expected_after": result["expected_after"],
+        "expected_ledger": result["expected_ledger"],
+        "settlement": result["settlement"],
+        "source": found_at_proposal["source"],
+    }
+    found = _after_post(p, credit=credit)
+    found["source"] = found_at_proposal["source"]
+    found["invoices"][0][0]["amountRemaining"] = "0.00"
+
+    async def fresh(db, tenant_id, proposal):
+        return found, {"order": {"id": "15945327"}}
+
+    monkeypatch.setattr(cc, "fresh", fresh)
+    out = await cc.verify_after(SimpleNamespace(info={}), "tenant", p, {"recordId": "16123312"})
+    if outcome == "verified":
+        assert out["status"] == "verified" and out["balance"]["booked"] == out["balance"]["source"]
+    else:
+        assert (out["status"], out["reason"]) == ("needs_review", outcome)
+
+
+@pytest.mark.asyncio
+async def test_only_this_cases_own_credit_may_sit_unapplied_on_the_order(monkeypatch):
+    """The credit left on account is found again by its idempotency key. Any other unapplied credit
+    naming the order still stops a proposal: a person decides it, never a second credit beside it."""
+    ours = cc.external_id("tenant", SCOPE, CASE, "16029044")
+    own = _credit("16300000", 674.73, applied_to="999", unapplied="674.73", ext=ours)
+    own["apply"] = {"items": []}
+    reader, _ = _netsuite(credits=[own], named=["16300000"])
+    db = _patch_reads(monkeypatch, reader)
+    found, _ = await cc.gather(db, "tenant", CASE, ["1471"])
+    assert [d["id"] for d, _ in found["credits"]] == ["16300000"]
+    stray = _credit("16300001", 674.73, applied_to="999", unapplied="674.73", ext="someone-else")
+    stray["apply"] = {"items": []}
+    reader, _ = _netsuite(credits=[stray], named=["16300001"])
+    db = _patch_reads(monkeypatch, reader)
+    with pytest.raises(cc.RefusalError) as exc:
+        await cc.gather(db, "tenant", CASE, ["1471"])
+    assert exc.value.code == "existing_credit_not_applied_to_invoice"
 
 
 # --- the agent's tool and playbook ---------------------------------------------------------------
@@ -1157,3 +1263,44 @@ async def test_a_refusal_with_exact_figures_reaches_the_agent_through_the_real_a
         )
     )
     assert stored["detail"] == {"invoice_remaining": "0.0", "credit": "1000.00"}
+
+
+@pytest.mark.parametrize(
+    "settlement, total, title",
+    [
+        ("none", "0.00", "Create a zero-total correction credit"),
+        ("customer_credit_on_account", "674.73", "Create a credit on the customer's account"),
+        ("applied_to_invoice", "674.73", "Create and apply a credit"),
+    ],
+)
+def test_the_resolution_plan_names_the_credit_and_shows_the_orders_posted_balance(settlement, total, title):
+    """Staging 2026-10-21 (R022012488): the plan above a zero-total card said "Create and apply a
+    credit, 19.70 -> 0.00": the invoice's total against the credit's. A new credit changes the
+    order's posted balance, so the plan shows that, under the credit's own name."""
+    from app.services.transaction_ops.resolution_plan import proposal_plan
+
+    p = {
+        "kind": cc.KIND,
+        "tenant_id": "tenant",
+        "case_id": str(CASE),
+        "order_reference": "R231821517",
+        "scope": SCOPE,
+        "record_type": "creditmemo",
+        "record_id": "16029044",
+        "invoice_id": "16029044",
+        "sales_order_id": "15945327",
+        "execution_transport": "mcp_record_api",
+        "before": {"tranId": "INV371382", "total": "13494.75"},
+        "source": {"number": "R231821517", "currency": "USD", "total": "12820.02", "tax_total": "0"},
+        "expected_after": {"total": total, "subtotal": total, "taxTotal": "0.00"},
+        "balance": {
+            "before": {"gross": "13494.75", "net": "13494.75", "tax": "0.00"},
+            "after": {"gross": "12820.02", "net": "12820.02", "tax": "0.00"},
+            "source": {"gross": "12820.02", "net": "12820.02", "tax": "0.00"},
+        },
+        "settlement": settlement,
+        "proposed_fields": {},
+        "lines": [],
+    }
+    posting = proposal_plan(p, {})["steps"][0]
+    assert (posting["title"], posting["current_total"], posting["target_total"]) == (title, "13494.75", "12820.02")
