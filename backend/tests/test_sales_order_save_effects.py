@@ -120,3 +120,46 @@ async def test_recovery_baseline_must_reproduce_approved_native_hash():
     before["custbody_other"] = "tampered"
     with pytest.raises(ValueError, match="does not match approved"):
         await verify_after(None, None, {"scope": {}, "connection_id": "x", "before": approved}, before_raw=before)
+
+
+# PR #423 review round 1 (R3): an order discounted to a total of zero (adjusted to zero in Solidus,
+# invoiced at 0.00). Framework's NetSuite, read 2026-10-23 on 20 of 1,196 zero-total sales orders:
+# estGrossProfit is minus the cost estimate and estGrossProfitPercent is null; the record API may omit
+# a null field, so absent is the same answer.
+def zero_records(percent="null"):
+    before, after = records()
+    after.update(total="0.00", discountTotal="-1593.0", discountRate="-1593.0", estGrossProfit="-1243.75")
+    if percent == "null":
+        after["estGrossProfitPercent"] = None
+    elif percent == "absent":
+        after.pop("estGrossProfitPercent")
+    else:
+        after["estGrossProfitPercent"] = percent
+    return before, after
+
+
+@pytest.mark.parametrize("percent", ["null", "absent"])
+def test_a_zero_total_order_has_no_profit_percentage_and_loses_its_whole_cost(percent):
+    assert valid(*zero_records(percent))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda after: after.update(estGrossProfit="0"),  # the cost must show as the loss
+        lambda after: after.update(estGrossProfit="-1243.74"),
+        lambda after: after.update(estGrossProfitPercent="0"),  # a percentage of a zero total is not a number
+        lambda after: after.update(total="-1"),
+        lambda after: after.update(totalCostEstimate="1243.76"),
+    ],
+)
+def test_anything_else_on_a_zero_total_order_is_not_a_valid_save(change):
+    before, after = zero_records()
+    change(after)
+    assert not valid(before, after)
+
+
+def test_the_percentage_may_go_missing_only_at_a_zero_total():
+    before, after = records()
+    after.pop("estGrossProfitPercent")
+    assert not valid(before, after)

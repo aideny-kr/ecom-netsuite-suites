@@ -22,7 +22,7 @@ def inputs():
     support = d["support"]
     invoice = support["invoice"]
     invoice.update(discountItem=None, discountRate=None, discountTotal="0", status={"id": "Paid In Full"})
-    support.update(invoice_amount_paid="95", invoice_amount_remaining="0", invoice_credits=[])
+    support.update(invoice_amount_paid="95", invoice_amount_remaining="0", returns_and_credits=[])
     for key in ("invoice_applications", "discount_item"):
         support.pop(key)
     d.pop("evidence")
@@ -95,11 +95,14 @@ def test_shipments_from_the_order_are_fine():
     assert alignment.build_matching_candidate(**d) is not None
 
 
-@pytest.mark.parametrize("credits", [[{"id": "60"}], None, "unread"])
-def test_a_credit_on_the_invoice_or_an_unread_credit_check_refuses(credits):
-    # A credit created from or applied to the invoice means NetSuite's net is already below Solidus.
+@pytest.mark.parametrize(
+    "credits",
+    [[{"id": "60", "type": "CustCred"}], [{"id": "61", "type": "RtnAuth"}], None, "unread"],
+)
+def test_a_return_or_credit_on_the_order_or_invoice_or_an_unread_check_refuses(credits):
+    # A return or credit on the order or its invoice means NetSuite's net is already below Solidus.
     d = inputs()
-    d["support"]["invoice_credits"] = credits
+    d["support"]["returns_and_credits"] = credits
     assert alignment.build_matching_candidate(**d) is None
 
 
@@ -134,11 +137,14 @@ def test_every_order_line_is_billed_and_none_is_a_discount_or_closed(key, value)
     assert alignment.build_matching_candidate(**d) is None
 
 
-def test_the_invoice_credit_query_reads_credits_created_from_or_applied_to_the_invoice():
-    query = alignment.invoice_credit_query("20", "1")
-    assert "l.previousdoc = 20" in query and "t.type = 'CustCred'" in query
+def test_the_returns_and_credits_query_reads_the_order_and_the_invoice():
+    # PR #423 review round 1 (R1): a credit created from a return authorization links to neither the
+    # invoice nor the order's billing documents; the authorization itself links from the order.
+    query = alignment.returns_and_credits_query("90", "20", "1")
+    assert "l.previousdoc IN (90,20)" in query
+    assert "t.type IN ('RtnAuth','CustCred','CashRfnd')" in query
     with pytest.raises(ValueError):
-        alignment.invoice_credit_query("20 OR 1=1", "1")
+        alignment.returns_and_credits_query("90", "20 OR 1=1", "1")
 
 
 def _patch_context(monkeypatch, d, review, source, sections):
@@ -171,7 +177,7 @@ def _patch_context(monkeypatch, d, review, source, sections):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("changed", [None, "invoice_credits", "invoice_gl", "invoice", "basis", "source"])
+@pytest.mark.parametrize("changed", [None, "returns_and_credits", "invoice_gl", "invoice", "basis", "source"])
 async def test_approval_re_proves_the_same_basis_on_fresh_evidence(monkeypatch, changed):
     import json
     from unittest.mock import AsyncMock
@@ -182,8 +188,8 @@ async def test_approval_re_proves_the_same_basis_on_fresh_evidence(monkeypatch, 
     d["review"]["native_mcp_connector_id"] = str(uuid4())
     p = alignment.build_matching_candidate(**d)
     fresh = deepcopy(p)
-    if changed == "invoice_credits":
-        fresh["support"]["invoice_credits"] = [{"id": "60"}]
+    if changed == "returns_and_credits":
+        fresh["support"]["returns_and_credits"] = [{"id": "60"}]
     elif changed in {"invoice_gl", "invoice"}:
         fresh["support"][changed]["unexpected_change"] = True
     elif changed == "basis":
@@ -214,8 +220,26 @@ async def test_approval_re_proves_the_same_basis_on_fresh_evidence(monkeypatch, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("changed", [None, "credit_added", "credits_unread", "invoice_total", "gl", "source", "lines"])
+@pytest.mark.parametrize(
+    "changed",
+    [
+        None,
+        "credit_added",
+        "credits_unread",
+        "invoice_total",
+        "gl",
+        "source",
+        "lines",
+        # PR #423 review round 1 (R2): what the later evidence sees, and the last read, also count.
+        "later_invoice_paid_down",
+        "later_invoice_modified",
+        "later_invoice_missing",
+        "credit_at_the_last_read",
+        "last_read_unread",
+    ],
+)
 async def test_readback_needs_the_order_amended_and_the_invoice_and_its_credits_unchanged(monkeypatch, changed):
+    from contextlib import asynccontextmanager
     from unittest.mock import AsyncMock
     from uuid import uuid4
 
@@ -224,12 +248,20 @@ async def test_readback_needs_the_order_amended_and_the_invoice_and_its_credits_
     p = alignment.build_matching_candidate(**d)
     fresh = {"order": deepcopy(p["before"]), **deepcopy(p["support"])}
     fresh["order"].update(total="95", discountItem={"id": "50"}, discountRate="-5", discountTotal="-5")
-    sections = {"gl": {"20": deepcopy(fresh["invoice_gl"])}}
+    later = {
+        "id": "20",
+        "lastModifiedDate": fresh["invoice"]["lastModifiedDate"],
+        "total": fresh["invoice"]["total"],
+        "amountPaid": fresh["invoice_amount_paid"],
+        "amountRemaining": fresh["invoice_amount_remaining"],
+    }
+    sections = {"gl": {"20": deepcopy(fresh["invoice_gl"])}, "posting_documents": [later]}
     source = deepcopy(p["source"])
+    last = []
     if changed == "credit_added":
-        fresh["invoice_credits"] = [{"id": "60"}]
+        fresh["returns_and_credits"] = [{"id": "60", "type": "CustCred"}]
     if changed == "credits_unread":
-        fresh["invoice_credits"] = None
+        fresh["returns_and_credits"] = None
     if changed == "invoice_total":
         fresh["invoice"]["total"] = "90"
     if changed == "gl":
@@ -238,14 +270,34 @@ async def test_readback_needs_the_order_amended_and_the_invoice_and_its_credits_
         source["total"] = "94"
     if changed == "lines":
         fresh["order"]["lines"][0]["quantityBilled"] = "0"
+    if changed == "later_invoice_paid_down":
+        later.update(amountPaid="10", amountRemaining="85")
+    if changed == "later_invoice_modified":
+        later["lastModifiedDate"] = "2026-10-23T00:00:00Z"
+    if changed == "later_invoice_missing":
+        sections["posting_documents"] = []
+    if changed == "credit_at_the_last_read":
+        last = [{"id": "60", "type": "CustCred"}]
+    if changed == "last_read_unread":
+        last = None
     read = AsyncMock(return_value=fresh)
     monkeypatch.setattr(alignment, "read_support", read)
     commercial = _patch_context(monkeypatch, d, {}, source, sections)
+
+    @asynccontextmanager
+    async def reader(*args, **kwargs):
+        yield object()
+
+    final = AsyncMock(return_value=last)
+    monkeypatch.setattr(alignment, "authenticated_reader", reader)
+    monkeypatch.setattr(alignment, "read_returns_and_credits", final)
     result = await alignment.verify_after(None, p["tenant_id"], p)
     assert result["status"] == ("verified" if changed is None else "needs_review")
     assert result["retry_allowed"] is False
-    assert read.await_args.kwargs["invoice_credits"] is True
+    assert read.await_args.kwargs["returns_and_credits"] is True
     commercial.assert_not_awaited()
+    if changed is None:
+        final.assert_awaited_once()  # the last read happens after the evidence
 
 
 @pytest.mark.parametrize(
@@ -330,3 +382,13 @@ async def test_the_evidence_tool_tries_the_amendment_only_when_the_evidence_show
     if shape:
         # The amendment became the case's candidate and met the same case-scope gate as any other.
         assert "outside_case_resolution_scope" in result["accounting_evidence"]["blockers"]
+
+
+def test_an_order_adjusted_to_zero_is_discounted_to_zero():
+    # The 12 "Adjusted to zero" orders: Solidus and the invoice at 0.00, the sales order at full price.
+    d = inputs()
+    d["source"]["total"] = "0"
+    d["support"]["invoice"]["total"] = "0"
+    p = alignment.build_matching_candidate(**d)
+    assert p["proposed_fields"] == {"discountItem": {"id": "50"}, "discountRate": -100.0}
+    assert p["expected_after"]["total"] == "0" and p["expected_after"]["discountTotal"] == "-100"

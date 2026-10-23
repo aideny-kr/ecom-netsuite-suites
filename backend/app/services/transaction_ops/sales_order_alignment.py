@@ -114,17 +114,39 @@ def linked_query(order_id, subsidiary):
     )
 
 
-def invoice_credit_query(invoice_id, subsidiary):
-    """Credit memos created from (SaleRet) or applied to (Payment) one invoice."""
-    if not _id(invoice_id) or not _id(subsidiary):
-        raise ValueError("Native invoice-credit scope is required.")
+# What makes NetSuite's net billing differ from its invoice: a return authorization (and the credit
+# created from it), a credit memo or a cash refund.
+RETURN_AND_CREDIT_TYPES = ("RtnAuth", "CustCred", "CashRfnd")
+
+
+def returns_and_credits_query(order_id, invoice_id, subsidiary):
+    """Returns and credits linked from the order or its invoice: created from either, or applied to the
+    invoice (PR #423 review round 1, R1: a credit created from a return authorization, then refunded,
+    links to neither the invoice nor the order's billing documents)."""
+    if not _id(order_id) or not _id(invoice_id) or not _id(subsidiary):
+        raise ValueError("Native return and credit scope is required.")
+    types = ",".join(f"'{kind}'" for kind in RETURN_AND_CREDIT_TYPES)
     return (
-        "SELECT DISTINCT t.id FROM nexttransactionlinelink l JOIN transaction t ON t.id = l.nextdoc "
-        f"WHERE l.previousdoc = {invoice_id} AND t.type = 'CustCred' AND t.subsidiary = {subsidiary} ORDER BY t.id"
+        "SELECT DISTINCT t.id, t.type FROM nexttransactionlinelink l JOIN transaction t ON t.id = l.nextdoc "
+        f"WHERE l.previousdoc IN ({order_id},{invoice_id}) AND t.type IN ({types}) "
+        f"AND t.subsidiary = {subsidiary} ORDER BY t.id"
     )
 
 
-async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=None, invoice_credits=False):
+async def read_returns_and_credits(reader, order_id, invoice_id, subsidiary):
+    """The returns and credits linked from the order or invoice, or None when the read is incomplete."""
+    found, complete = _collection(
+        await reader.request(
+            "POST",
+            "/query/v1/suiteql",
+            params={"limit": 100, "offset": 0},
+            body={"q": returns_and_credits_query(order_id, invoice_id, subsidiary)},
+        )
+    )
+    return [{"id": str(row.get("id")), "type": row.get("type")} for row in found] if complete else None
+
+
+async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=None, returns_and_credits=False):
     scope = review["scope"]
     if not _id(invoice_id) or not _id(order_id):
         raise ValueError("Native record identities are required.")
@@ -133,7 +155,7 @@ async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=No
         tenant_id,
         review["netsuite_connection_id"],
         scope["netsuite_account_id"],
-        max_api_calls=6 if invoice_credits else 5,
+        max_api_calls=6 if returns_and_credits else 5,
     ) as reader:
         order = await reader.request("GET", f"/record/v1/salesOrder/{order_id}", params={"expandSubResources": "true"})
         invoice = await reader.request("GET", f"/record/v1/invoice/{invoice_id}", params={"expandSubResources": "true"})
@@ -154,18 +176,12 @@ async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=No
         rows, complete = _collection(linked)
         if not complete:
             raise ValueError("Linked record coverage is incomplete.")
-        credits = None
-        if invoice_credits:
-            found, credits_complete = _collection(
-                await reader.request(
-                    "POST",
-                    "/query/v1/suiteql",
-                    params={"limit": 100, "offset": 0},
-                    body={"q": invoice_credit_query(invoice_id, scope["subsidiary_id"])},
-                )
-            )
-            # Unknown is never "no credits": an incomplete read leaves None, which refuses.
-            credits = [{"id": str(row.get("id"))} for row in found] if credits_complete else None
+        # Unknown is never "no returns or credits": an incomplete read leaves None, which refuses.
+        returns = (
+            await read_returns_and_credits(reader, order_id, invoice_id, scope["subsidiary_id"])
+            if returns_and_credits
+            else None
+        )
         # Pin a stable order snapshot after collecting dependent evidence.
         end = await reader.request("GET", f"/record/v1/salesOrder/{order_id}")
         if any(str(end.get(k)) != str(order.get(k)) for k in ("id", "lastModifiedDate", "total")):
@@ -182,7 +198,7 @@ async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=No
             "linked_documents": clean(rows),
             "invoice_amount_paid": str(invoice.get("amountPaid")),
             "invoice_amount_remaining": str(invoice.get("amountRemaining")),
-            **({"invoice_credits": credits} if invoice_credits else {}),
+            **({"returns_and_credits": returns} if returns_and_credits else {}),
             "observed_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -417,8 +433,8 @@ def build_matching_candidate(tenant_id, case_id, source, review, support):
         billed = [r for r in linked if r["type"] in {"CustInvc", "CashSale", "CustCred", "CustRfnd"}]
         if len(billed) != 1 or billed[0]["type"] != "CustInvc" or str(billed[0]["id"]) != str(invoice["id"]):
             return None
-        # A credit created from or applied to the invoice puts NetSuite's net below the source.
-        if support.get("invoice_credits") != []:
+        # A return or credit on the order or its invoice puts NetSuite's net below the source.
+        if support.get("returns_and_credits") != []:
             return None
         lines = order["lines"]
         for line in lines:
@@ -515,7 +531,7 @@ async def prepare_matching(db, tenant_id, case_id, source, review, evidence):
     gl = (sections.get("gl") or {}).get(invoice_id)
     if not _id(order.get("id")) or not _id(invoice_id) or gl is None:
         return None
-    support = await read_support(db, tenant_id, review, invoice_id, order["id"], invoice_credits=True)
+    support = await read_support(db, tenant_id, review, invoice_id, order["id"], returns_and_credits=True)
     if (
         not documents[0].get("lastModifiedDate")
         or documents[0]["lastModifiedDate"] != support["invoice"]["lastModifiedDate"]
@@ -605,7 +621,7 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
         "invoice_amount_paid",
         "invoice_amount_remaining",
         "invoice_gl",
-        *(("invoice_credits",) if matching else ("invoice_applications", "discount_item")),
+        *(("returns_and_credits",) if matching else ("invoice_applications", "discount_item")),
     ):
         if clean(fresh["support"][key]) != clean(p["support"][key]):
             raise ValueError("Linked invoice, billing or fulfillment evidence changed.")
@@ -629,7 +645,7 @@ async def verify_after(db, tenant_id, p, receipt=None, *, before_raw=None):
         before = recovered
     matching = p.get("basis") == BASIS_INVOICE_MATCHES_SOURCE
     fresh = await read_support(
-        db, tenant_id, review, p["invoice_id"], p["record_id"], before=before, invoice_credits=matching
+        db, tenant_id, review, p["invoice_id"], p["record_id"], before=before, returns_and_credits=matching
     )
     order = fresh["order"]
     unchanged = set(before) | set(order)
@@ -648,7 +664,7 @@ async def verify_after(db, tenant_id, p, receipt=None, *, before_raw=None):
             "linked_documents",
             "invoice_amount_paid",
             "invoice_amount_remaining",
-            *(("invoice_credits",) if matching else ()),
+            *(("returns_and_credits",) if matching else ()),
         )
     )
     order_unchanged = ok
@@ -674,9 +690,32 @@ async def verify_after(db, tenant_id, p, receipt=None, *, before_raw=None):
     ok = ok and clean(sections.get("gl", {}).get(p["invoice_id"])) == p["support"]["invoice_gl"]
     ok = ok and clean(source) == p["source"]
     if matching:
-        # The invoice still equals the source and still carries no credit; the order now matches both.
+        # The invoice still equals the source and carries no return or credit; the order now matches both.
+        # The evidence above is read after the order and invoice, so it must still show the same invoice,
+        # and the returns and credits are read once more, last (PR #423 review round 1, R2).
         proof = {"status": "invoice_matches_source", "invoice_id": p["invoice_id"]}
-        ok = ok and fresh["invoice_credits"] == [] and _money(fresh["invoice"]["total"]) == _money(source["total"])
+        later = next((d for d in sections.get("posting_documents") or [] if str(d.get("id")) == p["invoice_id"]), None)
+        same_invoice = (
+            later is not None
+            and later.get("lastModifiedDate") == fresh["invoice"]["lastModifiedDate"]
+            and _money(later.get("total")) == _money(fresh["invoice"]["total"])
+            and _money(later.get("amountPaid")) == _money(fresh["invoice_amount_paid"])
+            and _money(later.get("amountRemaining")) == _money(fresh["invoice_amount_remaining"])
+        )
+        ok = (
+            ok
+            and same_invoice
+            and fresh["returns_and_credits"] == []
+            and _money(fresh["invoice"]["total"]) == _money(source["total"])
+        )
+        if ok:
+            async with authenticated_reader(
+                db, tenant_id, p["connection_id"], p["scope"]["netsuite_account_id"], max_api_calls=1
+            ) as reader:
+                last = await read_returns_and_credits(
+                    reader, p["record_id"], p["invoice_id"], p["scope"]["subsidiary_id"]
+                )
+            ok = last == []
     else:
         proof = evidence.get("commercial_credit_resolution") or {}
         ok = ok and clean(sections.get("invoice_applications")) == p["support"]["invoice_applications"]
