@@ -115,3 +115,61 @@ async def test_invalid_references_never_reach_provider(refs):
     with pytest.raises(bulk.NetSuiteEvidenceError):
         await bulk.collect_orders(reader, refs, "tranid", "1")
     reader.request.assert_not_awaited()
+
+
+class BulkDepositReader(BulkReader):
+    """BulkReader that also answers the order's deposit status query."""
+
+    credential_fingerprint = "test"
+    peak_concurrency = 1
+    max_api_calls = 100
+
+    def __init__(self):
+        super().__init__()
+        self.deposit_queries = []
+
+    async def request(self, method, path, **kwargs):
+        query = (kwargs.get("body") or {}).get("q", "")
+        if "t.type = 'CustDep'" in query:
+            self.calls += 1
+            self.deposit_queries.append(query)
+            return bulk.collection([{"id": "2", "foreigntotal": "100.00", "status": "C"}])
+        return await super().request(method, path, **kwargs)
+
+
+@pytest.mark.parametrize("status,reads", [("H", 1), ("C", 1), ("B", 0), (None, 0)])
+async def test_bulk_reads_deposits_only_for_a_closed_sales_order(monkeypatch, status, reads):
+    # A canceled order is settled only when every deposit is fully applied (decided 2026-10-22); the
+    # bulk reader asks for deposits exactly where the single reader does: a closed sales order.
+    from contextlib import asynccontextmanager
+    from uuid import uuid4
+
+    reader, connection = BulkDepositReader(), uuid4()
+
+    @asynccontextmanager
+    async def authenticated(*args, **kwargs):
+        yield reader
+
+    monkeypatch.setattr(bulk, "authenticated_reader", authenticated)
+    header = {"id": "1", "currency": {"id": "1"}, "subsidiary": {"id": "1"}}
+    if status:
+        header["orderStatus"] = {"id": status}
+    target = {
+        "provider": "netsuite",
+        "scope": {"connection_id": str(connection), "account_id": "6738075", "subsidiary_id": "1"},
+        "lookup": {"complete": True, "count": 1},
+        "orders": [
+            {
+                "record_id": "1",
+                "order_reference": "R123456789",
+                "header_complete": True,
+                "header": header,
+                "currency_metadata": {"symbol": "USD"},
+            }
+        ],
+    }
+    result = await bulk.read_refunds(None, uuid4(), connection, "6738075", "1", {"R123456789": target})
+    refund = result["refunds"]["R123456789"]
+    assert len(reader.deposit_queries) == reads
+    assert (refund["deposits"] == [{"id": "2", "total": "100.00", "status": "C"}]) is bool(reads)
+    assert refund["billing_ids"] == []

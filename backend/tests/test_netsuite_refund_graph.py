@@ -612,3 +612,119 @@ async def test_the_reader_never_drops_a_credit_a_tax_adjustment_names(monkeypatc
     reader = tax_reversal_and_income_credit()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", adjustment_profile=profile)
     assert [c["id"] for c in result["invoice_credits"]["credits"]] == ["3", "4"]
+
+
+# Canceled orders (decided by Aiden, 2026-10-22): reconciliation settles a canceled order only when it
+# can see that nothing was billed and every deposit is fully applied. The graph names the order's billing
+# documents, and reads its deposits' status with one query only when asked (a closed sales order).
+class DepositReader(Reader):
+    def __init__(self, deposits=None, complete=True):
+        super().__init__()
+        self.deposit_rows = deposits if deposits is not None else [{"id": "2", "foreigntotal": "100.00", "status": "C"}]
+        self.deposit_complete = complete
+        self.deposit_queries = []
+
+    async def request(self, method, path, **kwargs):
+        query = (kwargs.get("body") or {}).get("q", "")
+        if "t.type = 'CustDep'" in query:
+            self.calls += 1
+            self.deposit_queries.append(query)
+            rows = deepcopy(self.deposit_rows)
+            return {"items": rows, "count": len(rows), "totalResults": len(rows), "hasMore": not self.deposit_complete}
+        return await super().request(method, path, **kwargs)
+
+
+async def test_the_graph_names_the_orders_billing_documents():
+    reader = DepositReader()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["billing_ids"] == []
+    assert result["deposits"] is None and reader.deposit_queries == []  # not asked: no extra call
+    reader = DepositReader()
+    reader.edges.append(edge("1", "5", "SalesOrd", "CustInvc"))
+    assert (await collect_refunds(reader, "1", "1", "1", order_reference="R123456789"))["billing_ids"] == ["5"]
+
+
+async def test_deposits_are_read_in_one_query_when_asked():
+    reader = DepositReader()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", read_deposits=True)
+    assert result["deposits"] == [{"id": "2", "total": "100.00", "status": "C"}]
+    (query,) = reader.deposit_queries
+    assert "t.id IN (2)" in query
+
+
+async def test_an_order_with_no_deposit_reads_none():
+    reader = DepositReader()
+    reader.edges = []
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", read_deposits=True)
+    assert result["deposits"] == [] and reader.deposit_queries == []
+
+
+@pytest.mark.parametrize(
+    "rows,complete",
+    [
+        ([], True),  # the deposit the graph saw is missing from the read
+        ([{"id": "2", "foreigntotal": "100.00", "status": "C"}, {"id": "9", "foreigntotal": "1", "status": "C"}], True),
+        ([{"id": "2", "foreigntotal": "100.00", "status": "C"}], False),  # truncated
+        ([{"id": "2", "foreigntotal": None, "status": "C"}], True),
+    ],
+)
+async def test_an_unproven_deposit_read_is_unknown_and_never_breaks_the_refund_proof(rows, complete):
+    reader = DepositReader(rows, complete)
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", read_deposits=True)
+    assert result["deposits"] is None
+    assert result["amount"] == Decimal("100.00")  # the refund proof stands
+
+
+async def test_a_deposit_read_over_budget_leaves_deposits_unknown_and_the_proof_intact(monkeypatch):
+    from app.services.transaction_ops import netsuite_refunds
+
+    reader = DepositReader()
+    baseline = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    monkeypatch.setattr(netsuite_refunds, "MAX_REFUND_CALLS", reader.calls)  # exactly the proof's reads
+    reader = DepositReader()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", read_deposits=True)
+    assert result["deposits"] is None and result["amount"] == baseline["amount"]
+
+
+@pytest.mark.parametrize(
+    "header,closed",
+    [
+        ({"orderStatus": {"id": "H"}}, True),
+        ({"orderStatus": {"id": "C"}}, True),
+        ({"status": {"id": "H"}}, True),
+        ({"orderStatus": {"id": "B"}}, False),
+        ({"orderStatus": {"id": "G"}}, False),
+        ({}, False),
+    ],
+)
+async def test_the_single_reader_reads_deposits_only_for_a_closed_sales_order(monkeypatch, header, closed):
+    from contextlib import asynccontextmanager
+    from uuid import uuid4
+
+    from app.services.transaction_ops import netsuite_refunds as service
+
+    tenant, connection = uuid4(), uuid4()
+    target = {
+        "provider": "netsuite",
+        "scope": {"account_id": "6738075", "subsidiary_id": "1", "connection_id": str(connection)},
+        "lookup": {"complete": True, "count": 1},
+        "orders": [
+            {
+                "record_id": "1",
+                "order_reference": "R123456789",
+                "header_complete": True,
+                "header": {"id": "1", "subsidiary": {"id": "1"}, "currency": {"id": "1"}, **header},
+                "currency_metadata": {"symbol": "USD"},
+            }
+        ],
+    }
+    native = DepositReader()
+
+    @asynccontextmanager
+    async def authenticated(*args, **kwargs):
+        yield native
+
+    monkeypatch.setattr(service, "authenticated_reader", authenticated)
+    result = await service.read_netsuite_refunds(None, tenant, connection, "6738075", "1", "R123456789", target)
+    assert (result["deposits"] is not None) is closed
+    assert len(native.deposit_queries) == (1 if closed else 0)

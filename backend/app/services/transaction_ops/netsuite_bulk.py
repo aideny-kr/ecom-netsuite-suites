@@ -271,7 +271,7 @@ async def read_orders(db, tenant_id, connection_id, account_id, subsidiary_id, r
 
 async def read_refunds(db, tenant_id, connection_id, account_id, subsidiary_id, targets, *, adjustment_profile=None):
     # Use precisely the same target checks as the single reader before batching.
-    from app.services.transaction_ops.netsuite_refunds import refund_scope
+    from app.services.transaction_ops.netsuite_refunds import order_closed, refund_scope
 
     account = _account(account_id)
     scopes = {
@@ -304,6 +304,7 @@ async def read_refunds(db, tenant_id, connection_id, account_id, subsidiary_id, 
                                 adjustment_profile=adjustment_profile,
                                 request_links_reader=batch.links,
                                 graph_reader=batch.graph,
+                                read_deposits=order_closed(order),
                             )
                         return ref, {
                             **result,
