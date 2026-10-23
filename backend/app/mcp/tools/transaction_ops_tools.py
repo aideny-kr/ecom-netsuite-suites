@@ -853,6 +853,19 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                     correction = await prepare(db, tenant_id, case.id, source, review, evidence)
                 except (ValueError, KeyError, NetSuiteEvidenceError) as exc:
                     evidence["blockers"].append(f"sales_order_alignment:{exc}")
+            if correction is None and review.get("sales_credit_profile"):
+                # A billed order whose invoice already equals the source: the header discount the order
+                # lacks (decided 2026-10-22). Read only when the evidence already shows that shape.
+                from app.services.transaction_ops.sales_order_alignment import (
+                    matching_invoice_shape,
+                    prepare_matching,
+                )
+
+                if matching_invoice_shape(source, evidence.get("sections") or {}):
+                    try:
+                        correction = await prepare_matching(db, tenant_id, case.id, source, review, evidence)
+                    except (ValueError, KeyError, NetSuiteEvidenceError) as exc:
+                        evidence["blockers"].append(f"sales_order_matching_invoice:{exc}")
             if correction is None:
                 from app.services.transaction_ops.credit_reallocation import (
                     build_intent,

@@ -19,7 +19,11 @@ def _profit_valid(values, total, cost):
     # Oracle gross-profit transaction fields include header discounts. This
     # adapter supports only zero tax/shipping and unchanged estimated costs.
     profit = (_number(total) - _number(cost)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if _number(total) <= 0 or _number(values["estGrossProfit"]) != profit:
+    if _number(total) == 0:
+        # An order discounted to zero (Framework's NetSuite, 20 of 1,196 zero-total orders read
+        # 2026-10-23): the whole cost is the loss and the percentage is null, or omitted by the API.
+        return _number(values["estGrossProfit"]) == profit and values.get("estGrossProfitPercent") is None
+    if _number(total) < 0 or _number(values["estGrossProfit"]) != profit:
         return False
     percent = (profit / _number(total) * 100).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     return _number(values["estGrossProfitPercent"]) == percent
@@ -36,9 +40,13 @@ def comparison_snapshot(raw, before, account_id):
         # Opaque legacy hashes are never silently reinterpreted.
         result["save_effects_valid"] = observed["native_digest"] == before["native_digest"]
         return result
-    if set(previous) != set(current):
-        return result
     try:
+        # A null percentage may be omitted by the record API; only at a zero total is that the same answer.
+        omitted = set(previous) - set(current) == {"estGrossProfitPercent"} and _number(raw["total"]) == 0
+        if set(previous) != set(current) and not omitted:
+            return result
+        if omitted:
+            current = {**current, "estGrossProfitPercent": None}
         profit_fields = {"estGrossProfit", "estGrossProfitPercent"}
         if profit_fields.intersection(current):
             if not profit_fields <= current.keys() or not all(
