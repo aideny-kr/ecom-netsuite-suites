@@ -149,8 +149,22 @@ def build_group_card(members, selection, session_id):
     return card
 
 
-def reallocation_reason(code):
-    """What a member's skipped reason says about the existing-credit reallocation, if anything."""
+def reallocation_reason(code, zero_total_code=None):
+    """What a member's skipped reason says about the existing-credit reallocation, if anything.
+
+    ``zero_total_code`` is the refusal of the zero-total credit tried after a ``period_locked``
+    reallocation: it, not the locked period, is why the member was set aside."""
+    if zero_total_code == "no_verified_exemplar":
+        return (
+            "The credit to correct is in a locked period. A zero-total correction in the open period needs "
+            "one approved and verified correction of this kind for this configuration first; group "
+            "preparation then applies the same treatment."
+        )
+    if zero_total_code:
+        return (
+            "The credit to correct is in a locked period; a zero-total correction in the open period was not "
+            f"prepared: {zero_total_code}."
+        )
     if not code or code in {"no_difference", "gross_not_reconciled"}:
         return None
     if code == "no_verified_exemplar":
@@ -172,6 +186,8 @@ _SET_ASIDE = {
     "tax_refund_items_not_configured": "tax item not configured",
     "tax_accounts_not_configured": "tax account not configured",
     "tax_account_not_configured": "tax account not configured",
+    "foreign_currency_unsupported": "foreign currency not supported yet",
+    "invoice_count_unsupported": "more than one invoice",
 }
 
 
@@ -296,7 +312,7 @@ async def prepare_group_confirmation(
                     collected = evidence.get("accounting_evidence") or {}
                     routes = collected.get("investigation_routes", [])
                     investigation_evidence = summarize(collected)
-                    reallocation_refusal = None
+                    reallocation_refusal = zero_total_refusal = None
                     if evidence.get("success") and not child_db.info.get("accounting_correction_candidate"):
                         # No preset recipe fits: an existing credit reallocation, derived by the
                         # server from this member's own figures, once one has been verified.
@@ -315,6 +331,25 @@ async def prepare_group_confirmation(
                                 f"{type(exc).__name__}: {str(exc)[:200]}",
                                 flush=True,
                             )
+                        if reallocation_refusal == "period_locked":
+                            # The credit to correct sits in a closed period: the open-period half of
+                            # the same fix, a zero-total credit the server derives from this member's
+                            # figures once one has been verified (75 open cases, staging 2026-10-22).
+                            from app.services.transaction_ops import credit_creation
+
+                            try:
+                                await credit_creation.prepare_group_member(child_db, tenant_id, member["case_id"])
+                                timing["zero_total_ms"] = elapsed()
+                            except credit_creation.RefusalError as exc:
+                                zero_total_refusal = exc.code
+                            except Exception as exc:
+                                child_db.info.pop("accounting_correction_candidate", None)
+                                zero_total_refusal = f"error:{type(exc).__name__}"
+                                print(
+                                    f"accounting_group: zero-total attempt failed case={member['case_id']} "
+                                    f"{type(exc).__name__}: {str(exc)[:200]}",
+                                    flush=True,
+                                )
                     prepared = (
                         await candidate_confirmation(
                             db=child_db,
@@ -373,10 +408,17 @@ async def prepare_group_confirmation(
                         )
                     else:
                         reason = "No validated correction is ready. Continue investigation using the recorded evidence."
-                    if not blocked and (note := reallocation_reason(reallocation_refusal)):
+                    if not blocked and (note := reallocation_reason(reallocation_refusal, zero_total_refusal)):
                         reason += " " + note
                     set_aside = set_aside_label(
-                        blocked=blocked, code=reallocation_refusal, identified=bool(collected.get("resolution_intents"))
+                        blocked=blocked,
+                        # A member the zero-total credit does not fit is still held by its locked period.
+                        code=(
+                            reallocation_refusal
+                            if zero_total_refusal in (None, "derive_unsupported_shape")
+                            else zero_total_refusal
+                        ),
+                        identified=bool(collected.get("resolution_intents")),
                     )
             except Exception as exc:
                 await child_db.rollback()

@@ -158,6 +158,11 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
         ),
     }
     original_values = dict(values)
+    settled = _canceled_order_settled(source, header, refunds.get("target"), reference, currency, precision)
+    if settled:
+        # Nothing is owed on either side; the refunds still have to agree exactly.
+        values = {**values, "order_total": (Decimal(0), Decimal(0)), "tax": (Decimal(0), Decimal(0))}
+        return _finish(result, values, original_values, [settled], precision)
     adjustments = []
     offset = service_order_offset(source, header, tax, precision)
     if offset:
@@ -240,11 +245,20 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                     "tax": f"{invoice['tax']:.{precision}f}",
                 }
             )
+    zero = _zero_total_order_tax(source, values, precision)
+    if zero:
+        adjustments.append(zero)
+        values["tax"] = (values["tax"][1], values["tax"][1])
     rounding = _within_rounding(values, config, precision)
     if rounding:
         adjustments.append(rounding)
         for key in ("order_total", "tax"):
             values[key] = (values[key][0], values[key][0])
+    return _finish(result, values, original_values, adjustments, precision, rounding)
+
+
+def _finish(result, values, original_values, adjustments, precision, rounding=None):
+    """The compared amounts, the adjustments that explain them, and the status."""
     if adjustments:
         result["adjustments"] = adjustments
         result["original_amounts"] = {
@@ -282,6 +296,78 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
             else "all_amounts_agree",
         )
     return result
+
+
+DEPOSIT_FULLY_APPLIED = "C"
+
+
+def _canceled_order_settled(source, header, evidence, reference, currency, precision):
+    """A canceled order NetSuite has settled, or None (decided by Aiden, 2026-10-22).
+
+    Canceled in the source with nothing still paid there, the sales order closed or cancelled, nothing
+    billed (no invoice or cash sale) and every customer deposit fully applied: refunded, or moved to
+    another order. The closed sales order's header total is then not an amount anyone owes. Each fact
+    must be read, never assumed: unread billing or deposits leave the plain comparison.
+    """
+    if source.get("state") != "canceled" or _amount(source.get("payment_total"), precision) != 0:
+        return None
+    from app.services.transaction_ops.netsuite_refunds import CLOSED_ORDER_STATUSES, order_status
+
+    status = order_status(header)
+    if status not in CLOSED_ORDER_STATUSES or _refund(evidence, reference, currency, precision) is None:
+        return None
+    billing, deposits = evidence.get("billing_ids"), evidence.get("deposits")
+    if not isinstance(billing, list) or billing or not isinstance(deposits, list):
+        return None
+    read = []
+    for deposit in deposits:
+        total = _amount(deposit.get("total"), precision) if isinstance(deposit, dict) else None
+        if total is None or deposit.get("status") != DEPOSIT_FULLY_APPLIED or not deposit.get("id"):
+            return None
+        read.append({"id": str(deposit["id"]), "total": f"{total:.{precision}f}", "status": DEPOSIT_FULLY_APPLIED})
+    return {
+        "kind": "canceled_order_settled",
+        "status": "verified",
+        "basis": (
+            "canceled in the source; the sales order is closed with nothing billed and every deposit fully applied"
+        ),
+        "sales_order_status": status,
+        "deposits": read,
+    }
+
+
+# Payments that never moved money.
+_UNPAID_PAYMENT_STATES = frozenset({"void", "failed", "invalid", "checkout"})
+
+
+def _zero_total_order_tax(source, values, precision):
+    """The source's tax on an order both sides total at zero, or None (decided by Aiden, 2026-10-22).
+
+    Solidus keeps the pre-adjustment tax on an order adjusted to zero; NetSuite carries none. With
+    both totals zero, no NetSuite tax, and no money taken in the source (no payment, no store credit),
+    there is nothing collected to remit, so the source tax is not compared. Money taken on a zero
+    order keeps the comparison, as the service-order rule before it required. Any other order keeps
+    its tax comparison.
+    """
+    (source_total, target_total), (source_tax, target_tax) = values["order_total"], values["tax"]
+    if source_total != 0 or target_total != 0 or target_tax != 0 or source_tax is None or source_tax == 0:
+        return None
+    for key in ("payment_total", "total_applicable_store_credit"):
+        if key in source and _amount(source.get(key), precision) != 0:
+            return None
+    for payment in source.get("payments") or []:
+        try:
+            amount = _decimal(payment.get("amount")) if isinstance(payment, dict) else None
+        except (ValueError, TypeError, DecimalException):
+            return None
+        if amount is None or (amount != 0 and payment.get("state") not in _UNPAID_PAYMENT_STATES):
+            return None
+    return {
+        "kind": "zero_total_order_tax",
+        "status": "verified",
+        "basis": "the source and NetSuite order totals are both zero, so the source's tax is not owed",
+        "source_tax": f"{source_tax:.{precision}f}",
+    }
 
 
 def _within_rounding(values, config, precision):

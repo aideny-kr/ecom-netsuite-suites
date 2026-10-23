@@ -480,8 +480,9 @@ _REALLOCATION_GUIDANCE = {
     "no_difference": "The posted tax already equals the source; nothing to reallocate.",
     "gross_not_reconciled": "Gross does not reconcile, so this is not a reallocation of an existing credit.",
     "period_locked": "The credit's period is locked, so it cannot be edited. Make the same correction in the open "
-    "period with a zero-total credit from the credit tool: one line on the configured tax-refund item for the tax "
-    "part and an equal negative line on this credit's item. Leave this credit, its refund and the invoice as they are.",
+    "period with a zero-total credit from the credit tool: one line on the configured tax-refund item (an id from "
+    "detail.tax_refund_items) for the tax part and an equal negative line on this credit's item. Leave this credit, "
+    "its refund and the invoice as they are.",
     "foreign_currency_unsupported": "Foreign-currency credits are not supported by this correction.",
 }
 
@@ -590,6 +591,8 @@ _CREDIT_GUIDANCE = {
     "posted to that account: use the item of the credit being corrected.",
     "reversal_exceeds_credited": "A negative line cannot take back more than the order's credits posted to that "
     "account.",
+    "item_ids_unreadable": "Item ids are NetSuite internal ids, never names or placeholders. For the tax part use an "
+    "id from detail.tax_refund_items, the subsidiary's configured tax-refund items, and propose again.",
     "reallocation_moves_only_to_tax": "A credit with a negative line only moves value onto the tax-refund item: its "
     "positive lines are tax lines.",
     "reallocation_total_not_zero": "A credit with a negative line must add up to exactly zero.",

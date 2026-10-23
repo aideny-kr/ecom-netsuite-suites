@@ -123,7 +123,7 @@ _ROWS = (
         # Agent-proposed, accepted by outcome: credit_creation.assess (smart resolver, slice 1).
         kind="credit_creation",
         label="Create and apply a credit",
-        batch_label="Agent-proposed credit and invoice application",
+        batch_label="New credit memo, accepted by outcome",
         record_type="creditmemo",
         family="amendment",
         lock="invoice",

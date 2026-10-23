@@ -203,7 +203,14 @@ def _facts(
     if period.get("id") is not None and str(period["id"]) != _ref(credit, "postingPeriod"):
         raise RefusalError("evidence_incomplete", {"reason": "period_is_not_the_credits"})
     if any(period.get(flag) is not False for flag in ("closed", "arLocked", "allLocked")):
-        raise RefusalError("period_locked", {"period_id": _ref(credit, "postingPeriod")})
+        # The open-period zero-total credit this refusal points to needs the tax-refund item: name it.
+        raise RefusalError(
+            "period_locked",
+            {
+                "period_id": _ref(credit, "postingPeriod"),
+                "tax_refund_items": sorted(str(k) for k in (profile.get("tax_item_accounts") or {})),
+            },
+        )
     # NetSuite's record API refuses any save of a credit without a location; such a credit gets the
     # subsidiary's configured correction location, stamped on the header (and so on every line).
     correction_location = None
@@ -1146,6 +1153,10 @@ async def prepare_group_member(db, tenant_id, case_id):
 
     prefetched = db.info.pop(GROUP_PREPARATION_READS, None)
     facts, context = await gather(db, tenant_id, case_id, None, prefetched=prefetched)
+    # The order's own refusals first: a credit in a locked period is period_locked whether or not this
+    # configuration has an exemplar, so the group can try the open-period zero-total credit instead
+    # (PR #421 review round 1, F1: neither live configuration had a verified reallocation).
+    _facts(**facts)
     exemplar = await verified_exemplar(db, tenant_id, context["review"]["config_id"])
     if exemplar is None:
         raise RefusalError("no_verified_exemplar", {"config_id": context["review"]["config_id"]})
