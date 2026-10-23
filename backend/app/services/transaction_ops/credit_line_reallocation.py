@@ -1146,6 +1146,10 @@ async def prepare_group_member(db, tenant_id, case_id):
 
     prefetched = db.info.pop(GROUP_PREPARATION_READS, None)
     facts, context = await gather(db, tenant_id, case_id, None, prefetched=prefetched)
+    # The order's own refusals first: a credit in a locked period is period_locked whether or not this
+    # configuration has an exemplar, so the group can try the open-period zero-total credit instead
+    # (PR #421 review round 1, F1: neither live configuration had a verified reallocation).
+    _facts(**facts)
     exemplar = await verified_exemplar(db, tenant_id, context["review"]["config_id"])
     if exemplar is None:
         raise RefusalError("no_verified_exemplar", {"config_id": context["review"]["config_id"]})

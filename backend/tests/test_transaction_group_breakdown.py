@@ -395,6 +395,14 @@ async def test_a_refund_that_put_its_tax_into_income_goes_to_the_group_fix(world
     await world.case("R000001252", delta="0.00", tax="2.06", links=[link("6", amount="327.50")], proofs=[proof])
     # No credit memo at all: nothing refunded the tax.
     await world.case("R000001253", delta="0.00", tax="-85.74")
+    # PR #421 review round 1 (F2): a tax gap larger than the refund credits cannot be their tax.
+    await world.case(
+        "R000001254",
+        delta="0.00",
+        tax="-650.00",
+        links=[link("6", amount="450.00")],
+        proofs=[{"kind": "credit_memo", "tax_amount": "0", "amount": "450.00"}],
+    )
     monkeypatch.setattr(gb, "_invoices", _no_invoices)
     groups = (await list_groups(world.db, world.tenant.id))["groups"]
     found = {}
@@ -407,6 +415,7 @@ async def test_a_refund_that_put_its_tax_into_income_goes_to_the_group_fix(world
     assert found["R000001251"]["next_step"] == "prepare_corrections"
     assert found["R000001252"]["cause"] != "tax_left_after_credit"
     assert found["R000001253"]["cause"] != "tax_left_after_credit"
+    assert found["R000001254"]["cause"] != "tax_left_after_credit"
 
 
 async def test_a_tax_difference_is_never_called_a_business_price(world, monkeypatch):

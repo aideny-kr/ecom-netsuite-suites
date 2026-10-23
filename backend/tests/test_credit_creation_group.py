@@ -185,10 +185,20 @@ def test_the_exemplar_is_a_verified_zero_total_credit_on_the_same_configuration(
             return SimpleNamespace(first=lambda: None)
 
     assert asyncio.run(cc.verified_exemplar(_Db(), TENANT, CONFIG)) is None
-    sql = captured["sql"]
-    for path in ("'status'", "'kind'", "'config_id'", "'settlement'", "'accounting_verification'"):
-        assert path in sql
-    assert "ORDER BY" in sql and "LIMIT" in sql
+    sql = " ".join(captured["sql"].split())
+    # PR #421 review round 1 (F3): the predicates and their values, not just the key names.
+    tenant = str(TENANT).replace("-", "")
+    assert f"chat_messages.tenant_id = '{tenant}'" in sql or f"chat_messages.tenant_id = '{TENANT}'" in sql
+    for path, value in (
+        ("'status'", "'approved'"),
+        ("'kind'", "'credit_creation'"),
+        ("'config_id'", f"'{CONFIG}'"),
+        ("'settlement'", "'none'"),
+        ("'status'", "'verified'"),
+    ):
+        assert f"->> {path}) = {value}" in sql, (path, value, sql)
+    assert "'accounting_verification'" in sql
+    assert "ORDER BY chat_messages.created_at DESC, chat_messages.id DESC LIMIT 1" in sql
 
 
 class TestGroupFallback:

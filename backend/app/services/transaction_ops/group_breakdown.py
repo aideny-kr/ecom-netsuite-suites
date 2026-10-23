@@ -371,7 +371,18 @@ def _classify(member, invoices, tax_reasons):
     target = (report.get("refund_evidence") or {}).get("target") or {}
     # The same refund, booked with its VAT in income: the total already agrees, and NetSuite's tax is
     # high and its net low by that VAT (staging 2026-10-22, 75 open cases).
-    tax_split_gap = tax is not None and tax < 0 and delta == 0 and _known_zero(member, "refunds")
+    # Only a gap the refund credits can hold: their tax is part of what they refunded, so a larger gap
+    # is not theirs (PR #421 review round 1, F2).
+    refunded = [_decimal(link.get("amount")) for link in credit_links]
+    tax_split_gap = (
+        tax is not None
+        and tax < 0
+        and delta == 0
+        and _known_zero(member, "refunds")
+        and bool(refunded)
+        and None not in refunded
+        and -tax < sum(refunded, Decimal(0))
+    )
     if (
         (tax_only_gap or tax_split_gap)
         and any(link.get("credit_memo_id") for link in member["links"])
