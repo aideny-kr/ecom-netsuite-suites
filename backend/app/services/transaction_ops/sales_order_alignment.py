@@ -114,12 +114,26 @@ def linked_query(order_id, subsidiary):
     )
 
 
-async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=None):
+def invoice_credit_query(invoice_id, subsidiary):
+    """Credit memos created from (SaleRet) or applied to (Payment) one invoice."""
+    if not _id(invoice_id) or not _id(subsidiary):
+        raise ValueError("Native invoice-credit scope is required.")
+    return (
+        "SELECT DISTINCT t.id FROM nexttransactionlinelink l JOIN transaction t ON t.id = l.nextdoc "
+        f"WHERE l.previousdoc = {invoice_id} AND t.type = 'CustCred' AND t.subsidiary = {subsidiary} ORDER BY t.id"
+    )
+
+
+async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=None, invoice_credits=False):
     scope = review["scope"]
     if not _id(invoice_id) or not _id(order_id):
         raise ValueError("Native record identities are required.")
     async with authenticated_reader(
-        db, tenant_id, review["netsuite_connection_id"], scope["netsuite_account_id"], max_api_calls=5
+        db,
+        tenant_id,
+        review["netsuite_connection_id"],
+        scope["netsuite_account_id"],
+        max_api_calls=6 if invoice_credits else 5,
     ) as reader:
         order = await reader.request("GET", f"/record/v1/salesOrder/{order_id}", params={"expandSubResources": "true"})
         invoice = await reader.request("GET", f"/record/v1/invoice/{invoice_id}", params={"expandSubResources": "true"})
@@ -140,6 +154,18 @@ async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=No
         rows, complete = _collection(linked)
         if not complete:
             raise ValueError("Linked record coverage is incomplete.")
+        credits = None
+        if invoice_credits:
+            found, credits_complete = _collection(
+                await reader.request(
+                    "POST",
+                    "/query/v1/suiteql",
+                    params={"limit": 100, "offset": 0},
+                    body={"q": invoice_credit_query(invoice_id, scope["subsidiary_id"])},
+                )
+            )
+            # Unknown is never "no credits": an incomplete read leaves None, which refuses.
+            credits = [{"id": str(row.get("id"))} for row in found] if credits_complete else None
         # Pin a stable order snapshot after collecting dependent evidence.
         end = await reader.request("GET", f"/record/v1/salesOrder/{order_id}")
         if any(str(end.get(k)) != str(order.get(k)) for k in ("id", "lastModifiedDate", "total")):
@@ -156,6 +182,7 @@ async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=No
             "linked_documents": clean(rows),
             "invoice_amount_paid": str(invoice.get("amountPaid")),
             "invoice_amount_remaining": str(invoice.get("amountRemaining")),
+            **({"invoice_credits": credits} if invoice_credits else {}),
             "observed_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -329,6 +356,176 @@ async def prepare(db, tenant_id, case_id, source, review, evidence):
     return build_candidate(tenant_id, case_id, source, review, evidence, support)
 
 
+BASIS_INVOICE_MATCHES_SOURCE = "invoice_matches_source"
+_NOT_A_SALE_LINE = frozenset({"Discount", "Markup", "Subtotal"})
+
+
+def _zero(value):
+    return value is not None and _money(value) == 0
+
+
+def build_matching_candidate(tenant_id, case_id, source, review, support):
+    """A billed order whose one invoice already equals the finalized source: the header discount it lacks.
+
+    Decided by Aiden 2026-10-22: the sales order must match, by a header discount equal to the order's
+    total less its invoice's, the mechanism already proven on a billed order (R146850445). Fails closed
+    outside a net gap: the invoice equals the source in total, and the tax is zero on the source, the
+    invoice and the order. Nothing billed, credited or refunded besides the one invoice. This never
+    changes the invoice, its ledger or any line.
+    """
+    try:
+        profile = SalesCreditProfile.model_validate(review["sales_credit_profile"])
+        order, invoice, scope = support["order"], support["invoice"], review["scope"]
+        total = _money(source["total"])
+        amount = _money(order["total"]) - _money(invoice["total"])
+        if (
+            review.get("configuration_status") != "scoped_configuration_found"
+            or not review.get("connection_active")
+            or not review.get("native_mcp_connector_id")
+            or profile.account_id != scope["netsuite_account_id"]
+            or profile.subsidiary_id != str(scope["subsidiary_id"])
+            or review["business_entity_subsidiaries"].get(source["business_entity"]) != profile.subsidiary_id
+            # The finalized source, without tax.
+            or source.get("state") != "complete"
+            or source.get("requires_review") not in (False, None)
+            or not source.get("completed_at")
+            or source["currency"] != profile.currency
+            or not all(_zero(source.get(k)) for k in ("tax_total", "included_tax_total", "additional_tax_total"))
+            or source["number"] != order["tranId"]
+            # The invoice already equals it.
+            or _money(invoice["total"]) != total
+            or reference(invoice, "createdFrom") != str(order["id"])
+            or any(reference(order, k) != reference(invoice, k) for k in ("entity", "subsidiary", "currency"))
+            or reference(order, "subsidiary") != profile.subsidiary_id
+            or str(support["currency"]["id"]) != reference(order, "currency")
+            or support["currency"]["symbol"] != profile.currency
+            or support["currency"]["currencyPrecision"] != 2
+            or _money(order["exchangeRate"]) != 1
+            or _money(invoice["exchangeRate"]) != 1
+            or not all(_zero(d.get(k)) for d in (order, invoice) for k in ("taxTotal", "taxRate", "shippingCost"))
+            # A fully billed order with no header discount yet, above its invoice.
+            or (order.get("status") or {}).get("id") != "G"
+            or order["discountItem"] is not None
+            or _money(order["discountRate"] or 0) != 0
+            or _money(order["discountTotal"]) != 0
+            or order["billingSchedule"] is not None
+            or amount <= 0
+            or not order["lastModifiedDate"]
+        ):
+            return None
+        linked = support["linked_documents"]
+        billed = [r for r in linked if r["type"] in {"CustInvc", "CashSale", "CustCred", "CustRfnd"}]
+        if len(billed) != 1 or billed[0]["type"] != "CustInvc" or str(billed[0]["id"]) != str(invoice["id"]):
+            return None
+        # A credit created from or applied to the invoice puts NetSuite's net below the source.
+        if support.get("invoice_credits") != []:
+            return None
+        lines = order["lines"]
+        for line in lines:
+            if (
+                (line.get("itemType") or {}).get("id") in _NOT_A_SALE_LINE
+                or _money(line["quantity"]) <= 0
+                or _money(line["amount"]) < 0
+                or _money(line["quantityBilled"]) != _money(line["quantity"])
+                or line.get("isClosed") is not False
+            ):
+                return None
+        if sum((_money(line["amount"]) for line in lines), Decimal(0)) != _money(order["subtotal"]):
+            return None
+        from app.services.transaction_ops.sales_credit import _native_number
+
+        candidate = clean(
+            deepcopy(
+                {
+                    "kind": KIND,
+                    "basis": BASIS_INVOICE_MATCHES_SOURCE,
+                    "tenant_id": str(tenant_id),
+                    "case_id": str(case_id),
+                    "order_reference": source["number"],
+                    "record_type": "salesorder",
+                    "lock_record_type": "invoice",
+                    "record_id": str(order["id"]),
+                    "mutation_type": "update",
+                    "connector_id": str(review["native_mcp_connector_id"]),
+                    "connection_id": str(review["netsuite_connection_id"]),
+                    "config_id": str(review["config_id"]),
+                    "scope": scope,
+                    "profile": profile.model_dump(mode="json"),
+                    "source": source,
+                    "before": order,
+                    "support": {k: v for k, v in support.items() if k != "order"},
+                    "invoice_id": str(invoice["id"]),
+                    "observed_at": support["observed_at"],
+                    "accounting_book": profile.accounting_book_id,
+                    "ar_account": profile.ar_account_id,
+                    "sales_adjustment_account": profile.adjustment_account_id,
+                    "proposed_fields": {
+                        "discountItem": {"id": profile.item_id},
+                        "discountRate": _native_number(-amount),
+                    },
+                    "expected_after": {
+                        "total": str(total),
+                        "subtotal": str(order["subtotal"]),
+                        "taxTotal": "0.00",
+                        "discountTotal": str(-amount),
+                    },
+                    "approval_basis": "Amend the billed sales order to match its invoice, which already equals "
+                    "the finalized source. Apply only the displayed header discount (the order total less the "
+                    "invoice total). Retain items, quantities, fulfillment and billing state, classifications and "
+                    "original date. This does not authorize rebilling, another invoice/credit, a GL adjustment or "
+                    "cash movement. Verify the invoice, its ledger and its credits remain unchanged, and retain "
+                    "before/after evidence, source version and approver in the audit log.",
+                }
+            )
+        )
+        if len(json.dumps(candidate, separators=(",", ":")).encode()) > MAX_PROPOSAL_BYTES:
+            return None
+        return candidate
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return None
+
+
+def matching_invoice_shape(source, sections):
+    """Whether evidence already read could be this treatment's shape: worth its six reads only then.
+
+    One invoice equal to the source total, an order above it, and no tax on either.
+    """
+    try:
+        order, documents = sections.get("sales_order") or {}, sections.get("posting_documents") or []
+        if len(documents) != 1 or documents[0].get("record_type") != "invoice":
+            return False
+        invoice = documents[0]
+        return (
+            _money(invoice["total"]) == _money(source["total"])
+            and _money(order["total"]) > _money(invoice["total"])
+            and all(_zero(document.get("taxTotal")) for document in (order, invoice))
+        )
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
+
+
+async def prepare_matching(db, tenant_id, case_id, source, review, evidence):
+    """The header discount for a billed order whose one invoice already equals the source, or None."""
+    sections = evidence.get("sections") or {}
+    order = sections.get("sales_order") or {}
+    documents = sections.get("posting_documents") or []
+    if not review.get("sales_credit_profile") or len(documents) != 1:
+        return None
+    invoice_id = str(documents[0].get("id"))
+    gl = (sections.get("gl") or {}).get(invoice_id)
+    if not _id(order.get("id")) or not _id(invoice_id) or gl is None:
+        return None
+    support = await read_support(db, tenant_id, review, invoice_id, order["id"], invoice_credits=True)
+    if (
+        not documents[0].get("lastModifiedDate")
+        or documents[0]["lastModifiedDate"] != support["invoice"]["lastModifiedDate"]
+    ):
+        raise ValueError("Invoice evidence and native snapshot are not from the same observed version.")
+    support["invoice_gl"] = clean(gl)
+    evidence["native_api_calls"] = evidence.get("native_api_calls", 0) + 6
+    return build_matching_candidate(tenant_id, case_id, source, review, support)
+
+
 def is_update(record_type, normalized):
     return record_type.lower() == "salesorder" and any(
         str(k).lower() in {"discountitem", "discountrate"} for k in normalized.fields
@@ -390,11 +587,16 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
         raise ValueError("Sales-order configuration changed; prepare a new approval.")
     source = await refresh_source(db, tenant_id, p["scope"], p["order_reference"])
     evidence = await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json)
-    await collect_commercial_credits(db, tenant_id, review, case.latest_report_json, source, evidence)
-    fresh = await prepare(db, tenant_id, case.id, source, review, evidence)
+    matching = p.get("basis") == BASIS_INVOICE_MATCHES_SOURCE
+    if matching:
+        # The basis the card was proposed on, re-proved: never the other treatment's evidence.
+        fresh = await prepare_matching(db, tenant_id, case.id, source, review, evidence)
+    else:
+        await collect_commercial_credits(db, tenant_id, review, case.latest_report_json, source, evidence)
+        fresh = await prepare(db, tenant_id, case.id, source, review, evidence)
     if not fresh or any(
-        clean(fresh[k]) != clean(p[k])
-        for k in ("source", "before", "proposed_fields", "expected_after", "scope", "invoice_id")
+        clean(fresh.get(k)) != clean(p.get(k))
+        for k in ("basis", "source", "before", "proposed_fields", "expected_after", "scope", "invoice_id")
     ):
         raise ValueError("Sales order, source or invoice eligibility changed; prepare a new approval.")
     for key in (
@@ -403,8 +605,7 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
         "invoice_amount_paid",
         "invoice_amount_remaining",
         "invoice_gl",
-        "invoice_applications",
-        "discount_item",
+        *(("invoice_credits",) if matching else ("invoice_applications", "discount_item")),
     ):
         if clean(fresh["support"][key]) != clean(p["support"][key]):
             raise ValueError("Linked invoice, billing or fulfillment evidence changed.")
@@ -426,7 +627,10 @@ async def verify_after(db, tenant_id, p, receipt=None, *, before_raw=None):
         }:
             raise ValueError("Archived sales-order baseline does not match approved evidence.")
         before = recovered
-    fresh = await read_support(db, tenant_id, review, p["invoice_id"], p["record_id"], before=before)
+    matching = p.get("basis") == BASIS_INVOICE_MATCHES_SOURCE
+    fresh = await read_support(
+        db, tenant_id, review, p["invoice_id"], p["record_id"], before=before, invoice_credits=matching
+    )
     order = fresh["order"]
     unchanged = set(before) | set(order)
     unchanged -= AMENDED_FIELDS | {"save_effects", "native_digest", "comparison_native_digest", "save_effects_valid"}
@@ -439,7 +643,13 @@ async def verify_after(db, tenant_id, p, receipt=None, *, before_raw=None):
     ok = ok and _money(order["discountRate"]) == _money(str(p["proposed_fields"]["discountRate"]))
     linked_unchanged = all(
         clean(fresh[k]) == clean(p["support"][k])
-        for k in ("invoice", "linked_documents", "invoice_amount_paid", "invoice_amount_remaining")
+        for k in (
+            "invoice",
+            "linked_documents",
+            "invoice_amount_paid",
+            "invoice_amount_remaining",
+            *(("invoice_credits",) if matching else ()),
+        )
     )
     order_unchanged = ok
     ok = ok and linked_unchanged
@@ -457,18 +667,25 @@ async def verify_after(db, tenant_id, p, receipt=None, *, before_raw=None):
     full_review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
     source = await refresh_source(db, tenant_id, p["scope"], p["order_reference"])
     evidence = await collect_accounting_evidence(db, tenant_id, full_review, case.latest_report_json)
-    await collect_commercial_credits(db, tenant_id, full_review, case.latest_report_json, source, evidence)
-    proof = evidence.get("commercial_credit_resolution") or {}
+    if not matching:
+        # As before this basis existed: the commercial read can refresh the invoice's GL section.
+        await collect_commercial_credits(db, tenant_id, full_review, case.latest_report_json, source, evidence)
     sections = evidence.get("sections") or {}
     ok = ok and clean(sections.get("gl", {}).get(p["invoice_id"])) == p["support"]["invoice_gl"]
-    ok = ok and clean(sections.get("invoice_applications")) == p["support"]["invoice_applications"]
-    ok = ok and clean(sections.get("invoice_discount_item")) == p["support"]["discount_item"]
-    ok = (
-        ok
-        and clean(source) == p["source"]
-        and proof.get("status") == "existing_invoice_discount_verified"
-        and str(proof.get("invoice_id")) == p["invoice_id"]
-    )
+    ok = ok and clean(source) == p["source"]
+    if matching:
+        # The invoice still equals the source and still carries no credit; the order now matches both.
+        proof = {"status": "invoice_matches_source", "invoice_id": p["invoice_id"]}
+        ok = ok and fresh["invoice_credits"] == [] and _money(fresh["invoice"]["total"]) == _money(source["total"])
+    else:
+        proof = evidence.get("commercial_credit_resolution") or {}
+        ok = ok and clean(sections.get("invoice_applications")) == p["support"]["invoice_applications"]
+        ok = ok and clean(sections.get("invoice_discount_item")) == p["support"]["discount_item"]
+        ok = (
+            ok
+            and proof.get("status") == "existing_invoice_discount_verified"
+            and str(proof.get("invoice_id")) == p["invoice_id"]
+        )
     return {
         "status": "verified" if ok else "needs_review",
         "sales_order": order,
