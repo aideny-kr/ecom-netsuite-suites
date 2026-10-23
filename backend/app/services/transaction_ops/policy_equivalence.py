@@ -13,7 +13,10 @@ from decimal import Decimal
 from app.services.transaction_ops.evidence_contract import VERSION
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile
 
-RULE_VERSION = 2  # 2: a saved order-total difference without an invoice-credit read is affected
+# 2: a saved order-total difference without an invoice-credit read is affected
+# 3: a saved difference on a canceled order read without billing and deposits, or on a zero order with a
+#    tax difference, is affected (2026-10-22)
+RULE_VERSION = 3
 SCOPE_KEYS = (
     "source_connection_id",
     "source_step_id",
@@ -158,6 +161,22 @@ def evaluate(report, snapshot, changed, *, evaluated_at):
         # orders are read again; matched orders and other differences keep reuse.
         if "invoice_credits" not in target and Decimal(balance["amounts"]["order_total"]["delta"]) != 0:
             return gap("invoice_credits_not_read", "affected")
+        # 2026-10-22 (decided by Aiden): a settled canceled order and a zero order's leftover tax are
+        # matched (order_reconciliation._canceled_order_settled, _zero_total_order_tax). A saved
+        # difference either could change is read again; every other saved result keeps reuse. A
+        # canceled order needs its billing and deposits, which reads before this did not report; the
+        # source status is "unknown" when Solidus flagged the order for review, so that counts too.
+        if balance["status"] == "difference":
+            canceled = (report.get("source") or {}).get("status") in {"cancelled", "unknown"}
+            if canceled and not ("billing_ids" in target and "deposits" in target):
+                return gap("canceled_order_evidence_not_read", "affected")
+            total = balance["amounts"]["order_total"]
+            if (
+                Decimal(total["source"]) == 0
+                and Decimal(total["target"]) == 0
+                and Decimal(balance["amounts"]["tax"]["delta"]) != 0
+            ):
+                return gap("zero_total_order_tax", "affected")
         return {
             "status": "equivalent",
             "reason": "changed_reasons_absent",

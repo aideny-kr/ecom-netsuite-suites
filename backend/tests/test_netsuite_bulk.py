@@ -115,3 +115,21 @@ async def test_invalid_references_never_reach_provider(refs):
     with pytest.raises(bulk.NetSuiteEvidenceError):
         await bulk.collect_orders(reader, refs, "tranid", "1")
     reader.request.assert_not_awaited()
+
+
+async def test_bulk_reports_the_same_deposits_and_billing_as_the_single_reader():
+    # PR #422 review round 1 (F2): deposits come from the shared graph rows, so a closed order costs
+    # the batch no extra call and no other order's proof can be starved by it.
+    from tests.test_netsuite_refund_graph import DepositReader
+
+    reader = BulkReader()
+    reader.edges = DepositReader().edges
+    batch = await bulk.RefundGraphBatch.collect(reader, {"R123456789": {"record_id": "1"}})
+    calls = reader.calls
+    actual = await collect_refunds(
+        reader, "1", "1", "1", order_reference="R123456789", request_links_reader=batch.links, graph_reader=batch.graph
+    )
+    expected = await collect_refunds(DepositReader(), "1", "1", "1", order_reference="R123456789")
+    assert actual["deposits"] == expected["deposits"] == [{"id": "2", "total": "100.00", "status": "C"}]
+    assert actual["billing_ids"] == expected["billing_ids"] == []
+    assert reader.calls - calls == 1  # the refund record only, as without deposits

@@ -8,6 +8,11 @@ from app.services.transaction_ops.order_reconciliation import reconcile_order
 from tests.test_order_balance_reconciliation import evidence
 
 
+def _kinds(result):
+    """Which proofs decided the result: the service/RMA offset proof or the 2026-10-22 zero-total rule."""
+    return [adjustment["kind"] for adjustment in result.get("adjustments") or []]
+
+
 def service_evidence():
     source, target, config, refunds = evidence()
     source["orders"][0].update(
@@ -100,6 +105,28 @@ def test_fully_offset_service_shipping_tax_matches_with_original_evidence():
     assert (source, target, refunds) == before
 
 
+# Money taken on a zero order, or tax NetSuite carries, keeps the comparison: neither the
+# service/RMA offset nor the zero-total rule of 2026-10-22 can hide it.
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda s, t, r: s.update(total_applicable_store_credit="2"),
+        lambda s, t, r: s.update(payment_total="2"),
+        lambda s, t, r: s.update(payments=[{"amount": "2"}]),
+        lambda s, t, r: t.update(taxTotal="1"),
+    ],
+)
+def test_zero_order_does_not_hide_unproven_tax(change):
+    source, target, config, refunds = service_evidence()
+    change(source["orders"][0], target["orders"][0]["header"], refunds)
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] != "matched"
+    assert "adjustments" not in result
+
+
+# Decided by Aiden 2026-10-22: an order both sides total at zero, with no NetSuite tax and no money
+# taken in the source, has no tax to compare. These changes break the service/RMA offset proof, so
+# they were unmatched before; now the zero-total rule matches them, and says so.
 @pytest.mark.parametrize(
     "change",
     [
@@ -112,9 +139,6 @@ def test_fully_offset_service_shipping_tax_matches_with_original_evidence():
         lambda s, t, r: s["adjustments"][0].update(label="Promotion", source_type="Spree::PromotionAction"),
         lambda s, t, r: s["adjustments"].append(deepcopy(s["adjustments"][0])),
         lambda s, t, r: s.update(adjustment_total="-89"),
-        lambda s, t, r: s.update(total_applicable_store_credit="2"),
-        lambda s, t, r: s.update(payment_total="2"),
-        lambda s, t, r: s.update(payments=[{"amount": "2"}]),
         lambda s, t, r: s["line_items"][0].update(total="79"),
         lambda s, t, r: s["line_items"][0]["adjustments"][0].update(amount="1"),
         lambda s, t, r: s["shipments"][0]["adjustments"][0].update(amount="1"),
@@ -125,15 +149,15 @@ def test_fully_offset_service_shipping_tax_matches_with_original_evidence():
         lambda s, t, r: t.update(shippingCost="1"),
         lambda s, t, r: t.update(handlingCost="1"),
         lambda s, t, r: t.update(custbody_fw_solidus_tax_amount="1"),
-        lambda s, t, r: t.update(taxTotal="1"),
     ],
 )
-def test_zero_order_does_not_hide_unproven_tax(change):
+def test_a_zero_order_without_the_offset_proof_matches_by_the_zero_total_rule(change):
     source, target, config, refunds = service_evidence()
     change(source["orders"][0], target["orders"][0]["header"], refunds)
     result = reconcile_order(source, target, config, refunds=refunds)
-    assert result["status"] != "matched"
-    assert "adjustments" not in result
+    assert result["status"] == "matched"
+    kinds = [adjustment["kind"] for adjustment in result["adjustments"]]
+    assert kinds == ["zero_total_order_tax"] or kinds == ["service_order_full_offset"]
 
 
 def test_service_adjustment_cannot_hide_missing_or_mismatched_refunds():
@@ -160,7 +184,9 @@ def test_inclusive_tax_cannot_exceed_the_shipping_price():
     source["orders"][0]["adjustments"][0]["amount"] = "-90"
     source["orders"][0]["shipments"][0]["adjustments"][0]["amount"] = "12"
     target["orders"][0]["header"]["custbody_fw_solidus_tax_amount"] = "12"
-    assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
+    result = reconcile_order(source, target, config, refunds=refunds)
+    # The offset proof refuses; since 2026-10-22 the zero-total rule decides a zero order with no money taken.
+    assert _kinds(result) == ["zero_total_order_tax"]
 
 
 def test_full_manual_service_offset_is_proven_by_amounts_not_a_free_text_label():
@@ -190,6 +216,6 @@ def test_multiple_finalized_manual_offsets_must_sum_to_the_full_service_charge()
     assert result["status"] == "matched"
     assert result["adjustments"][0]["source_adjustment_ids"] == ["21", "24"]
     a[1]["amount"] = "-1"
-    assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
+    assert _kinds(reconcile_order(source, target, config, refunds=refunds)) == ["zero_total_order_tax"]
     a[1].update(amount="-2", finalized=False)
-    assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
+    assert _kinds(reconcile_order(source, target, config, refunds=refunds)) == ["zero_total_order_tax"]

@@ -612,3 +612,79 @@ async def test_the_reader_never_drops_a_credit_a_tax_adjustment_names(monkeypatc
     reader = tax_reversal_and_income_credit()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", adjustment_profile=profile)
     assert [c["id"] for c in result["invoice_credits"]["credits"]] == ["3", "4"]
+
+
+# Canceled orders (decided by Aiden, 2026-10-22): reconciliation settles a canceled order only when it
+# can see that nothing was billed and every deposit is fully applied. The graph names the order's billing
+# documents and reports its deposits from the status and total columns of the graph query it already
+# runs: no extra call, no extra time (PR #422 review round 1, F2/F3).
+def with_document(row, prefix, status, total):
+    return {**row, prefix + "status": status, prefix + "total": total}
+
+
+class DepositReader(Reader):
+    """The default graph (order 1 -> deposit 2 -> application 3 <- refund 4) with document columns."""
+
+    def __init__(self, status="C", total="100.00"):
+        super().__init__()
+        self.edges = [
+            with_document(edge("1", "2", "SalesOrd", "CustDep"), "next", status, total),
+            with_document(edge("2", "3", "CustDep", "DepAppl"), "previous", status, total),
+            edge("4", "3", "CustRfnd", "DepAppl"),
+        ]
+
+
+async def test_the_graph_names_the_orders_billing_documents_and_deposits_at_no_extra_call():
+    plain = Reader()
+    await collect_refunds(plain, "1", "1", "1", order_reference="R123456789")
+    reader = DepositReader()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["billing_ids"] == []
+    assert result["deposits"] == [{"id": "2", "total": "100.00", "status": "C"}]
+    assert reader.calls == plain.calls
+    reader = DepositReader()
+    reader.edges.append(edge("1", "5", "SalesOrd", "CustInvc"))
+    assert (await collect_refunds(reader, "1", "1", "1", order_reference="R123456789"))["billing_ids"] == ["5"]
+
+
+async def test_an_order_with_no_deposit_has_none():
+    reader = DepositReader()
+    reader.edges = []
+    assert (await collect_refunds(reader, "1", "1", "1", order_reference="R123456789"))["deposits"] == []
+
+
+async def test_a_deposit_shared_with_another_order_is_unknown_not_absent():
+    # PR #422 review round 1 (F1): a deposit linked to two sales orders is not owned by either.
+    reader = DepositReader()
+    reader.edges = [
+        with_document(edge("1", "2", "SalesOrd", "CustDep"), "next", "B", "100.00"),
+        with_document(edge("900", "2", "SalesOrd", "CustDep"), "next", "B", "100.00"),
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["deposits"] is None
+
+
+@pytest.mark.parametrize(
+    "status,total",
+    [(None, "100.00"), ("C", None), ("C", "0"), ("C", "x"), (3, "100.00")],
+)
+async def test_a_deposit_the_rows_do_not_describe_is_unknown_and_never_breaks_the_refund_proof(status, total):
+    reader = DepositReader(status, total)
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["deposits"] is None
+    assert result["amount"] == Decimal("100.00")  # the refund proof stands
+
+
+async def test_rows_that_disagree_on_a_deposit_leave_it_unknown():
+    reader = DepositReader()
+    reader.edges[1] = with_document(reader.edges[1], "previous", "B", "100.00")  # the second row says B
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["deposits"] is None and result["amount"] == Decimal("100.00")
+
+
+def test_the_graph_query_reads_each_documents_status_and_total():
+    from app.services.transaction_ops.netsuite_refunds import _query
+
+    query = _query({"1"})
+    for column in ("p.status AS previousstatus", "n.status AS nextstatus", "p.foreigntotal AS previoustotal"):
+        assert column in query
