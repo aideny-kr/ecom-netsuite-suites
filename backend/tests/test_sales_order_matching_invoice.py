@@ -236,6 +236,12 @@ async def test_approval_re_proves_the_same_basis_on_fresh_evidence(monkeypatch, 
         "later_invoice_missing",
         "credit_at_the_last_read",
         "last_read_unread",
+        # Round 2 (R4): the later evidence must also show one billing document and the same order.
+        "later_second_invoice",
+        "later_cash_sale",
+        "later_order_total_changed",
+        "later_order_modified",
+        "later_links_incomplete",
     ],
 )
 async def test_readback_needs_the_order_amended_and_the_invoice_and_its_credits_unchanged(monkeypatch, changed):
@@ -255,7 +261,16 @@ async def test_readback_needs_the_order_amended_and_the_invoice_and_its_credits_
         "amountPaid": fresh["invoice_amount_paid"],
         "amountRemaining": fresh["invoice_amount_remaining"],
     }
-    sections = {"gl": {"20": deepcopy(fresh["invoice_gl"])}, "posting_documents": [later]}
+    sections = {
+        "gl": {"20": deepcopy(fresh["invoice_gl"])},
+        "posting_documents": [later],
+        "sales_order": {
+            "id": "90",
+            "total": fresh["order"]["total"],
+            "lastModifiedDate": fresh["order"]["lastModifiedDate"],
+        },
+        "linked_documents": {"complete": True, "rows": [{"id": "20", "type": "CustInvc"}]},
+    }
     source = deepcopy(p["source"])
     last = []
     if changed == "credit_added":
@@ -276,6 +291,17 @@ async def test_readback_needs_the_order_amended_and_the_invoice_and_its_credits_
         later["lastModifiedDate"] = "2026-10-23T00:00:00Z"
     if changed == "later_invoice_missing":
         sections["posting_documents"] = []
+    if changed == "later_second_invoice":
+        sections["linked_documents"]["rows"].append({"id": "21", "type": "CustInvc"})
+        sections["posting_documents"].append({**later, "id": "21"})
+    if changed == "later_cash_sale":
+        sections["linked_documents"]["rows"].append({"id": "22", "type": "CashSale"})
+    if changed == "later_order_total_changed":
+        sections["sales_order"]["total"] = "105"
+    if changed == "later_order_modified":
+        sections["sales_order"]["lastModifiedDate"] = "2026-10-23T00:00:00Z"
+    if changed == "later_links_incomplete":
+        sections["linked_documents"]["complete"] = False
     if changed == "credit_at_the_last_read":
         last = [{"id": "60", "type": "CustCred"}]
     if changed == "last_read_unread":

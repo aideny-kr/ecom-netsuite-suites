@@ -694,9 +694,22 @@ async def verify_after(db, tenant_id, p, receipt=None, *, before_raw=None):
         # The evidence above is read after the order and invoice, so it must still show the same invoice,
         # and the returns and credits are read once more, last (PR #423 review round 1, R2).
         proof = {"status": "invoice_matches_source", "invoice_id": p["invoice_id"]}
-        later = next((d for d in sections.get("posting_documents") or [] if str(d.get("id")) == p["invoice_id"]), None)
+        # Round 2 (R4): the later evidence must show this order and this one invoice as the only billing
+        # document; a second invoice, a cash sale or an order changed since would bill more than the source.
+        documents = sections.get("posting_documents") or []
+        later = documents[0] if len(documents) == 1 and str(documents[0].get("id")) == p["invoice_id"] else None
+        links = sections.get("linked_documents") or {}
+        billing = [r for r in links.get("rows") or [] if r.get("type") in {"CustInvc", "CashSale"}]
+        later_order = sections.get("sales_order") or {}
+        same_order = (
+            later_order.get("lastModifiedDate") == fresh["order"]["lastModifiedDate"]
+            and _money(later_order.get("total")) == _money(fresh["order"]["total"])
+            and links.get("complete") is True
+            and [str(r.get("id")) for r in billing] == [p["invoice_id"]]
+        )
         same_invoice = (
-            later is not None
+            same_order
+            and later is not None
             and later.get("lastModifiedDate") == fresh["invoice"]["lastModifiedDate"]
             and _money(later.get("total")) == _money(fresh["invoice"]["total"])
             and _money(later.get("amountPaid")) == _money(fresh["invoice_amount_paid"])
