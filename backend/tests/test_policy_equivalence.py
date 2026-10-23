@@ -277,3 +277,59 @@ def test_a_saved_difference_with_an_equal_order_total_is_still_reused():
     report = saved_difference(order_total_delta="0.00", tax_delta="0.10")
     report["balance"]["amounts"]["order_total"] = {"source": "1.00", "target": "1.00", "delta": "0.00"}
     assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+# 2026-10-22 (decided by Aiden; PR #422 review round 2, F4): a settled canceled order and the leftover
+# tax on a zero order are matched. A saved difference those rules could change is not reused: a
+# canceled order read before its billing and deposits were reported is read again, and so is a zero
+# order with a tax difference. Every other saved result keeps reuse.
+
+
+def credits_read(report):
+    report["refund_evidence"]["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    return report
+
+
+@pytest.mark.parametrize("status", ["cancelled", "unknown"])
+def test_a_saved_canceled_difference_without_deposits_is_read_again(status):
+    before, _ = snapshots()
+    report = credits_read(saved_difference())
+    report["source"]["status"] = status
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW) == {
+        "status": "affected",
+        "reason": "canceled_order_evidence_not_read",
+    }
+
+
+def test_a_saved_canceled_difference_read_with_deposits_and_billing_is_reused():
+    before, _ = snapshots()
+    report = credits_read(saved_difference())
+    report["source"]["status"] = "cancelled"
+    report["refund_evidence"]["target"].update(billing_ids=[], deposits=[])
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+def test_a_saved_difference_on_an_active_order_keeps_reuse():
+    before, _ = snapshots()
+    report = credits_read(saved_difference())
+    report["source"]["status"] = "fulfilled"
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+def test_a_saved_zero_order_tax_difference_is_read_again():
+    before, _ = snapshots()
+    report = saved_report()
+    report["balance"]["status"] = "difference"
+    report["balance"]["amounts"]["order_total"] = {"source": "0.00", "target": "0.00", "delta": "0.00"}
+    report["balance"]["amounts"]["tax"] = {"source": "0.88", "target": "0.00", "delta": "0.88"}
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW) == {
+        "status": "affected",
+        "reason": "zero_total_order_tax",
+    }
+
+
+def test_a_saved_match_is_never_affected_by_the_new_rules():
+    before, _ = snapshots()
+    report = saved_report()
+    report["source"]["status"] = "cancelled"
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
