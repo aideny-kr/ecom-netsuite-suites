@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import tempfile
 from contextlib import contextmanager
@@ -42,6 +43,7 @@ class TrustedProjectError(ValueError):
 @dataclass(frozen=True)
 class TrustedProject:
     files: Mapping[str, bytes]
+    manifest_json: str
     snapshot_sha: str
     manifest_sha: str
     project_sha: str
@@ -78,11 +80,14 @@ def _check_files(files: dict[str, bytes]) -> None:
         _reject()
 
 
-def _deploy(files: dict[str, bytes]) -> bytes:
+def _deploy(manifest: list[dict]) -> bytes:
     # The strict ASCII path alphabet excludes XML metacharacters and globs.
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n<deploy><files>'
-        + "".join("<path>~/" + path + "</path>" for path in sorted(files))
+        + "".join(
+            "<path>~/" + path + "</path>"
+            for path in sorted(entry["path"] for entry in manifest if entry["operation"] != "unchanged")
+        )
         + "</files></deploy>\n"
     ).encode("utf-8")
 
@@ -101,6 +106,14 @@ def build_project(
     any future use. Delete/object/configuration deployments are unsupported.
     Nothing from a workspace filesystem or ambient SDK store is inspected.
     """
+    if type(files) is not dict or type(manifest) is not list or len(manifest) > MAX_FILES:
+        _reject()
+    # Immutable bytes/strings/ints are checked below; disconnect the mutable
+    # containers before validation so later caller edits cannot change output.
+    files = files.copy()
+    if any(type(entry) is not dict for entry in manifest):
+        _reject()
+    manifest = [entry.copy() for entry in manifest]
     _check_files(files)
     if (
         not isinstance(expected_snapshot_sha, str)
@@ -128,16 +141,23 @@ def build_project(
         ):
             _reject()
         seen.add(path)
+    if not any(entry["operation"] in ("create", "modify") for entry in manifest):
+        _reject()
+    manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     if (
         snapshot_hash(files) != expected_snapshot_sha
-        or hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-        != expected_manifest_sha
+        or hashlib.sha256(manifest_json.encode("utf-8")).hexdigest() != expected_manifest_sha
     ):
         _reject()
     # Copy, freeze and preserve raw bytes, including CRLF and lone CR. SDK
     # metadata belongs only to the generated project, never the signed snapshot.
-    output = {**files, "manifest.xml": _MANIFEST, "deploy.xml": _deploy(files)}
-    return TrustedProject(MappingProxyType(output), expected_snapshot_sha, expected_manifest_sha, snapshot_hash(output))
+    # Unchanged files remain local inputs but are not selected for upload. An
+    # all-unchanged project is rejected above, so it cannot produce an empty
+    # deploy list or be mistaken for a remote deployment proof.
+    output = {**files, "manifest.xml": _MANIFEST, "deploy.xml": _deploy(manifest)}
+    return TrustedProject(
+        MappingProxyType(output), manifest_json, expected_snapshot_sha, expected_manifest_sha, snapshot_hash(output)
+    )
 
 
 @contextmanager
@@ -147,25 +167,32 @@ def materialize_project(project: TrustedProject) -> Iterator[Path]:
     There is no caller-selected destination or existing tree to overlay. This
     process must already be isolated from tenant code before credentials exist;
     directory modes alone do not isolate mutually untrusted same-uid processes.
+    Keep this synchronous helper in the credential executor; an async caller
+    must offload bounded filesystem work instead of blocking its event loop.
     """
     if not isinstance(project, TrustedProject):
         _reject()
     output = dict(project.files)
     files = {path: content for path, content in output.items() if path not in {"manifest.xml", "deploy.xml"}}
-    _check_files(files)
-    if (
-        output.get("manifest.xml") != _MANIFEST
-        or output.get("deploy.xml") != _deploy(files)
-        or snapshot_hash(files) != project.snapshot_sha
-        or snapshot_hash(output) != project.project_sha
-    ):
+    if not isinstance(project.manifest_json, str) or len(project.manifest_json) > MAX_FILES * 1024:
+        _reject()
+    try:
+        manifest = json.loads(project.manifest_json)
+    except ValueError:
+        _reject()
+    rebuilt = build_project(
+        files=files,
+        manifest=manifest,
+        expected_snapshot_sha=project.snapshot_sha,
+        expected_manifest_sha=project.manifest_sha,
+    )
+    if output != dict(rebuilt.files) or rebuilt.project_sha != project.project_sha:
         _reject()
     with tempfile.TemporaryDirectory(prefix="suitecloud_project_") as root_name:
         root = Path(root_name)
         for path, content in output.items():
             target = root / path
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with target.open("xb") as handle:
-                target.chmod(0o600)
+            with open(target, "xb", opener=lambda name, flags: os.open(name, flags, 0o600)) as handle:
                 handle.write(content)
         yield root

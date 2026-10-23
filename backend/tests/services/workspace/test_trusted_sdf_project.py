@@ -182,8 +182,92 @@ def test_baseexception_cleans_private_project():
 def test_modify_and_unchanged_are_supported_and_operation_order_stays_bound():
     hashes = []
     for operation in ["create", "modify", "unchanged"]:
-        args = inputs()
+        args = inputs({PATH: CONTENT, "FileCabinet/SuiteScripts/changed.txt": b"synthetic"})
         args["manifest"][0].update(operation=operation, apply_order=-1 if operation == "unchanged" else 0)
         args["expected_manifest_sha"] = manifest_sha(args["manifest"])
         hashes.append(sdf.build_project(**args).manifest_sha)
     assert len(set(hashes)) == 3
+
+
+def test_all_unchanged_is_a_noop_and_cannot_produce_a_deploy_project():
+    args = inputs()
+    args["manifest"][0].update(operation="unchanged", apply_order=-1)
+    args["expected_manifest_sha"] = manifest_sha(args["manifest"])
+    with pytest.raises(sdf.TrustedProjectError):
+        sdf.build_project(**args)
+
+
+@pytest.mark.parametrize("size", [512, 513])
+def test_path_length_boundary(size):
+    prefix = "FileCabinet/SuiteScripts/" + "/".join(["d" * 70] * 6) + "/"
+    path = prefix + "a" * (size - len(prefix) - 3) + ".js"
+    assert len(path) == size
+    if size == 512:
+        sdf.build_project(**inputs({path: CONTENT}))
+    else:
+        with pytest.raises(sdf.TrustedProjectError):
+            sdf.build_project(**inputs({path: CONTENT}))
+
+
+@pytest.mark.parametrize("size", [80, 81])
+def test_segment_length_boundary(size):
+    path = "FileCabinet/SuiteScripts/" + "a" * (size - 3) + ".js"
+    if size == 80:
+        sdf.build_project(**inputs({path: CONTENT}))
+    else:
+        with pytest.raises(sdf.TrustedProjectError):
+            sdf.build_project(**inputs({path: CONTENT}))
+
+
+def test_exact_count_and_byte_budget_accepted_and_casefolded_directory_collision_rejected(monkeypatch):
+    monkeypatch.setattr(sdf, "MAX_FILES", 2)
+    monkeypatch.setattr(sdf, "MAX_BYTES", 4)
+    sdf.build_project(**inputs({PATH: b"12", PATH + ".txt": b"34"}))
+    with pytest.raises(sdf.TrustedProjectError):
+        sdf.build_project(
+            **inputs({"FileCabinet/SuiteScripts/Probe.js": b"1", "FileCabinet/SuiteScripts/probe.js/x.js": b"2"})
+        )
+
+
+@pytest.mark.parametrize("sha", [None, 1, [], "A" * 64])
+@pytest.mark.parametrize("field", ["expected_snapshot_sha", "expected_manifest_sha"])
+def test_hash_type_and_canonical_format_rejected(field, sha):
+    args = inputs()
+    args[field] = sha
+    with pytest.raises(sdf.TrustedProjectError):
+        sdf.build_project(**args)
+
+
+def test_unchanged_files_are_available_locally_but_never_selected_for_remote_upload():
+    unchanged = "FileCabinet/SuiteScripts/unchanged.js"
+    args = inputs({PATH: CONTENT, unchanged: b"existing remote content may have changed"})
+    for entry in args["manifest"]:
+        if entry["path"] == unchanged:
+            entry.update(operation="unchanged", apply_order=-1)
+    args["expected_manifest_sha"] = manifest_sha(args["manifest"])
+    project = sdf.build_project(**args)
+    assert unchanged in project.files
+    assert [p.text for p in ET.fromstring(project.files["deploy.xml"]).findall("./files/path")] == ["~/" + PATH]
+
+
+def test_materializer_rejects_a_changed_manifest_identity(tmp_path, monkeypatch):
+    project = sdf.build_project(**inputs())
+    monkeypatch.setattr(sdf.tempfile, "tempdir", str(tmp_path))
+    for sha in ["0" * 64, "not a manifest hash"]:
+        with pytest.raises(sdf.TrustedProjectError), sdf.materialize_project(replace(project, manifest_sha=sha)):
+            pytest.fail("manifest identity was not revalidated")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_build_snapshots_inputs_before_validation(monkeypatch):
+    args = inputs()
+    original = sdf._check_files
+
+    def mutate_original_after_check(files):
+        original(files)
+        args["files"][PATH] = b"concurrent new bytes"
+        args["manifest"][0]["operation"] = "delete"
+
+    monkeypatch.setattr(sdf, "_check_files", mutate_original_after_check)
+    project = sdf.build_project(**args)
+    assert project.files[PATH] == CONTENT
