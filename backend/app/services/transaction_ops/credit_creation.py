@@ -375,6 +375,42 @@ def booked_balance(*, posting_date=None, **order):
     return _balance(*current["before"], precision), _balance(*current["required"], precision)
 
 
+def derive_zero_total(exemplar_lines, **order):
+    """A group member's zero-total credit, computed by the server: the verified exemplar's two items
+    (a configured tax item and the income item it took back), sized by this order's own figures.
+
+    Only the tax reclass the exemplar was: the order's posted gross already equals the source and its
+    tax exceeds the source's, so the credit moves exactly that excess from income to tax. Anything
+    else is refused here; :func:`assess` still decides whether the lines are acceptable.
+    """
+    precision = order.get("precision", 2)
+    configured = {str(k) for k in (order["profile"].get("tax_item_accounts") or {})}
+    lines = exemplar_lines if isinstance(exemplar_lines, list) else []
+    amounts = [_dec(x.get("amount")) if isinstance(x, dict) else None for x in lines]
+    positive = [x for x, a in zip(lines, amounts) if a is not None and a > 0]
+    negative = [x for x, a in zip(lines, amounts) if a is not None and a < 0]
+    if (
+        len(lines) != 2
+        or len(positive) != 1
+        or len(negative) != 1
+        or str(positive[0].get("item_id")) not in configured
+        or sum(amounts, Decimal(0)) != 0
+    ):
+        raise RefusalError("derive_unsupported_shape", {"reason": "exemplar_not_a_tax_reclass"})
+    found = facts(**order)
+    gross_gap = found["before"][0] - found["required"][0]
+    tax_gap = found["before"][1] - found["required"][1]
+    if gross_gap != 0 or tax_gap <= 0:
+        raise RefusalError(
+            "derive_unsupported_shape", {"gross_gap": _q(gross_gap, precision), "tax_gap": _q(tax_gap, precision)}
+        )
+    amount = _q(tax_gap, precision)
+    return [
+        {"item_id": str(positive[0]["item_id"]), "amount": amount},
+        {"item_id": str(negative[0]["item_id"]), "amount": f"-{amount}"},
+    ]
+
+
 # --- Reads, the card, approval and readback -------------------------------------------------
 #
 # The same gather() feeds the proposal, the approval-time revalidation and the readback, so the
@@ -778,7 +814,7 @@ def _identity(found, context):
     )
 
 
-def _proposal(tenant_id, found, context, result, lines, memo, reason):
+def _proposal(tenant_id, found, context, result, lines, memo, reason, *, exemplar=None):
     import json
     from datetime import datetime, timezone
 
@@ -858,9 +894,16 @@ def _proposal(tenant_id, found, context, result, lines, memo, reason):
                     f"({lines_text}) and apply it to invoice {invoice.get('tranId') or invoice['id']}. "
                 )
                 + f"Posted order balance after: net {balance['after']['net']}, tax {balance['after']['tax']}, "
-                "which equals the finalized source. The items and amounts were chosen by the assistant from "
-                "evidence; the server verified the outcome. The invoice, its existing credits and the sales "
-                "order are not changed. The credit, its application and GL are re-read after execution."
+                "which equals the finalized source. "
+                + (
+                    f"The server derived the items and amounts from this order's own figures, the same treatment "
+                    f"as verified correction {exemplar}, and verified the outcome. "
+                    if exemplar
+                    else "The items and amounts were chosen by the assistant from evidence; the server verified "
+                    "the outcome. "
+                )
+                + "The invoice, its existing credits and the sales order are not changed. The credit, its "
+                "application and GL are re-read after execution."
             ),
             "status": "ready_for_exact_human_approval",
             "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -878,6 +921,74 @@ async def propose(db, tenant_id, case_id, lines, memo, reason):
     proposal = _proposal(tenant_id, found, context, result, lines, memo, reason)
     from app.services.transaction_ops.resolution_plan import proposal_plan
 
+    proposal["resolution_plan"] = proposal_plan(proposal, context["report"])
+    db.info["accounting_correction_candidate"] = proposal
+    return proposal
+
+
+async def verified_exemplar(db, tenant_id, config_id):
+    """The latest approved, independently verified zero-total credit on the same configuration:
+    ``(confirmation id, its lines)`` or None. As for the existing-credit reallocation, a group is
+    never the first use of a treatment on a configuration: one order is proposed, approved and
+    verified first, then members of the same shape follow. A credit applied to an invoice or left on
+    account is a different treatment, so only a zero-total settlement counts."""
+    from sqlalchemy import select
+
+    from app.models.chat import ChatMessage
+
+    so = ChatMessage.structured_output
+    row = (
+        await db.execute(
+            select(ChatMessage.id, so["accounting_review"]["lines"])
+            .where(
+                ChatMessage.tenant_id == tenant_id,
+                so["status"].astext == "approved",
+                so["accounting_review"]["kind"].astext == KIND,
+                so["accounting_review"]["config_id"].astext == str(config_id),
+                so["accounting_review"]["settlement"].astext == "none",
+                so["accounting_verification"]["status"].astext == "verified",
+            )
+            .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+            .limit(1)
+        )
+    ).first()
+    return None if row is None else (row[0], row[1])
+
+
+async def prepare_group_member(db, tenant_id, case_id):
+    """Group preparation for a member whose refund credit sits in a locked period: the zero-total
+    credit the agent proposes in chat (R166593377), derived by the server (no model arithmetic) and
+    accepted by the same outcome check. Sets the case's candidate."""
+    from uuid import UUID
+
+    from app.services.transaction_ops.accounting_review import accounting_context
+    from app.services.transaction_ops.case_service import get_case
+    from app.services.transaction_ops.resolution_plan import proposal_plan
+
+    case = await get_case(db, tenant_id, UUID(str(case_id)))
+    review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
+    exemplar = await verified_exemplar(db, tenant_id, review.get("config_id"))
+    if exemplar is None:
+        raise RefusalError("no_verified_exemplar", {"config_id": review.get("config_id")})
+    confirmation_id, exemplar_lines = exemplar
+    item_ids = [str((x or {}).get("item_id") or "") for x in exemplar_lines if isinstance(x, dict)]
+    found, context = await gather(db, tenant_id, case_id, item_ids, reserve=READBACK_RESERVE)
+    if str(context["review"].get("config_id")) != str(review.get("config_id")):
+        raise RefusalError("configuration_unavailable", {"reason": "configuration_changed"})
+    lines = derive_zero_total(exemplar_lines, **found)
+    memo = f"Tax reclass {lines[0]['amount']}: refund credit in a closed period booked the tax to income"
+    result = assess(lines=lines, memo=memo, **found)
+    proposal = _proposal(
+        tenant_id,
+        found,
+        context,
+        result,
+        lines,
+        memo,
+        f"Same treatment as verified correction {confirmation_id}, derived from this order's own source and GL.",
+        exemplar=confirmation_id,
+    )
+    proposal["exemplar_confirmation_id"] = str(confirmation_id)
     proposal["resolution_plan"] = proposal_plan(proposal, context["report"])
     db.info["accounting_correction_candidate"] = proposal
     return proposal

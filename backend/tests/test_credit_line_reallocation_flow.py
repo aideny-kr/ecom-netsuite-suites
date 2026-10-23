@@ -370,6 +370,21 @@ class TestGroup:
             await reallocation.prepare_group_member(db, TENANT, CASE)
         assert "accounting_correction_candidate" not in db.info
 
+    async def test_a_locked_credit_is_reported_as_locked_before_any_exemplar_is_needed(self, order, monkeypatch):
+        # PR #421 review round 1 (F1): the exemplar gate ran first, so a configuration with no verified
+        # reallocation (both live configs, 2026-10-22) reported no_verified_exemplar for a credit in a
+        # closed period and the group never tried the open-period zero-total credit.
+        async def none(db, tenant_id, config_id):
+            return None
+
+        monkeypatch.setattr(reallocation, "verified_exemplar", none)
+        order["facts"]["period"].update(closed=True, arLocked=True, allLocked=True)
+        db = _db()
+        with pytest.raises(reallocation.RefusalError) as exc:
+            await reallocation.prepare_group_member(db, TENANT, CASE)
+        assert exc.value.code == "period_locked"
+        assert "accounting_correction_candidate" not in db.info
+
     @pytest.mark.parametrize(
         "status,runs",
         [

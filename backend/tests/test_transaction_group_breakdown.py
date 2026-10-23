@@ -55,7 +55,14 @@ class World:
         refunds="0.00",
         proofs=(),
         tax_source="0.00",
+        credit_refunds="from_links",
     ):
+        # What the order's refunds paid out of each credit memo (the refund reader's credit_refunds).
+        # By default each linked credit refunded its link's amount; None leaves it unrecorded.
+        if credit_refunds == "from_links":
+            credit_refunds = {
+                str(item["credit_memo_id"]): item["amount"] for item in links if item.get("credit_memo_id")
+            }
         report = {
             "balance": {
                 "status": balance,
@@ -75,7 +82,13 @@ class World:
                     "record_id": str(15_000_000 + len(ref) * 7 + int(ref[-3:])) if record_id is None else record_id,
                 }
             ],
-            "refund_evidence": {"target": {"request_links": list(links), "tax_adjustments": list(proofs)}},
+            "refund_evidence": {
+                "target": {
+                    "request_links": list(links),
+                    "tax_adjustments": list(proofs),
+                    **({"credit_refunds": credit_refunds} if credit_refunds is not None else {}),
+                }
+            },
         }
         row = TransactionCase(
             id=uuid4(),
@@ -382,6 +395,54 @@ async def test_a_credit_that_left_the_tax_in_place_goes_to_the_group_fix(world, 
     result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
     cause = by_cause(result)["tax_left_after_credit"]
     assert cause["orders"] == 2 and cause["next_step"] == "prepare_corrections"
+
+
+async def test_a_refund_that_put_its_tax_into_income_goes_to_the_group_fix(world, monkeypatch):
+    # Staging 2026-10-22 (75 open cases, e.g. R375830927): the order total already agrees, but the
+    # refund's credit memo booked its VAT to income, so NetSuite's tax is high and its net low by the
+    # same amount. The same fix as a tax-only gap: move that tax out of income.
+    await world.config()
+    proof = {"kind": "credit_memo", "tax_amount": "0", "amount": "327.50"}
+    await world.case("R000001251", delta="0.00", tax="-24.54", links=[link("6", amount="327.50")], proofs=[proof])
+    # NetSuite's tax is LOWER than the source: not a refund that kept its tax.
+    await world.case("R000001252", delta="0.00", tax="2.06", links=[link("6", amount="327.50")], proofs=[proof])
+    # No credit memo at all: nothing refunded the tax.
+    await world.case("R000001253", delta="0.00", tax="-85.74")
+    # PR #421 review round 1 (F2): a tax gap larger than the refund credits cannot be their tax.
+    await world.case(
+        "R000001254",
+        delta="0.00",
+        tax="-650.00",
+        links=[link("6", amount="450.00")],
+        proofs=[{"kind": "credit_memo", "tax_amount": "0", "amount": "450.00"}],
+    )
+    # Round 2: a $500 refund paid 100 out of the credit memo and 400 out of the deposit. Only the
+    # 100 the credit refunded can hold its tax; the request's 500 cannot.
+    await world.case(
+        "R000001255",
+        delta="0.00",
+        tax="-200.00",
+        links=[link("6", amount="500.00")],
+        proofs=[{"kind": "credit_memo", "tax_amount": "0", "amount": "500.00"}],
+        credit_refunds={"15788939": "100.00"},
+    )
+    # No record of what the refunds paid out of the credit: unknown, so not this cause.
+    await world.case("R000001256", delta="0.00", tax="-24.54", links=[link("6", amount="327.50")], credit_refunds=None)
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+    groups = (await list_groups(world.db, world.tenant.id))["groups"]
+    found = {}
+    for group in groups:
+        result = await gb.breakdown(world.db, world.tenant.id, group_id=group["group_id"])
+        for cause in result["causes"]:
+            for ref in cause["order_references"]:
+                found[ref] = cause
+    assert found["R000001251"]["cause"] == "tax_left_after_credit"
+    assert found["R000001251"]["next_step"] == "prepare_corrections"
+    assert found["R000001252"]["cause"] != "tax_left_after_credit"
+    assert found["R000001253"]["cause"] != "tax_left_after_credit"
+    assert found["R000001254"]["cause"] != "tax_left_after_credit"
+    assert found["R000001255"]["cause"] != "tax_left_after_credit"
+    assert found["R000001256"]["cause"] != "tax_left_after_credit"
 
 
 async def test_a_tax_difference_is_never_called_a_business_price(world, monkeypatch):
