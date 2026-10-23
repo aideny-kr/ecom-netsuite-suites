@@ -203,7 +203,14 @@ def _facts(
     if period.get("id") is not None and str(period["id"]) != _ref(credit, "postingPeriod"):
         raise RefusalError("evidence_incomplete", {"reason": "period_is_not_the_credits"})
     if any(period.get(flag) is not False for flag in ("closed", "arLocked", "allLocked")):
-        raise RefusalError("period_locked", {"period_id": _ref(credit, "postingPeriod")})
+        # The open-period zero-total credit this refusal points to needs the tax-refund item: name it.
+        raise RefusalError(
+            "period_locked",
+            {
+                "period_id": _ref(credit, "postingPeriod"),
+                "tax_refund_items": sorted(str(k) for k in (profile.get("tax_item_accounts") or {})),
+            },
+        )
     # NetSuite's record API refuses any save of a credit without a location; such a credit gets the
     # subsidiary's configured correction location, stamped on the header (and so on every line).
     correction_location = None

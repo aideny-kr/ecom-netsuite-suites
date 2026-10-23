@@ -587,6 +587,16 @@ class TestReviewRoundThree:
         facts["period"].update(closed=True, arLocked=True, allLocked=True)
         assert _refused(facts, BV_FIX) == "period_locked"
 
+    def test_a_locked_period_names_the_configured_tax_refund_items(self):
+        """The open-period zero-total credit needs the tax-refund item; the refusal that sends the
+        agent there names it (staging 2026-10-22: the agent guessed "tax_refund")."""
+        facts = _bv()
+        facts["period"].update(closed=True, arLocked=True, allLocked=True)
+        with pytest.raises(reallocation.RefusalError) as exc:
+            reallocation.assess(lines=BV_FIX, **facts)
+        assert exc.value.code == "period_locked"
+        assert exc.value.detail["tax_refund_items"] == sorted(facts["profile"]["tax_item_accounts"])
+
     def test_a_credit_with_its_own_location_keeps_it(self):
         result = reallocation.assess(lines=US_FIX, **_us())
         assert "location" not in result["proposed_fields"] and "location" not in result["expected_after"]

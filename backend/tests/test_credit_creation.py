@@ -1360,3 +1360,20 @@ def test_only_solidus_tax_rate_adjustments_may_stay_unfinalized(adjustment, refu
         assert exc.value.code == "source_not_final"
     else:
         assert cc.assess(lines=LINES, memo="x", **facts)["balance"]["after"]["gross"] == "12820.02"
+
+
+@pytest.mark.asyncio
+async def test_a_placeholder_item_is_refused_with_the_configured_tax_refund_items(monkeypatch):
+    """Staging 2026-10-22 (R166593377, R183209823): the agent did not know BV's tax-refund item and
+    sent "tax_refund" as an item id. The refusal named nothing, so it reported a configuration gap
+    that does not exist. It now names the configured items, and the agent retries with them."""
+    reader, _ = _netsuite()
+    db = _patch_reads(monkeypatch, reader)
+    with pytest.raises(cc.RefusalError) as exc:
+        await cc.gather(db, "tenant", CASE, ["tax_refund", "1471"])
+    assert exc.value.code == "item_not_allowed"
+    assert exc.value.detail == {
+        "reason": "item_ids_unreadable",
+        "unreadable": ["tax_refund"],
+        "tax_refund_items": ["5005"],
+    }

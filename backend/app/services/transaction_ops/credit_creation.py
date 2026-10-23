@@ -480,7 +480,17 @@ async def gather(db, tenant_id, case_id, item_ids, *, reserve=0):
         raise RefusalError("source_scope_mismatch", {"business_entity": source.get("business_entity")})
     wanted = sorted({str(i) for i in item_ids or ()} | {str(k) for k in profile.tax_item_accounts})
     if not wanted or not all(_id(i) for i in wanted):
-        raise RefusalError("item_not_allowed", {"reason": "item_ids_unreadable"})
+        # Name the subsidiary's configured tax-refund items: the agent sent a placeholder
+        # ("tax_refund") for one on R166593377 and, told nothing, reported a configuration gap
+        # that does not exist (staging 2026-10-22).
+        raise RefusalError(
+            "item_not_allowed",
+            {
+                "reason": "item_ids_unreadable",
+                "unreadable": [i for i in wanted if not _id(i)],
+                "tax_refund_items": sorted(str(k) for k in profile.tax_item_accounts),
+            },
+        )
     ext = None
     async with authenticated_reader(
         db,
