@@ -85,7 +85,6 @@ async def read_netsuite_refunds(
                 currency_id,
                 order_reference=order_reference,
                 adjustment_profile=adjustment_profile,
-                read_deposits=order_closed(order),
             )
             return {
                 **result,
@@ -110,11 +109,6 @@ def order_status(header):
     """The sales order's status code, as normalization reads it; None when absent (never an error)."""
     value = (header.get("orderStatus") or header.get("status")) if isinstance(header, dict) else None
     return value.get("id") if isinstance(value, dict) else None
-
-
-def order_closed(order):
-    """Whether the target sales order is closed or cancelled: only then are its deposits read."""
-    return order_status(order.get("header") if isinstance(order, dict) else None) in CLOSED_ORDER_STATUSES
 
 
 def refund_scope(connection_id, account_id, subsidiary_id, order_reference, target_evidence, adjustment_profile=None):
@@ -160,7 +154,11 @@ def _query(frontier):
         "p.currency AS previouscurrency, n.currency AS nextcurrency, "
         "pl.subsidiary AS previoussubsidiary, nl.subsidiary AS nextsubsidiary, "
         "p.posting AS previousposting, n.posting AS nextposting, "
-        "p.voided AS previousvoided, n.voided AS nextvoided "
+        "p.voided AS previousvoided, n.voided AS nextvoided, "
+        # A document's own status and total, read in the same query: what reconciliation needs to
+        # see that a canceled order's deposits are all fully applied, at no extra call (2026-10-22).
+        "p.status AS previousstatus, n.status AS nextstatus, "
+        "p.foreigntotal AS previoustotal, n.foreigntotal AS nexttotal "
         "FROM NextTransactionLink l JOIN transaction p ON p.id=l.previousdoc "
         "JOIN transaction n ON n.id=l.nextdoc "
         "LEFT JOIN transactionline pl ON pl.transaction=p.id AND pl.mainline='T' "
@@ -345,42 +343,28 @@ async def read_invoice_credits(request, candidates, nodes, owned, currency_id, *
         return {"complete": False, "reason": str(exc) if isinstance(exc, ValueError) else "invoice_credit_unproven"}
 
 
-async def order_deposits(request, nodes, owned):
-    """The order's own customer deposits with their status, in one query; None when unproven.
+def order_deposits(nodes, reachable, owned, documents):
+    """The order's customer deposits with their status and total, from the graph's own rows; None when
+    any is unproven.
 
-    Only reconciliation of a closed sales order asks (a canceled order is settled only when every
-    deposit is fully applied, decided 2026-10-22). An unproven read is unknown, never a reason to
-    discard the refund proof.
+    Every non-voided deposit the graph reaches from the order counts. One shared with another order
+    is not this order's alone, so the answer is unknown, never "no deposits" (PR #422 review round 1,
+    F1). A deposit whose status or total the rows disagree on, or did not carry, is unknown too.
     """
-    ids = sorted(
-        (i for i in owned if (nodes.get(i) or {}).get("type") == "CustDep" and nodes[i].get("voided") != "T"),
-        key=int,
-    )
-    if not ids:
-        return []
-    try:
-        result = await request(
-            "POST",
-            "/query/v1/suiteql",
-            params={"limit": len(ids) + 1},
-            body={
-                "q": "SELECT t.id, t.foreigntotal, t.status FROM transaction t "
-                f"WHERE t.type = 'CustDep' AND t.id IN ({','.join(ids)})"
-            },
-        )
-        rows, complete = _collection(result)
-        if not complete or sorted((_id(row.get("id")) or "" for row in rows), key=str) != sorted(ids, key=str):
+    deposits = []
+    for identifier in sorted(reachable, key=int):
+        metadata = nodes.get(identifier) or {}
+        if metadata.get("type") != "CustDep" or metadata.get("voided") == "T":
+            continue
+        status, total = documents.get(identifier) or (None, None)
+        if identifier not in owned or not isinstance(status, str):
             return None
-        deposits = []
-        for row in sorted(rows, key=lambda r: int(_id(r.get("id")))):
-            if not isinstance(row.get("status"), str):
-                return None
-            deposits.append(
-                {"id": _id(row["id"]), "total": str(_positive(row.get("foreigntotal"))), "status": row["status"]}
-            )
-        return deposits
-    except (ValueError, KeyError, TypeError, ArithmeticError):
-        return None
+        try:
+            amount = _positive(total)
+        except (ValueError, TypeError, ArithmeticError):
+            return None
+        deposits.append({"id": identifier, "total": str(amount), "status": status})
+    return deposits
 
 
 async def collect_refunds(
@@ -393,7 +377,6 @@ async def collect_refunds(
     adjustment_profile=None,
     request_links_reader=None,
     graph_reader=None,
-    read_deposits=False,
 ):
     if any(_id(value) is None for value in (order_id, subsidiary_id, currency_id)):
         raise ValueError("invalid_refund_scope")
@@ -415,6 +398,7 @@ async def collect_refunds(
     edges = {(order_id, identifier, "SalesOrd", node["type"]) for identifier, node in nodes.items()}
     allocations = defaultdict(set)
     cash_refunds = set()
+    documents = {}
     for _ in range(MAX_DEPTH):
         if not frontier:
             break
@@ -439,6 +423,11 @@ async def collect_refunds(
                 if not isinstance(metadata["type"], str) or (identifier in nodes and nodes[identifier] != metadata):
                     raise ValueError("refund_graph_changed")
                 nodes[identifier] = metadata
+                # Kept apart from the node metadata the request links also describe; two rows that
+                # disagree leave the document's status unknown rather than failing the refund proof.
+                seen = (row.get(prefix + "status"), row.get(prefix + "total"))
+                if documents.setdefault(identifier, seen) != seen:
+                    documents[identifier] = (None, None)
             before, after = nodes[previous]["type"], nodes[following]["type"]
             edges.add((previous, following, before, after))
             if previous in frontier and before in _PARENTS.get(after, set()):
@@ -553,9 +542,6 @@ async def collect_refunds(
         taxed=taxed,
     )
     await recheck_links()
-    # Last, after every read the refund proof needs: an optional read that runs out of budget can
-    # only leave the deposits unknown, never cost the proof.
-    deposits = await order_deposits(request, nodes, owned) if read_deposits else None
     request_ids = sorted((link["request_id"] for link in request_links), key=int)
     transaction_ids = [order_id, *sorted(({*nodes, *application_documents} - {order_id}), key=int)]
     dependency_limit = MAX_DEPENDENCIES - len(request_ids)
@@ -567,10 +553,10 @@ async def collect_refunds(
         "tax_adjustments": adjustments,
         "invoice_credits": invoice_credits,
         "credit_refunds": {doc: str(value) for doc, value in sorted(credit_refunds.items(), key=lambda x: int(x[0]))},
-        # The order's invoices and cash sales, and (for a closed sales order only) its deposits:
-        # what reconciliation needs to settle a canceled order (decided 2026-10-22).
+        # The order's invoices and cash sales and its deposits, from the graph's own rows: what
+        # reconciliation needs to settle a canceled order (decided 2026-10-22).
         "billing_ids": billing_documents(nodes, reachable),
-        "deposits": deposits,
+        "deposits": order_deposits(nodes, reachable, owned, documents),
         # Retain every observed participant, including voided refunds and
         # parents outside the owned set. They can invalidate the proof later.
         # This inventories this read's inputs; it is not a change-feed watermark.
