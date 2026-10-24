@@ -490,7 +490,10 @@ function Workspace({ view, onViewChange }: WorkspaceNavigation) {
           role="alert"
           className="rounded-lg border border-destructive/30 p-4 text-[13px] text-destructive"
         >
-          Review data could not be loaded or queued. {safeError(failure)}
+          Review data could not be loaded or queued.{" "}
+          {/* A period request's failures are already one message per scope; formatting them
+              again as an error object hid every reason behind the generic text. */}
+          {typeof failure === "string" ? failure : safeError(failure)}
         </p>
       )}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
