@@ -94,6 +94,7 @@ async def test_real_commits_reject_current_certificate_rotation(installation, mo
         await set_tenant_context(db, str(i["company"]))
         token = await db.get(WorkspaceDeployToken, uuid.UUID(minted["jti"]))
         assert token.target_identity == identity
+        assert token.project_format == "suite-studio-files-v1"
         conn = await db.get(Connection, uuid.UUID(identity["connection_id"]))
         credentials["suitecloud_ci"]["certificate_id"] = "rotated"
         conn.encrypted_credentials = encrypt_credentials(credentials)
@@ -250,6 +251,7 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
                     "sandbox_id": "123-sb1",
                     "expected_snapshot_sha": p["snapshot_sha"],
                     "expected_manifest_sha": p["manifest_sha"],
+                    "expected_project_format": "suite-studio-files-v1",
                     "expected_target_identity": identity,
                 },
             )

@@ -137,6 +137,7 @@ async def test_worker_rejects_adapter_identity_drift_before_command(db, bound_pr
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -201,6 +202,7 @@ async def test_worker_rechecks_revocation_after_confirmation_before_seeding(db, 
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -247,6 +249,7 @@ async def test_worker_success_receipt_preserves_bound_identity(db, bound_project
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -285,6 +288,7 @@ async def test_uncertain_deploy_retains_verified_identity(db, bound_project, fai
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -328,6 +332,7 @@ async def test_connection_rotation_during_command_cannot_certify_success(db, bou
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -419,6 +424,7 @@ async def test_worker_rechecks_authority_after_credential_preparation(db, bound_
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )

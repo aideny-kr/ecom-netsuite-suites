@@ -184,6 +184,7 @@ class TestWorkerSnapshotReverify:
                     "sandbox_id": "6738075-sb1",
                     "expected_snapshot_sha": expected_sha,
                     "expected_manifest_sha": manifest["manifest_sha"],
+                    "expected_project_format": "suite-studio-files-v1",
                     "expected_target_identity": identity,
                 },
             )
@@ -222,6 +223,7 @@ class TestWorkerSnapshotReverify:
                     "sandbox_id": "6738075-sb1",
                     "expected_snapshot_sha": wrong_expected,
                     "expected_manifest_sha": "f" * 64,
+                    "expected_project_format": "suite-studio-files-v1",
                 },
             )
 

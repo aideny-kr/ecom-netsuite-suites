@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app.core.database import set_tenant_context
 from app.models.workspace import WorkspaceDeployToken, WorkspaceRun
 from app.services import audit_service
+from app.services.workspace.trusted_sdf_project import PROJECT_FORMAT
 
 
 async def dispatch_confirmed_deploy(db, *, run_id: uuid.UUID, tenant_id: uuid.UUID, actor_id: uuid.UUID):
@@ -37,12 +38,15 @@ async def dispatch_confirmed_deploy(db, *, run_id: uuid.UUID, tenant_id: uuid.UU
     run, token = matched
     if run.status != "queued":
         return run, False
+    if token.project_format != PROJECT_FORMAT:
+        raise ValueError("Confirmed deployment has no supported bound project format; preview again")
     params = {
         "sandbox_id": token.sandbox_id,
         "expected_snapshot_sha": token.snapshot_sha,
         "expected_manifest_sha": token.manifest_sha,
         "require_assertions": token.require_assertions,
         "expected_target_identity": token.target_identity,
+        "expected_project_format": token.project_format,
     }
     correlation_id = run.correlation_id
     await audit_service.log_event(
@@ -54,7 +58,11 @@ async def dispatch_confirmed_deploy(db, *, run_id: uuid.UUID, tenant_id: uuid.UU
         resource_type="workspace_run",
         resource_id=str(run_id),
         correlation_id=correlation_id,
-        payload={"delivery": "same_confirmed_queued_run", "target_identity": token.target_identity},
+        payload={
+            "delivery": "same_confirmed_queued_run",
+            "target_identity": token.target_identity,
+            "project_format": token.project_format,
+        },
     )
     # Never publish a run that another database session cannot yet see.
     await db.commit()

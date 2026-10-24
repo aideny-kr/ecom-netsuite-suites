@@ -113,3 +113,29 @@ work. Redelivery of a started or completed run does not execute another command;
 a fresh validation needs a fresh run. Returned command exit/output are retained
 even if the post-command identity check detects drift. Such deployment audits
 use `deploy.outcome_uncertain` and require reconciliation before another action.
+
+The trusted file projection has an explicit `suite-studio-files-v1` contract.
+Migration 104 stores that version on new confirmations, includes it in the
+signed payload and audit, and carries it through durable delivery. Null or
+unsupported versions require a fresh preview; they cannot dispatch or reach
+credential preparation. Apply the migration and drain old workers/queued work
+before activating matching API/worker images. No existing preview is backfilled
+with authority.
+
+The full-snapshot projection verifies all original bytes and manifest entries,
+including local tests and supported package/Jest inputs. It explicitly maps
+`SuiteScripts/` to `FileCabinet/SuiteScripts/`, also accepts canonical script
+paths, and generates the fixed file-only SDF project. Only supported script
+files enter that project; tests/configuration never enter a credential process.
+Deletes, object XML, unknown root paths, destination aliases and all-unchanged
+script deployments are unsupported. Project hashes describe the projection and
+must not replace the full checked snapshot identity. Serialized manifests must
+be canonical; malformed or excessively nested JSON is rejected before any root
+is created.
+
+This projection is still an inactive preparation primitive. The runner signs
+and checks the version but does not yet execute the generated project with the
+fixed Java SDK operations. Preview-time projection readiness, isolated SDK
+validate/deploy/readback and their receipts must be integrated before activation.
+The production credential seeder remains closed and all target/network/operator
+acceptance gates above remain open.

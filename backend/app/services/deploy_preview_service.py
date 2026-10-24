@@ -37,6 +37,7 @@ from app.services.chat.mutation_guard import (
 from app.services.deploy_service import check_deploy_prerequisites
 from app.services.runner_service import _validate_sandbox_target
 from app.services.workspace.snapshot import snapshot_hash
+from app.services.workspace.trusted_sdf_project import PROJECT_FORMAT
 
 
 def _token_fingerprint(token: str) -> str:
@@ -374,6 +375,7 @@ async def build_deploy_preview(
         "manifest_sha": manifest_payload["manifest_sha"],
         "gates": gate_result.get("gates", {}),
         "target_identity": gate_result["gates"]["validate"]["identity"],
+        "project_format": PROJECT_FORMAT,
     }
 
 
@@ -399,6 +401,7 @@ def _canonical_payload(
     actor_id: str,
     issued_at: str,
     target_identity: dict[str, str] | None = None,
+    project_format: str | None = None,
 ) -> str:
     """Canonical JSON used as HMAC body. ``sort_keys=True`` +
     ``separators=(",", ":")`` matches write_confirmation_service so the
@@ -417,6 +420,7 @@ def _canonical_payload(
             "actor_id": actor_id,
             "issued_at": issued_at,
             "target_identity": target_identity,
+            "project_format": project_format,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -437,6 +441,8 @@ async def mint_deploy_token(
     effects, and means the partial-unique constraint on
     ``workspace_deploy_tokens`` is only hit on the happy path.
     """
+    if preview.get("project_format") != PROJECT_FORMAT:
+        raise DeployGateNotMetError("Preview has no supported project format; preview again", {})
     # In-flight check — partial unique index would catch this at flush
     # time, but raising up-front lets us return the existing jti so the
     # UI re-renders the live preview instead of starting fresh.
@@ -459,6 +465,8 @@ async def mint_deploy_token(
                 WorkspaceDeployToken.target_identity["requested_certificate_id"].astext.is_(None),
                 WorkspaceDeployToken.target_identity["local_public_key_sha256"].astext.is_(None),
                 WorkspaceDeployToken.target_identity != preview["target_identity"],
+                WorkspaceDeployToken.project_format.is_(None),
+                WorkspaceDeployToken.project_format != PROJECT_FORMAT,
             ),
         )
     )
@@ -489,6 +497,7 @@ async def mint_deploy_token(
         changeset_id=uuid.UUID(preview["changeset_id"]),
         sandbox_id=preview["sandbox_id"],
         target_identity=preview["target_identity"],
+        project_format=PROJECT_FORMAT,
         snapshot_sha=preview["snapshot_sha"],
         manifest_sha=preview["manifest_sha"],
         require_assertions=preview["require_assertions"],
@@ -511,6 +520,7 @@ async def mint_deploy_token(
         actor_id=preview["actor_id"],
         issued_at=issued_at.isoformat(),
         target_identity=row.target_identity,
+        project_format=row.project_format,
     )
     # session_id keyed off the actor — codex P2 #8 noted that pinning to
     # the user (not cs_id) is the strongest binding short of WebAuthn.
@@ -534,6 +544,7 @@ async def mint_deploy_token(
             "snapshot_sha": preview["snapshot_sha"],
             "manifest_sha": preview["manifest_sha"],
             "target_identity": row.target_identity,
+            "project_format": row.project_format,
             "file_count": len(preview["manifest"]),
             "gates": preview.get("gates", {}),
             "expires_at": expires_at.isoformat(),
@@ -602,6 +613,8 @@ async def verify_and_consume_deploy_token(
 
     if not row.target_identity:
         raise DeployGateNotMetError("Preview has no bound validation identity; preview again", {})
+    if row.project_format != PROJECT_FORMAT:
+        raise DeployGateNotMetError("Preview has no supported bound project format; preview again", {})
 
     payload_json = _canonical_payload(
         jti=str(row.id),
@@ -615,6 +628,7 @@ async def verify_and_consume_deploy_token(
         actor_id=str(row.actor_id),
         issued_at=row.issued_at.isoformat(),
         target_identity=row.target_identity,
+        project_format=row.project_format,
     )
     is_valid = verify_confirmation_token(
         confirmation_token,
@@ -694,6 +708,7 @@ async def verify_and_consume_deploy_token(
             "manifest_sha": row.manifest_sha,
             "token_fingerprint": _token_fingerprint(confirmation_token),
             "target_identity": row.target_identity,
+            "project_format": row.project_format,
         },
     )
 

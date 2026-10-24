@@ -100,6 +100,7 @@ async def test_worker_rejects_different_numeric_role_before_command(db, checked_
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -175,6 +176,7 @@ async def test_missing_worker_identity_pin_never_reads_credentials(db, checked_p
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
             },
         )
     process.assert_not_awaited()
@@ -358,6 +360,7 @@ async def test_worker_rejects_drift_before_subprocess(db, checked_project, mutat
         "sandbox_id": "123-sb1",
         "expected_snapshot_sha": p["snapshot_sha"],
         "expected_manifest_sha": p["manifest_sha"],
+        "expected_project_format": "suite-studio-files-v1",
         "expected_target_identity": p["target_identity"],
         "require_assertions": False,
     }
@@ -452,6 +455,7 @@ async def test_deploy_cannot_use_ambient_cli_auth_even_with_passing_receipts(db,
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -486,6 +490,7 @@ async def test_worker_persists_auth_required_for_unverified_adapter_identity(db,
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -531,6 +536,7 @@ async def test_queued_deploy_rechecks_authority(db, checked_project, revoke):
                 "sandbox_id": "123-sb1",
                 "expected_snapshot_sha": p["snapshot_sha"],
                 "expected_manifest_sha": p["manifest_sha"],
+                "expected_project_format": "suite-studio-files-v1",
                 "expected_target_identity": p["target_identity"],
             },
         )
@@ -554,6 +560,7 @@ async def test_duplicate_deploy_delivery_does_not_dispatch_again(db, checked_pro
         "sandbox_id": "123-sb1",
         "expected_snapshot_sha": p["snapshot_sha"],
         "expected_manifest_sha": p["manifest_sha"],
+        "expected_project_format": "suite-studio-files-v1",
         "expected_target_identity": p["target_identity"],
     }
     command = AsyncMock(return_value=(0, "", ""))

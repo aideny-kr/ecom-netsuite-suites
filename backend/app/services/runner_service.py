@@ -35,6 +35,7 @@ from app.services.deploy_service import DeployGateError
 from app.services.workspace.command_sandbox import CommandSandboxError, command_run_scope
 from app.services.workspace.snapshot import materialized_snapshot_hash
 from app.services.workspace.suitecloud_auth_seeder import AuthSeederError, require_verified_identity
+from app.services.workspace.trusted_sdf_project import PROJECT_FORMAT
 
 logger = structlog.get_logger()
 
@@ -871,6 +872,8 @@ async def execute_run(
             expected_manifest = (extra_params or {}).get("expected_manifest_sha")
             if not expected_sha or not expected_manifest or run.changeset_id is None:
                 raise DeployGateError("Deploy requires a confirmed snapshot and manifest")
+            if (extra_params or {}).get("expected_project_format") != PROJECT_FORMAT:
+                raise DeployGateError("Deploy requires the confirmed supported project format; preview again")
             if run.snapshot_hash != expected_sha:
                 raise DeployGateError("Materialized snapshot differs from the confirmed snapshot")
             fresh = await compute_deploy_manifest(

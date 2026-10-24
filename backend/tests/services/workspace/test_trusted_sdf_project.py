@@ -271,3 +271,15 @@ def test_build_snapshots_inputs_before_validation(monkeypatch):
     monkeypatch.setattr(sdf, "_check_files", mutate_original_after_check)
     project = sdf.build_project(**args)
     assert project.files[PATH] == CONTENT
+
+
+@pytest.mark.parametrize("text", ["noncanonical", "nested"])
+def test_materializer_rejects_noncanonical_or_nested_json_before_filesystem(text, tmp_path, monkeypatch):
+    project = sdf.build_project(**inputs())
+    manifest = (
+        json.dumps(json.loads(project.manifest_json), indent=2) if text == "noncanonical" else "[" * 20000 + "]" * 20000
+    )
+    monkeypatch.setattr(sdf.tempfile, "tempdir", str(tmp_path))
+    with pytest.raises(sdf.TrustedProjectError), sdf.materialize_project(replace(project, manifest_json=manifest)):
+        pytest.fail("untrusted serialized manifest accepted")
+    assert list(tmp_path.iterdir()) == []

@@ -2,8 +2,7 @@
 
 This accepts an already reviewed *file-only* manifest, not a repository root.
 No tenant configuration, hooks, package manager, object XML or CLI JavaScript
-is loaded. Legacy ``SuiteScripts/`` paths require an explicit future mapping
-in the signed preview contract; this module never guesses or strips prefixes.
+is loaded. The versioned full-snapshot projection explicitly maps legacy paths.
 It grants no target authority and has no SDK, network or production caller.
 """
 
@@ -24,6 +23,7 @@ from app.services.workspace.snapshot import snapshot_hash
 
 MAX_FILES = 1000
 MAX_BYTES = 8 * 1024 * 1024
+PROJECT_FORMAT = "suite-studio-files-v1"
 _PREFIX = "FileCabinet/SuiteScripts/"
 _SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*", re.ASCII)
 _SHA = re.compile(r"[a-f0-9]{64}", re.ASCII)
@@ -160,6 +160,94 @@ def build_project(
     )
 
 
+def build_reviewed_project(
+    *,
+    files: dict[str, bytes],
+    manifest: list[dict],
+    expected_snapshot_sha: str,
+    expected_manifest_sha: str,
+    project_format: str,
+) -> TrustedProject:
+    """Project the entire signed/check-tested snapshot using an explicit version.
+
+    Tests and package configuration stay bound by the original hashes but never
+    enter the credential process. Only script files are projected. The returned
+    hashes identify that projection; callers must retain the full snapshot's
+    identity separately. This does not grant execution or target authority.
+    """
+    if project_format != PROJECT_FORMAT or type(files) is not dict or type(manifest) is not list:
+        _reject()
+    if not 1 <= len(files) <= MAX_FILES or len(manifest) != len(files):
+        _reject()
+    files = files.copy()
+    if any(type(e) is not dict for e in manifest):
+        _reject()
+    manifest = [e.copy() for e in manifest]
+    total = 0
+    for path, content in files.items():
+        if (
+            not isinstance(path, str)
+            or len(path) > 512
+            or not all(_SEGMENT.fullmatch(p) and len(p) <= 80 for p in path.split("/"))
+            or type(content) is not bytes
+        ):
+            _reject()
+        total += len(content)
+        if total > MAX_BYTES:
+            _reject()
+    projected_files: dict[str, bytes] = {}
+    projected_manifest = []
+    seen = set()
+    auxiliary = {
+        "package.json",
+        "package-lock.json",
+        "jest.config.js",
+        "jest.config.json",
+        "jest.setup.js",
+        "README.md",
+    }
+    for entry in manifest:
+        if set(entry) != {"path", "operation", "content_sha", "apply_order"}:
+            _reject()
+        path = entry["path"]
+        if (
+            not isinstance(path, str)
+            or path not in files
+            or path in seen
+            or entry["operation"] not in ("create", "modify", "unchanged")
+            or type(entry["apply_order"]) is not int
+            or not -1 <= entry["apply_order"] <= 1000000
+            or entry["content_sha"] != hashlib.sha256(files[path]).hexdigest()
+        ):
+            _reject()
+        seen.add(path)
+        if path.startswith("SuiteScripts/"):
+            destination = "FileCabinet/" + path
+        elif path.startswith(_PREFIX):
+            destination = path
+        elif path in auxiliary or path.startswith(("tests/", "test/", "__tests__/")):
+            continue
+        else:
+            _reject()
+        if destination in projected_files:
+            _reject()
+        projected_files[destination] = files[path]
+        projected_manifest.append({**entry, "path": destination})
+    manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    if (
+        snapshot_hash(files) != expected_snapshot_sha
+        or hashlib.sha256(manifest_json.encode()).hexdigest() != expected_manifest_sha
+    ):
+        _reject()
+    projected_json = json.dumps(projected_manifest, sort_keys=True, separators=(",", ":"))
+    return build_project(
+        files=projected_files,
+        manifest=projected_manifest,
+        expected_snapshot_sha=snapshot_hash(projected_files),
+        expected_manifest_sha=hashlib.sha256(projected_json.encode()).hexdigest(),
+    )
+
+
 @contextmanager
 def materialize_project(project: TrustedProject) -> Iterator[Path]:
     """Own a new private root and clean it even on cancellation/exception.
@@ -178,7 +266,7 @@ def materialize_project(project: TrustedProject) -> Iterator[Path]:
         _reject()
     try:
         manifest = json.loads(project.manifest_json)
-    except ValueError:
+    except (ValueError, RecursionError):
         _reject()
     rebuilt = build_project(
         files=files,
@@ -186,7 +274,11 @@ def materialize_project(project: TrustedProject) -> Iterator[Path]:
         expected_snapshot_sha=project.snapshot_sha,
         expected_manifest_sha=project.manifest_sha,
     )
-    if output != dict(rebuilt.files) or rebuilt.project_sha != project.project_sha:
+    if (
+        project.manifest_json != rebuilt.manifest_json
+        or output != dict(rebuilt.files)
+        or rebuilt.project_sha != project.project_sha
+    ):
         _reject()
     with tempfile.TemporaryDirectory(prefix="suitecloud_project_") as root_name:
         root = Path(root_name)
