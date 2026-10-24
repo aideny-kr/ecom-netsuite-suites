@@ -199,6 +199,36 @@ it("keeps failed evidence loading distinct from zero matches", async () => {
   ).toBe(true);
   expect(screen.getByTestId("stat-checked")).toHaveTextContent("—");
 });
+it("shows each scope's own reason when a period cannot be queued", async () => {
+  // Staging 2026-10-24: the per-scope messages were formatted again as an error object, so every
+  // failure read "The request could not be confirmed" whatever the server said.
+  vi.mocked(apiClient.post).mockRejectedValue(Object.assign(new Error("Conflict"), { status: 409 }));
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile period" }));
+  const alert = await screen.findByText(/Review data could not be loaded or queued/);
+  expect(alert).toHaveTextContent(/state or evidence changed/i);
+  expect(alert).not.toHaveTextContent(/request could not be confirmed/i);
+});
+it("opens the period's running review when another click finds one already queued", async () => {
+  // Staging 2026-10-24: the server refuses a second review of a period whose review is still queued or
+  // running, and names it. The page shows that review instead of "could not be loaded or queued".
+  const { ApiError } = await vi.importActual<typeof import("@/lib/api-client")>("@/lib/api-client");
+  const normal = vi.mocked(apiClient.get).getMockImplementation()!;
+  const queued = { ...run, id: "queued-review", status: "pending" };
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) =>
+    path.endsWith("/runs/queued-review") ? (queued as never) : normal(path),
+  );
+  vi.mocked(apiClient.post).mockRejectedValue(
+    new ApiError(JSON.stringify({ code: "review_already_running", run_id: "queued-review" }), 409),
+  );
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile period" }));
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith("/api/v1/transaction-ops/runs/queued-review"),
+  );
+  await waitFor(() => expect(screen.getByRole("button", { name: "Reconcile period" })).not.toBeDisabled());
+  expect(screen.queryByText(/Review data could not be loaded or queued/)).not.toBeInTheDocument();
+});
 it("reuses a failed period request key but gives an intentional new review a fresh key", async () => {
   vi.mocked(apiClient.post)
     .mockRejectedValueOnce(new Error("Temporary outage"))

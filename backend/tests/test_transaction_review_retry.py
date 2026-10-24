@@ -147,7 +147,15 @@ async def test_different_period_does_not_reuse_failed_cohort(db, admin_user, mon
     assert run.progress_json == {}
 
 
-async def test_pending_retry_rejects_another_click_and_old_budget_cannot_fork(client, db, admin_user, monkeypatch):
+async def test_another_click_is_refused_naming_the_running_review_and_old_budget_cannot_fork(
+    client, db, admin_user, monkeypatch
+):
+    # Staging 2026-10-24: "Reconcile period" on a period whose review was already queued answered a bare
+    # 409, which the page showed as "Review data could not be loaded or queued". The refusal now names
+    # the running review so the page can show it; it stays a refusal, so no key is re-pointed.
+    from sqlalchemy import func, select
+
+    from app.models.transaction_ops import TransactionRun
     from app.services.transaction_ops.continuation import continuation_result, continue_budget_run
     from app.services.transaction_ops.scheduler import _recovery_ids
 
@@ -155,13 +163,20 @@ async def test_pending_retry_rejects_another_click_and_old_budget_cannot_fork(cl
     config, _, failed = await stopped_review(db, actor, monkeypatch, reason="budget")
     request = period_review.PeriodReview(evaluation_key=uuid4(), period="last_week")
     resumed = await period_review.create_review(db, actor.tenant_id, config.id, request, actor=actor)
+    runs = await db.scalar(
+        select(func.count()).select_from(TransactionRun).where(TransactionRun.config_id == config.id)
+    )
     response = await client.post(
         f"/api/v1/transaction-ops/configs/{config.id}/review",
         json={"period": "last_week", "evaluation_key": str(uuid4())},
         headers=headers,
     )
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "review_already_running"
+    assert response.json()["detail"] == {"code": "review_already_running", "run_id": str(resumed.id)}
+    after = await db.scalar(
+        select(func.count()).select_from(TransactionRun).where(TransactionRun.config_id == config.id)
+    )
+    assert after == runs  # nothing created
     child, _ = await continuation_result(db, actor.tenant_id, failed.id)
     assert child.id == resumed.id
     assert (await continue_budget_run(db, actor.tenant_id, failed.id)).id == resumed.id

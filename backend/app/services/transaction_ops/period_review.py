@@ -94,16 +94,20 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
 
     if previous and await stopped(db, tenant_id, previous.config_id, previous.params_json["review"]["id"]):
         previous = None
+    # The refusal names the review already queued or running for this period, so the page can show it
+    # (staging 2026-10-24: the bare refusal read as "Review data could not be loaded or queued"). Still a
+    # refusal: this request's key is never attached to another attempt (PR review round 1, R1).
     if previous and previous.status in ("pending", "running"):
-        raise state.StateError("review_already_running")
+        raise state.StateError("review_already_running", detail={"run_id": str(previous.id)})
     if previous and previous.status == "finished" and previous.termination_reason in ("error", "budget", "stall"):
         active = await db.scalar(
             same_period.with_only_columns(TransactionRun.id)
             .where(TransactionRun.status.in_(("pending", "running")))
+            .order_by(TransactionRun.created_at.desc(), TransactionRun.id.desc())
             .limit(1)
         )
         if active:
-            raise state.StateError("review_already_running")
+            raise state.StateError("review_already_running", detail={"run_id": str(active)})
         if summary["run_count"] >= 512:
             raise state.StateError("review_history_limit")
         retry = await state.create_run(

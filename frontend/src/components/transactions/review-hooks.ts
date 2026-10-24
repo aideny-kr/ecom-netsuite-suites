@@ -204,11 +204,25 @@ export function useCaseEvidence(id: string) {
 export function useFixProposals(offset: number, enabled: boolean, size = 50) {
   return useRecordPage<TransactionProposal>("proposals", offset, size, enabled);
 }
+/** The run a refusal names as already reviewing this period, or null for any other error. */
+function runningReviewId(error: unknown): string | null {
+  const status = (error as { status?: unknown } | null)?.status;
+  const message = (error as { message?: unknown } | null)?.message;
+  if (status !== 409 || typeof message !== "string") return null;
+  try {
+    const detail = JSON.parse(message) as { code?: unknown; run_id?: unknown };
+    return detail?.code === "review_already_running" && typeof detail.run_id === "string"
+      ? detail.run_id
+      : null;
+  } catch {
+    return null;
+  }
+}
 export function useStartPeriodReview() {
   const access = useTransactionAccess();
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       configId,
       request,
     }: {
@@ -216,10 +230,18 @@ export function useStartPeriodReview() {
       request: PeriodInput;
     }) => {
       if (!access.allowed) throw new Error("Access unavailable");
-      return apiClient.post<TransactionRun>(
-        `${base}/configs/${enc(configId)}/review`,
-        request,
-      );
+      try {
+        return await apiClient.post<TransactionRun>(
+          `${base}/configs/${enc(configId)}/review`,
+          request,
+        );
+      } catch (error) {
+        // The period's review is already queued or running (staging 2026-10-24): show that review,
+        // which the server names, instead of reporting the refusal as a failure.
+        const running = runningReviewId(error);
+        if (running) return apiClient.get<TransactionRun>(`${base}/runs/${enc(running)}`);
+        throw error;
+      }
     },
     onSuccess: () =>
       client.invalidateQueries({
