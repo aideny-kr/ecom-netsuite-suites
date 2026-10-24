@@ -41,7 +41,7 @@ Manager = Annotated[User, Depends(require_permission("connections.manage"))]
 
 
 def _http_error(exc):
-    return HTTPException(status_code=exc.http_status, detail={"code": exc.code})
+    return HTTPException(status_code=exc.http_status, detail={**getattr(exc, "detail", {}), "code": exc.code})
 
 
 async def _publish_pending(run, tenant_id):

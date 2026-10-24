@@ -91,10 +91,12 @@ ADAPTERS = {"netsuite": "guard_restlet", "celigo": "celigo"}
 
 
 class StateError(ValueError):
-    def __init__(self, code: str, http_status: int = 409):
+    def __init__(self, code: str, http_status: int = 409, *, detail: dict | None = None):
         super().__init__(code)
         self.code = code
         self.http_status = http_status
+        # Identifiers a caller can act on (e.g. the review already running); never a message.
+        self.detail = detail or {}
 
 
 def lineage_work_key(base_work_key: str, retry_of_operation_id) -> str:

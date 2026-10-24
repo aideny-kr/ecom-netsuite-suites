@@ -209,6 +209,26 @@ it("shows each scope's own reason when a period cannot be queued", async () => {
   expect(alert).toHaveTextContent(/state or evidence changed/i);
   expect(alert).not.toHaveTextContent(/request could not be confirmed/i);
 });
+it("opens the period's running review when another click finds one already queued", async () => {
+  // Staging 2026-10-24: the server refuses a second review of a period whose review is still queued or
+  // running, and names it. The page shows that review instead of "could not be loaded or queued".
+  const { ApiError } = await vi.importActual<typeof import("@/lib/api-client")>("@/lib/api-client");
+  const normal = vi.mocked(apiClient.get).getMockImplementation()!;
+  const queued = { ...run, id: "queued-review", status: "pending" };
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) =>
+    path.endsWith("/runs/queued-review") ? (queued as never) : normal(path),
+  );
+  vi.mocked(apiClient.post).mockRejectedValue(
+    new ApiError(JSON.stringify({ code: "review_already_running", run_id: "queued-review" }), 409),
+  );
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile period" }));
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith("/api/v1/transaction-ops/runs/queued-review"),
+  );
+  await waitFor(() => expect(screen.getByRole("button", { name: "Reconcile period" })).not.toBeDisabled());
+  expect(screen.queryByText(/Review data could not be loaded or queued/)).not.toBeInTheDocument();
+});
 it("reuses a failed period request key but gives an intentional new review a fresh key", async () => {
   vi.mocked(apiClient.post)
     .mockRejectedValueOnce(new Error("Temporary outage"))
