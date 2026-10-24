@@ -8,7 +8,6 @@ import pytest
 from app.models.workspace import WorkspaceDeployToken
 from app.services.deploy_preview_service import (
     DeployGateNotMetError,
-    TokenInvalidError,
     mint_deploy_token,
     verify_and_consume_deploy_token,
 )
@@ -24,7 +23,7 @@ async def test_mint_refuses_a_preview_with_different_format(db, checked_project)
 
 
 @pytest.mark.asyncio
-async def test_format_is_stored_and_tampering_invalidates_hmac(db, checked_project):
+async def test_format_is_stored_and_unsupported_values_are_rejected(db, checked_project):
     ws, cs, user, *_ = checked_project
     p = await preview(db, checked_project)
     assert p["project_format"] == "suite-studio-files-v1"
@@ -33,11 +32,46 @@ async def test_format_is_stored_and_tampering_invalidates_hmac(db, checked_proje
     assert row.project_format == p["project_format"]
     row.project_format = "future-v2"
     await db.flush()
-    with pytest.raises((TokenInvalidError, DeployGateNotMetError)):
+    with pytest.raises(DeployGateNotMetError):
         await verify_and_consume_deploy_token(
             db=db, jti=row.id, confirmation_token=minted["confirmation_token"], actor_id=user.id, tenant_id=ws.tenant_id
         )
     assert row.consumed_at is None
+
+
+@pytest.mark.asyncio
+async def test_format_is_cryptographically_bound_even_when_schema_gate_is_bypassed(db, checked_project):
+    from app.services.chat.mutation_guard import verify_confirmation_token
+    from app.services.deploy_preview_service import _canonical_payload
+
+    ws, cs, user, *_ = checked_project
+    minted = await mint_deploy_token(db=db, preview=await preview(db, checked_project))
+    row = await db.get(WorkspaceDeployToken, uuid.UUID(minted["jti"]))
+    payload = dict(
+        jti=str(row.id),
+        tenant_id=str(row.tenant_id),
+        workspace_id=str(row.workspace_id),
+        changeset_id=str(row.changeset_id),
+        sandbox_id=row.sandbox_id,
+        snapshot_sha=row.snapshot_sha,
+        manifest_sha=row.manifest_sha,
+        require_assertions=row.require_assertions,
+        actor_id=str(row.actor_id),
+        issued_at=row.issued_at.isoformat(),
+        target_identity=row.target_identity,
+        project_format=row.project_format,
+    )
+    for version, expected in [(row.project_format, True), (None, False), ("future-v2", False)]:
+        payload["project_format"] = version
+        assert (
+            verify_confirmation_token(
+                minted["confirmation_token"],
+                session_id=str(user.id),
+                payload_json=_canonical_payload(**payload),
+                event_type="sandbox_deploy",
+            )
+            is expected
+        )
 
 
 @pytest.mark.asyncio

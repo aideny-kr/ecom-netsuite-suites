@@ -41,6 +41,15 @@ def test_full_snapshot_projects_legacy_paths_explicitly_and_keeps_test_identity(
         assert not (root / "package.json").exists()
 
 
+def test_v1_project_contract_golden():
+    # Changing this projection's semantics requires a new PROJECT_FORMAT,
+    # rather than silently reinterpreting persisted confirmations/queued work.
+    assert sdf.PROJECT_FORMAT == "suite-studio-files-v1"
+    project = sdf.build_reviewed_project(**args())
+    assert set(project.files) == {"FileCabinet/SuiteScripts/a.js", "manifest.xml", "deploy.xml"}
+    assert project.project_sha == "716099b2ff9b78e7df0542b577aa39ab43556a95d3c056afbf32b22a8ecc4d87"
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -96,5 +105,43 @@ def test_projection_rejects_drift_unsupported_inputs_and_noop(mutation):
 def test_malformed_manifest_values_have_sanitized_rejection(field, value):
     a = args()
     a["manifest"][0][field] = value
+    with pytest.raises(sdf.TrustedProjectError):
+        sdf.build_reviewed_project(**a)
+
+
+@pytest.mark.parametrize("script", ["SuiteScripts/a.js", "FileCabinet/SuiteScripts/a.js"])
+@pytest.mark.parametrize(
+    "auxiliary",
+    [
+        "tests/a.test.js",
+        "test/a.test.js",
+        "__tests__/a.test.js",
+        "package.json",
+        "package-lock.json",
+        "jest.config.js",
+        "jest.config.json",
+        "jest.setup.js",
+        "README.md",
+    ],
+)
+def test_each_supported_source_class_is_bound_but_only_scripts_are_projected(script, auxiliary):
+    a = args()
+    a["files"] = {script: b"// synthetic\r\n", auxiliary: b"local only"}
+    a["manifest"] = [
+        dict(
+            path=p,
+            content_sha=hashlib.sha256(c).hexdigest(),
+            operation="modify" if p == script else "unchanged",
+            apply_order=0,
+        )
+        for p, c in sorted(a["files"].items())
+    ]
+    a["expected_snapshot_sha"] = snapshot_hash(a["files"])
+    a["expected_manifest_sha"] = hashlib.sha256(
+        json.dumps(a["manifest"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    project = sdf.build_reviewed_project(**a)
+    assert set(project.files) == {"FileCabinet/SuiteScripts/a.js", "manifest.xml", "deploy.xml"}
+    a["files"][auxiliary] = b"unreviewed local bytes"
     with pytest.raises(sdf.TrustedProjectError):
         sdf.build_reviewed_project(**a)

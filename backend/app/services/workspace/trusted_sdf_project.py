@@ -188,7 +188,10 @@ def build_reviewed_project(
         if (
             not isinstance(path, str)
             or len(path) > 512
-            or not all(_SEGMENT.fullmatch(p) and len(p) <= 80 for p in path.split("/"))
+            or not all(
+                (part == "__tests__" and i == 0) or (_SEGMENT.fullmatch(part) and len(part) <= 80)
+                for i, part in enumerate(path.split("/"))
+            )
             or type(content) is not bytes
         ):
             _reject()

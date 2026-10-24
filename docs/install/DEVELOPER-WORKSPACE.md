@@ -139,3 +139,29 @@ fixed Java SDK operations. Preview-time projection readiness, isolated SDK
 validate/deploy/readback and their receipts must be integrated before activation.
 The production credential seeder remains closed and all target/network/operator
 acceptance gates above remain open.
+
+Before any activation, inventory legacy queued confirmations in the exact
+company database with this read-only, parameterized query (`:company_id` is
+supplied by the authorized operator):
+
+```sql
+SELECT r.id, r.status, t.project_format, t.consumed_at
+FROM workspace_runs AS r
+JOIN workspace_deploy_tokens AS t ON t.consumed_run_id = r.id
+  AND t.tenant_id = r.tenant_id AND t.actor_id = r.triggered_by
+WHERE r.tenant_id = CAST(:company_id AS uuid)
+  AND r.run_type = 'deploy_sandbox' AND r.status = 'queued'
+  AND (t.project_format IS NULL OR t.project_format <> 'suite-studio-files-v1');
+```
+
+The retry endpoint currently rejects these rows with its generic 404 and a
+"preview again" diagnostic; it does not cancel or audit their disposition.
+Keep activation blocked until the authorized operator has reconciled and drained
+these rows through a reviewed, audited maintenance procedure. Never assign the
+new version to an old confirmation or replay a started/uncertain run. This query
+is an inventory step, not a cancellation tool or release acceptance proof.
+
+Preview-time projection readiness is still required. Existing sync can produce
+`CustomScripts/` paths and space-containing names; v1 does not map those inputs.
+Resolve their supported mapping explicitly and reject unsupported snapshots
+before issuing a preview when SDK execution is integrated.
