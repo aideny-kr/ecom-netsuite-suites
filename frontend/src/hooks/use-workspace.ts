@@ -72,6 +72,20 @@ export function useFileContent(workspaceId: string | null, fileId: string | null
   });
 }
 
+export function useProposeFileEdit() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ workspaceId, fileId, ...body }: {
+      workspaceId: string; fileId: string; content: string; baseline_sha256: string;
+    }) => apiClient.post<{ changeset_id: string }>(
+      `/api/v1/workspaces/${workspaceId}/files/${fileId}/draft`, body,
+    ),
+    onSuccess: (_, { workspaceId }) => {
+      queryClient.invalidateQueries({ queryKey: ["changesets", workspaceId] });
+    },
+  });
+}
+
 export function useSearchFiles(workspaceId: string | null, query: string) {
   return useQuery<SearchResult[]>({
     queryKey: ["workspace-search", workspaceId, query],

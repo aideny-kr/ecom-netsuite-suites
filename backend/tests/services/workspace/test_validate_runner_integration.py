@@ -8,7 +8,6 @@ has_warnings, gate_status, snapshot_hash).
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -17,8 +16,6 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import encrypt_credentials
-from app.models.connection import Connection
 from app.models.workspace import (
     ValidationHit,
     Workspace,
@@ -30,12 +27,6 @@ from app.services import runner_service
 from app.services.workspace.suitecloud_auth_seeder import SeededCredentials
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
-# Default fake seeded-credentials result. ``account_id`` matches the
-# ``seeded_netsuite_connection`` fixture so snapshot_hash inputs stay
-# consistent across tests.
-_FAKE_SEEDED = SeededCredentials(path=Path("/tmp/fake.json"), account_id="1234567")
-
 
 # --- Fixtures ---
 
@@ -80,26 +71,11 @@ async def seeded_workspace_with_changeset(db: AsyncSession, tenant_a, admin_user
 
 @pytest_asyncio.fixture
 async def seeded_netsuite_connection(db: AsyncSession, tenant_a):
-    """Active OAuth2 NetSuite connection with a fresh access token."""
-    creds = {
-        "auth_type": "oauth2",
-        "access_token": "live_access_tok",
-        "refresh_token": "live_refresh_tok",
-        "expires_at": time.time() + 3600,
-        "account_id": "1234567",
-        "client_id": "test_client_id_abc",
-    }
-    conn = Connection(
-        tenant_id=tenant_a.id,
-        provider="netsuite",
-        label="Test NS",
-        status="active",
-        auth_type="oauth2",
-        encrypted_credentials=encrypt_credentials(creds),
-    )
-    db.add(conn)
-    await db.flush()
-    return conn
+    """Synthetic certificate connection; no SDK authentication."""
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "1234567-sb1")
+    return SeededCredentials(path=Path("/tmp/fake.json"), **identity)
 
 
 # --- Allowlist tests ---
@@ -117,6 +93,28 @@ def test_sdf_validate_removed_from_allowlist() -> None:
 
 
 # --- Execution tests ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account,role", [("1234567", None), ("", "1234"), ("1234567", "Administrator")])
+async def test_validation_requires_verified_account_and_numeric_role(
+    db, seeded_workspace_with_changeset, account, role
+):
+    workspace, cs, user = seeded_workspace_with_changeset
+    run = await runner_service.create_run(
+        db, workspace.tenant_id, workspace.id, "suitecloud_validate", user.id, changeset_id=cs.id
+    )
+    process = AsyncMock(return_value=(0, "", ""))
+    with (
+        patch.object(runner_service, "_run_subprocess", process),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            AsyncMock(return_value=SeededCredentials(Path("/tmp/unused"), account, role)),
+        ),
+    ):
+        await runner_service.execute_run(db, run.id, workspace.tenant_id)
+    assert run.status == "failed" and run.gate_status == "block"
+    process.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -146,7 +144,7 @@ async def test_execute_run_persists_validation_hits_on_errors(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=_FAKE_SEEDED),
+            new=AsyncMock(return_value=seeded_netsuite_connection),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
@@ -200,7 +198,7 @@ async def test_execute_run_passes_on_warnings_only(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=_FAKE_SEEDED),
+            new=AsyncMock(return_value=seeded_netsuite_connection),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
@@ -289,7 +287,7 @@ async def test_execute_run_clean_validation_passes(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=_FAKE_SEEDED),
+            new=AsyncMock(return_value=seeded_netsuite_connection),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
@@ -338,7 +336,7 @@ async def test_gate_status_independent_of_exit_code(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=_FAKE_SEEDED),
+            new=AsyncMock(return_value=seeded_netsuite_connection),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
@@ -384,7 +382,7 @@ async def test_execute_run_succeeds_for_applied_changeset(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=_FAKE_SEEDED),
+            new=AsyncMock(return_value=seeded_netsuite_connection),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
@@ -426,7 +424,7 @@ async def test_execute_run_handles_mixed_severity(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=_FAKE_SEEDED),
+            new=AsyncMock(return_value=seeded_netsuite_connection),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
@@ -476,7 +474,7 @@ async def test_execute_run_blocks_on_parser_error(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=_FAKE_SEEDED),
+            new=AsyncMock(return_value=seeded_netsuite_connection),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
@@ -530,7 +528,7 @@ async def test_execute_run_blocks_on_terminal_failure_without_error_hits(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=_FAKE_SEEDED),
+            new=AsyncMock(return_value=seeded_netsuite_connection),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)

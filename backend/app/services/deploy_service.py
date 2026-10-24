@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -9,7 +10,9 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.workspace import WorkspaceRun
+from app.models.workspace import WorkspaceArtifact, WorkspaceRun
+from app.services.workspace.suitecloud_auth_seeder import AuthSeederError
+from app.services.workspace.target_identity import receipt_identity, require_current_target
 
 logger = structlog.get_logger()
 
@@ -34,15 +37,15 @@ async def check_deploy_prerequisites(
     require_assertions: bool = False,
     override_reason: str | None = None,
     expected_snapshot_hash: str | None = None,
+    expected_account_id: str | None = None,
+    expected_target_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Check all prerequisites for sandbox deploy.
 
-    The validate gate looks up the latest `suitecloud_validate` run. When
-    `expected_snapshot_hash` is provided, the latest validate's snapshot_hash
-    must match — mismatch → ``status="stale"`` and the gate blocks deploy.
-    The pass/fail decision uses the run's `gate_status` field (``pass``
-    blocks/passes deterministically) when available, falling back to the run
-    lifecycle ``status`` otherwise.
+    Validation and unit-test receipts must match the canonical project content.
+    When no expected hash is supplied, compute it from the current approved
+    changeset. Legacy receipts without content identity fail closed.
+    Validation requires both a passed lifecycle and a passing parser gate.
 
     Returns a dict with gate status:
     {
@@ -56,6 +59,31 @@ async def check_deploy_prerequisites(
         "blocked_reason": str|None,
     }
     """
+    if expected_target_identity is not None and expected_account_id is None:
+        raise ValueError("Confirmed validation identity requires an explicit destination account")
+    if expected_snapshot_hash is None:
+        # Every caller enforces freshness; omission cannot disable this gate.
+        from app.models.workspace import WorkspaceChangeSet
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        cs = (
+            await db.execute(
+                select(WorkspaceChangeSet).where(
+                    WorkspaceChangeSet.id == changeset_id, WorkspaceChangeSet.tenant_id == tenant_id
+                )
+            )
+        ).scalar_one_or_none()
+        if cs is None or cs.status != "approved":
+            return {
+                "allowed": False,
+                "gates": {},
+                "override": {"applied": False, "reason": None},
+                "blocked_reason": "Changeset must be approved",
+            }
+        manifest = await compute_deploy_manifest(
+            db=db, changeset_id=changeset_id, tenant_id=tenant_id, workspace_id=cs.workspace_id
+        )
+        expected_snapshot_hash = manifest["snapshot_sha"]
     gates: dict[str, Any] = {}
 
     # --- validate gate (suitecloud_validate, with snapshot-hash freshness) ---
@@ -63,33 +91,62 @@ async def check_deploy_prerequisites(
     if validate_run is None:
         gates["validate"] = {"status": "missing", "run_id": None, "fresh": False}
     else:
-        is_fresh = expected_snapshot_hash is None or validate_run.snapshot_hash == expected_snapshot_hash
+        is_fresh = validate_run.snapshot_hash == expected_snapshot_hash
         if not is_fresh:
             gates["validate"] = {
                 "status": "stale",
                 "run_id": str(validate_run.id),
                 "fresh": False,
             }
-        elif validate_run.gate_status == "pass":
+        elif validate_run.status == "passed" and validate_run.gate_status == "pass":
             gates["validate"] = {
                 "status": "passed",
                 "run_id": str(validate_run.id),
                 "fresh": True,
             }
         else:
-            # gate_status is "block"/None → fall back to run lifecycle status
+            # Missing or blocking parser evidence cannot certify validation.
             gates["validate"] = {
-                "status": validate_run.status,
+                "status": "failed",
                 "run_id": str(validate_run.id),
                 "fresh": True,
             }
+
+        if expected_account_id is not None and gates["validate"]["status"] == "passed":
+            # Content identity is shared with local tests. Server validation also
+            # needs evidence for the actual destination account.
+            artifact = (
+                await db.execute(
+                    select(WorkspaceArtifact).where(
+                        WorkspaceArtifact.run_id == validate_run.id,
+                        WorkspaceArtifact.tenant_id == tenant_id,
+                        WorkspaceArtifact.artifact_type == "result_json",
+                    )
+                )
+            ).scalar_one_or_none()
+            try:
+                receipt = json.loads(artifact.content or "{}") if artifact else {}
+                identity = receipt_identity(receipt)
+                if identity["account_id"] != expected_account_id.strip().lower().replace("_", "-"):
+                    raise AuthSeederError("Validation destination changed")
+                await require_current_target(db, tenant_id, identity)
+                if expected_target_identity is not None and identity != expected_target_identity:
+                    raise AuthSeederError("Validation identity changed since preview")
+                gates["validate"]["identity"] = identity
+            except (ValueError, AttributeError, AuthSeederError):
+                gates["validate"]["status"] = "target_mismatch"
 
     # Check unit tests
     test_run = await _get_latest_run(db, changeset_id, tenant_id, "jest_unit_test")
     if test_run is None:
         gates["unit_tests"] = {"status": "missing", "run_id": None}
     else:
-        gates["unit_tests"] = {"status": test_run.status, "run_id": str(test_run.id)}
+        is_fresh = test_run.snapshot_hash == expected_snapshot_hash
+        gates["unit_tests"] = {
+            "status": test_run.status if is_fresh else "stale",
+            "run_id": str(test_run.id),
+            "fresh": is_fresh,
+        }
 
     # Check assertions
     if require_assertions:
@@ -107,7 +164,7 @@ async def check_deploy_prerequisites(
 
     # Evaluate gates — validate must be both passed AND fresh.
     validate_ok = gates["validate"]["status"] == "passed" and gates["validate"].get("fresh") is True
-    tests_ok = gates["unit_tests"]["status"] == "passed"
+    tests_ok = gates["unit_tests"]["status"] == "passed" and gates["unit_tests"].get("fresh") is True
     assertions_ok = gates["assertions"]["status"] in ("passed", "not_required")
     override_applied = False
     blocked_reason = None

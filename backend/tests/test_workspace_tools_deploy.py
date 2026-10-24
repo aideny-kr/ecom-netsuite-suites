@@ -94,12 +94,19 @@ async def mcp_deploy_eligible(db: AsyncSession, tenant_a, admin_user):
     db.add(cs)
     await db.flush()
 
+    from app.services.deploy_preview_service import compute_deploy_manifest
+
+    snapshot = (await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id))[
+        "snapshot_sha"
+    ]
+
     db.add(
         WorkspaceRun(
             tenant_id=tenant_a.id,
             workspace_id=ws.id,
             changeset_id=cs.id,
             run_type="suitecloud_validate",
+            snapshot_hash=snapshot,
             status="passed",
             triggered_by=user.id,
             has_errors=False,
@@ -112,8 +119,32 @@ async def mcp_deploy_eligible(db: AsyncSession, tenant_a, admin_user):
             workspace_id=ws.id,
             changeset_id=cs.id,
             run_type="jest_unit_test",
+            snapshot_hash=snapshot,
             status="passed",
             triggered_by=user.id,
+        )
+    )
+    await db.flush()
+    from app.models.workspace import WorkspaceArtifact
+
+    validation = (
+        await db.execute(
+            select(WorkspaceRun).where(
+                WorkspaceRun.changeset_id == cs.id, WorkspaceRun.run_type == "suitecloud_validate"
+            )
+        )
+    ).scalar_one()
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "6738075-sb1")
+    import json
+
+    db.add(
+        WorkspaceArtifact(
+            tenant_id=tenant_a.id,
+            run_id=validation.id,
+            artifact_type="result_json",
+            content=json.dumps(identity),
         )
     )
     await db.flush()
@@ -189,6 +220,11 @@ class TestMcpDeployConfirm:
             assert fake_task.delay.called
             call_kwargs = fake_task.delay.call_args.kwargs
             assert call_kwargs["extra_params"]["expected_snapshot_sha"] == preview["snapshot_sha"]
+            assert call_kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
+            assert call_kwargs["extra_params"]["expected_target_identity"]["account_id"] == "6738075-sb1"
+            assert len(call_kwargs["extra_params"]["expected_target_identity"]) == 5
+            assert call_kwargs["extra_params"]["expected_target_identity"]["role_id"] == "1234"
+            assert call_kwargs["extra_params"]["require_assertions"] is False
 
         # Token row marked consumed + linked to the run.
         import uuid as _uuid
@@ -197,6 +233,7 @@ class TestMcpDeployConfirm:
             select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == _uuid.UUID(preview["jti"]))
         )
         row = token_row.scalar_one()
+        assert call_kwargs["extra_params"]["expected_target_identity"] == row.target_identity
         assert row.consumed_at is not None
         assert str(row.consumed_run_id) == confirm_result["run_id"]
 

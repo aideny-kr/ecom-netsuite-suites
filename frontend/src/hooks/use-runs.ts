@@ -53,6 +53,17 @@ export function useRunArtifacts(runId: string | null) {
   });
 }
 
+export function useDeliverQueuedDeploy() {
+  const queryClient = useQueryClient();
+  return useMutation<WorkspaceRun & { dispatch_pending: boolean }, Error, string>({
+    mutationFn: (runId) => apiClient.post(`/api/v1/runs/${runId}/dispatch`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["workspace-runs"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace-run"] });
+    },
+  });
+}
+
 export function useTriggerValidate() {
   const queryClient = useQueryClient();
   return useMutation<WorkspaceRun, Error, string>({
