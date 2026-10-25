@@ -282,7 +282,8 @@ async def compute_deploy_snapshot(
         ops[path] = "modify"
 
     # snapshot_sha — final on-disk tree (post-patch).
-    snapshot_sha = snapshot_hash({path: content.encode("utf-8") for path, content in files.items()})
+    snapshot_files = {path: content.encode("utf-8") for path, content in files.items()}
+    snapshot_sha = snapshot_hash(snapshot_files)
 
     # Manifest — surface unchanged files AND deleted files so the operator sees the
     # full delta. content_sha for deletes is the pre-delete hash; "" if unknown.
@@ -313,11 +314,11 @@ async def compute_deploy_snapshot(
         "manifest": manifest,
         "snapshot_sha": snapshot_sha,
         "manifest_sha": manifest_sha,
-        "files": {path: content.encode("utf-8") for path, content in files.items()},
+        "files": snapshot_files,
     }
 
 
-def _project_readiness(snapshot: dict[str, Any], gates: dict[str, Any]) -> dict[str, Any]:
+def require_project_readiness(snapshot: dict[str, Any], gates: dict[str, Any]) -> dict[str, Any]:
     """Check deployability without changing the persisted v1 projection rules.
 
     A checked test-looking file inside a script tree is ambiguous. Reject the
@@ -418,7 +419,7 @@ async def build_deploy_preview(
             gate_result.get("blocked_reason") or "Deploy gate failed",
             gate_result.get("gates", {}),
         )
-    project_gate = _project_readiness(manifest_payload, gate_result.get("gates", {}))
+    project_gate = require_project_readiness(manifest_payload, gate_result.get("gates", {}))
 
     return {
         "changeset_id": str(changeset_id),
@@ -742,7 +743,7 @@ async def verify_and_consume_deploy_token(
             gate_result.get("blocked_reason") or "Deploy gate failed at confirm",
             gate_result.get("gates", {}),
         )
-    _project_readiness(fresh, gate_result.get("gates", {}))
+    require_project_readiness(fresh, gate_result.get("gates", {}))
 
     # All checks passed — caller will queue the run, then re-call this
     # row to set consumed_run_id. For now we mark consumed_at to lock the

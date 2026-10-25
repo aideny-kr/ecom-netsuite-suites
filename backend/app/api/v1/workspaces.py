@@ -945,12 +945,26 @@ async def get_uat_report(
             break
 
     # Historical passing runs do not establish readiness of the current code.
-    from app.services.deploy_preview_service import DeployPreviewError
+    from app.services.deploy_preview_service import (
+        DeployPreviewError,
+        compute_deploy_snapshot,
+        require_project_readiness,
+    )
     from app.services.deploy_service import check_deploy_prerequisites
 
+    project_state = "not_run"
     try:
         readiness = await check_deploy_prerequisites(db, cs.id, user.tenant_id)
         current_gates = readiness["gates"]
+        if readiness["allowed"]:
+            snapshot = await compute_deploy_snapshot(
+                db=db, changeset_id=cs.id, tenant_id=user.tenant_id, workspace_id=cs.workspace_id
+            )
+            try:
+                require_project_readiness(snapshot, current_gates)
+                project_state = "passed"
+            except DeployPreviewError:
+                project_state = "blocked"
     except (ValueError, DeployPreviewError):
         current_gates = {}
     validate_state = current_gates.get("validate", {}).get(
@@ -999,7 +1013,7 @@ async def get_uat_report(
 
     if deploy_ok:
         overall = "deployed"
-    elif validate_ok and tests_ok and assertions_ok:
+    elif validate_ok and tests_ok and assertions_ok and project_state == "passed":
         overall = "ready_for_deploy"
     elif any(r and r.status == "failed" for r in latest_runs.values()):
         overall = "failed"
@@ -1011,6 +1025,7 @@ async def get_uat_report(
         "changeset_title": cs.title,
         "changeset_status": cs.status,
         "gates": {
+            "project": project_state,
             "validate": validate_state,
             "unit_tests": tests_state,
             "assertions": (

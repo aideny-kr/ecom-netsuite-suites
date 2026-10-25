@@ -865,7 +865,11 @@ async def execute_run(
 
             # Compare the actual materialized tree, then re-check current receipts.
             # A database re-read alone can disagree with files already written to disk.
-            from app.services.deploy_preview_service import compute_deploy_manifest
+            from app.services.deploy_preview_service import (
+                DeployGateNotMetError,
+                compute_deploy_snapshot,
+                require_project_readiness,
+            )
             from app.services.deploy_service import check_deploy_prerequisites
 
             expected_sha = (extra_params or {}).get("expected_snapshot_sha")
@@ -876,7 +880,7 @@ async def execute_run(
                 raise DeployGateError("Deploy requires the confirmed supported project format; preview again")
             if run.snapshot_hash != expected_sha:
                 raise DeployGateError("Materialized snapshot differs from the confirmed snapshot")
-            fresh = await compute_deploy_manifest(
+            fresh = await compute_deploy_snapshot(
                 db=db, changeset_id=run.changeset_id, tenant_id=run.tenant_id, workspace_id=run.workspace_id
             )
             if fresh["snapshot_sha"] != expected_sha or fresh["manifest_sha"] != expected_manifest:
@@ -892,6 +896,10 @@ async def execute_run(
             )
             if not gates["allowed"]:
                 raise DeployGateError(gates["blocked_reason"])
+            try:
+                require_project_readiness(fresh, gates["gates"])
+            except DeployGateNotMetError as exc:
+                raise DeployGateError(str(exc)) from exc
 
             confirmed_identity = (extra_params or {}).get("expected_target_identity")
             if not confirmed_identity or confirmed_identity != gates["gates"]["validate"].get("identity"):
@@ -920,7 +928,7 @@ async def execute_run(
                 raise DeployGateError(
                     "Deployment actor, company, workspace or approval changed during credential preparation"
                 )
-            current = await compute_deploy_manifest(
+            current = await compute_deploy_snapshot(
                 db=db, changeset_id=run.changeset_id, tenant_id=run.tenant_id, workspace_id=run.workspace_id
             )
             if current["snapshot_sha"] != expected_sha or current["manifest_sha"] != expected_manifest:

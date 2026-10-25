@@ -474,7 +474,21 @@ class TestUATReport:
         """UAT report should show correct status when all runs pass."""
         user, headers = admin_user
         ws, cs = ws_cs
+        from app.models.workspace import WorkspacePatch
         from app.services.deploy_preview_service import compute_deploy_manifest
+
+        db.add(
+            WorkspacePatch(
+                tenant_id=cs.tenant_id,
+                changeset_id=cs.id,
+                file_path="SuiteScripts/uat.js",
+                operation="create",
+                new_content="// synthetic reviewed project\n",
+                baseline_sha256="",
+                apply_order=0,
+            )
+        )
+        await db.flush()
 
         snapshot = (
             await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
@@ -877,6 +891,18 @@ async def test_uat_deployed_state_requires_current_snapshot_and_manifest(client,
 
     user, headers = admin_user
     ws, cs = ws_cs
+    db.add(
+        WorkspacePatch(
+            tenant_id=cs.tenant_id,
+            changeset_id=cs.id,
+            file_path="SuiteScripts/new.js",
+            operation="create",
+            new_content="// synthetic reviewed patch\n",
+            baseline_sha256="",
+            apply_order=0,
+        )
+    )
+    await db.flush()
     current = await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=cs.tenant_id, workspace_id=ws.id)
     deployment = WorkspaceRun(
         tenant_id=cs.tenant_id,

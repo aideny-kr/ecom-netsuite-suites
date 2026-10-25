@@ -40,6 +40,23 @@ async def dispatch_confirmed_deploy(db, *, run_id: uuid.UUID, tenant_id: uuid.UU
         return run, False
     if token.project_format != PROJECT_FORMAT:
         raise ValueError("Confirmed deployment has no supported bound project format; preview again")
+    from app.services.deploy_preview_service import (
+        DeployPreviewError,
+        compute_deploy_snapshot,
+        require_project_readiness,
+    )
+
+    if token.workspace_id != run.workspace_id or token.changeset_id != run.changeset_id:
+        raise ValueError("Confirmed deployment project differs from the queued run")
+    try:
+        snapshot = await compute_deploy_snapshot(
+            db=db, changeset_id=run.changeset_id, tenant_id=tenant_id, workspace_id=run.workspace_id
+        )
+        if snapshot["snapshot_sha"] != token.snapshot_sha or snapshot["manifest_sha"] != token.manifest_sha:
+            raise ValueError("Confirmed deployment project changed; preview again")
+        require_project_readiness(snapshot, {})
+    except (DeployPreviewError, ValueError) as exc:
+        raise ValueError("Confirmed deployment project is not ready; preview again") from exc
     params = {
         "sandbox_id": token.sandbox_id,
         "expected_snapshot_sha": token.snapshot_sha,

@@ -181,7 +181,10 @@ these rows through a reviewed, audited maintenance procedure. Never assign the
 new version to an old confirmation or replay a started/uncertain run. This query
 is an inventory step, not a cancellation tool or release acceptance proof.
 
-Preview-time projection readiness is still required. Existing sync can produce
-`CustomScripts/` paths and space-containing names; v1 does not map those inputs.
-Resolve their supported mapping explicitly and reject unsupported snapshots
-before issuing a preview when SDK execution is integrated.
+Preview, confirmation, retry delivery and the worker now share the same static
+project readiness gate. Old current-format v1 rows are rechecked before delivery
+or credential preparation. The UAT report also requires that readiness before
+calling the project ready for deployment. In-flight inventory and reconciliation
+remain necessary for uncertain outcomes; a blocked old queue is never replayed.
+Adding support for `CustomScripts/` or space-containing paths still requires
+an explicit versioned projection; the current v1 mapping is unchanged.

@@ -24,6 +24,7 @@ from app.models.workspace import (
     Workspace,
     WorkspaceChangeSet,
     WorkspaceFile,
+    WorkspacePatch,
     WorkspaceRun,
 )
 
@@ -65,6 +66,19 @@ async def deploy_run_ready(db: AsyncSession, tenant_a, admin_user):
         proposed_by=user.id,
     )
     db.add(cs)
+    await db.flush()
+
+    db.add(
+        WorkspacePatch(
+            tenant_id=tenant_a.id,
+            changeset_id=cs.id,
+            file_path="SuiteScripts/new.js",
+            operation="create",
+            new_content="// reviewed worker patch\n",
+            baseline_sha256="",
+            apply_order=0,
+        )
+    )
     await db.flush()
 
     run = WorkspaceRun(
