@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlalchemy import delete, select
 
-from app.models.workspace import WorkspaceDeployToken, WorkspaceFile, WorkspacePatch
+from app.models.workspace import WorkspaceDeployToken, WorkspaceFile, WorkspacePatch, WorkspaceRun
 from app.services import runner_service
 from app.services.deploy_preview_service import (
     DeployGateNotMetError,
@@ -194,3 +194,56 @@ async def test_uat_report_does_not_call_noop_project_ready(client, db, checked_p
     assert response.status_code == 200
     assert response.json()["overall_status"] != "ready_for_deploy"
     assert response.json()["gates"]["project"] == "blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["http", "mcp"])
+async def test_confirmation_reports_committed_run_when_delivery_readiness_changes(
+    client, db, checked_project, admin_user, channel
+):
+    from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
+
+    ws, cs, user, *_ = checked_project
+    minted = await mint_deploy_token(db=db, preview=await preview(db, checked_project))
+
+    async def change_before_delivery(db, **kwargs):
+        db.add(
+            WorkspaceFile(
+                tenant_id=ws.tenant_id,
+                workspace_id=ws.id,
+                path="SuiteScripts/later.js",
+                file_name="later.js",
+                content="// concurrent edit",
+                is_directory=False,
+            )
+        )
+        await db.commit()
+        return await dispatch_confirmed_deploy(db, **kwargs)
+
+    with (
+        patch("app.services.workspace.deploy_dispatch.dispatch_confirmed_deploy", change_before_delivery),
+        patch("app.workers.tasks.workspace_run.workspace_run_task.delay") as send,
+    ):
+        if channel == "http":
+            _, headers = admin_user
+            response = await client.post(
+                f"/api/v1/changesets/{cs.id}/deploy-sandbox/confirm",
+                json={"jti": minted["jti"], "confirmation_token": minted["confirmation_token"]},
+                headers=headers,
+            )
+            assert response.status_code == 409
+            result = response.json()["detail"]
+        else:
+            from app.mcp.tools.workspace_tools import execute_deploy_sandbox_confirm
+
+            result = await execute_deploy_sandbox_confirm(
+                {"jti": minted["jti"], "confirmation_token": minted["confirmation_token"]},
+                {"db": db, "tenant_id": str(ws.tenant_id), "actor_id": str(user.id)},
+            )
+            assert result["row_count"] == 0 and result["error"]
+        send.assert_not_called()
+    assert result["code"] == "deployment_delivery_blocked"
+    row = await db.get(WorkspaceDeployToken, uuid.UUID(minted["jti"]))
+    assert str(row.consumed_run_id) == result["run_id"]
+    run = await db.get(WorkspaceRun, row.consumed_run_id)
+    assert run.status == result["status"] == "queued"

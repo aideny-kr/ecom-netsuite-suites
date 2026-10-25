@@ -856,7 +856,20 @@ async def deploy_sandbox_confirm(
 
     from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
 
-    run, pending = await dispatch_confirmed_deploy(db, run_id=run.id, tenant_id=user.tenant_id, actor_id=user.id)
+    try:
+        run, pending = await dispatch_confirmed_deploy(db, run_id=run.id, tenant_id=user.tenant_id, actor_id=user.id)
+    except ValueError as exc:
+        # Confirmation is already durable. A later edit must not become a 500
+        # or encourage creating another deployment without seeing this run.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "deployment_delivery_blocked",
+                "message": str(exc),
+                "run_id": str(run.id),
+                "status": run.status,
+            },
+        ) from exc
     return {**_serialize_run(run), "dispatch_pending": pending}
 
 

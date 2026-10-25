@@ -201,6 +201,18 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
         )
         db.add(cs)
         await db.flush()
+        db.add(
+            WorkspacePatch(
+                tenant_id=i["company"],
+                changeset_id=cs.id,
+                file_path="SuiteScripts/refresh.js",
+                operation="create",
+                new_content="// synthetic refresh proof\n",
+                baseline_sha256="",
+                apply_order=0,
+            )
+        )
+        await db.flush()
         p = await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=i["company"], workspace_id=ws.id)
         for check_kind in ("suitecloud_validate", "jest_unit_test"):
             check = WorkspaceRun(

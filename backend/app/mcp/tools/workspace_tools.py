@@ -327,12 +327,22 @@ async def execute_deploy_sandbox_confirm(params: dict[str, Any], context: dict[s
     )
     token_row.consumed_run_id = run.id
     await db.flush()
+    await db.commit()
 
     from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
 
-    run, dispatch_pending = await dispatch_confirmed_deploy(
-        db, run_id=run.id, tenant_id=uuid.UUID(tenant_id), actor_id=actor_uuid
-    )
+    try:
+        run, dispatch_pending = await dispatch_confirmed_deploy(
+            db, run_id=run.id, tenant_id=uuid.UUID(tenant_id), actor_id=actor_uuid
+        )
+    except ValueError as exc:
+        return {
+            "error": str(exc),
+            "code": "deployment_delivery_blocked",
+            "run_id": str(run.id),
+            "status": run.status,
+            "row_count": 0,
+        }
 
     return {
         "run_id": str(run.id),
