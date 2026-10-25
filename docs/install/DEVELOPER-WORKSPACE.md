@@ -133,14 +133,30 @@ must not replace the full checked snapshot identity. Serialized manifests must
 be canonical; malformed or excessively nested JSON is rejected before any root
 is created.
 
-This projection is still an inactive preparation primitive. The runner signs
-and checks the version but does not yet execute the generated project with the
-fixed Java SDK operations. Preview-time projection readiness, isolated SDK
-validate/deploy/readback and their receipts must be integrated before activation.
+Preview now builds the projection in memory before issuing a token; confirmation
+repeats that readiness check before consuming it. The project gate reports the
+projected snapshot, manifest and generated-project hashes separately from the
+original checked hashes. It exposes no source bytes. This is a static project
+readiness result, not an SDK check, deployment or target authorization.
+
+The v1 projection rules remain unchanged. `CustomScripts/` paths from File
+Cabinet sync, spaces, objects and deletes are unsupported and block preview.
+There is no automatic path rewrite for these inputs. Within either script root,
+directory segments `test`, `tests`, `__tests__`, `__mocks__`, `__snapshots__`, and
+filenames ending in `.test.js` or `.spec.js` (case insensitive) block the entire
+deployment. Move test inputs to a recognized auxiliary root and rerun checks;
+preview does not silently omit them or upload them. This classification does
+not detect arbitrary test code by its contents. Root auxiliary inputs supported
+by the versioned builder remain bound to the full snapshot and excluded from
+the projection. An all-unchanged script manifest cannot issue a preview.
+
+The runner signs and checks the version but does not yet execute the generated
+project with the fixed Java SDK operations. Isolated SDK validate/deploy/readback
+and their receipts must be integrated before activation.
 The production credential seeder remains closed and all target/network/operator
 acceptance gates above remain open.
 
-Before any activation, inventory legacy queued confirmations in the exact
+Before any activation, inventory all in-flight confirmations in the exact
 company database with this read-only, parameterized query (`:company_id` is
 supplied by the authorized operator):
 
@@ -150,11 +166,15 @@ FROM workspace_runs AS r
 JOIN workspace_deploy_tokens AS t ON t.consumed_run_id = r.id
   AND t.tenant_id = r.tenant_id AND t.actor_id = r.triggered_by
 WHERE r.tenant_id = CAST(:company_id AS uuid)
-  AND r.run_type = 'deploy_sandbox' AND r.status = 'queued'
-  AND (t.project_format IS NULL OR t.project_format <> 'suite-studio-files-v1');
+  AND r.run_type = 'deploy_sandbox' AND r.status IN ('queued', 'running');
 ```
 
-The retry endpoint currently rejects these rows with its generic 404 and a
+Pre-readiness v1 rows may describe projects the new preview would reject; a
+version label alone is insufficient. Reconcile every old in-flight row before
+activation, including those with the current format. Already-running outcomes
+require target inspection and must never be replayed.
+
+The retry endpoint currently rejects null/unsupported-format rows with its generic 404 and a
 "preview again" diagnostic; it does not cancel or audit their disposition.
 Keep activation blocked until the authorized operator has reconciled and drained
 these rows through a reviewed, audited maintenance procedure. Never assign the

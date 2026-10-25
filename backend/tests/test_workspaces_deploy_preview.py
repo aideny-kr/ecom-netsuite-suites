@@ -28,6 +28,7 @@ from app.models.workspace import (
     WorkspaceChangeSet,
     WorkspaceDeployToken,
     WorkspaceFile,
+    WorkspacePatch,
     WorkspaceRun,
 )
 
@@ -92,6 +93,19 @@ async def deploy_eligible_changeset(db: AsyncSession, tenant_a, admin_user):
         proposed_by=user.id,
     )
     db.add(cs)
+    await db.flush()
+
+    db.add(
+        WorkspacePatch(
+            tenant_id=tenant_a.id,
+            changeset_id=cs.id,
+            file_path="SuiteScripts/deploy_me.js",
+            operation="modify",
+            new_content="// reviewed patch\n",
+            baseline_sha256="c725115613daf004f09d9ba1b1645b5e8dabf81464fd388dba1dc07605313b81",
+            apply_order=0,
+        )
+    )
     await db.flush()
 
     from app.services.deploy_preview_service import compute_deploy_manifest

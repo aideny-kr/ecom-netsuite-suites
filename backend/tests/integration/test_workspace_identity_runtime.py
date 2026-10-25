@@ -14,7 +14,7 @@ from app.core.database import set_tenant_context
 from app.core.encryption import encrypt_credentials
 from app.models.connection import Connection
 from app.models.user import User
-from app.models.workspace import Workspace, WorkspaceChangeSet, WorkspaceDeployToken, WorkspaceFile
+from app.models.workspace import Workspace, WorkspaceChangeSet, WorkspaceDeployToken, WorkspaceFile, WorkspacePatch
 from app.services import runner_service
 from app.services.deploy_preview_service import (
     DeployGateNotMetError,
@@ -65,6 +65,18 @@ async def test_real_commits_reject_current_certificate_rotation(installation, mo
                 ),
             ]
         )
+        await db.flush()
+        db.add(
+            WorkspacePatch(
+                tenant_id=i["company"],
+                changeset_id=cs.id,
+                file_path="SuiteScripts/new.js",
+                operation="create",
+                new_content="// inert reviewed patch\n",
+                baseline_sha256="",
+                apply_order=0,
+            )
+        )
         await db.commit()
         for kind in ("suitecloud_validate", "jest_unit_test"):
             await set_tenant_context(db, str(i["company"]))
@@ -88,6 +100,8 @@ async def test_real_commits_reject_current_certificate_rotation(installation, mo
             tenant_id=i["company"],
             actor_id=user.id,
         )
+        assert p["gates"]["project"]["status"] == "pass"
+        assert len(p["gates"]["project"]["project_sha"]) == 64
         minted = await mint_deploy_token(db=db, preview=p)
         await db.commit()
     async with factory() as db:

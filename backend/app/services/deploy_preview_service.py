@@ -37,7 +37,7 @@ from app.services.chat.mutation_guard import (
 from app.services.deploy_service import check_deploy_prerequisites
 from app.services.runner_service import _validate_sandbox_target
 from app.services.workspace.snapshot import snapshot_hash
-from app.services.workspace.trusted_sdf_project import PROJECT_FORMAT
+from app.services.workspace.trusted_sdf_project import PROJECT_FORMAT, TrustedProjectError, build_reviewed_project
 
 
 def _token_fingerprint(token: str) -> str:
@@ -178,9 +178,23 @@ async def compute_deploy_manifest(
     tenant_id: uuid.UUID,
     workspace_id: uuid.UUID,
 ) -> dict[str, Any]:
+    """Public manifest identity, without returning snapshot contents to callers."""
+    snapshot = await compute_deploy_snapshot(
+        db=db, changeset_id=changeset_id, tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    return {key: snapshot[key] for key in ("manifest", "snapshot_sha", "manifest_sha")}
+
+
+async def compute_deploy_snapshot(
+    *,
+    db: AsyncSession,
+    changeset_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+) -> dict[str, Any]:
     """Build the deploy manifest for *changeset_id* + compute both hashes.
 
-    Returns a dict ``{manifest, snapshot_sha, manifest_sha}`` where:
+    Returns internal snapshot bytes plus ``{manifest, snapshot_sha, manifest_sha}`` where:
 
     - ``manifest`` is a list of ``{path, operation, content_sha, apply_order}``
       entries sorted by ``path``. ``operation`` ∈ ``{"create", "modify",
@@ -299,6 +313,48 @@ async def compute_deploy_manifest(
         "manifest": manifest,
         "snapshot_sha": snapshot_sha,
         "manifest_sha": manifest_sha,
+        "files": {path: content.encode("utf-8") for path, content in files.items()},
+    }
+
+
+def _project_readiness(snapshot: dict[str, Any], gates: dict[str, Any]) -> dict[str, Any]:
+    """Check deployability without changing the persisted v1 projection rules.
+
+    A checked test-looking file inside a script tree is ambiguous. Reject the
+    whole deployment instead of silently dropping it or uploading it. Synced
+    CustomScripts paths, spaces, objects and deletes remain unsupported by v1.
+    No source bytes, raw path or filesystem/SDK execution enters this receipt.
+    """
+    for path in snapshot["files"]:
+        if path.startswith(("SuiteScripts/", "FileCabinet/SuiteScripts/")):
+            parts = path.lower().split("/")
+            if any(part in {"test", "tests", "__tests__", "__mocks__", "__snapshots__"} for part in parts) or parts[
+                -1
+            ].endswith((".test.js", ".spec.js")):
+                raise DeployGateNotMetError(
+                    "Move test inputs outside the deployed script tree before previewing",
+                    {**gates, "project": {"status": "blocked", "reason": "test_path_in_script_tree"}},
+                )
+    try:
+        project = build_reviewed_project(
+            files=snapshot["files"],
+            manifest=snapshot["manifest"],
+            expected_snapshot_sha=snapshot["snapshot_sha"],
+            expected_manifest_sha=snapshot["manifest_sha"],
+            project_format=PROJECT_FORMAT,
+        )
+    except TrustedProjectError as exc:
+        raise DeployGateNotMetError(
+            "Requires a supported file-only SDF project with changed script files; "
+            "CustomScripts paths, spaces, objects and deletes are unsupported",
+            {**gates, "project": {"status": "blocked", "reason": "unsupported_projection"}},
+        ) from exc
+    return {
+        "status": "pass",
+        "format": PROJECT_FORMAT,
+        "snapshot_sha": project.snapshot_sha,
+        "manifest_sha": project.manifest_sha,
+        "project_sha": project.project_sha,
     }
 
 
@@ -345,7 +401,7 @@ async def build_deploy_preview(
     except ValueError as e:
         raise InvalidSandboxTargetError(str(e)) from e
 
-    manifest_payload = await compute_deploy_manifest(
+    manifest_payload = await compute_deploy_snapshot(
         db=db, changeset_id=changeset_id, tenant_id=tenant_id, workspace_id=changeset.workspace_id
     )
     # Passing checks must describe this exact content, including unchanged files.
@@ -362,6 +418,7 @@ async def build_deploy_preview(
             gate_result.get("blocked_reason") or "Deploy gate failed",
             gate_result.get("gates", {}),
         )
+    project_gate = _project_readiness(manifest_payload, gate_result.get("gates", {}))
 
     return {
         "changeset_id": str(changeset_id),
@@ -373,7 +430,7 @@ async def build_deploy_preview(
         "manifest": manifest_payload["manifest"],
         "snapshot_sha": manifest_payload["snapshot_sha"],
         "manifest_sha": manifest_payload["manifest_sha"],
-        "gates": gate_result.get("gates", {}),
+        "gates": {**gate_result.get("gates", {}), "project": project_gate},
         "target_identity": gate_result["gates"]["validate"]["identity"],
         "project_format": PROJECT_FORMAT,
     }
@@ -660,7 +717,7 @@ async def verify_and_consume_deploy_token(
 
     # Codex P1 #6 + #7 — snapshot must still match. Re-compute and
     # compare to the pinned hashes.
-    fresh = await compute_deploy_manifest(
+    fresh = await compute_deploy_snapshot(
         db=db,
         changeset_id=row.changeset_id,
         tenant_id=tenant_id,
@@ -685,6 +742,7 @@ async def verify_and_consume_deploy_token(
             gate_result.get("blocked_reason") or "Deploy gate failed at confirm",
             gate_result.get("gates", {}),
         )
+    _project_readiness(fresh, gate_result.get("gates", {}))
 
     # All checks passed — caller will queue the run, then re-call this
     # row to set consumed_run_id. For now we mark consumed_at to lock the

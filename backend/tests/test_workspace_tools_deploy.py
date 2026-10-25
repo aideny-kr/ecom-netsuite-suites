@@ -31,6 +31,7 @@ from app.models.workspace import (
     WorkspaceChangeSet,
     WorkspaceDeployToken,
     WorkspaceFile,
+    WorkspacePatch,
     WorkspaceRun,
 )
 
@@ -92,6 +93,19 @@ async def mcp_deploy_eligible(db: AsyncSession, tenant_a, admin_user):
         proposed_by=user.id,
     )
     db.add(cs)
+    await db.flush()
+
+    db.add(
+        WorkspacePatch(
+            tenant_id=tenant_a.id,
+            changeset_id=cs.id,
+            file_path="SuiteScripts/mcp_deploy.js",
+            operation="modify",
+            new_content="// reviewed patch\n",
+            baseline_sha256="c4777c682cd30640d95e99b9e28e964a6db7894a61042ce5e152fa9de9d1a5b2",
+            apply_order=0,
+        )
+    )
     await db.flush()
 
     from app.services.deploy_preview_service import compute_deploy_manifest

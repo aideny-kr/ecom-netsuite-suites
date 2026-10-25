@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
-from app.models.workspace import Workspace, WorkspaceChangeSet, WorkspaceFile
+from app.models.workspace import Workspace, WorkspaceChangeSet, WorkspaceFile, WorkspacePatch
 from app.services import deploy_service, runner_service
 from app.services.deploy_preview_service import (
     DeployGateNotMetError,
@@ -243,6 +243,19 @@ async def checked_project(db, tenant_a, admin_user):
         tenant_id=tenant_a.id, workspace_id=ws.id, title="Content checks", status="approved", proposed_by=user.id
     )
     db.add_all([file, cs])
+    await db.flush()
+
+    db.add(
+        WorkspacePatch(
+            tenant_id=tenant_a.id,
+            changeset_id=cs.id,
+            file_path="SuiteScripts/new.js",
+            operation="create",
+            new_content="// checked patch\n",
+            baseline_sha256="",
+            apply_order=0,
+        )
+    )
     await db.flush()
 
     from tests.workspace_identity import make_target
