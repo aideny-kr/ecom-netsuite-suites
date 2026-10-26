@@ -476,3 +476,49 @@ def test_a_saved_invoice_credit_without_its_origin_is_copied_as_before():
     credit = reconcile_order(source, target, config, refunds=refunds)["adjustments"][-1]
     assert credit["basis"] == "credit memos created from the order's invoice"
     assert credit["credits"] == [{"id": "30", "number": "CM0", "invoice_id": "9", "total": "4.82", "tax": "0"}]
+
+
+# C15-R1: Solidus keeps the pre-adjustment tax on an order adjusted to zero (2026-10-22), so a credit
+# that brings the order total to a zero source total is never compared with that stale tax. Either tier
+# counts only when the zero-order rule holds on the credited values: no NetSuite tax left, and no money
+# taken in the source.
+
+
+@pytest.mark.parametrize("tier", ["credits", "returns"])
+def test_a_credit_that_leaves_netsuite_tax_on_a_zero_order_explains_nothing(tier):
+    # Input A: the full gross credited to income with no tax, so NetSuite still carries 20.00 of
+    # output tax on an order that collected nothing. Equal to Solidus's stale tax is not agreement.
+    source, target, config, refunds = returned(("0.00", "20.00"), ("120.00", "20.00"), **{tier: [("120.00", "0.00")]})
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "difference"
+    assert result["amounts"]["order_total"] == {"source": "0.00", "target": "120.00", "delta": "-120.00"}
+    assert "adjustments" not in result
+
+
+@pytest.mark.parametrize("tier", ["credits", "returns"])
+def test_a_credit_that_clears_netsuite_tax_on_a_zero_order_matches_under_the_zero_order_rule(tier):
+    # Input B: a correctly taxed full credit leaves NetSuite at 0.00 / 0.00 against Solidus's stale 20.00.
+    source, target, config, refunds = returned(("0.00", "20.00"), ("120.00", "20.00"), **{tier: [("120.00", "20.00")]})
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched" and result["reason"] == "verified_adjustments_agree"
+    credit, zero = result["adjustments"]
+    assert credit["kind"] == "invoice_credit_memos" and credit["total"] == "120.00" and credit["tax"] == "20.00"
+    assert zero["kind"] == "zero_total_order_tax" and zero["source_tax"] == "20.00"
+    assert result["amounts"]["order_total"] == {"source": "0.00", "target": "0.00", "delta": "0.00"}
+    assert result["amounts"]["tax"]["delta"] == "0.00"
+    assert result["original_amounts"]["order_total"]["delta"] == "-120.00"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"payment_total": "120.00"},
+        {"total_applicable_store_credit": "5.00"},
+        {"payments": [{"amount": "120.00", "state": "completed"}]},
+    ],
+)
+def test_a_credited_zero_order_that_took_money_keeps_its_tax_comparison(fields):
+    source, target, config, refunds = returned(("0.00", "20.00"), ("120.00", "20.00"), returns=[("120.00", "20.00")])
+    source["orders"][0].update(fields)
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "difference" and "adjustments" not in result

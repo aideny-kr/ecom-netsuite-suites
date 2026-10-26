@@ -267,12 +267,22 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                 )
             )
         for basis, tier in tiers:
-            credited_total = target_total - tier["total"]
-            credited_tax = target_tax - tier["tax"]
-            if credited_total != source_total or credited_tax != source_tax:
+            credited = {
+                **values,
+                "order_total": (source_total, target_total - tier["total"]),
+                "tax": (source_tax, target_tax - tier["tax"]),
+            }
+            if credited["order_total"][1] != source_total:
                 continue
-            values["order_total"] = (source_total, credited_total)
-            values["tax"] = (source_tax, credited_tax)
+            # C15-R1: Solidus keeps the pre-adjustment tax on an order adjusted to zero, so a credit
+            # landing on a zero source total is never compared with that tax: it counts only when the
+            # zero-order rule holds on the credited values (no NetSuite tax left, no money taken).
+            if source_total == 0 and source_tax != 0:
+                if not _zero_total_order_tax(source, credited, precision):
+                    continue
+            elif credited["tax"][1] != source_tax:
+                continue
+            values["order_total"], values["tax"] = credited["order_total"], credited["tax"]
             # The order itself is matched: the 2026-09-13 note that the sales order
             # still needs a source-backed amendment no longer applies (decided 10-01).
             result.pop("posting_reconciliation", None)

@@ -341,7 +341,7 @@ def test_a_saved_match_is_never_affected_by_the_new_rules():
 # C15: a credit memo created from the order's own return authorization can now explain an
 # order-total difference the invoice credits do not. A saved order-total difference read before
 # return credits were reported is read again. A saved match keeps reuse: the invoice credits
-# are still tried first and alone, so no match they made can change.
+# are still tried first and alone, so no match they made can change (except on a zero order, C15-R1 below).
 
 
 def test_the_rule_version_names_the_return_credit_rule():
@@ -400,3 +400,41 @@ def test_a_saved_match_on_invoice_credits_read_before_return_credits_is_reused()
     ]
     result = evaluate(report, before, frozenset(), evaluated_at=NOW)
     assert result["status"] == "equivalent" and result["balance"] == report["balance"]
+
+
+# C15-R1: on a zero order whose source still reports tax, a credit tier counts only under the zero-order
+# rule on the credited values, never by equalling Solidus's stale tax. A saved credit match that left
+# NetSuite tax on a zero order (an invoice-credit match before this rule) is read again; one that cleared
+# the tax, and every credit match on an order with a source total, keeps reuse.
+
+
+def saved_zero_order_credit_match(tax, adjustments):
+    report = saved_report()
+    report["refund_evidence"]["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    report["balance"]["amounts"]["order_total"] = {"source": "0.00", "target": "0.00", "delta": "0.00"}
+    report["balance"]["amounts"]["tax"] = {"source": tax, "target": tax, "delta": "0.00"}
+    report["balance"]["adjustments"] = [{"kind": kind, "status": "verified"} for kind in adjustments]
+    return report
+
+
+def test_a_saved_credit_match_that_left_tax_on_a_zero_order_is_read_again():
+    before, _ = snapshots()
+    report = saved_zero_order_credit_match("20.00", ["invoice_credit_memos"])
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW) == {
+        "status": "affected",
+        "reason": "credited_zero_order_tax",
+    }
+
+
+@pytest.mark.parametrize(
+    "tax,adjustments",
+    [
+        ("0.00", ["invoice_credit_memos", "zero_total_order_tax"]),  # the credit cleared NetSuite's tax
+        ("0.00", ["invoice_credit_memos"]),  # a zero order with no tax at all
+        ("20.00", []),  # a plain comparison: no credit counted
+    ],
+)
+def test_a_saved_zero_order_match_the_credit_rule_cannot_change_is_reused(tax, adjustments):
+    before, _ = snapshots()
+    report = saved_zero_order_credit_match(tax, adjustments)
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
