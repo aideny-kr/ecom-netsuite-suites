@@ -322,6 +322,8 @@ async def test_server_validation_binds_exact_generated_bytes_and_filters_sdk_out
             "-server",
             "-accountspecificvalues",
             "ERROR",
+            "-log",
+            str(seen["home"] / "validation.log"),
         ]
         root = seen["project"]
         assert cwd != root and cwd == seen["home"]
@@ -344,6 +346,8 @@ async def test_server_validation_binds_exact_generated_bytes_and_filters_sdk_out
         assert receipt.source_manifest_sha == reviewed_inputs["expected_manifest_sha"]
         assert receipt.project_sha == seen["sha"]
         assert receipt.project_format == "suite-studio-files-v1"
+        assert receipt.sdk_version == sdk.SDK_VERSION and receipt.sdk_sha256 == sdk.SDK_SHA256
+        assert receipt.server_validation is True and receipt.account_specific_values == "ERROR"
         assert len(receipt.sdk_output_sha256) == 64
         assert "private token" not in repr(receipt) and "label" not in repr(receipt)
         assert not seen["project"].exists()
@@ -367,7 +371,19 @@ async def test_validation_requires_successful_session_authentication(runtime, mo
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
-    ["wrong_identity", "bad_hash", "test_path", "unknown_format", "json_error", "timeout", "tamper", "cancel"],
+    [
+        "wrong_identity",
+        "bad_hash",
+        "test_path",
+        "unknown_format",
+        "json_error",
+        "timeout",
+        "tamper",
+        "extra_file",
+        "symlink",
+        "exec_error",
+        "cancel",
+    ],
 )
 async def test_validation_failure_never_returns_receipt_or_replays(
     runtime, private_key, monkeypatch, reviewed_inputs, failure
@@ -390,6 +406,12 @@ async def test_validation_failure_never_returns_receipt_or_replays(
             raise asyncio.CancelledError()
         if failure == "tamper":
             (root / "FileCabinet/SuiteScripts/exact.js").write_bytes(b"changed")
+        if failure == "extra_file":
+            (root / "unexpected.log").write_bytes(b"private output")
+        if failure == "symlink":
+            (root / "alias.js").symlink_to(root / "FileCabinet/SuiteScripts/exact.js")
+        if failure == "exec_error":
+            raise OSError("private token")
         return b'{"status":"SUCCESS"}'
 
     monkeypatch.setattr(sdk, "_run_process", invoke)
@@ -411,10 +433,12 @@ async def test_validation_failure_never_returns_receipt_or_replays(
         with pytest.raises(error) as caught:
             await session.validate_project(expected_identity=identity, **reviewed_inputs)
         assert "private token" not in str(caught.value)
+        if failure == "exec_error":
+            assert "uncertain" in str(caught.value)
         with pytest.raises(sdk.SdkAuthError, match="already attempted"):
             await session.validate_project(expected_identity=identity, **reviewed_inputs)
         assert sum(isinstance(c, list) and "validate" in c for c in calls) == (
-            failure in {"json_error", "timeout", "tamper", "cancel"}
+            failure in {"json_error", "timeout", "tamper", "extra_file", "symlink", "exec_error", "cancel"}
         )
         for c in calls:
             if isinstance(c, Path):
@@ -489,4 +513,83 @@ async def test_cancellation_during_filesystem_allocation_settles_and_removes_roo
         finally:
             release.set()
         process.assert_awaited_once()
+        assert len(roots) == 1 and not roots[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_validation_reports_cleanup_failure_without_claiming_bad_input(
+    runtime, private_key, monkeypatch, reviewed_inputs
+):
+    from contextlib import contextmanager
+
+    original = sdk.materialize_project
+
+    @contextmanager
+    def failed_cleanup(project):
+        with original(project) as root:
+            yield root
+        raise OSError("private path")
+
+    monkeypatch.setattr(sdk, "_run_process", AsyncMock(side_effect=[response(), b'{"status":"SUCCESS"}']))
+    monkeypatch.setattr(sdk, "materialize_project", failed_cleanup)
+    async with sdk.IsolatedSdkSession(**runtime) as session:
+        identity = await session.authenticate(
+            account_id="1234567_SB1", role_id="1234", certificate_id="synthetic-cert", private_key=private_key
+        )
+        with pytest.raises(sdk.SdkAuthError, match="cleanup failed.*reconcile") as caught:
+            await session.validate_project(expected_identity=identity, **reviewed_inputs)
+        assert "private path" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["verification", "cleanup"])
+async def test_repeated_cancel_settles_verification_and_cleanup(
+    runtime, private_key, monkeypatch, reviewed_inputs, phase
+):
+    import threading
+    from contextlib import contextmanager
+
+    started, release = threading.Event(), threading.Event()
+    roots = []
+    materialize = sdk.materialize_project
+
+    @contextmanager
+    def track(project):
+        context = materialize(project)
+        root = context.__enter__()
+        roots.append(root)
+        try:
+            yield root
+        finally:
+            if phase == "cleanup":
+                started.set()
+                assert release.wait(3)
+            context.__exit__(None, None, None)
+
+    verify = sdk._verify_project_bytes
+
+    def delayed_verify(root, project):
+        verify(root, project)
+        if phase == "verification":
+            started.set()
+            assert release.wait(3)
+
+    monkeypatch.setattr(sdk, "materialize_project", track)
+    monkeypatch.setattr(sdk, "_verify_project_bytes", delayed_verify)
+    monkeypatch.setattr(sdk, "_run_process", AsyncMock(side_effect=[response(), b'{"status":"SUCCESS"}']))
+    async with sdk.IsolatedSdkSession(**runtime) as session:
+        identity = await session.authenticate(
+            account_id="1234567_SB1", role_id="1234", certificate_id="synthetic-cert", private_key=private_key
+        )
+        task = asyncio.create_task(session.validate_project(expected_identity=identity, **reviewed_inputs))
+        try:
+            assert await asyncio.to_thread(started.wait, 3)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
         assert len(roots) == 1 and not roots[0].exists()

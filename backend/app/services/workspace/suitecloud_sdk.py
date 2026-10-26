@@ -67,6 +67,10 @@ class SdkValidationReceipt:
     projected_manifest_sha: str
     project_sha: str
     sdk_output_sha256: str
+    sdk_version: str
+    sdk_sha256: str
+    server_validation: bool
+    account_specific_values: str
 
 
 async def _settle_owned_task(task):
@@ -90,9 +94,15 @@ async def _project_directory(project):
         yield await asyncio.shield(allocation)
     finally:
         try:
-            await _settle_owned_task(allocation)
+            try:
+                await _settle_owned_task(allocation)
+            except OSError:
+                raise SdkAuthError("SuiteCloud SDK project preparation failed; reconcile before retry") from None
             cleanup = asyncio.create_task(asyncio.to_thread(context.__exit__, None, None, None))
-            await _settle_owned_task(cleanup)
+            try:
+                await _settle_owned_task(cleanup)
+            except OSError:
+                raise SdkAuthError("SuiteCloud SDK project cleanup failed; reconcile before retry") from None
         finally:
             if owner.cancelling() > cancellations_before:
                 raise asyncio.CancelledError()
@@ -165,7 +175,7 @@ async def _run_process(cmd: list[str], *, cwd: Path, env: dict[str, str], timeou
         async with asyncio.timeout(timeout):
             stdout = await protocol.result
         if transport.get_returncode() != 0:
-            raise SdkAuthError("SuiteCloud SDK authentication process failed")
+            raise SdkAuthError("SuiteCloud SDK process failed; reconcile before retry")
         return stdout
     finally:
         try:
@@ -386,6 +396,9 @@ class IsolatedSdkSession:
                 expected_manifest_sha=expected_manifest_sha,
                 project_format=project_format,
             )
+        except TrustedProjectError:
+            raise SdkAuthError("SuiteCloud SDK validation requires an exact supported reviewed project") from None
+        try:
             async with _project_directory(project) as root:
                 cmd = self._command(
                     "validate",
@@ -396,6 +409,8 @@ class IsolatedSdkSession:
                     "-server",
                     "-accountspecificvalues",
                     "ERROR",
+                    "-log",
+                    str(self.root / "validation.log"),
                 )
                 try:
                     raw = await _run_process(cmd, cwd=self.root, env=self._env, timeout=90)
@@ -409,8 +424,8 @@ class IsolatedSdkSession:
                     await _settle_owned_task(verification)
                 if not self._open or self._verified_identity != identity:
                     raise SdkAuthError("SuiteCloud SDK validation session is no longer open")
-        except (TrustedProjectError, OSError):
-            raise SdkAuthError("SuiteCloud SDK validation requires an exact supported reviewed project") from None
+        except OSError:
+            raise SdkAuthError("SuiteCloud SDK validation outcome uncertain; reconcile before retry") from None
         return SdkValidationReceipt(
             identity=identity,
             source_snapshot_sha=expected_snapshot_sha,
@@ -420,4 +435,8 @@ class IsolatedSdkSession:
             projected_manifest_sha=project.manifest_sha,
             project_sha=project.project_sha,
             sdk_output_sha256=hashlib.sha256(raw).hexdigest(),
+            sdk_version=SDK_VERSION,
+            sdk_sha256=SDK_SHA256,
+            server_validation=True,
+            account_specific_values="ERROR",
         )

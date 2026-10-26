@@ -1,11 +1,14 @@
 # Inactive credential executor
 
 This image supports only the fixed broker's offline empty-store diagnostic and
-certificate account/role authentication. It cannot validate or deploy a project.
+certificate account/role authentication. The packaged SDK module also contains
+an inactive validation primitive; the broker request schema accepts no project
+operation, and deployment/readback remain unimplemented.
 No production caller, image setting or credential provisioning is enabled.
 
-Use a minimal allowlisted build context containing this Dockerfile, the two
-listed Python modules and the public Oracle SDK 2026.1.0 JAR at the COPY path.
+Use a minimal allowlisted build context containing this Dockerfile, the four
+listed Python modules (credential_contract, suitecloud_sdk, trusted_sdf_project
+and snapshot) and the public Oracle SDK 2026.1.0 JAR at the COPY path.
 The image build and SDK session verify the SDK SHA256. Supply a reviewed digest-pinned
 Python 3.11 Debian base as BASE_IMAGE, build locally, inspect the final immutable
 image ID and review its contents. Do not use the application image or copy a

@@ -291,7 +291,10 @@ async def test_token_refresh_writer_not_blocked_by_external_command(installation
 @pytest.mark.parametrize("channel", ["http", "mcp"])
 @pytest.mark.parametrize("suppress_confirm_commit", [False, True])
 async def test_separate_session_observes_confirmation_before_blocked_delivery(
-    installation, monkeypatch, channel, suppress_confirm_commit  # noqa: F811 -- fixture
+    installation,  # noqa: F811 -- fixture
+    monkeypatch,
+    channel,
+    suppress_confirm_commit,
 ):
     """Real commit proof plus negative control; no same-session savepoint proof."""
     from httpx import ASGITransport, AsyncClient
