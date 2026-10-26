@@ -280,6 +280,9 @@ def _build_detailed_report(source_evidence, target_evidence, config, mapping, *,
                 {
                     "record_id": item["record_id"],
                     "header": item["header"],
+                    # The identity row's native totals; a reconciled case never reopens, so the
+                    # figures behind a native zero tax stay with it.
+                    **({"native_header": item["native_header"]} if "native_header" in item else {}),
                     "periods": item.get("periods"),
                     "completeness_errors": item.get("completeness_errors", []),
                 }

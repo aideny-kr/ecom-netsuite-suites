@@ -109,6 +109,42 @@ async def test_bulk_identity_keeps_duplicates_and_missing_orders_without_scope_f
     assert reader.request.await_count == 1
 
 
+async def test_bulk_identity_carries_native_tax_onto_the_order_evidence():
+    # Class C24: the bulk path reads the same identity-row tax as the single reader, through
+    # the shared read_matches, so a tax-free order clears here too.
+    import json
+
+    import httpx
+
+    from app.services.transaction_ops.netsuite_reader import _Reader
+    from app.services.transaction_ops.order_reconciliation import reconcile_order
+    from tests.test_transaction_ops_netsuite_reader import SUBSIDIARY, zero_tax_order
+
+    identity, body, source, config, refunds = zero_tax_order({"native_taxtotal": 0, "native_total": 500})
+    queries = []
+
+    def respond(request):
+        if "/currency/" in request.url.path:
+            return httpx.Response(200, json={"id": "1", "symbol": "USD", "currencyPrecision": 2})
+        if request.method == "POST":
+            query = json.loads(request.content)["q"]
+            if "FROM accountingperiod" in query:
+                return httpx.Response(200, json=bulk.collection([{"id": "10", "closed": "F"}]))
+            queries.append(query)
+            return httpx.Response(200, json=identity)
+        return httpx.Response(200, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        reader = _Reader(client, "https://6738075.invalid", "token", max_api_calls=bulk.MAX_CALLS)
+        result = (await bulk.collect_orders(reader, ["R900000401"], "tranid", SUBSIDIARY))["R900000401"]
+    (query,) = queries
+    assert "t.taxtotal AS native_taxtotal" in query and "t.foreigntotal AS native_total" in query
+    assert result["orders"][0]["native_header"] == {"id": "900401", "taxtotal": "0", "total": "500"}
+    result["scope"] = {"account_id": "6738075", "subsidiary_id": SUBSIDIARY}
+    balance = reconcile_order(source, result, config, refunds=refunds)
+    assert balance["status"] == "matched" and balance["target_tax_basis"] == "native_taxtotal"
+
+
 @pytest.mark.parametrize("refs", [[], ["bad"], ["R123456789' OR 1=1"], ["R123456789"] * 2])
 async def test_invalid_references_never_reach_provider(refs):
     reader = AsyncMock()

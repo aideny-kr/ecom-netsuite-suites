@@ -8,7 +8,7 @@ import re
 from decimal import Decimal, DecimalException, localcontext
 
 from app.schemas.transaction_ops import _decimal
-from app.services.transaction_ops.netsuite_reader import _account
+from app.services.transaction_ops.netsuite_reader import _account, _id
 from app.services.transaction_ops.normalization import source_entity_key
 from app.services.transaction_ops.refund_adjustments import verified_tax_adjustments
 from app.services.transaction_ops.service_order_reconciliation import service_order_offset
@@ -23,6 +23,15 @@ def _amount(value, precision):
         if amount < 0 or amount != amount.quantize(quantum):
             return None
         return amount
+    except (ValueError, TypeError, DecimalException):
+        return None
+
+
+def _signed_amount(value, precision):
+    """An exact amount at the currency precision that may be negative, or None."""
+    try:
+        amount = _decimal(value)
+        return amount if amount == amount.quantize(Decimal(1).scaleb(-precision)) else None
     except (ValueError, TypeError, DecimalException):
         return None
 
@@ -164,6 +173,12 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
         values = {**values, "order_total": (Decimal(0), Decimal(0)), "tax": (Decimal(0), Decimal(0))}
         return _finish(result, values, original_values, [settled], precision)
     adjustments = []
+    native_zero = _native_zero_tax(tax, target, header, precision)
+    if native_zero:
+        # original_amounts keeps the header's own tax as unread; only the comparison uses the zero.
+        adjustments.append(native_zero)
+        values["tax"] = (values["tax"][0], Decimal(0))
+        result["target_tax_basis"] = "native_taxtotal"
     offset = service_order_offset(source, header, tax, precision)
     if offset:
         adjustments.append(offset)
@@ -333,6 +348,61 @@ def _canceled_order_settled(source, header, evidence, reference, currency, preci
         ),
         "sales_order_status": status,
         "deposits": read,
+    }
+
+
+# Header amounts that count as zero when the record API leaves them out (the summary money
+# fields of commercial_credits). The discount is signed, negative in REST, and added as it is.
+_ABSENT_IS_ZERO = ("discountTotal", "shippingCost", "handlingCost")
+
+
+def _native_zero_tax(source_tax, target, header, precision):
+    """The sales order's tax proven zero when the record API left out taxTotal, or None (C24, 2026-10-25).
+
+    The record API drops an empty summary money field, so a tax-free order can arrive with no
+    taxTotal. Absence is not zero, so it is proven, as for a credit memo's absent taxTotal in
+    refund_adjustments (where present but null is malformed evidence, not a zero): the header's
+    own arithmetic must leave no room for tax, and NetSuite's SuiteQL figures for the same record
+    must give zero tax at the header's total. Those come from the identity read just before the
+    record, not the same observation, so neither proof is enough alone. Only for a source that
+    charged no tax: a taxed source keeps its tax missing rather than a difference against a zero
+    no record showed.
+    """
+    if source_tax != 0 or "taxTotal" in header:
+        return None
+    native, record_id = target.get("native_header"), _id(header.get("id"))
+    if not isinstance(native, dict) or record_id is None or _id(native.get("id")) != record_id:
+        return None
+    total, subtotal = _amount(header.get("total"), precision), _amount(header.get("subtotal"), precision)
+    native_tax, native_total = _amount(native.get("taxtotal"), precision), _amount(native.get("total"), precision)
+    if None in (total, subtotal, native_tax, native_total) or native_tax != 0 or native_total != total:
+        return None
+    parts = {}
+    for key in _ABSENT_IS_ZERO:
+        if key in header:
+            parts[key] = (_signed_amount if key == "discountTotal" else _amount)(header[key], precision)
+            if parts[key] is None:
+                return None
+        else:
+            parts[key] = None
+    if total != subtotal + sum((amount for amount in parts.values() if amount is not None), Decimal(0)):
+        return None
+
+    def text(amount):
+        return f"{amount:.{precision}f}" if amount is not None else None
+
+    return {
+        "kind": "native_zero_tax",
+        "status": "verified",
+        "basis": (
+            "the record API left out taxTotal; NetSuite's SuiteQL tax total for the same record is zero at "
+            "the same total, and the header's own arithmetic leaves no room for tax"
+        ),
+        "record_id": record_id,
+        "native_taxtotal": text(native_tax),
+        "native_total": text(native_total),
+        # As the header reported them; None is a field the record API left out, counted as zero.
+        "arithmetic": {"total": text(total), "subtotal": text(subtotal), **{k: text(v) for k, v in parts.items()}},
     }
 
 
