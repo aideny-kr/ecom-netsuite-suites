@@ -311,7 +311,9 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     )
     (source_total, target_total), (source_tax, target_tax) = values["order_total"], values["tax"]
     known = None not in (source_total, target_total, source_tax, target_tax)
-    billed = (original_values["order_total"][1], original_values["tax"][1])
+    # The invoices are compared with what the order billed: its tax as read, or the zero NetSuite's own
+    # figures proved when REST left the tax out (C24; review R4).
+    billed = (original_values["order_total"][1], Decimal(0) if native_zero else original_values["tax"][1])
     if invoice and known and source_total != target_total and invoice["invoiced"] == billed:
         tiers = []
         if invoice["rows"]:

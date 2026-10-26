@@ -732,7 +732,11 @@ async def collect_refunds(
         currency_id,
         billing=billing_documents(nodes, reachable),
         taxed=taxed,
-        returns=return_credit_candidates(nodes, parents, reachable),
+        # A hand-booked credit attached through its RA (C09) is a refund, already counted from the
+        # refund that pays it, and its origin is that refund, not the RA: never a return credit (C15).
+        returns=return_credit_candidates(
+            {k: v for k, v in nodes.items() if k not in refused and k not in set(accepted)}, parents, reachable
+        ),
         reachable=reachable,
     )
     await recheck_links(accepted)
