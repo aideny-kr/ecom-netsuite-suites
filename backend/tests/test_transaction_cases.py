@@ -316,6 +316,19 @@ def test_unknown_coverage_limit_cannot_close_financial_case():
     assert not case_service._cleared(evidence, NOW)
 
 
+@pytest.mark.parametrize("authorizations", [["1002"], []])
+def test_a_balance_naming_an_open_return_authorization_never_reconciles_the_case(authorizations):
+    """C09-R1 (2026-10-25): a refund booked by hand is held out of the NetSuite read while its return
+    authorization is open, and a reconciled case can never reopen. Whatever step labelled the balance,
+    it cannot clear the case, even in a compacted report that kept only the balance."""
+    evidence = report("matched")
+    evidence["balance"]["open_return_authorizations"] = authorizations
+    evidence["evidence_limits"] = {"code": "evidence_size_limit"}
+    assert not case_service._cleared(evidence, NOW)
+    del evidence["balance"]["open_return_authorizations"]
+    assert case_service._cleared(evidence, NOW)
+
+
 @pytest.mark.asyncio
 async def test_every_case_evaluation_is_audited_and_penny_difference_stays_open(db, admin_user):
     from sqlalchemy import select

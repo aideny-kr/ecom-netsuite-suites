@@ -84,41 +84,50 @@ def reconcile_order(source_evidence, target_evidence, config, *, refunds=None):
     return _open_return_authorizations(result, (refunds or {}).get("target"))
 
 
+OPEN_RETURN_AUTHORIZATION = "return_authorization_open_after_manual_refund"
+
+
 def _open_return_authorizations(result, evidence):
-    """Name the open return authorization behind a refund difference, when there is one (C09, 2026-10-25).
+    """Name the open return authorizations behind hand-booked refunds, and keep the order in review (C09, 2026-10-25).
 
     The NetSuite read leaves out a hand-booked refund credit whose return authorization is still open,
-    since that authorization could still pay the customer a second time; the refund difference that
-    leaves keeps the order in review. Its reason tells the reviewer the refund is booked and the
-    authorization needs closing. The amounts and status are unchanged.
+    since that authorization could still pay the customer a second time. Left out, its money is not
+    seen: a source refund that already equals what was counted -- none at all, or one NetSuite paid
+    twice -- would match the order and hide the refund (review C09-R1). So the order's own complete read
+    names them on the result whatever its status, and held_by_open_return_authorization keeps it from
+    matching; an authorization whose id cannot be read still holds it. The amounts are unchanged.
     """
-    refunds = result["amounts"]["refunds"]
     if (
-        result.get("status") != "difference"
-        or refunds.get("delta") is None
-        or _decimal(refunds["delta"]) == 0
-        or not isinstance(evidence, dict)
+        not isinstance(evidence, dict)
         or evidence.get("complete") is not True
         or evidence.get("order_reference") != result.get("order_reference")
         or evidence.get("currency") != result.get("currency")
         or not isinstance(evidence.get("tagged_credits_rejected"), list)
     ):
         return result
-    open_authorizations = sorted(
-        {
-            authorization
-            for entry in evidence["tagged_credits_rejected"]
-            if isinstance(entry, dict)
-            and entry.get("reason") == "return_authorization_open"
-            and (authorization := _id(entry.get("return_authorization_id")))
-        },
-        key=int,
-    )
-    if open_authorizations:
-        result.update(
-            reason="return_authorization_open_after_manual_refund", open_return_authorizations=open_authorizations
+    held = [
+        entry
+        for entry in evidence["tagged_credits_rejected"]
+        if isinstance(entry, dict) and entry.get("reason") == "return_authorization_open"
+    ]
+    if held:
+        result["open_return_authorizations"] = sorted(
+            {authorization for entry in held if (authorization := _id(entry.get("return_authorization_id")))},
+            key=int,
         )
-    return result
+    return held_by_open_return_authorization(result)
+
+
+def held_by_open_return_authorization(balance):
+    """A balance naming an open return authorization is a difference, never matched (C09-R1, 2026-10-25).
+
+    The reconciliation and every later step that labels the balance again (the posting recheck after a
+    correction, accounting_credit_recheck.project) pass through here, and case_service._cleared never
+    reconciles a case on such a balance. An incomplete balance keeps its status: it is not matched.
+    """
+    if "open_return_authorizations" in balance and balance.get("status") in {"matched", "difference"}:
+        balance.update(status="difference", reason=OPEN_RETURN_AUTHORIZATION)
+    return balance
 
 
 def _reconcile(source_evidence, target_evidence, config, refunds):

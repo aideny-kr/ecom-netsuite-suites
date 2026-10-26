@@ -399,7 +399,9 @@ def _attribute_tagged(tagged, nodes, reachable, owned, parents, allocations, doc
     outside the order is shared, and fails the read as any shared credit does. It must have
     been created from nothing, from a document of this order, or from the very refund the
     graph shows paying it. While its authorization is still open, that authorization could
-    pay the customer a second time, so its refund is left out and the order stays in review.
+    pay the customer a second time, so its refund is left out; the hold reported in
+    ``tagged_credits_rejected`` keeps the order from matching whatever the amounts
+    (order_reconciliation.held_by_open_return_authorization, C09-R1).
     """
     accepted, rejected = [], []
     for credit in sorted(tagged, key=int):

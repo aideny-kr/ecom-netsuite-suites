@@ -143,6 +143,51 @@ async def test_posting_recheck_preserves_original_order_and_clears_only_proven_b
     assert (p, current, report) == before
 
 
+async def test_a_posting_recheck_never_matches_an_order_holding_an_open_return_authorization(mcp_credit):
+    """C09-R1 (2026-10-25): the recheck re-derives the status from the posted balance and the refund
+    delta. A refund booked by hand behind an open return authorization is not in that delta, so the
+    order stays a difference naming the authorization, and the case stays open."""
+    from app.services.transaction_ops.case_service import _cleared
+
+    now = datetime.now(timezone.utc)
+    p, current, report = corrected(mcp_credit, now)
+    report["balance"].update(
+        reason="return_authorization_open_after_manual_refund", open_return_authorizations=["1002"]
+    )
+    result = recheck.project(p, report, current, verified_at=now - timedelta(seconds=1), now=now)
+    assert (result["balance"]["status"], result["balance"]["reason"]) == (
+        "difference",
+        "return_authorization_open_after_manual_refund",
+    )
+    assert result["balance"]["open_return_authorizations"] == ["1002"]
+    # Everything else the recheck proved is kept.
+    assert result["balance"]["posting_reconciliation"]["status"] == "matched"
+    assert not _cleared(result, now)
+
+
+@pytest.mark.parametrize("module", ["credit_creation", "credit_line_reallocation"])
+def test_every_kind_of_posting_recheck_keeps_an_open_return_authorization_in_review(monkeypatch, module):
+    import importlib
+
+    agent = importlib.import_module(f"app.services.transaction_ops.{module}")
+
+    def project(p, report, current, *, verified_at, now):
+        return {**report, "balance": {**report["balance"], "status": "matched", "reason": f"{module}_recheck"}}
+
+    monkeypatch.setattr(agent, "project", project)
+    now = datetime.now(timezone.utc)
+    report = {"balance": {"status": "difference", "open_return_authorizations": ["1002"]}}
+    result = recheck.project({"kind": agent.KIND}, report, None, verified_at=now, now=now)
+    assert (result["balance"]["status"], result["balance"]["reason"]) == (
+        "difference",
+        "return_authorization_open_after_manual_refund",
+    )
+    report["balance"] = {"status": "difference"}
+    assert recheck.project({"kind": agent.KIND}, report, None, verified_at=now, now=now)["balance"]["status"] == (
+        "matched"
+    )
+
+
 async def test_penny_tax_difference_is_still_a_difference_after_credit(mcp_credit):
     now = datetime.now(timezone.utc)
     p, current, report = corrected(mcp_credit, now)

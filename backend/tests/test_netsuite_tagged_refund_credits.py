@@ -19,8 +19,10 @@ import pytest
 
 from app.services.transaction_ops import netsuite_bulk as bulk
 from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS, collect_refunds
+from app.services.transaction_ops.order_reconciliation import reconcile_order
 from tests.test_netsuite_custom_refunds import CustomReader
 from tests.test_netsuite_refund_graph import edge
+from tests.test_order_balance_reconciliation import evidence as balance_evidence
 
 REFERENCE = "R900000301"
 ORDER, RETURN, CREDIT, REFUND = "1001", "1002", "1003", "1004"
@@ -256,6 +258,72 @@ async def test_a_tagged_order_with_many_refunds_stops_within_the_native_read_bud
     with pytest.raises(ValueError, match="budget"):
         await read(reader)
     assert reader.calls <= MAX_REFUND_CALLS
+
+
+# --- reconciliation ----------------------------------------------------------------------------
+
+
+def reconciled(graph, source_refund):
+    """The order's reconciliation from this NetSuite refund read and a completed source refund."""
+    source, target, config, refunds = balance_evidence()
+    source["orders"][0]["number"] = target["orders"][0]["order_reference"] = REFERENCE
+    refunds["source"].update(order_reference=REFERENCE, amount=source_refund)
+    refunds["target"] = {**graph, "amount": str(graph["amount"]), "complete": True, "order_reference": REFERENCE}
+    refunds["target"]["currency"] = refunds["source"]["currency"]
+    return reconcile_order(source, target, config, refunds=refunds)
+
+
+def paid_twice(return_status):
+    """The integration refunded the order through its return authorization (credit 1005, paid 200.00 by
+    refund 1006), and finance booked the same refund again by hand (credit 1003, refund 1004)."""
+    reader = TaggedReader(return_status=return_status)
+    reader.edges += [
+        {**edge(RETURN, "1005", "RtnAuth", "CustCred"), "previousstatus": return_status},
+        edge("1006", "1005", "CustRfnd", "CustCred"),
+    ]
+    records = {
+        REFUND: reader.record,
+        "1006": {
+            **deepcopy(reader.record),
+            "id": "1006",
+            "apply": {"items": [{"apply": True, "doc": {"id": "1005"}, "line": 0, "amount": "200.00"}]},
+        },
+    }
+    original = reader.request
+
+    async def request(method, path, **kwargs):
+        if method == "GET":
+            reader.record = records[path.rsplit("/", 1)[-1]]
+        return await original(method, path, **kwargs)
+
+    reader.request = request
+    return reader
+
+
+async def test_a_refund_held_behind_an_open_return_authorization_never_matches_the_order():
+    """Review C09-R1: the source shows no refund and NetSuite paid 200.00 by hand. Behind a closed
+    authorization the refund counts and the order differs; behind an open one the read holds it out, and
+    0.00 against 0.00 must not match the order and hide the money."""
+    closed = reconciled(await read(TaggedReader(return_status="H")), "0.00")
+    assert (closed["status"], closed["amounts"]["refunds"]["delta"]) == ("difference", "-200.00")
+    held = reconciled(await read(TaggedReader(return_status="F")), "0.00")
+    assert held["status"] == "difference"
+    assert held["reason"] == "return_authorization_open_after_manual_refund"
+    assert held["open_return_authorizations"] == [RETURN]
+    # The amounts stay what was proven: the held refund is never counted to make the difference.
+    assert held["amounts"]["refunds"] == {"source": "0.00", "target": "0.00", "delta": "0.00"}
+
+
+async def test_a_second_payout_held_behind_an_open_return_authorization_never_matches_the_order():
+    """Review C09-R1: NetSuite paid 400.00 for a 200.00 source refund. Closed, the read counts both and the
+    order differs; open, it counts only the integration's refund, and 200.00 against 200.00 must not match."""
+    closed = reconciled(await read(paid_twice("H")), "200.00")
+    assert (closed["status"], closed["amounts"]["refunds"]["target"]) == ("difference", "400.00")
+    graph = await read(paid_twice("F"))
+    assert graph["amount"] == Decimal("200.00") and graph["credit_refunds"] == {"1005": "200.00"}
+    held = reconciled(graph, "200.00")
+    assert (held["status"], held["reason"]) == ("difference", "return_authorization_open_after_manual_refund")
+    assert held["open_return_authorizations"] == [RETURN]
 
 
 # --- bulk path ---------------------------------------------------------------------------------

@@ -308,3 +308,39 @@ def test_a_refund_difference_left_by_an_open_return_authorization_says_so():
     refunds["target"]["tagged_credits_rejected"] = refunds["target"]["tagged_credits_rejected"][1:2]
     result = reconcile_order(source, target, config, refunds=refunds)
     assert result["reason"] == "amounts_differ" and "open_return_authorizations" not in result
+
+
+HELD = {"id": "1003", "reason": "return_authorization_open", "return_authorization_id": "1002"}
+
+
+@pytest.mark.parametrize("change", ["refunds_agree", "order_total_differs", "unreadable_authorization"])
+def test_an_open_return_authorization_never_lets_the_order_match(change):
+    """C09-R1 (2026-10-25): the held refund is NetSuite money the read leaves out. A source refund that
+    already equals what was counted (none at all, or one NetSuite paid twice) would match the order and
+    hide it, so the hold alone keeps the order a difference, whatever the amounts and whichever
+    metric differs. An authorization whose id cannot be read still holds the order."""
+    source, target, config, refunds = evidence()
+    held = dict(HELD)
+    if change == "order_total_differs":
+        target["orders"][0]["header"]["total"] = "119.00"
+    if change == "unreadable_authorization":
+        held["return_authorization_id"] = "RA1"
+    refunds["target"].update(tagged_credits=[], tagged_credits_rejected=[held])
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert (result["status"], result["reason"]) == ("difference", "return_authorization_open_after_manual_refund")
+    assert result["open_return_authorizations"] == ([] if change == "unreadable_authorization" else ["1002"])
+    assert result["amounts"]["refunds"] == {"source": "0.00", "target": "0.00", "delta": "0.00"}
+
+
+def test_an_incomplete_comparison_still_names_the_open_return_authorization():
+    """Named on an incomplete result too, so a later step that re-derives the missing amounts (a posting
+    recheck) cannot match the order while the authorization is open. Only the order's own complete
+    read names one."""
+    source, target, config, refunds = evidence()
+    del source["orders"][0]["included_tax_total"]
+    refunds["target"].update(tagged_credits=[], tagged_credits_rejected=[dict(HELD)])
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert (result["status"], result["reason"]) == ("incomplete", "amount_evidence_unavailable")
+    assert result["open_return_authorizations"] == ["1002"]
+    refunds["target"]["order_reference"] = "R123456780"
+    assert "open_return_authorizations" not in reconcile_order(source, target, config, refunds=refunds)
