@@ -81,6 +81,15 @@ CAUSES = {
         "next_step": "fix_at_source",
         "next_label": "The order sync must carry Solidus order adjustments; new orders are probably affected too.",
     },
+    "source_changed_after_export": {
+        "next_pill": "Review source",
+        "label": "Solidus changed after the NetSuite export",
+        "why": "NetSuite holds exactly the order total Solidus exported to it (custbody_fw_solidus_order_total), "
+        "so the difference is a later change to the Solidus order, not a NetSuite price.",
+        "next_step": "fix_at_source",
+        "next_label": "Confirm with operations what changed in Solidus after the export (an exchange or a "
+        "replacement?) and whether it should be billed. NetSuite follows only if it should.",
+    },
     "business_priced_in_netsuite": {
         "next_pill": "Needs a policy",
         "label": "Business orders priced in NetSuite",
@@ -109,6 +118,7 @@ _ORDER = {key: index for index, key in enumerate(CAUSES)}
 _NEEDS_INVOICE = frozenset(
     {
         "source_adjustment_not_in_netsuite",
+        "source_changed_after_export",
         "business_priced_in_netsuite",
         "refund_without_credit_memo",
         "no_shared_cause",
@@ -413,12 +423,42 @@ def _classify(member, invoices, tax_reasons):
     explaining = _explaining_adjustments(member["order"], delta)
     if explaining and _known_zero(member, "tax", "refunds"):
         return "source_adjustment_not_in_netsuite", {"labels": [_label(entry) for entry in explaining]}
+    # NetSuite still holds the total Solidus exported: the order changed in Solidus afterwards (2026-10-26,
+    # accounting team: six business orders read as NetSuite prices). For any customer, before the fallback.
+    if delta and _known_zero(member, "tax", "refunds") and _held_as_exported(member):
+        return "source_changed_after_export", {}
     if delta and _known_zero(member, "tax", "refunds") and _customer_type(member["order"]) == "business":
         return "business_priced_in_netsuite", {}
     # A pointer for review, not an explanation of the amounts: it proposes nothing.
     if member["links"] and not any(link.get("credit_memo_id") for link in member["links"]):
         return "refund_without_credit_memo", {}
     return "no_shared_cause", {}
+
+
+def _sales_order_header(report, order_id):
+    """The observed sales order header, from the record API read kept with the observation; None when the
+    report holds none, or not exactly one, or one for another record."""
+    records = (report.get("netsuite_provenance") or {}).get("records")
+    if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+        return None
+    header = records[0].get("header")
+    if not isinstance(header, dict) or str(header.get("id") or "") != order_id or not order_id:
+        return None
+    return header
+
+
+def _held_as_exported(member):
+    """The difference is a Solidus change after the export, proven from one observation: the sales order
+    still holds exactly the Solidus total exported to it, the comparison read that same sales order total,
+    and Solidus's total today differs from what it exported. A comparison against posted documents (an
+    invoice less credits) is not this cause, whatever the header holds (review F1)."""
+    header = member["header"]
+    if header is None:
+        return False
+    exported, total = _decimal(header.get("custbody_fw_solidus_order_total")), _decimal(header.get("total"))
+    amounts = ((member["report"].get("balance") or {}).get("amounts") or {}).get("order_total") or {}
+    source, target = _decimal(amounts.get("source")), _decimal(amounts.get("target"))
+    return exported is not None and exported == total and target == total and source is not None and source != exported
 
 
 def _facts(key, members, detail, invoices, saved_source="complete"):
@@ -457,7 +497,12 @@ def _facts(key, members, detail, invoices, saved_source="complete"):
                     "orders": sum(n for _, n in labels.most_common()[5:]),
                 }
             )
-    if key in ("invoice_matches_source", "source_adjustment_not_in_netsuite", "business_priced_in_netsuite"):
+    if key in (
+        "invoice_matches_source",
+        "source_adjustment_not_in_netsuite",
+        "source_changed_after_export",
+        "business_priced_in_netsuite",
+    ):
         types = Counter(_customer_type(m["order"]) for m in members)
         counts.extend(
             {"kind": "customer_type", "fact": f"{kind} customer", "orders": n} for kind, n in types.most_common()
@@ -544,6 +589,7 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
                 "order": _source_order(snapshots.get(case.order_reference), case.order_reference),
             }
         )
+        members[-1]["header"] = _sales_order_header(report, members[-1]["order_id"])
         # A correction counts only while the credit memo it corrected is still on the order: a card
         # stays in the chat forever, the order can move on. Invoice and sales order corrections cannot
         # be tied to the saved report, so their orders are classified on current evidence instead.
@@ -605,6 +651,16 @@ async def breakdown(db, tenant_id, *, group_id=None, case_id=None, review_run_id
                 **vocabulary,
                 "orders": len(row["members"]),
                 "order_references": [m["reference"] for m in sorted(row["members"], key=lambda m: m["reference"])],
+                # Each order's NetSuite sales order as observed: the id, and its number (tranId) when the
+                # header was kept. In this account the number is usually the order reference itself.
+                "sales_orders": [
+                    {
+                        "order_reference": m["reference"],
+                        "sales_order_id": m["order_id"] or None,
+                        "sales_order_number": (m["header"] or {}).get("tranId"),
+                    }
+                    for m in sorted(row["members"], key=lambda m: m["reference"])
+                ],
                 "amounts": amounts,
                 "facts": _facts(key, row["members"], row["detail"], invoices, saved_source),
             }
@@ -659,6 +715,10 @@ def _model_fact(fact):
     return None if fact.get("kind") in ("customer", "adjustment_label") else fact["fact"]
 
 
+# The sales orders the model reads per cause; the card shows every order.
+MODEL_SALES_ORDERS = 20
+
+
 def condensed_for_model(result):
     """What the model reads: causes, counts, facts and next steps. No amounts, no customer names."""
     return {
@@ -673,6 +733,10 @@ def condensed_for_model(result):
                 "orders": cause["orders"],
                 "next_step": cause["next_step"],
                 "facts": [text for text in (_model_fact(f) for f in cause["facts"]) if text],
+                # Identifiers only, never amounts: the agent names the sales orders from data instead of
+                # guessing what an order reference is (2026-10-26). Bounded per cause.
+                "sales_orders": (cause.get("sales_orders") or [])[:MODEL_SALES_ORDERS],
+                "sales_orders_not_listed": max(0, len(cause.get("sales_orders") or []) - MODEL_SALES_ORDERS),
             }
             for cause in result["causes"]
         ],

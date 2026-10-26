@@ -56,6 +56,8 @@ class World:
         proofs=(),
         tax_source="0.00",
         credit_refunds="from_links",
+        header=None,
+        target_total=None,
     ):
         # What the order's refunds paid out of each credit memo (the refund reader's credit_refunds).
         # By default each linked credit refunded its link's amount; None leaves it unrecorded.
@@ -70,7 +72,11 @@ class World:
                 "target_currency": "USD",
                 "missing_metrics": [],
                 "amounts": {
-                    "order_total": {"delta": delta, "source": source_total},
+                    "order_total": {
+                        "delta": delta,
+                        "source": source_total,
+                        **({"target": target_total} if target_total is not None else {}),
+                    },
                     "tax": {"delta": tax, "source": tax_source} if tax is not None else None,
                     "refunds": {"delta": refunds},
                 },
@@ -90,6 +96,11 @@ class World:
                 }
             },
         }
+        if header is not None:
+            # The sales order header as the record API returned it, kept with the observation.
+            report["netsuite_provenance"] = {
+                "records": [{"record_id": report["targets"][0]["record_id"], "header": header}]
+            }
         row = TransactionCase(
             id=uuid4(),
             tenant_id=self.tenant.id,
@@ -534,8 +545,20 @@ async def test_the_model_never_reads_customer_names_or_numbers_inside_labels(wor
     monkeypatch.setattr(gb, "_invoices", invoices)
     result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
     assert any(f["fact"] == "Jane Doe" for f in by_cause(result)["invoice_matches_source"]["facts"])
-    condensed = json.dumps(gb.condensed_for_model(result))
-    assert "Jane Doe" not in condensed and "50" not in condensed and "Refund" not in condensed
+    model = gb.condensed_for_model(result)
+    condensed = json.dumps(model)
+    assert "Jane Doe" not in condensed and "Refund" not in condensed
+    # Sales orders are identifiers by design (2026-10-26): only the three identifier keys, and no
+    # amount anywhere else.
+    assert all(
+        set(order) == {"order_reference", "sales_order_id", "sales_order_number"}
+        for cause in model["causes"]
+        for order in cause["sales_orders"]
+    )
+    without_ids = json.dumps(
+        {**model, "causes": [{k: v for k, v in c.items() if not k.startswith("sales_orders")} for c in model["causes"]]}
+    )
+    assert "50" not in without_ids
 
 
 async def test_an_invoice_with_the_right_total_but_the_wrong_tax_is_not_called_right(world, monkeypatch):
@@ -845,3 +868,128 @@ async def test_corrections_must_account_for_the_whole_tax_difference(world, monk
     monkeypatch.setattr(gb, "_invoices", _no_invoices)
     result = await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id())
     assert by_cause(result)["corrected_in_app"]["order_references"] == ["R000003102"]
+
+
+def exported(ref, total, solidus_total, record_id="15000000"):
+    """A sales order header whose exported Solidus total (custbody_fw_solidus_order_total) is known."""
+    return {"id": record_id, "tranId": ref, "total": total, "custbody_fw_solidus_order_total": solidus_total}
+
+
+async def test_an_order_netsuite_holds_as_exported_is_a_solidus_change_not_a_netsuite_price(world, monkeypatch):
+    """2026-10-26 (accounting team, chat on 6 BV business orders): NetSuite held exactly the total Solidus
+    exported, and Solidus grew afterwards, but every business order fell to 'priced in NetSuite' and the
+    agent asked for a pricing policy. A NetSuite total equal to the exported Solidus total names the
+    later Solidus change instead, for any customer; without that proof the business fallback stays."""
+    await world.config()
+    changed = await world.case(
+        "R000000401",
+        delta="121.48",
+        source_total="2415.69",
+        target_total="2294.21",
+        record_id="13242037",
+        header=exported("R000000401", "2294.21", "2294.21", "13242037"),
+    )
+    await world.solidus("R000000401", customer_type="business")
+    consumer = await world.case(
+        "R000000402",
+        delta="52.06",
+        source_total="1819.00",
+        target_total="1766.94",
+        record_id="12282878",
+        header=exported("R000000402", "1766.94", "1766.94", "12282878"),
+    )
+    await world.solidus("R000000402", customer_type="consumer")
+    # Exported a different total than NetSuite holds: not proof of a later Solidus change.
+    priced = await world.case(
+        "R000000403",
+        delta="80.00",
+        source_total="1000.00",
+        target_total="920.00",
+        record_id="11012663",
+        header=exported("R000000403", "920.00", "1000.00", "11012663"),
+    )
+    await world.solidus("R000000403", customer_type="business")
+    # No stored header at all: the fallback as before.
+    unread = await world.case("R000000404", delta="10.00", source_total="110.00", record_id="11012664")
+    await world.solidus("R000000404", customer_type="business")
+    # Review F1: Solidus still equals what it exported; the comparison read posted documents (invoice less
+    # credit 90), not the sales order. The difference is in NetSuite's postings, not a Solidus change.
+    posted = await world.case(
+        "R000000405",
+        delta="10.00",
+        source_total="100.00",
+        target_total="90.00",
+        record_id="11012665",
+        header=exported("R000000405", "100.00", "100.00", "11012665"),
+    )
+    await world.solidus("R000000405", customer_type="business")
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+
+    causes = by_cause(await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id()))
+
+    after = causes["source_changed_after_export"]
+    assert after["order_references"] == [changed.order_reference, consumer.order_reference]
+    assert after["next_step"] == "fix_at_source"
+    assert causes["business_priced_in_netsuite"]["order_references"] == [
+        priced.order_reference,
+        unread.order_reference,
+        posted.order_reference,
+    ]
+
+
+async def test_every_cause_names_each_orders_netsuite_sales_order(world, monkeypatch):
+    """The same chat: asked for the sales order numbers, the agent said the R-numbers were not NetSuite
+    sales orders. Each cause now carries each order's sales order id and number as NetSuite holds them."""
+    await world.config()
+    await world.case(
+        "R000000501",
+        delta="121.48",
+        source_total="2415.69",
+        target_total="2294.21",
+        record_id="13242037",
+        header=exported("R000000501", "2294.21", "2294.21", "13242037"),
+    )
+    await world.solidus("R000000501", customer_type="business")
+    await world.case("R000000502", delta="10.00", source_total="110.00", record_id="11012664")
+    await world.solidus("R000000502", customer_type="business")
+    monkeypatch.setattr(gb, "_invoices", _no_invoices)
+
+    causes = by_cause(await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id()))
+
+    assert causes["source_changed_after_export"]["sales_orders"] == [
+        {"order_reference": "R000000501", "sales_order_id": "13242037", "sales_order_number": "R000000501"}
+    ]
+    # Without a stored header the id still comes from the observed record; the number stays unknown.
+    assert causes["business_priced_in_netsuite"]["sales_orders"] == [
+        {"order_reference": "R000000502", "sales_order_id": "11012664", "sales_order_number": None}
+    ]
+
+
+def test_the_model_reads_each_orders_sales_order_but_never_an_amount():
+    """The agent answers 'which sales orders?' from the breakdown itself (2026-10-26), bounded per cause."""
+    orders = [
+        {
+            "order_reference": f"R9000006{i:02d}",
+            "sales_order_id": str(1000 + i),
+            "sales_order_number": f"R9000006{i:02d}",
+        }
+        for i in range(25)
+    ]
+    result = {
+        "orders": 25,
+        "checked": {"netsuite": "not_needed"},
+        "causes": [
+            {
+                "cause": "source_changed_after_export",
+                "label": "Solidus changed after the NetSuite export",
+                "orders": 25,
+                "next_step": "fix_at_source",
+                "facts": [],
+                "sales_orders": orders,
+                "amounts": {"order_total": "1234.56"},
+            }
+        ],
+    }
+    [cause] = gb.condensed_for_model(result)["causes"]
+    assert cause["sales_orders"] == orders[:20] and cause["sales_orders_not_listed"] == 5
+    assert "1234.56" not in json.dumps(gb.condensed_for_model(result))
