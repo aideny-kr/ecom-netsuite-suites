@@ -1,11 +1,12 @@
 from copy import deepcopy
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
 from app.services.transaction_ops.netsuite_refunds import collect_refunds
 from app.services.transaction_ops.order_reconciliation import reconcile_order
-from app.services.transaction_ops.policy_equivalence import changed_reasons, evaluate
+from app.services.transaction_ops.policy_equivalence import RULE_VERSION, changed_reasons, evaluate
 from tests.test_refund_adjustment_matching import REFERENCE, CreditReader, balance_case, reader_profile
 
 NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
@@ -66,6 +67,8 @@ def saved_report():
                 "currency": "USD",
                 "request_links": [],
                 "tax_adjustments": [],
+                # Read with tagged refund credits (C09, 2026-10-25); none here.
+                "tagged_credits": [],
             },
         },
         "balance": {
@@ -229,8 +232,10 @@ def test_runner_built_report_retains_the_fields_needed_for_equivalence():
     refunds["target"].update(
         connection_id=str(case.config.netsuite_connection_id), account_id="6738075-sb1", subsidiary_id="3"
     )
-    # The NetSuite refund read reports invoice credits since 2026-10-01 (none here).
-    refunds["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    # The NetSuite refund read reports invoice credits since 2026-10-01, and apart from them the
+    # order's own return credits since C15 (none here).
+    empty = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    refunds["target"]["invoice_credits"] = {**empty, "return_credits": dict(empty)}
     report = build_report(
         case.source,
         case.targets,
@@ -267,8 +272,7 @@ def test_a_saved_order_total_difference_without_a_credit_read_is_read_again():
 
 def test_a_saved_difference_already_read_with_credits_is_reused():
     before, _ = snapshots()
-    report = saved_difference()
-    report["refund_evidence"]["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    report = credits_read(saved_difference())
     assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
 
 
@@ -286,7 +290,9 @@ def test_a_saved_difference_with_an_equal_order_total_is_still_reused():
 
 
 def credits_read(report):
-    report["refund_evidence"]["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    # A read since C15: the invoice credits and, apart from them, the order's own return credits.
+    empty = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    report["refund_evidence"]["target"]["invoice_credits"] = {**empty, "return_credits": dict(empty)}
     return report
 
 
@@ -332,4 +338,142 @@ def test_a_saved_match_is_never_affected_by_the_new_rules():
     before, _ = snapshots()
     report = saved_report()
     report["source"]["status"] = "cancelled"
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+# 2026-10-25 (C09): a refund credit booked by hand from its own refund and tagged with the order now
+# counts through the order's return authorization. That adds NetSuite refund money, so it can change a
+# saved match as well as a difference: every report read before tagged credits is read again.
+
+
+def saved_refunds(source, target):
+    report = saved_report()
+    report["refund_evidence"]["target"].pop("tagged_credits")
+    delta = str(Decimal(source) - Decimal(target))
+    report["balance"]["status"] = "matched" if source == target else "difference"
+    report["balance"]["amounts"]["refunds"] = {"source": source, "target": target, "delta": delta}
+    return report
+
+
+def test_a_saved_refund_difference_read_before_tagged_credits_is_read_again():
+    before, _ = snapshots()
+    result = evaluate(saved_refunds("200.00", "0.00"), before, frozenset(), evaluated_at=NOW)
+    assert result == {"status": "affected", "reason": "tagged_credits_not_read"}
+
+
+@pytest.mark.parametrize("amount", ["200.00", "1.00"])
+def test_a_saved_match_read_before_tagged_credits_is_read_again(amount):
+    before, _ = snapshots()
+    report = saved_refunds(amount, amount)
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW) == {
+        "status": "affected",
+        "reason": "tagged_credits_not_read",
+    }
+    report["refund_evidence"]["target"]["tagged_credits"] = []
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+def test_the_tagged_credit_rule_has_its_own_version():
+    assert RULE_VERSION == 4
+
+
+# C15: a credit memo created from the order's own return authorization can now explain an
+# order-total difference the invoice credits do not. A saved order-total difference read before
+# return credits were reported is read again. A saved match keeps reuse: the invoice credits
+# are still tried first and alone, so no match they made can change (except on a zero order, C15-R1 below).
+
+
+def test_the_rule_version_names_the_return_credit_rule():
+    from app.services.transaction_ops.policy_equivalence import RULE_VERSION
+
+    assert RULE_VERSION == 4
+
+
+def test_a_saved_order_total_difference_read_before_return_credits_is_read_again():
+    before, _ = snapshots()
+    report = saved_difference()
+    report["refund_evidence"]["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW) == {
+        "status": "affected",
+        "reason": "return_credits_not_read",
+    }
+
+
+@pytest.mark.parametrize(
+    "returns",
+    [
+        {"complete": True, "credits": [], "total": "0", "tax": "0"},
+        {"complete": False, "reason": "return_credit_ownership_ambiguous"},
+    ],
+)
+def test_a_saved_difference_read_with_return_credits_is_reused(returns):
+    before, _ = snapshots()
+    report = credits_read(saved_difference())
+    report["refund_evidence"]["target"]["invoice_credits"]["return_credits"] = returns
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+def test_a_saved_difference_whose_invoice_credits_were_unknown_is_reused():
+    # Return credits count only with the invoice credits, so an unknown invoice-credit read
+    # cannot match under the new rule either.
+    before, _ = snapshots()
+    report = saved_difference()
+    report["refund_evidence"]["target"]["invoice_credits"] = {"complete": False, "reason": "invoice_credit_budget"}
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+def test_a_saved_match_on_invoice_credits_read_before_return_credits_is_reused():
+    before, _ = snapshots()
+    report = saved_report()
+    report["refund_evidence"]["target"]["invoice_credits"] = {
+        "complete": True,
+        "credits": [
+            {"id": "30", "number": "CM30", "invoice_id": "9", "total": "4.82", "tax": "0", "posting": "income"}
+        ],
+        "total": "4.82",
+        "tax": "0",
+        "invoices": {"ids": ["9"], "total": "5.82", "tax": "0"},
+    }
+    report["balance"]["adjustments"] = [
+        {"kind": "invoice_credit_memos", "status": "verified", "total": "4.82", "tax": "0.00", "credits": []}
+    ]
+    result = evaluate(report, before, frozenset(), evaluated_at=NOW)
+    assert result["status"] == "equivalent" and result["balance"] == report["balance"]
+
+
+# C15-R1: on a zero order whose source still reports tax, a credit tier counts only under the zero-order
+# rule on the credited values, never by equalling Solidus's stale tax. A saved credit match that left
+# NetSuite tax on a zero order (an invoice-credit match before this rule) is read again; one that cleared
+# the tax, and every credit match on an order with a source total, keeps reuse.
+
+
+def saved_zero_order_credit_match(tax, adjustments):
+    report = saved_report()
+    report["refund_evidence"]["target"]["invoice_credits"] = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    report["balance"]["amounts"]["order_total"] = {"source": "0.00", "target": "0.00", "delta": "0.00"}
+    report["balance"]["amounts"]["tax"] = {"source": tax, "target": tax, "delta": "0.00"}
+    report["balance"]["adjustments"] = [{"kind": kind, "status": "verified"} for kind in adjustments]
+    return report
+
+
+def test_a_saved_credit_match_that_left_tax_on_a_zero_order_is_read_again():
+    before, _ = snapshots()
+    report = saved_zero_order_credit_match("20.00", ["invoice_credit_memos"])
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW) == {
+        "status": "affected",
+        "reason": "credited_zero_order_tax",
+    }
+
+
+@pytest.mark.parametrize(
+    "tax,adjustments",
+    [
+        ("0.00", ["invoice_credit_memos", "zero_total_order_tax"]),  # the credit cleared NetSuite's tax
+        ("0.00", ["invoice_credit_memos"]),  # a zero order with no tax at all
+        ("20.00", []),  # a plain comparison: no credit counted
+    ],
+)
+def test_a_saved_zero_order_match_the_credit_rule_cannot_change_is_reused(tax, adjustments):
+    before, _ = snapshots()
+    report = saved_zero_order_credit_match(tax, adjustments)
     assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"

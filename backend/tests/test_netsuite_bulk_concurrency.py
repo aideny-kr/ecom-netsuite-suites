@@ -70,7 +70,7 @@ class Wire:
                 }
             elif kind == "period":
                 value = bulk.collection([{"id": "10", "closed": "F", "alllocked": "F"}])
-            elif "customrecord_fw_refund_requests" in sql:
+            elif "customrecord_fw_refund_requests" in sql or "t.otherrefnum" in sql:
                 value = bulk.collection([])
             elif "NextTransactionLink" in sql:
                 frontier = set(re.search(r"l.previousdoc IN \(([^)]+)\)", sql)[1].split(","))
@@ -233,7 +233,8 @@ async def test_authenticated_bulk_order_and_refund_paths_use_seven_without_share
                 assert value["complete"] and value["amount"] == str(i + 1)
                 assert value["record_ids"] == [str(300 + i)]
                 assert value["api_calls"] == 1
-            assert meter.calls == refunds["api_calls"] == (11 if failure == "429" else 14)
+            # One shared read of the orders' tagged refund credits (C09) joins the batch.
+            assert meter.calls == refunds["api_calls"] == (12 if failure == "429" else 15)
         assert wire.active == 0 and wire.peak == 7
         assert db.execute.await_count == 2
         connection.tenant_id = CONNECTION  # Another tenant cannot authorize a new batch.
@@ -312,6 +313,35 @@ def test_parallel_budget_reserves_the_invoice_credit_read():
     assert batch.parallel_fits(["1"], None) is False
     reader.max_api_calls = 1
     assert batch.parallel_fits(["1"], None) is True
+
+
+def test_parallel_budget_reserves_the_read_for_a_return_credit_no_invoice_links():
+    # C15: a credit created from the order's return authorization and refunded, never applied
+    # to the invoice, is read in the same totals call. It needs that call reserved too.
+    from types import SimpleNamespace
+
+    def row(previous, following, before, after):
+        return {"previousdoc": previous, "nextdoc": following, "previoustype": before, "nexttype": after}
+
+    reader = SimpleNamespace(max_api_calls=1, calls=0)
+    edges = [
+        row("1", "2", "SalesOrd", "CustInvc"),
+        row("1", "5", "SalesOrd", "RtnAuth"),
+        row("5", "6", "RtnAuth", "CustCred"),
+        row("4", "6", "CustRfnd", "CustCred"),
+    ]
+    batch = bulk.RefundGraphBatch(reader, [], edges, {"1", "2", "5", "6"})
+    assert batch.parallel_fits(["1"], None) is False  # the refund GET and the totals read
+    reader.max_api_calls = 2
+    assert batch.parallel_fits(["1"], None) is True
+
+
+def test_the_refund_read_budget_already_covers_the_return_credits():
+    # They ride the invoice-credit totals call, which MAX_REFUND_CALLS already counts. The two calls above
+    # 26 are the tagged-credit read and its reverse request check (C09), not the return credits.
+    from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS
+
+    assert MAX_REFUND_CALLS == 28
 
 
 def test_parallel_budget_reserves_the_read_for_a_credit_linked_from_another_invoice():

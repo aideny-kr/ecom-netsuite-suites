@@ -14,7 +14,7 @@ class BulkReader(Reader):
         if method == "POST":
             self.calls += 1
             sql = kwargs["body"]["q"]
-            if "customrecord_fw_refund_requests" in sql:
+            if "customrecord_fw_refund_requests" in sql or "t.otherrefnum" in sql:
                 return bulk.collection([])
             frontier = set(re.search(r"l.previousdoc IN \(([^)]+)\)", sql)[1].split(","))
             rows = [r for r in self.edges if {r["previousdoc"], r["nextdoc"]} & frontier]
@@ -28,7 +28,14 @@ async def test_bulk_graph_matches_single_verifier_and_amortizes_empty_orders():
     batch = await bulk.RefundGraphBatch.collect(reader, orders)
     expected = await collect_refunds(Reader(), "1", "1", "1", order_reference="R123456789")
     actual = await collect_refunds(
-        reader, "1", "1", "1", order_reference="R123456789", request_links_reader=batch.links, graph_reader=batch.graph
+        reader,
+        "1",
+        "1",
+        "1",
+        order_reference="R123456789",
+        request_links_reader=batch.links,
+        graph_reader=batch.graph,
+        tagged_reader=batch.tagged_credits,
     )
     assert actual == expected
     calls = reader.calls
@@ -40,6 +47,7 @@ async def test_bulk_graph_matches_single_verifier_and_amortizes_empty_orders():
         order_reference="R999999999",
         request_links_reader=batch.links,
         graph_reader=batch.graph,
+        tagged_reader=batch.tagged_credits,
     )
     assert empty["amount"] == 0 and reader.calls == calls
 
@@ -70,6 +78,7 @@ async def test_bulk_preserves_existing_refund_failure_gates(failure):
             order_reference="R123456789",
             request_links_reader=batch.links,
             graph_reader=batch.graph,
+            tagged_reader=batch.tagged_credits,
         )
 
 
@@ -109,6 +118,42 @@ async def test_bulk_identity_keeps_duplicates_and_missing_orders_without_scope_f
     assert reader.request.await_count == 1
 
 
+async def test_bulk_identity_carries_native_tax_onto_the_order_evidence():
+    # Class C24: the bulk path reads the same identity-row tax as the single reader, through
+    # the shared read_matches, so a tax-free order clears here too.
+    import json
+
+    import httpx
+
+    from app.services.transaction_ops.netsuite_reader import _Reader
+    from app.services.transaction_ops.order_reconciliation import reconcile_order
+    from tests.test_transaction_ops_netsuite_reader import SUBSIDIARY, zero_tax_order
+
+    identity, body, source, config, refunds = zero_tax_order({"native_taxtotal": 0, "native_total": 500})
+    queries = []
+
+    def respond(request):
+        if "/currency/" in request.url.path:
+            return httpx.Response(200, json={"id": "1", "symbol": "USD", "currencyPrecision": 2})
+        if request.method == "POST":
+            query = json.loads(request.content)["q"]
+            if "FROM accountingperiod" in query:
+                return httpx.Response(200, json=bulk.collection([{"id": "10", "closed": "F"}]))
+            queries.append(query)
+            return httpx.Response(200, json=identity)
+        return httpx.Response(200, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        reader = _Reader(client, "https://6738075.invalid", "token", max_api_calls=bulk.MAX_CALLS)
+        result = (await bulk.collect_orders(reader, ["R900000401"], "tranid", SUBSIDIARY))["R900000401"]
+    (query,) = queries
+    assert "t.taxtotal AS native_taxtotal" in query and "t.foreigntotal AS native_total" in query
+    assert result["orders"][0]["native_header"] == {"id": "900401", "taxtotal": "0", "total": "500"}
+    result["scope"] = {"account_id": "6738075", "subsidiary_id": SUBSIDIARY}
+    balance = reconcile_order(source, result, config, refunds=refunds)
+    assert balance["status"] == "matched" and balance["target_tax_basis"] == "native_taxtotal"
+
+
 @pytest.mark.parametrize("refs", [[], ["bad"], ["R123456789' OR 1=1"], ["R123456789"] * 2])
 async def test_invalid_references_never_reach_provider(refs):
     reader = AsyncMock()
@@ -127,7 +172,14 @@ async def test_bulk_reports_the_same_deposits_and_billing_as_the_single_reader()
     batch = await bulk.RefundGraphBatch.collect(reader, {"R123456789": {"record_id": "1"}})
     calls = reader.calls
     actual = await collect_refunds(
-        reader, "1", "1", "1", order_reference="R123456789", request_links_reader=batch.links, graph_reader=batch.graph
+        reader,
+        "1",
+        "1",
+        "1",
+        order_reference="R123456789",
+        request_links_reader=batch.links,
+        graph_reader=batch.graph,
+        tagged_reader=batch.tagged_credits,
     )
     expected = await collect_refunds(DepositReader(), "1", "1", "1", order_reference="R123456789")
     assert actual["deposits"] == expected["deposits"] == [{"id": "2", "total": "100.00", "status": "C"}]

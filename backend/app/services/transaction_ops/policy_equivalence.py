@@ -16,7 +16,10 @@ from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProf
 # 2: a saved order-total difference without an invoice-credit read is affected
 # 3: a saved difference on a canceled order read without billing and deposits, or on a zero order with a
 #    tax difference, is affected (2026-10-22)
-RULE_VERSION = 3
+# 4: a saved report read before tagged refund credits is affected, matched or not (C09, 2026-10-25)
+# 4: a saved order-total difference read before the order's own return credits were reported, or a saved
+#    credit match that left NetSuite tax on a zero order, is affected (C15)
+RULE_VERSION = 4
 SCOPE_KEYS = (
     "source_connection_id",
     "source_step_id",
@@ -161,6 +164,39 @@ def evaluate(report, snapshot, changed, *, evaluated_at):
         # orders are read again; matched orders and other differences keep reuse.
         if "invoice_credits" not in target and Decimal(balance["amounts"]["order_total"]["delta"]) != 0:
             return gap("invoice_credits_not_read", "affected")
+        # 2026-10-25 (C09): a refund credit booked by hand from its own refund and tagged with the order
+        # counts through the order's return authorization (netsuite_refunds._attribute_tagged). Unlike
+        # the rules above it adds NetSuite refund money, so it can turn a saved match into a difference
+        # as well as settle one: every report read before it is read again, whatever it found.
+        if not isinstance(target.get("tagged_credits"), list):
+            return gap("tagged_credits_not_read", "affected")
+        # C15: credit memos created from the order's own return authorization can explain an order-total
+        # difference its invoice credits do not (order_reconciliation._invoice_credits). A saved difference
+        # whose complete invoice-credit read did not report them is affected. Return credits count only
+        # with complete invoice credits, so an unknown read cannot change; and a saved match keeps reuse
+        # because the invoice credits are still tried first and alone, so no match they made can change,
+        # except the zero-order one below.
+        credits = target.get("invoice_credits")
+        if (
+            isinstance(credits, dict)
+            and credits.get("complete") is True
+            and "return_credits" not in credits
+            and Decimal(balance["amounts"]["order_total"]["delta"]) != 0
+        ):
+            return gap("return_credits_not_read", "affected")
+        # C15-R1: on a zero order whose source still reports tax, a credit counts only when it leaves no
+        # NetSuite tax (the zero-order rule on the credited values). A saved credit match that left NetSuite
+        # tax on a zero order was compared with Solidus's stale tax, so it is affected.
+        if (
+            balance["status"] == "matched"
+            and any(
+                isinstance(adjustment, dict) and adjustment.get("kind") == "invoice_credit_memos"
+                for adjustment in balance.get("adjustments") or []
+            )
+            and Decimal(balance["amounts"]["order_total"]["source"]) == 0
+            and Decimal(balance["amounts"]["tax"]["target"]) != 0
+        ):
+            return gap("credited_zero_order_tax", "affected")
         # 2026-10-22 (decided by Aiden): a settled canceled order and a zero order's leftover tax are
         # matched (order_reconciliation._canceled_order_settled, _zero_total_order_tax). A saved
         # difference either could change is read again; every other saved result keeps reuse. A

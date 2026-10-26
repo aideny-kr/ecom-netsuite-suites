@@ -53,6 +53,8 @@ class Reader:
         assert path == "/query/v1/suiteql" and kwargs["params"]["limit"] <= 201
         if "customrecord_fw_refund_requests" in kwargs["body"]["q"]:
             return {"items": [], "count": 0, "totalResults": 0, "hasMore": False}
+        if "t.otherrefnum" in kwargs["body"]["q"]:  # no credit booked by hand for the order (C09)
+            return {"items": [], "count": 0, "totalResults": 0, "hasMore": False}
         frontier = set(re.search(r"l.previousdoc IN \(([^)]+)\)", kwargs["body"]["q"])[1].split(","))
         rows = [row for row in self.edges if row["previousdoc"] in frontier or row["nextdoc"] in frontier]
         return {"items": deepcopy(rows), "count": len(rows), "totalResults": len(rows), "hasMore": not self.complete}
@@ -71,7 +73,8 @@ async def test_deposit_refund_uses_reverse_payment_link_and_only_this_orders_app
         "refund_requests": [],
         "truncated": False,
     }
-    assert reader.calls == 5  # Inventory adds no provider requests.
+    # Requests, tagged credits (C09), two graph depths and the refund. Inventory adds no provider requests.
+    assert reader.calls == 6
 
 
 async def test_complete_empty_related_graph_proves_zero():
@@ -89,7 +92,7 @@ async def test_large_application_inventory_is_bounded_without_changing_refund_am
     assert result["amount"] == Decimal("100.00")
     assert result["dependency_manifest"]["transaction_ids"] == ["1000", "2", "3", "4"]
     assert result["dependency_manifest"]["truncated"] is True
-    assert reader.calls == 5
+    assert reader.calls == 6
 
 
 @pytest.mark.parametrize(
@@ -318,6 +321,8 @@ class CreditReader(Reader):
 
 
 INVOICE = {"ids": ["2"], "total": "10.00", "tax": "0"}
+# Every read reports the order's own return credits apart from its invoice credits (C15).
+NO_RETURNS = {"complete": True, "credits": [], "total": "0", "tax": "0"}
 
 
 async def test_credit_memo_created_from_the_orders_invoice_is_reported_but_never_counted_as_refund():
@@ -328,11 +333,21 @@ async def test_credit_memo_created_from_the_orders_invoice_is_reported_but_never
     assert result["invoice_credits"] == {
         "complete": True,
         "credits": [
-            {"id": "3", "number": "CM11788", "invoice_id": "2", "total": "4.82", "tax": "0", "posting": "income"}
+            {
+                "id": "3",
+                "number": "CM11788",
+                "origin_id": "2",
+                "origin_type": "CustInvc",
+                "invoice_id": "2",
+                "total": "4.82",
+                "tax": "0",
+                "posting": "income",
+            }
         ],
         "total": "4.82",
         "tax": "0",
         "invoices": INVOICE,
+        "return_credits": NO_RETURNS,
     }
     assert reader.credit_queries == 1
     assert "3" in result["dependency_manifest"]["transaction_ids"]
@@ -355,7 +370,7 @@ async def test_refunded_invoice_credit_is_both_a_refund_and_an_invoice_credit():
 
 
 async def test_return_credits_and_voided_credits_are_not_invoice_credits():
-    reader = CreditReader([credit_row("6", "CM2", "9.00")])
+    reader = CreditReader([credit_row("6", "CM2", "9.00", createdfrom="5")])
     reader.edges = [
         edge("1", "2", "SalesOrd", "CustInvc"),
         edge("2", "5", "CustInvc", "RtnAuth"),
@@ -364,15 +379,18 @@ async def test_return_credits_and_voided_credits_are_not_invoice_credits():
     ]
     reader.edges[-1]["nextvoided"] = "T"
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
-    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}
-    assert reader.credit_queries == 0
+    credits = result["invoice_credits"]
+    # The invoice credits are what they were before C15; the return credit is reported apart.
+    assert {key: credits[key] for key in ("complete", "credits", "total", "tax")} == NO_RETURNS
+    assert [(c["id"], c["origin_type"]) for c in credits["return_credits"]["credits"]] == [("6", "RtnAuth")]
+    assert reader.credit_queries == 1
 
 
 async def test_no_invoice_credit_means_no_extra_provider_call():
     reader = CreditReader()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
-    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}
-    assert reader.calls == 5 and reader.credit_queries == 0
+    assert result["invoice_credits"] == {**NO_RETURNS, "return_credits": NO_RETURNS}
+    assert reader.calls == 6 and reader.credit_queries == 0
 
 
 async def test_credit_on_an_invoice_shared_with_another_order_is_unknown_not_zero():
@@ -414,7 +432,8 @@ async def test_an_unproven_credit_read_is_unknown_and_never_breaks_the_refund_pr
 
 async def test_a_return_credit_applied_to_the_invoice_is_not_an_invoice_credit():
     # The graph links an invoice to a credit memo both when the credit was created from
-    # it and when it was only applied to it. Only "created from" makes it an invoice credit.
+    # it and when it was only applied to it. Only "created from" makes it an invoice credit;
+    # one created from the order's own return authorization is a return credit (C15).
     reader = CreditReader([credit_row("6", "CM2", "9.00", createdfrom="5")])
     reader.edges = [
         edge("1", "2", "SalesOrd", "CustInvc"),
@@ -423,7 +442,30 @@ async def test_a_return_credit_applied_to_the_invoice_is_not_an_invoice_credit()
         edge("2", "6", "CustInvc", "CustCred"),
     ]
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
-    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0", "invoices": INVOICE}
+    assert result["invoice_credits"] == {
+        "complete": True,
+        "credits": [],
+        "total": "0",
+        "tax": "0",
+        "invoices": INVOICE,
+        "return_credits": {
+            "complete": True,
+            "credits": [
+                {
+                    "id": "6",
+                    "number": "CM2",
+                    "origin_id": "5",
+                    "origin_type": "RtnAuth",
+                    "total": "9.00",
+                    "tax": "0",
+                    "posting": "income",
+                }
+            ],
+            "total": "9.00",
+            "tax": "0",
+        },
+    }
+    assert reader.credit_queries == 1
 
 
 async def test_a_credit_whose_origin_is_not_in_the_graph_makes_the_read_unknown():
@@ -443,7 +485,7 @@ async def test_a_standalone_credit_applied_to_the_invoice_is_not_an_invoice_cred
     reader = CreditReader([credit_row("3", "CM1", "4.82", createdfrom=None)])
     reader.edges = [edge("1", "2", "SalesOrd", "CustInvc"), edge("2", "3", "CustInvc", "CustCred")]
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
-    assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0", "invoices": INVOICE}
+    assert result["invoice_credits"] == {**NO_RETURNS, "invoices": INVOICE, "return_credits": NO_RETURNS}
 
 
 # --- Packet review 2026-10-16 (Codex, gpt-6-astra) ----------------------------------------
@@ -612,6 +654,206 @@ async def test_the_reader_never_drops_a_credit_a_tax_adjustment_names(monkeypatc
     reader = tax_reversal_and_income_credit()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789", adjustment_profile=profile)
     assert [c["id"] for c in result["invoice_credits"]["credits"]] == ["3", "4"]
+
+
+# --- Credit memos created from the order's own return authorization (C15) ----------------
+# A fully returned order is credited from its return authorization, not its invoice, so the
+# invoice credits never saw it. The reader reports those credits as `return_credits`, apart
+# from the invoice credits, which stay exactly what they were: a problem with a return credit
+# makes only the return credits unknown. They are never refunded money.
+
+
+def return_edges():
+    """Order 1 billed by invoice 2; its return authorization 5 and credit 6 created from it."""
+    return [
+        edge("1", "2", "SalesOrd", "CustInvc"),
+        edge("1", "5", "SalesOrd", "RtnAuth"),
+        edge("5", "6", "RtnAuth", "CustCred"),
+    ]
+
+
+def without_returns(credits):
+    return {key: value for key, value in credits.items() if key != "return_credits"}
+
+
+async def test_a_refunded_return_credit_the_invoice_never_links_is_read_and_never_counted_as_refunded_twice():
+    # The order is returned in full: credit 6 from return authorization 5, refunded by 4. No
+    # invoice links to the credit, so before C15 the reader never saw it.
+    reader = CreditReader(
+        [credit_row("6", "CM6", "100.00", tax="10.00", createdfrom="5")],
+        invoices=[invoice_row("2", "100.00", "10.00")],
+    )
+    reader.edges = [*return_edges(), edge("4", "6", "CustRfnd", "CustCred")]
+    reader.record["apply"]["items"] = [{"apply": True, "doc": {"id": "6"}, "line": 1, "amount": "100.00"}]
+    reader.record["total"] = "100.00"
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000801")
+    # The refund is counted once, as the refund it is; the credit is not more refunded money.
+    assert result["amount"] == Decimal("100.00") and result["refund_count"] == 1
+    assert result["credit_refunds"] == {"6": "100.00"}
+    credits = result["invoice_credits"]
+    assert without_returns(credits) == {**NO_RETURNS, "invoices": {"ids": ["2"], "total": "100.00", "tax": "10.00"}}
+    assert credits["return_credits"] == {
+        "complete": True,
+        "credits": [
+            {
+                "id": "6",
+                "number": "CM6",
+                "origin_id": "5",
+                "origin_type": "RtnAuth",
+                "total": "100.00",
+                "tax": "10.00",
+                "posting": "income",
+            }
+        ],
+        "total": "100.00",
+        "tax": "10.00",
+    }
+    assert reader.credit_queries == 1
+
+
+async def test_another_orders_return_credit_applied_to_this_invoice_is_skipped_and_the_invoice_credit_still_counts():
+    # Credit 8 was created from another order's return authorization (900) and only applied
+    # here. It is not this order's, so it is skipped exactly as before C15, never refused.
+    rows = [credit_row("3", "CM3", "4.82"), credit_row("8", "CM8", "20.00", createdfrom="900")]
+    reader = CreditReader(rows)
+    reader.edges = [
+        *invoice_credit_edges(),
+        edge("2", "8", "CustInvc", "CustCred"),
+        edge("900", "8", "RtnAuth", "CustCred"),
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000802")
+    credits = result["invoice_credits"]
+    assert credits["complete"] is True
+    assert [(c["id"], c["origin_type"]) for c in credits["credits"]] == [("3", "CustInvc")]
+    assert credits["total"] == "4.82" and credits["return_credits"] == NO_RETURNS
+
+
+@pytest.mark.parametrize(
+    "shared",
+    [
+        edge("800", "5", "SalesOrd", "RtnAuth"),  # the return authorization is also another order's
+        edge("901", "6", "CustInvc", "CustCred"),  # the return credit is applied to another order's invoice
+    ],
+)
+async def test_a_return_credit_another_order_shares_makes_only_the_return_credits_unknown(shared):
+    rows = [credit_row("3", "CM3", "4.82"), credit_row("6", "CM6", "9.00", createdfrom="5")]
+    reader = CreditReader(rows)
+    reader.edges = [*return_edges(), edge("2", "3", "CustInvc", "CustCred"), shared]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000803")
+    credits = result["invoice_credits"]
+    assert credits["complete"] is True and [c["id"] for c in credits["credits"]] == ["3"]
+    assert credits["return_credits"] == {"complete": False, "reason": "return_credit_ownership_ambiguous"}
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        credit_row("6", "CM6", "9.00", createdfrom="5", foreigntotal="9.00"),  # a credit cannot be positive
+        credit_row("6", "CM6", "9.00", createdfrom="5", currency="2"),
+        credit_row("6", "CM6", "9.00", createdfrom="5", posting="F"),
+        credit_row("6", "CM6", "9.00", createdfrom="999"),  # an origin the graph never saw
+        credit_row("6", "CM6", "9.00", createdfrom="2"),  # reached from the return, created elsewhere
+        credit_row("6", "CM6", "9.00", createdfrom=None),
+    ],
+)
+async def test_an_unproven_return_credit_never_touches_the_invoice_credits(row):
+    reader = CreditReader([credit_row("3", "CM3", "4.82"), row])
+    reader.edges = [*return_edges(), edge("2", "3", "CustInvc", "CustCred")]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000804")
+    credits = result["invoice_credits"]
+    assert credits["complete"] is True and credits["total"] == "4.82"
+    assert [c["id"] for c in credits["credits"]] == ["3"]
+    assert credits["return_credits"]["complete"] is False
+
+
+async def test_a_missing_return_credit_header_never_touches_the_invoice_credits():
+    reader = CreditReader([credit_row("3", "CM3", "4.82")])
+    reader.edges = [*return_edges(), edge("2", "3", "CustInvc", "CustCred")]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000804")
+    credits = result["invoice_credits"]
+    assert credits["complete"] is True and [c["id"] for c in credits["credits"]] == ["3"]
+    assert credits["return_credits"] == {"complete": False, "reason": "return_credit_read_incomplete"}
+
+
+async def test_a_return_credit_with_a_non_income_line_is_reported_unproven_beside_the_invoice_credit():
+    # A restocking fee posted to an expense account: the reader classifies, reconciliation decides.
+    rows = [credit_row("3", "CM3", "4.82"), credit_row("6", "CM6", "9.00", createdfrom="5")]
+    lines = [credit_line("3", "4.82"), credit_line("6", "8.00"), credit_line("6", "1.00", "610", "Expense")]
+    reader = CreditReader(rows, lines=lines)
+    reader.edges = [*return_edges(), edge("2", "3", "CustInvc", "CustCred")]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000805")
+    credits = result["invoice_credits"]
+    assert [(c["id"], c["posting"]) for c in credits["credits"]] == [("3", "income")]
+    assert credits["return_credits"]["complete"] is True
+    assert [(c["id"], c["posting"]) for c in credits["return_credits"]["credits"]] == [("6", "unproven")]
+
+
+async def test_more_return_credits_than_the_budget_never_touch_the_invoice_credits():
+    from app.services.transaction_ops.netsuite_refunds import MAX_INVOICE_CREDITS
+
+    returns = [str(10 + i) for i in range(MAX_INVOICE_CREDITS)]
+    reader = CreditReader(
+        [credit_row("3", "CM3", "4.82"), *(credit_row(i, "CM" + i, "1.00", createdfrom="5") for i in returns)]
+    )
+    reader.edges = [*return_edges()[:2], edge("2", "3", "CustInvc", "CustCred")]
+    reader.edges += [edge("5", i, "RtnAuth", "CustCred") for i in returns]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000806")
+    credits = result["invoice_credits"]
+    assert credits["complete"] is True and credits["total"] == "4.82"
+    assert credits["return_credits"] == {"complete": False, "reason": "return_credit_budget"}
+    assert reader.credit_queries == 1
+
+
+async def test_return_credit_rows_past_their_budget_never_touch_the_invoice_credits(monkeypatch):
+    monkeypatch.setattr("app.services.transaction_ops.netsuite_refunds.MAX_RETURN_CREDIT_ROWS", 1)
+    reader = CreditReader([credit_row("3", "CM3", "4.82"), credit_row("6", "CM6", "9.00", createdfrom="5")])
+    reader.edges = [*return_edges(), edge("2", "3", "CustInvc", "CustCred")]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000806")
+    credits = result["invoice_credits"]
+    assert credits["complete"] is True and [c["id"] for c in credits["credits"]] == ["3"]
+    assert credits["return_credits"] == {"complete": False, "reason": "return_credit_read_incomplete"}
+
+
+async def test_a_read_with_no_return_credit_asks_exactly_what_it_asked_before():
+    asked = []
+    reader = CreditReader([credit_row("3", "CM3", "4.82")])
+    reader.edges = invoice_credit_edges()
+    original = reader.request
+
+    async def request(method, path, **kwargs):
+        if "t.foreigntotal" in kwargs.get("body", {}).get("q", ""):
+            asked.append((kwargs["params"], kwargs["body"]["q"].rsplit("WHERE", 1)[1]))
+        return await original(method, path, **kwargs)
+
+    reader.request = request
+    await collect_refunds(reader, "1", "1", "1", order_reference="R900000809")
+    assert asked == [({"limit": 201}, " t.id IN (3,2) AND (t.type='CustCred' OR tl.mainline='T')")]
+
+
+async def test_a_cash_sale_order_with_a_return_credit_keeps_its_invoice_credits_unchanged():
+    # Billed by cash sale 9 and returned through 5: no invoice, so no invoice credit, exactly as
+    # before C15. The return credit cannot be counted against invoices either, so it is unknown.
+    reader = CreditReader([credit_row("6", "CM6", "9.00", createdfrom="5")])
+    reader.edges = [
+        edge("1", "9", "SalesOrd", "CashSale"),
+        edge("1", "5", "SalesOrd", "RtnAuth"),
+        edge("5", "6", "RtnAuth", "CustCred"),
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000807")
+    assert result["invoice_credits"] == {
+        **NO_RETURNS,
+        "return_credits": {"complete": False, "reason": "invoice_credit_billing_unproven"},
+    }
+    assert reader.credit_queries == 0
+
+
+async def test_an_unproven_invoice_read_for_return_credits_alone_never_makes_the_invoice_credits_unknown():
+    reader = CreditReader([credit_row("6", "CM6", "9.00", createdfrom="5")], invoices=[])
+    reader.edges = return_edges()
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R900000808")
+    credits = result["invoice_credits"]
+    assert without_returns(credits) == NO_RETURNS
+    assert credits["return_credits"]["complete"] is False
 
 
 # Canceled orders (decided by Aiden, 2026-10-22): reconciliation settles a canceled order only when it

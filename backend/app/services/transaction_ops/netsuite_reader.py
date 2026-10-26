@@ -116,6 +116,12 @@ TAX_FIELDS = frozenset(
     }
 )
 CURRENCY_FIELDS = frozenset({"id", "symbol", "name", "currencyPrecision", "decimalPrecision", "isInactive"})
+# SuiteQL's own totals for the order, selected in the identity query (both in the transaction's
+# currency, group_breakdown checked taxtotal on a CHF invoice). The record API drops an empty
+# taxTotal, so these are what can prove its absence is a zero (order_reconciliation._native_zero_tax).
+# Column alias -> key on the order evidence's native_header.
+NATIVE_IDENTITY_COLUMNS = {"native_taxtotal": "taxtotal", "native_total": "total"}
+NATIVE_IDENTITY_SELECT = "t.taxtotal AS native_taxtotal, t.foreigntotal AS native_total"
 PERIOD_FIELDS = frozenset(
     {"id", "periodname", "closed", "alllocked", "arlocked", "aplocked", "isadjust", "startdate", "enddate"}
 )
@@ -171,6 +177,20 @@ def _project(source: dict, fields: frozenset[str]) -> dict:
         elif value is None or isinstance(value, (str, int, Decimal, bool)):
             result[key] = value
     return result
+
+
+def _native_header(record_id: str, match: dict) -> dict:
+    """The identity row's native totals, as text, beside the record that row named.
+
+    They come from the identity read before the record GET, not the same observation. SuiteQL
+    leaves out a null column, so an amount it did not report stays absent here, never zero.
+    """
+    native = {"id": record_id}
+    for column, key in NATIVE_IDENTITY_COLUMNS.items():
+        value = match.get(column)
+        if isinstance(value, (str, int, Decimal)) and not isinstance(value, bool):
+            native[key] = str(value)
+    return native
 
 
 def _collection(body: dict) -> tuple[list[dict], bool]:
@@ -391,7 +411,7 @@ class _Reader:
 
     async def read(self, *, order_reference: str, reference_field: str, subsidiary_id: str) -> dict:
         query = (
-            f"SELECT t.id, t.tranid, t.type, t.{reference_field} AS order_reference "
+            f"SELECT t.id, t.tranid, t.type, t.{reference_field} AS order_reference, {NATIVE_IDENTITY_SELECT} "
             f"FROM transaction t WHERE t.type = 'SalesOrd' AND t.{reference_field} = "
             "'" + order_reference.replace("'", "''") + "' ORDER BY t.id"
         )
@@ -457,6 +477,7 @@ class _Reader:
                     "record_id": record_id,
                     "order_reference": match["order_reference"],
                     "header": header,
+                    "native_header": _native_header(record_id, match),
                     "lines": lines,
                     "tax_details": tax,
                     "currency_metadata": metadata,
