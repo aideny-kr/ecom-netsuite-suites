@@ -448,12 +448,17 @@ def _sales_order_header(report, order_id):
 
 
 def _held_as_exported(member):
-    """NetSuite's total equals the Solidus total exported to it, both read from the same header."""
+    """The difference is a Solidus change after the export, proven from one observation: the sales order
+    still holds exactly the Solidus total exported to it, the comparison read that same sales order total,
+    and Solidus's total today differs from what it exported. A comparison against posted documents (an
+    invoice less credits) is not this cause, whatever the header holds (review F1)."""
     header = member["header"]
     if header is None:
         return False
     exported, total = _decimal(header.get("custbody_fw_solidus_order_total")), _decimal(header.get("total"))
-    return exported is not None and total is not None and exported == total
+    amounts = ((member["report"].get("balance") or {}).get("amounts") or {}).get("order_total") or {}
+    source, target = _decimal(amounts.get("source")), _decimal(amounts.get("target"))
+    return exported is not None and exported == total and target == total and source is not None and source != exported
 
 
 def _facts(key, members, detail, invoices, saved_source="complete"):

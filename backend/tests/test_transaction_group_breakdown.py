@@ -57,6 +57,7 @@ class World:
         tax_source="0.00",
         credit_refunds="from_links",
         header=None,
+        target_total=None,
     ):
         # What the order's refunds paid out of each credit memo (the refund reader's credit_refunds).
         # By default each linked credit refunded its link's amount; None leaves it unrecorded.
@@ -71,7 +72,11 @@ class World:
                 "target_currency": "USD",
                 "missing_metrics": [],
                 "amounts": {
-                    "order_total": {"delta": delta, "source": source_total},
+                    "order_total": {
+                        "delta": delta,
+                        "source": source_total,
+                        **({"target": target_total} if target_total is not None else {}),
+                    },
                     "tax": {"delta": tax, "source": tax_source} if tax is not None else None,
                     "refunds": {"delta": refunds},
                 },
@@ -880,6 +885,7 @@ async def test_an_order_netsuite_holds_as_exported_is_a_solidus_change_not_a_net
         "R000000401",
         delta="121.48",
         source_total="2415.69",
+        target_total="2294.21",
         record_id="13242037",
         header=exported("R000000401", "2294.21", "2294.21", "13242037"),
     )
@@ -888,6 +894,7 @@ async def test_an_order_netsuite_holds_as_exported_is_a_solidus_change_not_a_net
         "R000000402",
         delta="52.06",
         source_total="1819.00",
+        target_total="1766.94",
         record_id="12282878",
         header=exported("R000000402", "1766.94", "1766.94", "12282878"),
     )
@@ -897,6 +904,7 @@ async def test_an_order_netsuite_holds_as_exported_is_a_solidus_change_not_a_net
         "R000000403",
         delta="80.00",
         source_total="1000.00",
+        target_total="920.00",
         record_id="11012663",
         header=exported("R000000403", "920.00", "1000.00", "11012663"),
     )
@@ -904,6 +912,17 @@ async def test_an_order_netsuite_holds_as_exported_is_a_solidus_change_not_a_net
     # No stored header at all: the fallback as before.
     unread = await world.case("R000000404", delta="10.00", source_total="110.00", record_id="11012664")
     await world.solidus("R000000404", customer_type="business")
+    # Review F1: Solidus still equals what it exported; the comparison read posted documents (invoice less
+    # credit 90), not the sales order. The difference is in NetSuite's postings, not a Solidus change.
+    posted = await world.case(
+        "R000000405",
+        delta="10.00",
+        source_total="100.00",
+        target_total="90.00",
+        record_id="11012665",
+        header=exported("R000000405", "100.00", "100.00", "11012665"),
+    )
+    await world.solidus("R000000405", customer_type="business")
     monkeypatch.setattr(gb, "_invoices", _no_invoices)
 
     causes = by_cause(await gb.breakdown(world.db, world.tenant.id, group_id=await world.group_id()))
@@ -911,7 +930,11 @@ async def test_an_order_netsuite_holds_as_exported_is_a_solidus_change_not_a_net
     after = causes["source_changed_after_export"]
     assert after["order_references"] == [changed.order_reference, consumer.order_reference]
     assert after["next_step"] == "fix_at_source"
-    assert causes["business_priced_in_netsuite"]["order_references"] == [priced.order_reference, unread.order_reference]
+    assert causes["business_priced_in_netsuite"]["order_references"] == [
+        priced.order_reference,
+        unread.order_reference,
+        posted.order_reference,
+    ]
 
 
 async def test_every_cause_names_each_orders_netsuite_sales_order(world, monkeypatch):
@@ -922,6 +945,7 @@ async def test_every_cause_names_each_orders_netsuite_sales_order(world, monkeyp
         "R000000501",
         delta="121.48",
         source_total="2415.69",
+        target_total="2294.21",
         record_id="13242037",
         header=exported("R000000501", "2294.21", "2294.21", "13242037"),
     )
