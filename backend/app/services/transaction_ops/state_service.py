@@ -421,14 +421,10 @@ async def control_config(db, tenant_id, config_id, request: ConfigControl, *, ac
 
 def _config_snapshot(config):
     from app.services.transaction_ops.evidence_contract import VERSION
-    from app.services.transaction_ops.policy_equivalence import RULE_VERSION
 
     return {
         **ConfigOut.model_validate(config).model_dump(mode="json"),
         "evidence_contract_version": VERSION,
-        # The reconciliation rules the run's findings are evaluated under: a period covered under other
-        # rules is never certified again without reading it (daily_evidence.compatible_scope).
-        "reconciliation_rule_version": RULE_VERSION,
         "destination_discovery_version": 2
         if config.mapping_json.get("metabase_replica") and config.mapping_json.get("reconciliation_policy") is not None
         else 1,
