@@ -284,3 +284,195 @@ def test_credits_on_an_invoice_that_differs_from_the_sales_order_never_explain_i
 def test_credits_on_an_invoice_whose_tax_differs_from_the_sales_order_never_explain_it():
     source, target, config, refunds = credited(evidence(), "115.18", [("4.82", "0")], invoiced=("120.00", "19.00"))
     assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
+
+
+# --- Credit memos created from the order's own return authorization (C15) ----------------
+# A returned order is credited from its return authorization, so the invoice credits never
+# include that credit. Two tiers, never added together by default: the invoice credits are
+# tried first, alone, exactly as before. Only when they do not explain the difference are
+# they tried together with every one of the order's own return credits, all income, exact on
+# total and tax, against invoices equal to the sales order. Neither tier is ever applied in part.
+
+
+def returned(source, sales_order, credits=(), returns=(), *, refunded="0.00"):
+    """Synthetic order R900000801: the source (total, tax), the sales order and its invoice (total,
+    tax), the invoice credits and the order's own return credits, each (total, tax)."""
+    evidence_tuple = evidence()
+    source_evidence, target, config, refunds = evidence_tuple
+    reference = "R900000801"
+    source_evidence["orders"][0].update(number=reference, total=source[0], included_tax_total=source[1])
+    target["orders"][0]["order_reference"] = reference
+    target["orders"][0]["header"].update(total=sales_order[0], taxTotal=sales_order[1])
+    for side in refunds.values():
+        side.update(order_reference=reference, amount=refunded)
+    refunds["target"]["dependency_manifest"] = {"version": 1, "order_id": "77", "transaction_ids": ["77"]}
+
+    def read(values, origin, first):
+        rows = [
+            {
+                "id": str(first + i),
+                "number": f"CM{first + i}",
+                "origin_id": origin[0],
+                "origin_type": origin[1],
+                **({"invoice_id": origin[0]} if origin[1] == "CustInvc" else {}),
+                "total": total,
+                "tax": tax,
+                "posting": "income",
+            }
+            for i, (total, tax) in enumerate(values)
+        ]
+        return {
+            "credits": rows,
+            "total": str(sum((Decimal(t) for t, _ in values), Decimal(0))),
+            "tax": str(sum((Decimal(x) for _, x in values), Decimal(0))),
+        }
+
+    refunds["target"]["invoice_credits"] = {
+        "complete": True,
+        **read(credits, ("9", "CustInvc"), 30),
+        "invoices": {"ids": ["9"], "total": sales_order[0], "tax": sales_order[1]},
+        "return_credits": {"complete": True, **read(returns, ("40", "RtnAuth"), 60)},
+    }
+    return evidence_tuple
+
+
+def test_a_return_credit_applied_to_the_invoice_reconciles_a_fully_returned_order():
+    # Returned in full: the credit created from the return authorization is applied to the invoice.
+    source, target, config, refunds = returned(("0.00", "0.00"), ("500.00", "0.00"), returns=[("500.00", "0.00")])
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched" and result["reason"] == "verified_adjustments_agree"
+    assert result["amounts"]["order_total"] == {"source": "0.00", "target": "0.00", "delta": "0.00"}
+    credit = result["adjustments"][-1]
+    assert credit["kind"] == "invoice_credit_memos" and credit["status"] == "verified"
+    assert credit["basis"] == "credit memos created from the order's invoice or its own return authorization"
+    assert credit["credits"] == [
+        {"id": "60", "number": "CM60", "origin_id": "40", "origin_type": "RtnAuth", "total": "500.00", "tax": "0.00"}
+    ]
+    assert credit["total"] == "500.00" and credit["tax"] == "0.00"
+
+
+def test_a_return_credit_short_on_tax_leaves_the_whole_difference_and_the_refund_unchanged():
+    # Returned in full and the credit refunded, never applied to the invoice: credited 500.00 with
+    # 92.50 tax against 100.00 billed. Total agrees after the credit, tax does not, so nothing is
+    # applied: the report keeps the full differences and the refunds still agree on their own.
+    source, target, config, refunds = returned(
+        ("0.00", "0.00"), ("500.00", "100.00"), returns=[("500.00", "92.50")], refunded="500.00"
+    )
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "difference"
+    assert result["amounts"]["order_total"] == {"source": "0.00", "target": "500.00", "delta": "-500.00"}
+    assert result["amounts"]["tax"] == {"source": "0.00", "target": "100.00", "delta": "-100.00"}
+    assert result["amounts"]["refunds"] == {"source": "500.00", "target": "500.00", "delta": "0.00"}
+    assert "adjustments" not in result
+
+
+def test_an_order_that_already_matches_ignores_its_return_credits_too():
+    source, target, config, refunds = returned(("120.00", "20.00"), ("120.00", "20.00"), returns=[("30.00", "5.00")])
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched" and result["reason"] == "all_amounts_agree"
+    assert "adjustments" not in result
+
+
+def test_invoice_credits_that_explain_the_difference_alone_still_match_on_them_alone():
+    # Regression A: Solidus does not lower its total for a return, so adding return credit 60
+    # to invoice credit 30 would break a match that holds today.
+    source, target, config, refunds = returned(
+        ("115.18", "20.00"), ("120.00", "20.00"), credits=[("4.82", "0.00")], returns=[("30.00", "0.00")]
+    )
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched"
+    credit = result["adjustments"][-1]
+    assert credit["basis"] == "credit memos created from the order's invoice"
+    assert [c["id"] for c in credit["credits"]] == ["30"] and credit["total"] == "4.82"
+
+
+@pytest.mark.parametrize(
+    "returns",
+    [
+        lambda r: r["credits"][0].update(posting="unproven"),  # a restocking fee posted to an expense
+        lambda r: r.clear() or r.update(complete=False, reason="return_credit_ownership_ambiguous"),
+    ],
+)
+def test_an_unproven_return_credit_never_breaks_an_invoice_credit_match(returns):
+    # Regression B: a problem with a return credit makes only the return credits unknown.
+    source, target, config, refunds = returned(
+        ("115.18", "20.00"), ("120.00", "20.00"), credits=[("4.82", "0.00")], returns=[("30.00", "0.00")]
+    )
+    returns(refunds["target"]["invoice_credits"]["return_credits"])
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched"
+    assert [c["id"] for c in result["adjustments"][-1]["credits"]] == ["30"]
+
+
+def test_invoice_and_return_credits_count_together_only_when_the_invoice_credits_alone_do_not():
+    source, target, config, refunds = returned(
+        ("85.18", "20.00"), ("120.00", "20.00"), credits=[("4.82", "0.00")], returns=[("30.00", "0.00")]
+    )
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched"
+    credit = result["adjustments"][-1]
+    assert [(c["id"], c["origin_type"]) for c in credit["credits"]] == [("30", "CustInvc"), ("60", "RtnAuth")]
+    assert credit["credits"][0]["invoice_id"] == "9" and "invoice_id" not in credit["credits"][1]
+    assert credit["total"] == "34.82" and credit["tax"] == "0.00"
+
+
+def test_return_credits_count_all_together_or_not_at_all():
+    # 30.00 alone would explain the 30.00 difference; the order's return credits are never a subset.
+    source, target, config, refunds = returned(
+        ("90.00", "20.00"), ("120.00", "20.00"), returns=[("30.00", "0.00"), ("10.00", "0.00")]
+    )
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "difference" and "adjustments" not in result
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda r: r["target"]["invoice_credits"]["return_credits"].update(complete=False),
+        lambda r: r["target"]["invoice_credits"].pop("return_credits"),
+        lambda r: r["target"]["invoice_credits"]["return_credits"]["credits"][0].update(posting="unproven"),
+        lambda r: r["target"]["invoice_credits"]["return_credits"]["credits"][0].pop("posting"),
+        lambda r: r["target"]["invoice_credits"]["return_credits"].update(total="29.00"),
+        lambda r: r["target"]["invoice_credits"]["return_credits"]["credits"][0].update(total="-30.00"),
+        lambda r: r["target"]["invoice_credits"]["return_credits"]["credits"].clear(),
+        lambda r: r["target"]["invoice_credits"]["credits"][0].update(posting="unproven"),
+        lambda r: r["target"]["invoice_credits"].update(complete=False),
+        lambda r: r["target"]["invoice_credits"]["invoices"].update(total="115.18"),
+        lambda r: r["target"].update(tax_adjustments=[{"credit_memo_id": "60"}]),
+    ],
+)
+def test_unproven_return_credits_never_explain_a_difference(change):
+    source, target, config, refunds = returned(
+        ("85.18", "20.00"), ("120.00", "20.00"), credits=[("4.82", "0.00")], returns=[("30.00", "0.00")]
+    )
+    change(refunds)
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["amounts"]["order_total"]["target"] == "120.00"
+    assert result["status"] != "matched"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (("115.18", "20.00"), [("4.82", "0.00")]),  # explained by the invoice credit
+        (("115.00", "20.00"), [("4.82", "0.00")]),  # not explained
+        (("0.00", "0.00"), []),  # a cash-sale order: no invoice credit at all
+    ],
+)
+def test_unknown_return_credits_leave_every_result_exactly_as_before(case):
+    (source_amounts, credits) = case
+    before = returned(source_amounts, ("120.00", "20.00"), credits=credits)
+    before[3]["target"]["invoice_credits"].pop("return_credits")
+    after = returned(source_amounts, ("120.00", "20.00"), credits=credits)
+    after[3]["target"]["invoice_credits"]["return_credits"] = {
+        "complete": False,
+        "reason": "invoice_credit_billing_unproven",
+    }
+    assert reconcile_order(*after[:3], refunds=after[3]) == reconcile_order(*before[:3], refunds=before[3])
+
+
+def test_a_saved_invoice_credit_without_its_origin_is_copied_as_before():
+    source, target, config, refunds = credited(evidence(), "115.18", [("4.82", "0")])
+    credit = reconcile_order(source, target, config, refunds=refunds)["adjustments"][-1]
+    assert credit["basis"] == "credit memos created from the order's invoice"
+    assert credit["credits"] == [{"id": "30", "number": "CM0", "invoice_id": "9", "total": "4.82", "tax": "0"}]

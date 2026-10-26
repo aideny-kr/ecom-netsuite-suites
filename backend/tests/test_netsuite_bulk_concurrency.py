@@ -314,6 +314,34 @@ def test_parallel_budget_reserves_the_invoice_credit_read():
     assert batch.parallel_fits(["1"], None) is True
 
 
+def test_parallel_budget_reserves_the_read_for_a_return_credit_no_invoice_links():
+    # C15: a credit created from the order's return authorization and refunded, never applied
+    # to the invoice, is read in the same totals call. It needs that call reserved too.
+    from types import SimpleNamespace
+
+    def row(previous, following, before, after):
+        return {"previousdoc": previous, "nextdoc": following, "previoustype": before, "nexttype": after}
+
+    reader = SimpleNamespace(max_api_calls=1, calls=0)
+    edges = [
+        row("1", "2", "SalesOrd", "CustInvc"),
+        row("1", "5", "SalesOrd", "RtnAuth"),
+        row("5", "6", "RtnAuth", "CustCred"),
+        row("4", "6", "CustRfnd", "CustCred"),
+    ]
+    batch = bulk.RefundGraphBatch(reader, [], edges, {"1", "2", "5", "6"})
+    assert batch.parallel_fits(["1"], None) is False  # the refund GET and the totals read
+    reader.max_api_calls = 2
+    assert batch.parallel_fits(["1"], None) is True
+
+
+def test_the_refund_read_budget_already_covers_the_return_credits():
+    # They ride the invoice-credit totals call, which MAX_REFUND_CALLS already counts.
+    from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS
+
+    assert MAX_REFUND_CALLS == 26
+
+
 def test_parallel_budget_reserves_the_read_for_a_credit_linked_from_another_invoice():
     # Packet review F3: the reader reads any credit memo with an incoming invoice link,
     # even when that invoice belongs to another order.

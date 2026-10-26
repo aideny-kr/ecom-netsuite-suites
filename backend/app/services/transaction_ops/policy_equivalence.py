@@ -16,7 +16,8 @@ from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProf
 # 2: a saved order-total difference without an invoice-credit read is affected
 # 3: a saved difference on a canceled order read without billing and deposits, or on a zero order with a
 #    tax difference, is affected (2026-10-22)
-RULE_VERSION = 3
+# 4: a saved order-total difference read before the order's own return credits were reported is affected (C15)
+RULE_VERSION = 4
 SCOPE_KEYS = (
     "source_connection_id",
     "source_step_id",
@@ -161,6 +162,19 @@ def evaluate(report, snapshot, changed, *, evaluated_at):
         # orders are read again; matched orders and other differences keep reuse.
         if "invoice_credits" not in target and Decimal(balance["amounts"]["order_total"]["delta"]) != 0:
             return gap("invoice_credits_not_read", "affected")
+        # C15: credit memos created from the order's own return authorization can explain an order-total
+        # difference its invoice credits do not (order_reconciliation._invoice_credits). A saved difference
+        # whose complete invoice-credit read did not report them is affected. Return credits count only
+        # with complete invoice credits, so an unknown read cannot change; and a saved match keeps reuse
+        # because the invoice credits are still tried first and alone, so no match they made can change.
+        credits = target.get("invoice_credits")
+        if (
+            isinstance(credits, dict)
+            and credits.get("complete") is True
+            and "return_credits" not in credits
+            and Decimal(balance["amounts"]["order_total"]["delta"]) != 0
+        ):
+            return gap("return_credits_not_read", "affected")
         # 2026-10-22 (decided by Aiden): a settled canceled order and a zero order's leftover tax are
         # matched (order_reconciliation._canceled_order_settled, _zero_total_order_tax). A saved
         # difference either could change is read again; every other saved result keeps reuse. A

@@ -3,7 +3,10 @@
 Credit memos created from the order's invoice are reported separately, as
 `invoice_credits`, so the order comparison can count them (decided 2026-09-30:
 Framework books a Solidus order adjustment as a credit memo created from the
-invoice). They stay out of the refund amount: a credit is not returned money.
+invoice). Credit memos created from the order's own return authorization are
+reported apart from them, as `invoice_credits.return_credits` (C15): a fully
+returned order is credited from its return, which no invoice credit covers. Both
+stay out of the refund amount: a credit is not returned money.
 """
 
 import asyncio
@@ -25,10 +28,15 @@ from app.services.transaction_ops.netsuite_reader import (
 from app.services.transaction_ops.netsuite_refund_requests import read_request_links, verify_request_allocations
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile, read_tax_adjustments
 
-MAX_REFUND_CALLS = 26  # +1 for the batched credit-memo ledger read, +1 for the invoice-credit totals read
+# +1 for the batched credit-memo ledger read, +1 for the invoice-credit totals read. The order's
+# return credits ride that same totals read (C15), so they need no call of their own.
+MAX_REFUND_CALLS = 26
 MAX_INVOICE_CREDITS = 10
 # One read returns each credit's header and lines and each invoice's header.
 MAX_INVOICE_CREDIT_ROWS = 200
+# The rows of return credits no invoice links to, read in the same call; counted apart, so they
+# never use up the invoice credits' rows.
+MAX_RETURN_CREDIT_ROWS = 200
 INVENTORY_COST_TYPES = frozenset({"COGS", "OthCurrAsset"})
 MAX_DOCUMENTS = 100
 MAX_EDGES = 200
@@ -192,6 +200,25 @@ def invoice_credit_candidates(nodes, parents):
     )
 
 
+def return_credit_candidates(nodes, parents, reachable):
+    """Non-voided credit memos linked from a return authorization the order reaches (C15).
+
+    The totals read checks each one's `createdfrom` and whether the order owns it.
+    """
+    return sorted(
+        (
+            identifier
+            for identifier in reachable
+            if (nodes.get(identifier) or {}).get("type") == "CustCred"
+            and nodes[identifier].get("voided") != "T"
+            and any(
+                p in reachable and (nodes.get(p) or {}).get("type") == "RtnAuth" for p in parents.get(identifier, ())
+            )
+        ),
+        key=int,
+    )
+
+
 def billing_documents(nodes, reachable):
     """The order's billing documents: every non-voided invoice or cash sale downstream of it."""
     return sorted(
@@ -233,7 +260,18 @@ def _posting(lines, total, tax, taxed):
     return "income" if net == tax - total else "unproven"  # header amounts are negative
 
 
-async def read_invoice_credits(request, candidates, nodes, owned, currency_id, *, billing=(), taxed=frozenset()):
+def _summed(credits):
+    return {
+        "complete": True,
+        "credits": credits,
+        "total": str(sum((Decimal(c["total"]) for c in credits), Decimal(0))),
+        "tax": str(sum((Decimal(c["tax"]) for c in credits), Decimal(0))),
+    }
+
+
+async def read_invoice_credits(
+    request, candidates, nodes, owned, currency_id, *, billing=(), taxed=frozenset(), returns=(), reachable=frozenset()
+):
     """Credit memos created from one of this order's invoices, with their amounts.
 
     `complete: False` means unknown, never zero. A credit on an invoice shared with
@@ -244,103 +282,187 @@ async def read_invoice_credits(request, candidates, nodes, owned, currency_id, *
     2026-10-16, F1). Every credit is reported with its `posting` (see `_posting`); the
     reader never drops one, and reconciliation counts the credits only when all are
     "income" and the order has no refund tax adjustment (rounds 2-4, F3-F6).
+
+    The order's own return credits (C15) are reported apart, as `return_credits`: credits
+    created from a return authorization the order reaches, whether applied to the invoice
+    (a candidate here) or not (`returns`). The invoice credits are exactly what they were
+    before C15; a problem with a return credit makes only `return_credits` unknown. Their
+    rows share the read but have their own budget, so they never use up the invoice
+    credits' rows; only a page longer than both budgets together is unknown for both.
     """
-    if not candidates:
-        return {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    extra = [identifier for identifier in returns if identifier not in candidates]
+    if not candidates and not extra:
+        return {**_summed([]), "return_credits": _summed([])}
     try:
-        if len(candidates) > MAX_INVOICE_CREDITS:
-            raise ValueError("invoice_credit_budget")
-        if not billing or any((nodes.get(i) or {}).get("type") != "CustInvc" for i in billing):
-            raise ValueError("invoice_credit_billing_unproven")
-        if any(identifier not in owned for identifier in billing):
-            return {"complete": False, "reason": "invoice_credit_ownership_ambiguous"}
-        ids = [*candidates, *billing]
-        result = await request(
-            "POST",
-            "/query/v1/suiteql",
-            params={"limit": MAX_INVOICE_CREDIT_ROWS + 1},
-            body={
-                "q": "SELECT t.id, t.tranid, t.type, t.foreigntotal, t.taxtotal, t.currency, t.posting, "
-                "t.voided, tl.mainline, tl.taxline, tl.createdfrom, tl.foreignamount, tl.expenseaccount, "
-                "a.accttype FROM transaction t "
-                "JOIN transactionline tl ON tl.transaction=t.id "
-                "LEFT JOIN account a ON a.id=tl.expenseaccount "
-                f"WHERE t.id IN ({','.join(ids)}) AND (t.type='CustCred' OR tl.mainline='T')"
-            },
+        return await _read_credits(request, candidates, extra, nodes, owned, reachable, currency_id, billing, taxed)
+    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+        # NetSuiteEvidenceError is a ValueError. The refund proof above stands; the
+        # credits are unknown for this observation and the next scan reads them again.
+        reason = str(exc) if isinstance(exc, ValueError) else "invoice_credit_unproven"
+        if candidates:
+            return {"complete": False, "reason": reason}
+        # No invoice credit to read, exactly as before C15: the read was the return credits' alone.
+        return {**_summed([]), "return_credits": {"complete": False, "reason": reason}}
+
+
+async def _read_credits(request, candidates, extra, nodes, owned, reachable, currency_id, billing, taxed):
+    if len(candidates) > MAX_INVOICE_CREDITS:
+        raise ValueError("invoice_credit_budget")
+    if not billing or any((nodes.get(i) or {}).get("type") != "CustInvc" for i in billing):
+        raise ValueError("invoice_credit_billing_unproven")
+    if any(identifier not in owned for identifier in billing):
+        raise ValueError("invoice_credit_ownership_ambiguous")
+    returned = None  # why the return credits are unknown, once that is known
+    if len(candidates) + len(extra) > MAX_INVOICE_CREDITS:
+        returned, extra = {"complete": False, "reason": "return_credit_budget"}, []
+        if not candidates:
+            return {**_summed([]), "return_credits": returned}
+    ids = [*candidates, *extra, *billing]
+    limit = MAX_INVOICE_CREDIT_ROWS + (MAX_RETURN_CREDIT_ROWS if extra else 0)
+    result = await request(
+        "POST",
+        "/query/v1/suiteql",
+        params={"limit": limit + 1},
+        body={
+            "q": "SELECT t.id, t.tranid, t.type, t.foreigntotal, t.taxtotal, t.currency, t.posting, "
+            "t.voided, tl.mainline, tl.taxline, tl.createdfrom, tl.foreignamount, tl.expenseaccount, "
+            "a.accttype FROM transaction t "
+            "JOIN transactionline tl ON tl.transaction=t.id "
+            "LEFT JOIN account a ON a.id=tl.expenseaccount "
+            f"WHERE t.id IN ({','.join(ids)}) AND (t.type='CustCred' OR tl.mainline='T')"
+        },
+    )
+    rows, complete = _collection(result)
+    if not complete or len(rows) > limit:
+        raise ValueError("invoice_credit_read_incomplete")
+    returning = sum(1 for row in rows if _id(row.get("id")) in extra)
+    if len(rows) - returning > MAX_INVOICE_CREDIT_ROWS:
+        raise ValueError("invoice_credit_read_incomplete")
+    if returning > MAX_RETURN_CREDIT_ROWS:
+        returned = {"complete": False, "reason": "return_credit_read_incomplete"}
+    headers, lines, broken = {}, defaultdict(list), set()
+    for row in rows:
+        identifier = _id(row.get("id"))
+        if identifier not in ids:
+            raise ValueError("invoice_credit_read_incomplete")
+        if row.get("mainline") == "T" and identifier not in headers:
+            headers[identifier] = row
+        elif row.get("mainline") == "F":
+            lines[identifier].append(row)
+        else:
+            broken.add(identifier)  # a duplicated header, or a line of no known kind
+    # Every invoice credit and invoice has exactly one header; only credits have lines.
+    complete_headers = all(i in headers and i not in broken for i in (*candidates, *billing))
+    if not complete_headers or not set(lines) <= {*candidates, *extra}:
+        raise ValueError("invoice_credit_read_incomplete")
+    invoiced_total = invoiced_tax = Decimal(0)
+    for identifier in billing:
+        row = headers[identifier]
+        total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
+        if (
+            row.get("type") != "CustInvc"
+            or str(row.get("currency")) != str(currency_id)
+            or row.get("posting") != "T"
+            or row.get("voided") != "F"
+            or total is None
+            or tax is None
+            or total < 0
+            or tax < 0
+        ):
+            raise ValueError("invoice_credit_invoice_unproven")
+        invoiced_total, invoiced_tax = invoiced_total + total, invoiced_tax + tax
+    credits, applied = [], []
+    for identifier in candidates:
+        row = headers[identifier]
+        origin = _id(row.get("createdfrom"))
+        if (
+            row.get("type") != "CustCred"
+            or str(row.get("currency")) != str(currency_id)
+            or row.get("posting") != "T"
+            or row.get("voided") != "F"
+        ):
+            raise ValueError("invoice_credit_unproven")
+        total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
+        if total is None or tax is None or total >= 0 or tax > 0:
+            raise ValueError("invoice_credit_amount_unproven")
+        if origin is not None and origin not in nodes:
+            # An origin the graph never saw is unresolved, not "not an invoice":
+            # skipping it would certify a partial sum.
+            raise ValueError("invoice_credit_origin_unproven")
+        kind = (nodes.get(origin) or {}).get("type")
+        if kind == "RtnAuth" and origin in reachable:
+            applied.append(identifier)  # created from a return the order reaches: a return credit (C15)
+            continue
+        if kind != "CustInvc":
+            continue  # another order's return credit, or standalone: applied, not an invoice credit
+        if origin not in owned or identifier not in owned:
+            raise ValueError("invoice_credit_ownership_ambiguous")
+        credits.append(
+            {
+                "id": identifier,
+                "number": row.get("tranid"),
+                "origin_id": origin,
+                "origin_type": "CustInvc",
+                "invoice_id": origin,
+                "total": str(Decimal(0) - total),
+                "tax": str(Decimal(0) - tax),
+                "posting": _posting(lines.get(identifier, ()), total, tax, taxed),
+            }
         )
-        rows, complete = _collection(result)
-        if not complete or len(rows) > MAX_INVOICE_CREDIT_ROWS:
-            raise ValueError("invoice_credit_read_incomplete")
-        headers, lines = {}, defaultdict(list)
-        for row in rows:
-            identifier = _id(row.get("id"))
-            if row.get("mainline") == "T" and identifier not in headers:
-                headers[identifier] = row
-            elif row.get("mainline") == "F":
-                lines[identifier].append(row)
-            else:
-                raise ValueError("invoice_credit_read_incomplete")
-        if sorted(headers, key=str) != sorted(ids, key=str) or not set(lines) <= set(candidates):
-            raise ValueError("invoice_credit_read_incomplete")
-        invoiced_total = invoiced_tax = Decimal(0)
-        for identifier in billing:
-            row = headers[identifier]
-            total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
-            if (
-                row.get("type") != "CustInvc"
-                or str(row.get("currency")) != str(currency_id)
-                or row.get("posting") != "T"
-                or row.get("voided") != "F"
-                or total is None
-                or tax is None
-                or total < 0
-                or tax < 0
-            ):
-                raise ValueError("invoice_credit_invoice_unproven")
-            invoiced_total, invoiced_tax = invoiced_total + total, invoiced_tax + tax
+    if returned is None:
+        returned = _return_credits(
+            sorted({*applied, *extra}, key=int), headers, lines, broken, nodes, owned, reachable, currency_id, taxed
+        )
+    return {
+        **_summed(credits),
+        "invoices": {"ids": list(billing), "total": str(invoiced_total), "tax": str(invoiced_tax)},
+        "return_credits": returned,
+    }
+
+
+def _return_credits(identifiers, headers, lines, broken, nodes, owned, reachable, currency_id, taxed):
+    """The order's own return credits (C15), or why they are unknown; never raises.
+
+    Each must be created from a return authorization the order reaches. One that another
+    order shares -- its return authorization, or the credit itself applied to another
+    order's invoice -- makes them ambiguous: it is the order's return, so it is never
+    skipped. The reader classifies each credit's posting; reconciliation decides.
+    """
+    try:
         credits = []
-        for identifier in candidates:
-            row = headers[identifier]
-            origin = _id(row.get("createdfrom"))
+        for identifier in identifiers:
+            row = headers.get(identifier)
+            if row is None or identifier in broken:
+                raise ValueError("return_credit_read_incomplete")
             if (
                 row.get("type") != "CustCred"
                 or str(row.get("currency")) != str(currency_id)
                 or row.get("posting") != "T"
                 or row.get("voided") != "F"
             ):
-                raise ValueError("invoice_credit_unproven")
+                raise ValueError("return_credit_unproven")
             total, tax = _decimal(row.get("foreigntotal")), _decimal(row.get("taxtotal"))
             if total is None or tax is None or total >= 0 or tax > 0:
-                raise ValueError("invoice_credit_amount_unproven")
-            if origin is not None and origin not in nodes:
-                # An origin the graph never saw is unresolved, not "not an invoice":
-                # skipping it would certify a partial sum.
-                raise ValueError("invoice_credit_origin_unproven")
-            if (nodes.get(origin) or {}).get("type") != "CustInvc":
-                continue  # created from a return authorization, or standalone: applied, not an invoice credit
+                raise ValueError("return_credit_amount_unproven")
+            origin = _id(row.get("createdfrom"))
+            if origin not in reachable or (nodes.get(origin) or {}).get("type") != "RtnAuth":
+                raise ValueError("return_credit_origin_unproven")
             if origin not in owned or identifier not in owned:
-                return {"complete": False, "reason": "invoice_credit_ownership_ambiguous"}
+                return {"complete": False, "reason": "return_credit_ownership_ambiguous"}
             credits.append(
                 {
                     "id": identifier,
                     "number": row.get("tranid"),
-                    "invoice_id": origin,
+                    "origin_id": origin,
+                    "origin_type": "RtnAuth",
                     "total": str(Decimal(0) - total),
                     "tax": str(Decimal(0) - tax),
                     "posting": _posting(lines.get(identifier, ()), total, tax, taxed),
                 }
             )
-        return {
-            "complete": True,
-            "credits": credits,
-            "total": str(sum((Decimal(c["total"]) for c in credits), Decimal(0))),
-            "tax": str(sum((Decimal(c["tax"]) for c in credits), Decimal(0))),
-            "invoices": {"ids": list(billing), "total": str(invoiced_total), "tax": str(invoiced_tax)},
-        }
+        return _summed(credits)
     except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
-        # NetSuiteEvidenceError is a ValueError. The refund proof above stands; the
-        # credits are unknown for this observation and the next scan reads them again.
-        return {"complete": False, "reason": str(exc) if isinstance(exc, ValueError) else "invoice_credit_unproven"}
+        return {"complete": False, "reason": str(exc) if isinstance(exc, ValueError) else "return_credit_unproven"}
 
 
 def order_deposits(nodes, reachable, owned, documents):
@@ -540,6 +662,8 @@ async def collect_refunds(
         currency_id,
         billing=billing_documents(nodes, reachable),
         taxed=taxed,
+        returns=return_credit_candidates(nodes, parents, reachable),
+        reachable=reachable,
     )
     await recheck_links()
     request_ids = sorted((link["request_id"] for link in request_links), key=int)

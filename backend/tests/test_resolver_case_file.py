@@ -197,6 +197,48 @@ def test_netsuite_documents_merge_saved_observation_and_invoice_credits_once_eac
     assert docs["CD410934"]["type"] == "customer deposit"
 
 
+def test_return_credits_are_named_by_their_origin_and_summarised_apart():
+    # C15: a credit created from the order's return authorization is shown created from it,
+    # never from an invoice, and the refunds summary keeps it apart from the invoice credits.
+    report = deepcopy(REPORT)
+    credits = report["refund_evidence"]["target"]["invoice_credits"]
+    credits["credits"][0].update(origin_id="15805942", origin_type="CustInvc")
+    credits["return_credits"] = {
+        "complete": True,
+        "credits": [
+            {
+                "id": "900000006",
+                "number": "CM900006",
+                "origin_id": "900000005",
+                "origin_type": "RtnAuth",
+                "total": "9.00",
+                "tax": "0",
+                "posting": "income",
+            }
+        ],
+        "total": "9.00",
+        "tax": "0",
+    }
+    result = build(report=report)
+    docs = {d["number"]: d for d in result["netsuite"]["documents"]}
+    assert docs["CM900006"]["type"] == "credit memo" and docs["CM900006"]["created_from_id"] == "900000005"
+    assert docs["CM11788"]["created_from_id"] == "15805942"
+    refunds = result["netsuite"]["refunds"]
+    assert refunds["invoice_credits"] == {"total": "4.82", "tax": "0", "count": 1}
+    assert refunds["return_credits"] == {"total": "9.00", "tax": "0", "count": 1}
+
+
+def test_unknown_or_unread_return_credits_are_named_never_guessed():
+    report = deepcopy(REPORT)
+    assert build(report=report)["netsuite"]["refunds"]["return_credits"] == {"unknown": "not read"}
+    report["refund_evidence"]["target"]["invoice_credits"]["return_credits"] = {
+        "complete": False,
+        "reason": "return_credit_ownership_ambiguous",
+    }
+    refunds = build(report=report)["netsuite"]["refunds"]
+    assert refunds["return_credits"] == {"unknown": "return_credit_ownership_ambiguous"}
+
+
 def test_the_sales_order_links_to_netsuite():
     so = build()["netsuite"]["sales_order"]
     assert so["id"] == "14388301" and so["number"] == "SO1234567"
