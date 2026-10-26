@@ -77,6 +77,11 @@ class TaggedReader(CustomReader):
             self.tagged_queries.append(query)
             rows = deepcopy(self.tagged)
             return {"items": rows, "count": len(rows), "totalResults": len(rows), "hasMore": not self.tagged_complete}
+        if "tl.mainline='T'" in query:
+            # The invoice and return credit totals read (C15): an attributed credit is one of the order's
+            # return credits too. No rows: these tests are about the refund graph, not the credit totals.
+            self.calls += 1
+            return {"items": [], "count": 0, "totalResults": 0, "hasMore": False}
         return await super().request(method, path, **kwargs)
 
 

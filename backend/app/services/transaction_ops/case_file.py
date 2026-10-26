@@ -265,8 +265,11 @@ def _documents(observation, report, cuts):
     for doc in (sections.get("related_refund_documents") or {}).get("documents") or []:
         _merge_document(docs, doc, cuts)
     credits = ((report.get("refund_evidence") or {}).get("target") or {}).get("invoice_credits") or {}
-    if credits.get("complete") is True:
-        for credit in credits.get("credits") or []:
+    returns = credits.get("return_credits") if isinstance(credits.get("return_credits"), dict) else {}
+    for read in (credits, returns):
+        if read.get("complete") is not True:
+            continue
+        for credit in read.get("credits") or []:
             if isinstance(credit, dict) and credit.get("id"):
                 entry = docs.setdefault(str(credit["id"]), {"id": str(credit["id"])})
                 entry.update(
@@ -275,10 +278,17 @@ def _documents(observation, report, cuts):
                         "number": credit.get("number") or entry.get("number"),
                         "total": credit.get("total"),
                         "tax": credit.get("tax"),
-                        "created_from_id": credit.get("invoice_id"),
+                        # The invoice, or the return authorization (C15); reads before C15 named only the invoice.
+                        "created_from_id": credit.get("origin_id") or credit.get("invoice_id"),
                     }
                 )
     return list(docs.values())
+
+
+def _credit_summary(credits, missing):
+    if isinstance(credits, dict) and credits.get("complete") is True:
+        return {"total": credits.get("total"), "tax": credits.get("tax"), "count": len(credits.get("credits") or [])}
+    return {"unknown": (credits or {}).get("reason") or missing}
 
 
 def _refunds(report):
@@ -290,10 +300,11 @@ def _refunds(report):
         "netsuite_refunded": target.get("amount"),
         "refund_documents": target.get("refund_count"),
         "complete": target.get("complete"),
-        "invoice_credits": (
-            {"total": credits.get("total"), "tax": credits.get("tax"), "count": len(credits.get("credits") or [])}
-            if credits.get("complete") is True
-            else ({"unknown": credits.get("reason") or "not read"} if credits else None)
+        "invoice_credits": _credit_summary(credits, "not read") if credits else None,
+        # C15: credits from the order's own return authorization, apart from the invoice credits and
+        # never refunded money. Unknown with the invoice credits, and "not read" before C15.
+        "return_credits": (
+            _credit_summary(credits.get("return_credits"), credits.get("reason") or "not read") if credits else None
         ),
     }
 

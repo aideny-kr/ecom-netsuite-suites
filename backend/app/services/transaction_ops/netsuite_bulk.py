@@ -220,10 +220,12 @@ class RefundGraphBatch:
             }
             # One batched totals read when a credit memo touching this order has an
             # incoming invoice link, whoever owns that invoice; the reader reads it
-            # either way (netsuite_refunds.invoice_credit_candidates).
+            # either way (netsuite_refunds.invoice_credit_candidates). A credit linked
+            # from a return authorization is read in that same call, even when no invoice
+            # links to it (C15: netsuite_refunds.return_credit_candidates).
             invoice_credit = any(
                 {row["previousdoc"], row["nextdoc"]} & reachable
-                and row.get("previoustype") == "CustInvc"
+                and row.get("previoustype") in {"CustInvc", "RtnAuth"}
                 and row.get("nexttype") == "CustCred"
                 for row in self.edges
             )

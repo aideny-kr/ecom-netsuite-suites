@@ -44,21 +44,17 @@ def _refund(evidence, reference, currency, precision):
     return _amount(evidence.get("amount"), precision)
 
 
-def _invoice_credits(evidence, order_id, reference, currency, precision):
-    """Credit memos created from this order's invoice, from the same NetSuite refund read.
+def _counted(credits, precision):
+    """A complete read's credits and their sums, or None when any is unproven.
 
-    Only a complete read of the same order, reference and currency counts, and the
-    stated sums must equal their credits. Anything else is unknown, never zero.
+    The stated sums must equal their credits, and every credit must be proven a sales
+    reduction by its own lines; one that is not -- a tax-account or expense posting --
+    leaves the difference unexplained (packet review 2026-10-16, F2).
     """
-    if _refund(evidence, reference, currency, precision) is None:
-        return None
-    manifest, credits = evidence.get("dependency_manifest"), evidence.get("invoice_credits")
-    if not isinstance(manifest, dict) or not isinstance(credits, dict):
-        return None
-    if str(manifest.get("order_id")) != str(order_id) or credits.get("complete") is not True:
+    if not isinstance(credits, dict) or credits.get("complete") is not True:
         return None
     rows = credits.get("credits")
-    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         return None
     amounts = [(_amount(row.get("total"), precision), _amount(row.get("tax"), precision)) for row in rows]
     if any(total is None or tax is None or total <= 0 for total, tax in amounts):
@@ -66,10 +62,31 @@ def _invoice_credits(evidence, order_id, reference, currency, precision):
     total, tax = sum((t for t, _ in amounts), Decimal(0)), sum((x for _, x in amounts), Decimal(0))
     if _amount(credits.get("total"), precision) != total or _amount(credits.get("tax"), precision) != tax:
         return None
-    # Every credit must be proven a sales reduction by its own lines; one that is not -- a
-    # tax-account or expense posting -- leaves the difference unexplained (packet review
-    # 2026-10-16, F2).
     if any(row.get("posting") != "income" for row in rows):
+        return None
+    return {"rows": rows, "total": total, "tax": tax}
+
+
+def _invoice_credits(evidence, order_id, reference, currency, precision):
+    """Credit memos created from this order's invoice, and apart from them those created
+    from its own return authorization (C15), from the same NetSuite refund read.
+
+    Only a complete read of the same order, reference and currency counts, and the
+    stated sums must equal their credits. Anything else is unknown, never zero. Return
+    credits are None unless every one is proven; they never make the invoice credits unknown.
+    """
+    if _refund(evidence, reference, currency, precision) is None:
+        return None
+    manifest, credits = evidence.get("dependency_manifest"), evidence.get("invoice_credits")
+    if not isinstance(manifest, dict) or not isinstance(credits, dict):
+        return None
+    if str(manifest.get("order_id")) != str(order_id):
+        return None
+    invoice = _counted(credits, precision)
+    if invoice is None:
+        return None
+    returns = _counted(credits.get("return_credits"), precision)
+    if not invoice["rows"] and not (returns and returns["rows"]):
         return None
     # The order's invoices, read in the same call. Credits are subtracted from the sales
     # order, so they explain it only when the invoices equal it (packet review 2026-10-16, F1).
@@ -79,7 +96,11 @@ def _invoice_credits(evidence, order_id, reference, currency, precision):
     invoiced = (_amount(invoices.get("total"), precision), _amount(invoices.get("tax"), precision))
     if None in invoiced:
         return None
-    return {"rows": rows, "total": total, "tax": tax, "invoiced": invoiced}
+    return {**invoice, "returns": returns if returns and returns["rows"] else None, "invoiced": invoiced}
+
+
+# The fields an applied credit is shown with; a return credit has no invoice_id.
+_CREDIT_FIELDS = ("id", "number", "origin_id", "origin_type", "invoice_id", "total", "tax")
 
 
 def reconcile_order(source_evidence, target_evidence, config, *, refunds=None):
@@ -276,6 +297,12 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     # (decided 2026-10-16): combining the two proofs let one credit be partly accounted
     # for, or counted from two different reads (packet review rounds 2-4, F3-F6). None of
     # Framework's 35 credit-explained open cases has one; a mixed order stays for a person.
+    # C15: a returned order is credited from its own return authorization, which the
+    # invoice credits never include. Two tiers, never added together by default: the
+    # invoice credits alone first, exactly as before; only when they do not explain the
+    # difference, the invoice credits with every one of the order's return credits. Solidus
+    # does not lower its total for a return, so adding them first would break a match the
+    # invoice credits make. Neither tier is ever applied in part.
     tax_adjustment_read = bool((refunds.get("target") or {}).get("tax_adjustments"))
     invoice = (
         None
@@ -286,11 +313,38 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     known = None not in (source_total, target_total, source_tax, target_tax)
     billed = (original_values["order_total"][1], original_values["tax"][1])
     if invoice and known and source_total != target_total and invoice["invoiced"] == billed:
-        credited_total = target_total - invoice["total"]
-        credited_tax = target_tax - invoice["tax"]
-        if credited_total == source_total and credited_tax == source_tax:
-            values["order_total"] = (source_total, credited_total)
-            values["tax"] = (source_tax, credited_tax)
+        tiers = []
+        if invoice["rows"]:
+            tiers.append(("credit memos created from the order's invoice", invoice))
+        if invoice["returns"]:
+            returns = invoice["returns"]
+            tiers.append(
+                (
+                    "credit memos created from the order's invoice or its own return authorization",
+                    {
+                        "rows": [*invoice["rows"], *returns["rows"]],
+                        "total": invoice["total"] + returns["total"],
+                        "tax": invoice["tax"] + returns["tax"],
+                    },
+                )
+            )
+        for basis, tier in tiers:
+            credited = {
+                **values,
+                "order_total": (source_total, target_total - tier["total"]),
+                "tax": (source_tax, target_tax - tier["tax"]),
+            }
+            if credited["order_total"][1] != source_total:
+                continue
+            # C15-R1: Solidus keeps the pre-adjustment tax on an order adjusted to zero, so a credit
+            # landing on a zero source total is never compared with that tax: it counts only when the
+            # zero-order rule holds on the credited values (no NetSuite tax left, no money taken).
+            if source_total == 0 and source_tax != 0:
+                if not _zero_total_order_tax(source, credited, precision):
+                    continue
+            elif credited["tax"][1] != source_tax:
+                continue
+            values["order_total"], values["tax"] = credited["order_total"], credited["tax"]
             # The order itself is matched: the 2026-09-13 note that the sales order
             # still needs a source-backed amendment no longer applies (decided 10-01).
             result.pop("posting_reconciliation", None)
@@ -298,15 +352,13 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                 {
                     "kind": "invoice_credit_memos",
                     "status": "verified",
-                    "basis": "credit memos created from the order's invoice",
-                    "credits": [
-                        {key: row.get(key) for key in ("id", "number", "invoice_id", "total", "tax")}
-                        for row in invoice["rows"]
-                    ],
-                    "total": f"{invoice['total']:.{precision}f}",
-                    "tax": f"{invoice['tax']:.{precision}f}",
+                    "basis": basis,
+                    "credits": [{key: row[key] for key in _CREDIT_FIELDS if key in row} for row in tier["rows"]],
+                    "total": f"{tier['total']:.{precision}f}",
+                    "tax": f"{tier['tax']:.{precision}f}",
                 }
             )
+            break
     zero = _zero_total_order_tax(source, values, precision)
     if zero:
         adjustments.append(zero)
