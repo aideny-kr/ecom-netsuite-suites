@@ -40,8 +40,9 @@ class StagedNetSuite:
         identifier, data, _ = entry
         if reference not in data and can_fetch and key not in self.attempted:
             # Leave enough for the primary individual financial reads after a
-            # failed batch (order + refund + the largest source refund read).
-            fallback = 56 if kind == "orders" else 28
+            # failed batch (order + refund + the largest source refund read). The
+            # single refund read grew by two calls for tagged credits (C09).
+            fallback = 56 if kind == "orders" else 30
             remaining = self.run.max_api_calls - self.run.api_calls_used - (self.run.api_calls_held or 0)
             if remaining < bulk.MAX_CALLS + 3 + fallback:
                 return None

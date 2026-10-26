@@ -65,6 +65,10 @@ def _cleared(report, now):
         if (
             balance["status"] != "matched"
             or balance["missing_metrics"]
+            # A refund booked by hand behind a return authorization still open (C09-R1, 2026-10-25): the
+            # NetSuite read left its money out, and a reconciled case never reopens. The balance carries it
+            # through report compaction and every relabelling (order_reconciliation.held_by_open_return_authorization).
+            or "open_return_authorizations" in balance
             or (limits and not detail_only)
             or len(report["targets"]) != 1
             or report["lookup"].get("complete") is not True

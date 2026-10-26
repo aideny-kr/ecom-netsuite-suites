@@ -14,7 +14,7 @@ class BulkReader(Reader):
         if method == "POST":
             self.calls += 1
             sql = kwargs["body"]["q"]
-            if "customrecord_fw_refund_requests" in sql:
+            if "customrecord_fw_refund_requests" in sql or "t.otherrefnum" in sql:
                 return bulk.collection([])
             frontier = set(re.search(r"l.previousdoc IN \(([^)]+)\)", sql)[1].split(","))
             rows = [r for r in self.edges if {r["previousdoc"], r["nextdoc"]} & frontier]
@@ -28,7 +28,14 @@ async def test_bulk_graph_matches_single_verifier_and_amortizes_empty_orders():
     batch = await bulk.RefundGraphBatch.collect(reader, orders)
     expected = await collect_refunds(Reader(), "1", "1", "1", order_reference="R123456789")
     actual = await collect_refunds(
-        reader, "1", "1", "1", order_reference="R123456789", request_links_reader=batch.links, graph_reader=batch.graph
+        reader,
+        "1",
+        "1",
+        "1",
+        order_reference="R123456789",
+        request_links_reader=batch.links,
+        graph_reader=batch.graph,
+        tagged_reader=batch.tagged_credits,
     )
     assert actual == expected
     calls = reader.calls
@@ -40,6 +47,7 @@ async def test_bulk_graph_matches_single_verifier_and_amortizes_empty_orders():
         order_reference="R999999999",
         request_links_reader=batch.links,
         graph_reader=batch.graph,
+        tagged_reader=batch.tagged_credits,
     )
     assert empty["amount"] == 0 and reader.calls == calls
 
@@ -70,6 +78,7 @@ async def test_bulk_preserves_existing_refund_failure_gates(failure):
             order_reference="R123456789",
             request_links_reader=batch.links,
             graph_reader=batch.graph,
+            tagged_reader=batch.tagged_credits,
         )
 
 
@@ -163,7 +172,14 @@ async def test_bulk_reports_the_same_deposits_and_billing_as_the_single_reader()
     batch = await bulk.RefundGraphBatch.collect(reader, {"R123456789": {"record_id": "1"}})
     calls = reader.calls
     actual = await collect_refunds(
-        reader, "1", "1", "1", order_reference="R123456789", request_links_reader=batch.links, graph_reader=batch.graph
+        reader,
+        "1",
+        "1",
+        "1",
+        order_reference="R123456789",
+        request_links_reader=batch.links,
+        graph_reader=batch.graph,
+        tagged_reader=batch.tagged_credits,
     )
     expected = await collect_refunds(DepositReader(), "1", "1", "1", order_reference="R123456789")
     assert actual["deposits"] == expected["deposits"] == [{"id": "2", "total": "100.00", "status": "C"}]

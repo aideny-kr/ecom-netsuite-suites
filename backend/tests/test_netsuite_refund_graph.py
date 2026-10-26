@@ -53,6 +53,8 @@ class Reader:
         assert path == "/query/v1/suiteql" and kwargs["params"]["limit"] <= 201
         if "customrecord_fw_refund_requests" in kwargs["body"]["q"]:
             return {"items": [], "count": 0, "totalResults": 0, "hasMore": False}
+        if "t.otherrefnum" in kwargs["body"]["q"]:  # no credit booked by hand for the order (C09)
+            return {"items": [], "count": 0, "totalResults": 0, "hasMore": False}
         frontier = set(re.search(r"l.previousdoc IN \(([^)]+)\)", kwargs["body"]["q"])[1].split(","))
         rows = [row for row in self.edges if row["previousdoc"] in frontier or row["nextdoc"] in frontier]
         return {"items": deepcopy(rows), "count": len(rows), "totalResults": len(rows), "hasMore": not self.complete}
@@ -71,7 +73,8 @@ async def test_deposit_refund_uses_reverse_payment_link_and_only_this_orders_app
         "refund_requests": [],
         "truncated": False,
     }
-    assert reader.calls == 5  # Inventory adds no provider requests.
+    # Requests, tagged credits (C09), two graph depths and the refund. Inventory adds no provider requests.
+    assert reader.calls == 6
 
 
 async def test_complete_empty_related_graph_proves_zero():
@@ -89,7 +92,7 @@ async def test_large_application_inventory_is_bounded_without_changing_refund_am
     assert result["amount"] == Decimal("100.00")
     assert result["dependency_manifest"]["transaction_ids"] == ["1000", "2", "3", "4"]
     assert result["dependency_manifest"]["truncated"] is True
-    assert reader.calls == 5
+    assert reader.calls == 6
 
 
 @pytest.mark.parametrize(
@@ -372,7 +375,7 @@ async def test_no_invoice_credit_means_no_extra_provider_call():
     reader = CreditReader()
     result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
     assert result["invoice_credits"] == {"complete": True, "credits": [], "total": "0", "tax": "0"}
-    assert reader.calls == 5 and reader.credit_queries == 0
+    assert reader.calls == 6 and reader.credit_queries == 0
 
 
 async def test_credit_on_an_invoice_shared_with_another_order_is_unknown_not_zero():

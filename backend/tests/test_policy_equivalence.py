@@ -1,11 +1,12 @@
 from copy import deepcopy
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
 from app.services.transaction_ops.netsuite_refunds import collect_refunds
 from app.services.transaction_ops.order_reconciliation import reconcile_order
-from app.services.transaction_ops.policy_equivalence import changed_reasons, evaluate
+from app.services.transaction_ops.policy_equivalence import RULE_VERSION, changed_reasons, evaluate
 from tests.test_refund_adjustment_matching import REFERENCE, CreditReader, balance_case, reader_profile
 
 NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
@@ -66,6 +67,8 @@ def saved_report():
                 "currency": "USD",
                 "request_links": [],
                 "tax_adjustments": [],
+                # Read with tagged refund credits (C09, 2026-10-25); none here.
+                "tagged_credits": [],
             },
         },
         "balance": {
@@ -333,3 +336,39 @@ def test_a_saved_match_is_never_affected_by_the_new_rules():
     report = saved_report()
     report["source"]["status"] = "cancelled"
     assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+# 2026-10-25 (C09): a refund credit booked by hand from its own refund and tagged with the order now
+# counts through the order's return authorization. That adds NetSuite refund money, so it can change a
+# saved match as well as a difference: every report read before tagged credits is read again.
+
+
+def saved_refunds(source, target):
+    report = saved_report()
+    report["refund_evidence"]["target"].pop("tagged_credits")
+    delta = str(Decimal(source) - Decimal(target))
+    report["balance"]["status"] = "matched" if source == target else "difference"
+    report["balance"]["amounts"]["refunds"] = {"source": source, "target": target, "delta": delta}
+    return report
+
+
+def test_a_saved_refund_difference_read_before_tagged_credits_is_read_again():
+    before, _ = snapshots()
+    result = evaluate(saved_refunds("200.00", "0.00"), before, frozenset(), evaluated_at=NOW)
+    assert result == {"status": "affected", "reason": "tagged_credits_not_read"}
+
+
+@pytest.mark.parametrize("amount", ["200.00", "1.00"])
+def test_a_saved_match_read_before_tagged_credits_is_read_again(amount):
+    before, _ = snapshots()
+    report = saved_refunds(amount, amount)
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW) == {
+        "status": "affected",
+        "reason": "tagged_credits_not_read",
+    }
+    report["refund_evidence"]["target"]["tagged_credits"] = []
+    assert evaluate(report, before, frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+
+
+def test_the_tagged_credit_rule_has_its_own_version():
+    assert RULE_VERSION == 4

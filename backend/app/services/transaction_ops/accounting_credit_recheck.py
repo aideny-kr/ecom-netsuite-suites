@@ -16,6 +16,7 @@ from app.services.chat.external_tool_audit import WORKER_SESSION_FACTORY as READ
 from app.services.transaction_ops import credit_api_correction
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.native_accounting_service import _stable
+from app.services.transaction_ops.order_reconciliation import held_by_open_return_authorization
 from app.services.transaction_ops.posting_balance import repriced_credit_balance
 from app.services.transaction_ops.source_reader import SourceReadError
 
@@ -42,6 +43,17 @@ def _read_session(db):
 
 
 def project(p, report, current, *, verified_at, now):
+    """The order's balance after an approved correction, whichever kind made it.
+
+    Each kind labels the balance again from the posted invoice less credits and the refund delta. A
+    refund booked by hand behind a return authorization still open is not in that delta, so the order
+    it names stays a difference here, for every kind (C09-R1, 2026-10-25).
+    """
+    result = _project(p, report, current, verified_at=verified_at, now=now)
+    return {**result, "balance": held_by_open_return_authorization(dict(result["balance"]))}
+
+
+def _project(p, report, current, *, verified_at, now):
     from app.services.transaction_ops import credit_creation, credit_line_reallocation
 
     agent = {credit_line_reallocation.KIND: credit_line_reallocation, credit_creation.KIND: credit_creation}
