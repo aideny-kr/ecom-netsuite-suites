@@ -135,6 +135,8 @@ async def test_daily_reuses_complete_custom_slices_without_provider_or_jev_calls
         "connection",
         "contract",
         "discovery",
+        "rule",
+        "rule_missing",
         "source_incomplete",
         "refund_incomplete",
         "destination_incomplete",
@@ -164,6 +166,13 @@ async def test_daily_coverage_fails_closed_for_incompatible_or_incomplete_eviden
             **second.config_snapshot,
             "mapping_json": {**second.config_snapshot["mapping_json"], "reference_field": "other"},
         }
+    elif change == "rule":
+        # Evidence evaluated under an earlier reconciliation rule cannot certify a period under this one
+        # (release review R1, 2026-10-26: the whole-period reuse never re-evaluated its findings).
+        second.config_snapshot = {**second.config_snapshot, "reconciliation_rule_version": 3}
+    elif change == "rule_missing":
+        # A run from before the rule version was stamped.
+        second.config_snapshot = {k: v for k, v in second.config_snapshot.items() if k != "reconciliation_rule_version"}
     elif change in {"account", "entity", "connection", "contract", "discovery"}:
         key, value = {
             "account": ("netsuite_account_id", "other"),

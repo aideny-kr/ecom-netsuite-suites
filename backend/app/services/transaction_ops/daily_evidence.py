@@ -52,6 +52,10 @@ def compatible_scope(root):
         r.config_snapshot["mapping_json"] == snapshot.get("mapping_json", {}),
         func.coalesce(r.config_snapshot["evidence_contract_version"].astext, "1")
         == str(snapshot.get("evidence_contract_version", 1)),
+        # Findings evaluated under other reconciliation rules cannot certify a period under these; a run
+        # from before the version was stamped never matches a stamped one (release review R1, 2026-10-26).
+        func.coalesce(r.config_snapshot["reconciliation_rule_version"].astext, "0")
+        == str(snapshot.get("reconciliation_rule_version", 0)),
         func.coalesce(r.params_json["window_basis"].astext, "updated_at") == observation_basis(root),
     ]
     for key in (

@@ -207,3 +207,16 @@ async def test_prefetch_only_prepared_scope_does_not_send_remaining_candidates(a
     adapter.progress["pending_refs"] = [foreign]
     assert await adapter.order(foreign) is None
     assert staged.bulk.read_orders.await_count == 1
+
+
+@pytest.mark.parametrize("spare", [-1, 0])
+async def test_a_refund_batch_leaves_exactly_the_single_refund_reads_reservation(adapter, spare):
+    """Release review R3 (2026-10-26): the batch must leave what the runner reserves for its single
+    refund read afterwards (MAX_REFUND_CALLS + 3), derived from that constant, not a literal that
+    fell one call short when the refund read grew for tagged credits (C09)."""
+    from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS
+
+    adapter.run.max_api_calls = staged.bulk.MAX_CALLS + 3 + MAX_REFUND_CALLS + 3 + spare
+    factory = AsyncMock(return_value={"refunds": {REFS[0]: {"complete": True, "amount": "0"}}})
+    await adapter.get("refunds", REFS[0], "context", factory)
+    assert adapter.reserve.await_count == (0 if spare < 0 else 1)
