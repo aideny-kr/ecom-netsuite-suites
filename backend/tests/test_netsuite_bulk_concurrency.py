@@ -70,7 +70,7 @@ class Wire:
                 }
             elif kind == "period":
                 value = bulk.collection([{"id": "10", "closed": "F", "alllocked": "F"}])
-            elif "customrecord_fw_refund_requests" in sql:
+            elif "customrecord_fw_refund_requests" in sql or "t.otherrefnum" in sql:
                 value = bulk.collection([])
             elif "NextTransactionLink" in sql:
                 frontier = set(re.search(r"l.previousdoc IN \(([^)]+)\)", sql)[1].split(","))
@@ -233,7 +233,8 @@ async def test_authenticated_bulk_order_and_refund_paths_use_seven_without_share
                 assert value["complete"] and value["amount"] == str(i + 1)
                 assert value["record_ids"] == [str(300 + i)]
                 assert value["api_calls"] == 1
-            assert meter.calls == refunds["api_calls"] == (11 if failure == "429" else 14)
+            # One shared read of the orders' tagged refund credits (C09) joins the batch.
+            assert meter.calls == refunds["api_calls"] == (12 if failure == "429" else 15)
         assert wire.active == 0 and wire.peak == 7
         assert db.execute.await_count == 2
         connection.tenant_id = CONNECTION  # Another tenant cannot authorize a new batch.

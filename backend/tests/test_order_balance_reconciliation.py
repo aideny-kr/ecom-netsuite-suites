@@ -284,3 +284,27 @@ def test_credits_on_an_invoice_that_differs_from_the_sales_order_never_explain_i
 def test_credits_on_an_invoice_whose_tax_differs_from_the_sales_order_never_explain_it():
     source, target, config, refunds = credited(evidence(), "115.18", [("4.82", "0")], invoiced=("120.00", "19.00"))
     assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
+
+
+def test_a_refund_difference_left_by_an_open_return_authorization_says_so():
+    """C09 (2026-10-25): the NetSuite read leaves out a hand-booked refund credit whose return
+    authorization is still open, so the order is not matched while the authorization could pay the
+    customer again. The difference names the open authorization for the reviewer to close."""
+    source, target, config, refunds = evidence()
+    refunds["source"]["amount"] = "200.00"
+    refunds["target"].update(
+        tagged_credits=[],
+        tagged_credits_rejected=[
+            {"id": "1003", "reason": "return_authorization_open", "return_authorization_id": "1002"},
+            {"id": "1008", "reason": "customer_differs", "return_authorization_id": "1009"},
+            {"id": "1010", "reason": "return_authorization_open", "return_authorization_id": "RA1"},
+        ],
+    )
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "difference"
+    assert result["reason"] == "return_authorization_open_after_manual_refund"
+    assert result["open_return_authorizations"] == ["1002"]
+    assert result["amounts"]["refunds"] == {"source": "200.00", "target": "0.00", "delta": "200.00"}
+    refunds["target"]["tagged_credits_rejected"] = refunds["target"]["tagged_credits_rejected"][1:2]
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["reason"] == "amounts_differ" and "open_return_authorizations" not in result

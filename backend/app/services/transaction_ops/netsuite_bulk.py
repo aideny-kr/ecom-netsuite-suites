@@ -19,10 +19,17 @@ from app.services.transaction_ops.netsuite_reader import (
     _id,
     authenticated_reader,
 )
-from app.services.transaction_ops.netsuite_refund_requests import read_request_links, request_query
+from app.services.transaction_ops.netsuite_refund_requests import (
+    read_request_links,
+    read_tagged_credits,
+    request_query,
+    tagged_credit_query,
+)
 from app.services.transaction_ops.netsuite_refunds import _PARENTS, MAX_DEPTH, _query, collect_refunds
 
 MAX_ORDERS = 10
+# The reader allows at most 32. A refund batch spends one on its tagged-credit read (C09); an order
+# the rest cannot cover returns None and falls back to its own single read.
 MAX_CALLS = 32
 MAX_CONCURRENT_CALLS = 7  # Per authenticated bulk collection, not the account's other integrations.
 MAX_ROWS = 1000
@@ -124,8 +131,9 @@ class RefundGraphBatch:
     custom reverse-ownership checks remain fresh native queries.
     """
 
-    def __init__(self, reader, requests, edges, scanned):
+    def __init__(self, reader, requests, edges, scanned, tagged=()):
         self.reader, self.requests, self.edges, self.scanned = reader, requests, edges, scanned
+        self.tagged = list(tagged)
 
     @classmethod
     async def collect(cls, reader, orders):
@@ -143,9 +151,16 @@ class RefundGraphBatch:
         )
         if any(str(row.get("order_id")) not in roots and row.get("order_reference") not in refs for row in requests):
             raise NetSuiteEvidenceError("invalid_bulk_request_scope")
-        frontier = roots | {
-            _id(row.get(key)) for row in requests for key in ("credit_id", "deposit_id") if _id(row.get(key))
-        }
+        # Every order's hand-booked, tagged refund credits in one read; each order's own
+        # verifier decides which are its (netsuite_refunds._attribute_tagged).
+        tagged = await query(reader, tagged_credit_query(ids, literals))
+        if any(str(row.get("order_id")) not in roots or row.get("credit_reference") not in refs for row in tagged):
+            raise NetSuiteEvidenceError("invalid_bulk_tagged_scope")
+        frontier = (
+            roots
+            | {_id(row.get(key)) for row in requests for key in ("credit_id", "deposit_id") if _id(row.get(key))}
+            | {_id(row.get("id")) for row in tagged if _id(row.get("id"))}
+        )
         scanned, edges = set(), []
         # Follow the same native relationship types as collect_refunds. A larger
         # union cannot erase shared ownership; every touching edge is retained.
@@ -170,16 +185,16 @@ class RefundGraphBatch:
             } - scanned
             if len(edges) > MAX_ROWS or len(scanned) > MAX_ROWS:
                 raise NetSuiteEvidenceError("bulk_graph_budget")
-        return cls(reader, requests, edges, scanned)
+        return cls(reader, requests, edges, scanned, tagged)
 
     def parallel_fits(self, roots, adjustment_profile):
         """Admit only cached native graphs whose worst-case GETs fit the budget.
 
-        Custom links/adjustments or incomplete graphs stay serial, so a scarce
+        Custom links, tagged credits, adjustments or incomplete graphs stay serial, so a scarce
         budget finishes earlier proofs instead of stranding every branch. This
         overcounts touching refunds; it schedules work, never proves ownership.
         """
-        if self.requests or adjustment_profile:
+        if self.requests or self.tagged or adjustment_profile:
             return False
         needed = 0
         for root in roots:
@@ -232,6 +247,25 @@ class RefundGraphBatch:
             return await request(method, path, **kwargs)
 
         return await read_request_links(partition, order_id, subsidiary_id, currency_id, reference)
+
+    async def tagged_credits(self, request, order_id, subsidiary_id, currency_id, reference):
+        initial = tagged_credit_query(order_id, f"'{reference}'")
+        used = False
+
+        async def partition(method, path, **kwargs):
+            nonlocal used
+            if not used and method == "POST" and path == "/query/v1/suiteql" and kwargs.get("body") == {"q": initial}:
+                used = True
+                return collection(
+                    [
+                        row
+                        for row in self.tagged
+                        if str(row.get("order_id")) == order_id and row.get("credit_reference") == reference
+                    ]
+                )
+            return await request(method, path, **kwargs)
+
+        return await read_tagged_credits(partition, order_id, subsidiary_id, currency_id, reference)
 
     async def graph(self, request, frontier):
         if frontier <= self.scanned:
@@ -304,6 +338,7 @@ async def read_refunds(db, tenant_id, connection_id, account_id, subsidiary_id, 
                                 adjustment_profile=adjustment_profile,
                                 request_links_reader=batch.links,
                                 graph_reader=batch.graph,
+                                tagged_reader=batch.tagged_credits,
                             )
                         return ref, {
                             **result,

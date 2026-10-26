@@ -22,10 +22,16 @@ from app.services.transaction_ops.netsuite_reader import (
     _sublist,
     authenticated_reader,
 )
-from app.services.transaction_ops.netsuite_refund_requests import read_request_links, verify_request_allocations
+from app.services.transaction_ops.netsuite_refund_requests import (
+    read_request_links,
+    read_tagged_credits,
+    verify_request_allocations,
+)
 from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile, read_tax_adjustments
 
-MAX_REFUND_CALLS = 26  # +1 for the batched credit-memo ledger read, +1 for the invoice-credit totals read
+# +1 for the batched credit-memo ledger read, +1 for the invoice-credit totals read, +1 for the tagged-credit
+# read and +1 for the reverse request check it makes for an order with no linked request (C09)
+MAX_REFUND_CALLS = 28
 MAX_INVOICE_CREDITS = 10
 # One read returns each credit's header and lines and each invoice's header.
 MAX_INVOICE_CREDIT_ROWS = 200
@@ -44,6 +50,8 @@ _PARENTS = {
     "CashRfnd": {"CashSale", "RtnAuth"},
 }
 _REFUND_TYPES = {"CustRfnd": "customerrefund", "CashRfnd": "cashrefund"}
+# Return authorizations that can produce no further credit or refund: Refunded (G) and Closed (H).
+SETTLED_RETURN_STATUSES = frozenset({"G", "H"})
 
 
 def _dict(value):
@@ -367,6 +375,52 @@ def order_deposits(nodes, reachable, owned, documents):
     return deposits
 
 
+def _ownership(edges, reachable, order_id):
+    """Each document's graph parents, and the documents that resolve to this order alone.
+
+    A shared invoice/deposit/credit cannot assign its whole refund to this order. Ownership
+    requires every relevant upstream document to resolve to this root.
+    """
+    parents = defaultdict(set)
+    for previous, following, before, after in edges:
+        if before in _PARENTS.get(after, set()):
+            parents[following].add(previous)
+    owned = {order_id}
+    for _ in range(MAX_DEPTH):
+        owned.update(node for node in reachable if parents[node] and parents[node] <= owned)
+    return parents, owned
+
+
+def _attribute_tagged(tagged, nodes, reachable, owned, parents, allocations, documents):
+    """Split the tagged credits the native graph did not reach into ``(accepted, rejected)``.
+
+    A credit booked by hand is the order's only through the return authorization it names,
+    which this order must own (C09, 2026-10-25). One that NetSuite also links to a document
+    outside the order is shared, and fails the read as any shared credit does. It must have
+    been created from nothing, from a document of this order, or from the very refund the
+    graph shows paying it. While its authorization is still open, that authorization could
+    pay the customer a second time, so its refund is left out and the order stays in review.
+    """
+    accepted, rejected = [], []
+    for credit in sorted(tagged, key=int):
+        if credit in reachable:
+            continue  # reached natively: the native rules count it, once
+        authorization, origin = tagged[credit]["return_id"], tagged[credit]["created_from"]
+        if authorization not in owned or (nodes.get(authorization) or {}).get("type") != "RtnAuth":
+            reason = "return_authorization_not_in_order"
+        elif not parents[credit] <= owned:
+            raise ValueError("refund_allocation_ambiguous")
+        elif origin is not None and origin not in owned and credit not in allocations.get(origin, ()):
+            reason = "created_from_unproven"
+        elif (documents.get(authorization) or (None, None))[0] not in SETTLED_RETURN_STATUSES:
+            reason = "return_authorization_open"
+        else:
+            accepted.append(credit)
+            continue
+        rejected.append({"id": credit, "reason": reason, "return_authorization_id": authorization})
+    return accepted, rejected
+
+
 async def collect_refunds(
     reader,
     order_id,
@@ -377,6 +431,7 @@ async def collect_refunds(
     adjustment_profile=None,
     request_links_reader=None,
     graph_reader=None,
+    tagged_reader=None,
 ):
     if any(_id(value) is None for value in (order_id, subsidiary_id, currency_id)):
         raise ValueError("invalid_refund_scope")
@@ -392,10 +447,18 @@ async def collect_refunds(
     nodes, request_links, recheck_links = await (request_links_reader or read_request_links)(
         request, order_id, subsidiary_id, currency_id, order_reference
     )
+    tagged, rejected = await (tagged_reader or read_tagged_credits)(
+        request, order_id, subsidiary_id, currency_id, order_reference
+    )
+    # A credit the order's refund requests link is theirs already; its tag adds nothing.
+    tagged = {credit: value for credit, value in tagged.items() if credit not in nodes}
     # Custom ownership is additive. Standard upstream links are still traversed
     # and can veto a conflicting/shared credit; application proof stays native.
-    frontier, visited, reachable = {order_id, *nodes}, set(), {order_id, *nodes}
+    # Tagged credits are read with the order, at no extra call, but join it only
+    # once its graph shows they may (_attribute_tagged).
+    frontier, visited, reachable = {order_id, *nodes, *tagged}, set(), {order_id, *nodes}
     edges = {(order_id, identifier, "SalesOrd", node["type"]) for identifier, node in nodes.items()}
+    nodes.update({credit: dict(value["node"]) for credit, value in tagged.items()})
     allocations = defaultdict(set)
     cash_refunds = set()
     documents = {}
@@ -447,15 +510,21 @@ async def collect_refunds(
     if frontier:
         raise ValueError("refund_graph_depth")
 
-    # A shared invoice/deposit/credit cannot assign its whole refund to this order.
-    # Ownership requires every relevant upstream document to resolve to this root.
-    parents = defaultdict(set)
-    for previous, following, before, after in edges:
-        if before in _PARENTS.get(after, set()):
-            parents[following].add(previous)
-    owned = {order_id}
-    for _ in range(MAX_DEPTH):
-        owned.update(node for node in reachable if parents[node] and parents[node] <= owned)
+    parents, owned = _ownership(edges, reachable, order_id)
+    accepted, held = _attribute_tagged(tagged, nodes, reachable, owned, parents, allocations, documents)
+    if accepted:
+        # Owned through its return authorization, as if NetSuite linked the two.
+        edges.update((tagged[credit]["return_id"], credit, "RtnAuth", "CustCred") for credit in accepted)
+        reachable.update(accepted)
+        if len(reachable) > MAX_DOCUMENTS or len(edges) > MAX_EDGES:
+            raise ValueError("refund_graph_budget")
+        parents, owned = _ownership(edges, reachable, order_id)
+    # A refused credit stays an observed participant, but its refund is not this order's.
+    refused = {entry["id"] for entry in held}
+    for refund in list(allocations):
+        allocations[refund] -= refused
+        if not allocations[refund]:
+            del allocations[refund]
     for identifier in owned:
         metadata = nodes.get(identifier)
         if metadata and (metadata["currency"] != currency_id or metadata["subsidiary"] != subsidiary_id):
@@ -534,14 +603,14 @@ async def collect_refunds(
         taxed = frozenset(profile.tax_accounts) | frozenset(profile.tax_item_accounts.values())
     invoice_credits = await read_invoice_credits(
         request,
-        invoice_credit_candidates(nodes, parents),
+        invoice_credit_candidates({k: v for k, v in nodes.items() if k not in refused}, parents),
         nodes,
         owned,
         currency_id,
         billing=billing_documents(nodes, reachable),
         taxed=taxed,
     )
-    await recheck_links()
+    await recheck_links(accepted)
     request_ids = sorted((link["request_id"] for link in request_links), key=int)
     transaction_ids = [order_id, *sorted(({*nodes, *application_documents} - {order_id}), key=int)]
     dependency_limit = MAX_DEPENDENCIES - len(request_ids)
@@ -553,6 +622,12 @@ async def collect_refunds(
         "tax_adjustments": adjustments,
         "invoice_credits": invoice_credits,
         "credit_refunds": {doc: str(value) for doc, value in sorted(credit_refunds.items(), key=lambda x: int(x[0]))},
+        # Credits booked by hand and tagged with the order (C09): those its graph owns through their
+        # return authorization, and every other one with why it was left out of the amount.
+        "tagged_credits": accepted,
+        "tagged_credits_rejected": sorted(
+            (entry for entry in [*rejected, *held] if entry["id"] not in reachable), key=lambda e: int(e["id"])
+        ),
         # The order's invoices and cash sales and its deposits, from the graph's own rows: what
         # reconciliation needs to settle a canceled order (decided 2026-10-22).
         "billing_ids": billing_documents(nodes, reachable),

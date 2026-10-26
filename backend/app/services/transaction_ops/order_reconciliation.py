@@ -8,7 +8,7 @@ import re
 from decimal import Decimal, DecimalException, localcontext
 
 from app.schemas.transaction_ops import _decimal
-from app.services.transaction_ops.netsuite_reader import _account
+from app.services.transaction_ops.netsuite_reader import _account, _id
 from app.services.transaction_ops.normalization import source_entity_key
 from app.services.transaction_ops.refund_adjustments import verified_tax_adjustments
 from app.services.transaction_ops.service_order_reconciliation import service_order_offset
@@ -80,7 +80,45 @@ def reconcile_order(source_evidence, target_evidence, config, *, refunds=None):
         return exclusion_report(source_evidence)["balance"]
     with localcontext() as context:
         context.prec = 60
-        return _reconcile(source_evidence, target_evidence, config, refunds or {})
+        result = _reconcile(source_evidence, target_evidence, config, refunds or {})
+    return _open_return_authorizations(result, (refunds or {}).get("target"))
+
+
+def _open_return_authorizations(result, evidence):
+    """Name the open return authorization behind a refund difference, when there is one (C09, 2026-10-25).
+
+    The NetSuite read leaves out a hand-booked refund credit whose return authorization is still open,
+    since that authorization could still pay the customer a second time; the refund difference that
+    leaves keeps the order in review. Its reason tells the reviewer the refund is booked and the
+    authorization needs closing. The amounts and status are unchanged.
+    """
+    refunds = result["amounts"]["refunds"]
+    if (
+        result.get("status") != "difference"
+        or refunds.get("delta") is None
+        or _decimal(refunds["delta"]) == 0
+        or not isinstance(evidence, dict)
+        or evidence.get("complete") is not True
+        or evidence.get("order_reference") != result.get("order_reference")
+        or evidence.get("currency") != result.get("currency")
+        or not isinstance(evidence.get("tagged_credits_rejected"), list)
+    ):
+        return result
+    open_authorizations = sorted(
+        {
+            authorization
+            for entry in evidence["tagged_credits_rejected"]
+            if isinstance(entry, dict)
+            and entry.get("reason") == "return_authorization_open"
+            and (authorization := _id(entry.get("return_authorization_id")))
+        },
+        key=int,
+    )
+    if open_authorizations:
+        result.update(
+            reason="return_authorization_open_after_manual_refund", open_return_authorizations=open_authorizations
+        )
+    return result
 
 
 def _reconcile(source_evidence, target_evidence, config, refunds):

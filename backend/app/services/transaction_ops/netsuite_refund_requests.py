@@ -1,6 +1,7 @@
-"""Framework refund-request links supplement (never replace) native payment proof."""
+"""Framework refund-request links and order-tagged credits supplement (never replace) native payment proof."""
 
 import re
+from collections import defaultdict
 
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops.netsuite_reader import _collection, _id
@@ -160,13 +161,16 @@ async def read_request_links(request, order_id, subsidiary_id, currency_id, refe
             }
         )
 
-    async def recheck():
+    async def recheck(tagged=()):
         # A second bounded lookup catches shared custom ownership and links changing
         # between reads. Never assign a shared credit based on the requested row alone.
-        if credits or refunds or deposits:
+        # A credit attributed by its order tag (read_tagged_credits) is checked the same
+        # way: no other order's refund request may link it.
+        claimed = credits | set(tagged)
+        if claimed or refunds or deposits:
             conditions = []
-            if credits:
-                conditions.append(f"r.custrecord_refreq_cm_link IN ({','.join(sorted(credits, key=int))})")
+            if claimed:
+                conditions.append(f"r.custrecord_refreq_cm_link IN ({','.join(sorted(claimed, key=int))})")
             if refunds:
                 conditions.append(f"r.custrecord_refreq_refund_link IN ({','.join(sorted(refunds, key=int))})")
             if deposits:
@@ -179,6 +183,112 @@ async def read_request_links(request, order_id, subsidiary_id, currency_id, refe
                 raise ValueError("refund_request_shared_or_changed")
 
     return nodes, links, recheck
+
+
+# A refund credit booked by hand (C09, 2026-10-25): a credit memo created from its own customer
+# refund, tagged with the order reference and naming the return authorization in otherrefnum.
+# Nothing links it to the sales order, so only the tag finds it.
+MAX_TAGGED_CREDITS = 10
+# A credit's row repeats once per return authorization sharing the number it names.
+MAX_TAGGED_ROWS = 2 * MAX_TAGGED_CREDITS
+_CREDIT_FIELDS = (
+    "id",
+    "type",
+    "currency",
+    "subsidiary",
+    "posting",
+    "voided",
+    "credit_reference",
+    "credit_customer",
+    "order_id",
+    "order_customer",
+    "created_from",
+    "return_number",
+)
+
+
+def tagged_credit_query(order_ids, references):
+    # Composed only from validated record ids and quoted references (read_tagged_credits and
+    # netsuite_bulk.RefundGraphBatch). The node columns are exactly netsuite_refunds._query's,
+    # so the graph re-reading the credit finds the same values.
+    return (
+        "SELECT t.id, t.type, t.currency, tl.subsidiary, t.posting, t.voided, "
+        "t.custbody_fw_order_number AS credit_reference, t.entity AS credit_customer, "
+        "so.id AS order_id, so.entity AS order_customer, tl.createdfrom AS created_from, "
+        "t.otherrefnum AS return_number, ra.id AS return_id, ra.entity AS return_customer "
+        "FROM transaction t JOIN transactionline tl ON tl.transaction=t.id AND tl.mainline='T' "
+        f"JOIN transaction so ON so.id IN ({order_ids}) AND so.entity=t.entity "
+        "LEFT JOIN transaction ra ON ra.tranid=t.otherrefnum AND ra.type='RtnAuth' "
+        f"WHERE t.type='CustCred' AND t.custbody_fw_order_number IN ({references}) "
+        "ORDER BY so.id, t.id, ra.id"
+    )
+
+
+async def read_tagged_credits(request, order_id, subsidiary_id, currency_id, reference):
+    """The order's tagged credits: ``(candidates, rejected)``.
+
+    The tag is typed by a person, so it never makes a credit the order's on its own. A
+    candidate is a posted credit of the order's customer, subsidiary and currency that names
+    exactly one return authorization of that customer; collect_refunds attributes it only
+    when the order's own graph owns that authorization. Every other tagged credit is
+    reported in ``rejected`` with why, and its refund stays out of the order's amount.
+    """
+    if not isinstance(reference, str) or not _REFERENCE.fullmatch(reference) or not _id(order_id):
+        raise ValueError("invalid_refund_reference")
+    result = await request(
+        "POST",
+        "/query/v1/suiteql",
+        params={"limit": MAX_TAGGED_ROWS + 1},
+        body={"q": tagged_credit_query(order_id, f"'{reference}'")},
+    )
+    rows, complete = _collection(result)
+    if not complete or len(rows) > MAX_TAGGED_ROWS:
+        raise ValueError("refund_tagged_credits_incomplete")
+    grouped = defaultdict(list)
+    for row in rows:
+        credit = _id(row.get("id"))
+        if not credit or _id(row.get("order_id")) != order_id or row.get("credit_reference") != reference:
+            raise ValueError("refund_tagged_credit_identity_unproven")
+        grouped[credit].append(row)
+    if len(grouped) > MAX_TAGGED_CREDITS:
+        raise ValueError("refund_tagged_credits_budget")
+    candidates, rejected = {}, []
+    for credit in sorted(grouped, key=int):
+        group = grouped[credit]
+        header = {key: group[0].get(key) for key in _CREDIT_FIELDS}
+        origin = _id(header["created_from"])
+        returns = [_id(row.get("return_id")) for row in group if row.get("return_id") is not None]
+        if (
+            any({key: row.get(key) for key in _CREDIT_FIELDS} != header for row in group)
+            or (header["created_from"] is not None and not origin)
+            or not all(returns)
+        ):
+            raise ValueError("refund_tagged_credit_identity_unproven")
+        customer = _id(header["credit_customer"])
+        return_id = returns[0] if len(returns) == 1 else None
+        reason = (
+            "customer_differs"
+            if not customer or customer != _id(header["order_customer"])
+            else "credit_scope_differs"
+            if (header["type"], header["currency"], header["subsidiary"], header["posting"], header["voided"])
+            != ("CustCred", currency_id, subsidiary_id, "T", "F")
+            else "return_authorization_unnamed"
+            if not returns
+            else "return_authorization_ambiguous"
+            if return_id is None
+            else "return_authorization_customer_differs"
+            if _id(group[0].get("return_customer")) != customer
+            else None
+        )
+        if reason:
+            rejected.append({"id": credit, "reason": reason, "return_authorization_id": return_id})
+            continue
+        candidates[credit] = {
+            "node": {key: header[key] for key in ("type", "currency", "subsidiary", "posting", "voided")},
+            "return_id": return_id,
+            "created_from": origin,
+        }
+    return candidates, rejected
 
 
 def verify_request_allocations(links, allocations, amounts):
