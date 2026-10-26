@@ -248,6 +248,46 @@ async def test_absent_tax_values_remain_absent_not_zero(context):
     assert result["orders"][0]["tax_details"] is None
 
 
+def zero_tax_order(native):
+    """A tax-free order on production wire types: the SuiteQL id and amounts are JSON numbers,
+    the record API id is a string and its header has no taxTotal key (class C24)."""
+    from tests.test_recon_native_zero_tax import evidence
+
+    identity = lookup([{"id": 900401, "type": "SalesOrd", "order_reference": "R900000401", **native}])
+    body = record(id="900401", tranId="R900000401", currency={"id": "1", "refName": "USD"}, subtotal=500, total=500)
+    body.pop("taxTotal")
+    source, _, config, refunds = evidence()
+    config.update(
+        subsidiary_id=SUBSIDIARY, mapping_json={"business_entity_subsidiaries": {"Framework Inc": SUBSIDIARY}}
+    )
+    return identity, body, source, config, refunds
+
+
+async def test_identity_row_tax_reaches_the_order_evidence_and_proves_the_zero(context):
+    from app.services.transaction_ops.order_reconciliation import reconcile_order
+
+    identity, body, source, config, refunds = zero_tax_order({"native_taxtotal": 0, "native_total": 500})
+    usd = {"id": "1", "symbol": "USD", "currencyPrecision": 2}
+    result, requests = await read(context, [identity, body], order_reference="R900000401", currency_response=usd)
+    query = json.loads(requests[0].content)["q"]
+    assert "t.taxtotal AS native_taxtotal" in query and "t.foreigntotal AS native_total" in query
+    assert result["api_calls"] == 4  # the same calls as before: the columns ride the identity query
+    assert result["orders"][0]["native_header"] == {"id": "900401", "taxtotal": "0", "total": "500"}
+    balance = reconcile_order(source, result, config, refunds=refunds)
+    assert balance["status"] == "matched" and balance["target_tax_basis"] == "native_taxtotal"
+
+
+async def test_a_null_native_tax_column_dropped_by_suiteql_leaves_tax_missing(context):
+    from app.services.transaction_ops.order_reconciliation import reconcile_order
+
+    identity, body, source, config, refunds = zero_tax_order({"native_total": 500})
+    usd = {"id": "1", "symbol": "USD", "currencyPrecision": 2}
+    result, _ = await read(context, [identity, body], order_reference="R900000401", currency_response=usd)
+    assert result["orders"][0]["native_header"] == {"id": "900401", "total": "500"}
+    balance = reconcile_order(source, result, config, refunds=refunds)
+    assert balance["status"] == "incomplete" and balance["missing_metrics"] == ["tax"]
+
+
 @pytest.mark.parametrize(
     "response",
     [

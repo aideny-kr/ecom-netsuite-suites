@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from app.services.transaction_ops.call_meter import observed_calls
 from app.services.transaction_ops.netsuite_reader import (
+    NATIVE_IDENTITY_SELECT,
     REFUND_QUERY_READ_TIMEOUT_SECONDS,
     NetSuiteEvidenceError,
     _account,
@@ -78,10 +79,12 @@ async def collect_orders(reader, refs, reference_field, subsidiary_id):
     if not _id(subsidiary_id) or not isinstance(reference_field, str) or not _FIELD.fullmatch(reference_field):
         raise NetSuiteEvidenceError("invalid_bulk_scope")
     literals = ",".join(f"'{ref}'" for ref in refs)
+    # The native totals ride the identity row into the shared read_matches, exactly as the
+    # single reader selects them; they never replace a record API amount.
     rows = await query(
         reader,
         (
-            f"SELECT t.id,t.tranid,t.type,t.{reference_field} AS order_reference "
+            f"SELECT t.id,t.tranid,t.type,t.{reference_field} AS order_reference,{NATIVE_IDENTITY_SELECT} "
             f"FROM transaction t WHERE t.type='SalesOrd' AND t.{reference_field} IN ({literals}) ORDER BY t.id"
         ),
         2 * MAX_ORDERS + 1,
