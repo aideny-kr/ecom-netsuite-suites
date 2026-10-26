@@ -6,6 +6,7 @@ the cursor is committed before reads and after each persisted observation.
 """
 
 import asyncio
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import UUID
@@ -344,6 +345,21 @@ def limit_report(report, *, now):
             # cannot turn this incomplete finding into an actionable comparison.
             summary["refund_dependency_evidence"] = dependencies
         return _bounded_json(summary)
+
+
+# The app's own refund-read error codes are snake_case tokens (refund_allocation_ambiguous,
+# refund_graph_budget, ...). Anything else may be provider free text and is never stored.
+_ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{2,80}")
+
+
+def _unreadable_refund_error(exc):
+    """Why the NetSuite refund read failed, kept with the evidence (2026-10-26: 18 orders stayed
+    'not verified' with no way to tell why). Only the exception type and an app error code."""
+    message = str(exc.args[0]) if isinstance(exc, ValueError) and exc.args else ""
+    return {
+        "error": message if _ERROR_CODE.fullmatch(message) else None,
+        "error_type": type(exc).__name__,
+    }
 
 
 async def run_investigation(
@@ -1618,8 +1634,12 @@ async def run_investigation(
                         )
                     except (state_service.StateError, FeatureRevokedError, ReadBudgetExhaustedError, TimeoutError):
                         raise
-                    except Exception:
-                        refunds["target"] = {"complete": False, "reason": "target_refunds_unavailable"}
+                    except Exception as exc:
+                        refunds["target"] = {
+                            "complete": False,
+                            "reason": "target_refunds_unavailable",
+                            **_unreadable_refund_error(exc),
+                        }
                 report["balance"] = reconcile_order(source, targets, config, refunds=refunds)
                 report["refund_evidence"] = refunds
                 report = limit_report(report, now=clock())

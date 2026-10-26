@@ -818,3 +818,49 @@ async def test_a_retry_is_paid_by_its_own_reservation_not_again_by_the_first_hol
     assert ("reserve", 10, 0) in state.events
     assert ("settle", 10, 6) in state.events
     assert state.run.progress_json["metered_calls"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (
+            ValueError("refund_allocation_ambiguous"),
+            {"error": "refund_allocation_ambiguous", "error_type": "ValueError"},
+        ),
+        (ValueError("private upstream information"), {"error": None, "error_type": "ValueError"}),
+        (KeyError("apply"), {"error": None, "error_type": "KeyError"}),
+    ],
+)
+async def test_an_unreadable_netsuite_refund_names_its_error_code_never_its_text(failure, expected):
+    """2026-10-26: 18 orders of the 10/1-10/11 slice stayed 'not verified' on a fresh read because every
+    failure of the NetSuite refund read was recorded as target_refunds_unavailable and nothing else. The
+    app's own error code (a snake_case token) is kept with the evidence; free text never is."""
+    from tests.test_transaction_balance_report import evidence
+
+    state = State()
+    source, target, config, _, _ = evidence()
+    state.run.config_snapshot.update(config)
+    state.run.config_snapshot["mapping_json"]["solidus_refund_step_id"] = str(uuid4())
+    target["orders"][0]["header"].update(total="120.00", taxTotal="20.00")
+    refund = {"order_reference": REF, "currency": "USD", "complete": True, "amount": "100.00"}
+    await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _clock=lambda: NOW,
+        _enabled=AsyncMock(return_value=True),
+        _source_reader=AsyncMock(return_value=source),
+        _target_reader=AsyncMock(return_value=target),
+        _source_refunds_reader=AsyncMock(return_value=refund),
+        _target_refunds_reader=AsyncMock(side_effect=failure),
+    )
+    report = state.reports[REF]
+    assert report["balance"]["status"] == "incomplete"
+    assert report["refund_evidence"]["target"] == {
+        "complete": False,
+        "reason": "target_refunds_unavailable",
+        **expected,
+    }
+    assert "private upstream" not in str(report)
