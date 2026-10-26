@@ -37,7 +37,12 @@ from app.services.chat.mutation_guard import (
 from app.services.deploy_service import check_deploy_prerequisites
 from app.services.runner_service import _validate_sandbox_target
 from app.services.workspace.snapshot import snapshot_hash
-from app.services.workspace.trusted_sdf_project import PROJECT_FORMAT, TrustedProjectError, build_reviewed_project
+from app.services.workspace.trusted_sdf_project import (
+    PROJECT_FORMAT,
+    TestPathProjectError,
+    TrustedProjectError,
+    build_ready_reviewed_project,
+)
 
 
 def _token_fingerprint(token: str) -> str:
@@ -326,24 +331,19 @@ def require_project_readiness(snapshot: dict[str, Any], gates: dict[str, Any]) -
     CustomScripts paths, spaces, objects and deletes remain unsupported by v1.
     No source bytes, raw path or filesystem/SDK execution enters this receipt.
     """
-    for path in snapshot["files"]:
-        if path.startswith(("SuiteScripts/", "FileCabinet/SuiteScripts/")):
-            parts = path.lower().split("/")
-            if any(part in {"test", "tests", "__tests__", "__mocks__", "__snapshots__"} for part in parts) or parts[
-                -1
-            ].endswith((".test.js", ".spec.js")):
-                raise DeployGateNotMetError(
-                    "Move test inputs outside the deployed script tree before previewing",
-                    {**gates, "project": {"status": "blocked", "reason": "test_path_in_script_tree"}},
-                )
     try:
-        project = build_reviewed_project(
+        project = build_ready_reviewed_project(
             files=snapshot["files"],
             manifest=snapshot["manifest"],
             expected_snapshot_sha=snapshot["snapshot_sha"],
             expected_manifest_sha=snapshot["manifest_sha"],
             project_format=PROJECT_FORMAT,
         )
+    except TestPathProjectError as exc:
+        raise DeployGateNotMetError(
+            "Move test inputs outside the deployed script tree before previewing",
+            {**gates, "project": {"status": "blocked", "reason": "test_path_in_script_tree"}},
+        ) from exc
     except TrustedProjectError as exc:
         raise DeployGateNotMetError(
             "Requires a supported file-only SDF project with changed script files; "

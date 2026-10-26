@@ -274,3 +274,219 @@ async def test_timeout_or_cancellation_terminates_descendants(tmp_path, cancel):
         await asyncio.sleep(0.01)
     else:
         pytest.fail(f"SDK descendant {pid} survived cleanup")
+
+
+@pytest.fixture
+def reviewed_inputs():
+    from app.services.workspace.snapshot import snapshot_hash
+
+    files = {"SuiteScripts/exact.js": b"// exact\r\n", "tests/private.js": b"local-only"}
+    manifest = [
+        {
+            "path": path,
+            "operation": "create" if path.startswith("SuiteScripts/") else "unchanged",
+            "content_sha": hashlib.sha256(content).hexdigest(),
+            "apply_order": index,
+        }
+        for index, (path, content) in enumerate(files.items())
+    ]
+    return dict(
+        files=files,
+        manifest=manifest,
+        expected_snapshot_sha=snapshot_hash(files),
+        expected_manifest_sha=hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        project_format="suite-studio-files-v1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_server_validation_binds_exact_generated_bytes_and_filters_sdk_output(
+    runtime, private_key, monkeypatch, reviewed_inputs
+):
+    from app.services.workspace.snapshot import materialized_snapshot_hash
+
+    seen = {}
+
+    async def invoke(cmd, *, cwd, env, timeout):
+        if "authenticateci" in cmd:
+            return response()
+        seen["project"] = Path(cmd[cmd.index("-project") + 1])
+        assert cmd[cmd.index("-jar") + 2 :] == [
+            "validate",
+            "-authid",
+            seen["auth_id"],
+            "-project",
+            str(seen["project"]),
+            "-server",
+            "-accountspecificvalues",
+            "ERROR",
+        ]
+        root = seen["project"]
+        assert cwd != root and cwd == seen["home"]
+        assert (root / "FileCabinet/SuiteScripts/exact.js").read_bytes() == b"// exact\r\n"
+        assert not (root / "tests").exists()
+        assert not list(root.rglob("*.pem")) and not (root / "package.json").exists()
+        seen["sha"] = materialized_snapshot_hash(str(root))
+        assert env["HOME"] == str(cwd) and timeout == 90
+        return b'{"status":"SUCCESS","resultMessage":"private token","data":{"private":"label"}}'
+
+    monkeypatch.setattr(sdk, "_run_process", invoke)
+    async with sdk.IsolatedSdkSession(**runtime) as session:
+        seen.update(auth_id=session.auth_id, home=session.root)
+        identity = await session.authenticate(
+            account_id="1234567_SB1", role_id="1234", certificate_id="synthetic-cert", private_key=private_key
+        )
+        receipt = await session.validate_project(expected_identity=identity, **reviewed_inputs)
+        assert receipt.identity == identity
+        assert receipt.source_snapshot_sha == reviewed_inputs["expected_snapshot_sha"]
+        assert receipt.source_manifest_sha == reviewed_inputs["expected_manifest_sha"]
+        assert receipt.project_sha == seen["sha"]
+        assert receipt.project_format == "suite-studio-files-v1"
+        assert len(receipt.sdk_output_sha256) == 64
+        assert "private token" not in repr(receipt) and "label" not in repr(receipt)
+        assert not seen["project"].exists()
+        with pytest.raises(sdk.SdkAuthError, match="already attempted"):
+            await session.validate_project(expected_identity=identity, **reviewed_inputs)
+    assert not seen["home"].exists()
+
+
+@pytest.mark.asyncio
+async def test_validation_requires_successful_session_authentication(runtime, monkeypatch, reviewed_inputs):
+    process = AsyncMock()
+    monkeypatch.setattr(sdk, "_run_process", process)
+    async with sdk.IsolatedSdkSession(**runtime) as session:
+        with pytest.raises(sdk.SdkAuthError, match="verified authentication"):
+            await session.validate_project(
+                expected_identity=sdk.VerifiedIdentity("1234567-sb1", "1234", "cert", "a" * 64), **reviewed_inputs
+            )
+    process.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    ["wrong_identity", "bad_hash", "test_path", "unknown_format", "json_error", "timeout", "tamper", "cancel"],
+)
+async def test_validation_failure_never_returns_receipt_or_replays(
+    runtime, private_key, monkeypatch, reviewed_inputs, failure
+):
+    from dataclasses import replace
+
+    calls = []
+
+    async def invoke(cmd, *, cwd, env, timeout):
+        calls.append(cmd)
+        if "authenticateci" in cmd:
+            return response()
+        root = Path(cmd[cmd.index("-project") + 1])
+        calls.append(root)
+        if failure == "json_error":
+            return b'{"status":"ERROR","errorMessages":["private token"]}'
+        if failure == "timeout":
+            raise TimeoutError()
+        if failure == "cancel":
+            raise asyncio.CancelledError()
+        if failure == "tamper":
+            (root / "FileCabinet/SuiteScripts/exact.js").write_bytes(b"changed")
+        return b'{"status":"SUCCESS"}'
+
+    monkeypatch.setattr(sdk, "_run_process", invoke)
+    async with sdk.IsolatedSdkSession(**runtime) as session:
+        identity = await session.authenticate(
+            account_id="1234567_SB1", role_id="1234", certificate_id="synthetic-cert", private_key=private_key
+        )
+        if failure == "wrong_identity":
+            identity = replace(identity, role_id="9")
+        if failure == "bad_hash":
+            reviewed_inputs["expected_snapshot_sha"] = "0" * 64
+        if failure == "test_path":
+            reviewed_inputs["files"]["SuiteScripts/exact.test.js"] = reviewed_inputs["files"].pop(
+                "SuiteScripts/exact.js"
+            )
+        if failure == "unknown_format":
+            reviewed_inputs["project_format"] = "unknown"
+        error = asyncio.CancelledError if failure == "cancel" else sdk.SdkAuthError
+        with pytest.raises(error) as caught:
+            await session.validate_project(expected_identity=identity, **reviewed_inputs)
+        assert "private token" not in str(caught.value)
+        with pytest.raises(sdk.SdkAuthError, match="already attempted"):
+            await session.validate_project(expected_identity=identity, **reviewed_inputs)
+        assert sum(isinstance(c, list) and "validate" in c for c in calls) == (
+            failure in {"json_error", "timeout", "tamper", "cancel"}
+        )
+        for c in calls:
+            if isinstance(c, Path):
+                assert not c.exists()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_validation_has_one_process_and_no_receipt_after_cancel(
+    runtime, private_key, monkeypatch, reviewed_inputs
+):
+    started, release = asyncio.Event(), asyncio.Event()
+    roots = []
+
+    async def invoke(cmd, **kwargs):
+        if "authenticateci" in cmd:
+            return response()
+        roots.append(Path(cmd[cmd.index("-project") + 1]))
+        started.set()
+        await release.wait()
+        return b'{"status":"SUCCESS"}'
+
+    monkeypatch.setattr(sdk, "_run_process", invoke)
+    async with sdk.IsolatedSdkSession(**runtime) as session:
+        identity = await session.authenticate(
+            account_id="1234567_SB1", role_id="1234", certificate_id="synthetic-cert", private_key=private_key
+        )
+        first = asyncio.create_task(session.validate_project(expected_identity=identity, **reviewed_inputs))
+        await asyncio.wait_for(started.wait(), 3)
+        with pytest.raises(sdk.SdkAuthError, match="already attempted"):
+            await session.validate_project(expected_identity=identity, **reviewed_inputs)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert len(roots) == 1 and not roots[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_filesystem_allocation_settles_and_removes_root(
+    runtime, private_key, monkeypatch, reviewed_inputs
+):
+    import threading
+    from contextlib import contextmanager
+
+    started, release = threading.Event(), threading.Event()
+    original = sdk.materialize_project
+    roots = []
+
+    @contextmanager
+    def delayed(project):
+        with original(project) as root:
+            roots.append(root)
+            started.set()
+            assert release.wait(3)
+            yield root
+
+    process = AsyncMock(return_value=response())
+    monkeypatch.setattr(sdk, "materialize_project", delayed)
+    monkeypatch.setattr(sdk, "_run_process", process)
+    async with sdk.IsolatedSdkSession(**runtime) as session:
+        identity = await session.authenticate(
+            account_id="1234567_SB1", role_id="1234", certificate_id="synthetic-cert", private_key=private_key
+        )
+        work = asyncio.create_task(session.validate_project(expected_identity=identity, **reviewed_inputs))
+        try:
+            assert await asyncio.to_thread(started.wait, 3)
+            work.cancel()
+            await asyncio.sleep(0)
+            work.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await work
+        finally:
+            release.set()
+        process.assert_awaited_once()
+        assert len(roots) == 1 and not roots[0].exists()

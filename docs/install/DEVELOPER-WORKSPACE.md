@@ -23,7 +23,11 @@ synthetic check/dispatch tests are not proof of a supported target deployment.
 The certificate adapter remains unfinished. An internal authentication primitive
 now isolates a digest-pinned SDK, Java home, private key and passkey, and checks
 the returned account and numeric role. It runs without workspace hooks or project
-configuration. It has no production caller or deploy operation; the seeder still
+configuration. A single-use internal server-validation primitive now rebuilds
+the reviewed projection and binds its exact local bytes, full checked identity,
+SDK output digest and verified session identity in a filtered receipt. It uses
+fixed Java SDK arguments, retains no raw diagnostics and rejects uncertain
+results without retry. It has no production caller or deploy operation; the seeder still
 rejects all runs. Offline empty-store and synthetic protocol tests do not prove
 an authorized certificate handshake.
 
@@ -151,8 +155,10 @@ by the versioned builder remain bound to the full snapshot and excluded from
 the projection. An all-unchanged script manifest cannot issue a preview.
 
 The runner signs and checks the version but does not yet execute the generated
-project with the fixed Java SDK operations. Isolated SDK validate/deploy/readback
-and their receipts must be integrated before activation.
+project with the fixed Java SDK operations. The inactive server-validation
+primitive is covered by synthetic protocol tests; it is not a live SDK handshake
+or sandbox validation. Worker integration, deployment and exact-byte remote
+readback receipts remain required before activation.
 The production credential seeder remains closed and all target/network/operator
 acceptance gates above remain open.
 

@@ -7,7 +7,8 @@ binding is enforced separately; it does not activate this primitive.
 
 Use the SDK's integration protocol directly: workspace JavaScript hooks and
 project configuration must never execute in this credential-bearing process.
-This module exposes no validation or deployment operation.
+An inactive, single-use server-validation primitive accepts only a rebuilt
+reviewed projection. Deployment and remote readback remain unimplemented.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import secrets
 import shutil
 import signal
 import tempfile
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +30,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from app.services.workspace.credential_contract import AuthSeederError
+from app.services.workspace.trusted_sdf_project import (
+    TrustedProjectError,
+    build_ready_reviewed_project,
+    materialize_project,
+)
 
 SDK_VERSION = "2026.1.0"
 SDK_SHA256 = "158038cfdc552e1af4b29aea86ff59ba8c0658ec950129339c1fbace4b1ad78b"
@@ -48,6 +55,59 @@ class VerifiedIdentity:
     # the requested credential, not independently introspected certificate data.
     requested_certificate_id: str
     local_public_key_sha256: str
+
+
+@dataclass(frozen=True)
+class SdkValidationReceipt:
+    identity: VerifiedIdentity
+    source_snapshot_sha: str
+    source_manifest_sha: str
+    project_format: str
+    projected_snapshot_sha: str
+    projected_manifest_sha: str
+    project_sha: str
+    sdk_output_sha256: str
+
+
+async def _settle_owned_task(task):
+    """Finish owned filesystem work despite repeated caller cancellation."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            pass
+    return task.result()
+
+
+@asynccontextmanager
+async def _project_directory(project):
+    """Offload filesystem work, settle cleanup, then propagate cancellation."""
+    owner = asyncio.current_task()
+    cancellations_before = owner.cancelling()
+    context = materialize_project(project)
+    allocation = asyncio.create_task(asyncio.to_thread(context.__enter__))
+    try:
+        yield await asyncio.shield(allocation)
+    finally:
+        try:
+            await _settle_owned_task(allocation)
+            cleanup = asyncio.create_task(asyncio.to_thread(context.__exit__, None, None, None))
+            await _settle_owned_task(cleanup)
+        finally:
+            if owner.cancelling() > cancellations_before:
+                raise asyncio.CancelledError()
+
+
+def _verify_project_bytes(root, project):
+    paths = list(root.rglob("*"))
+    if any(path.is_symlink() for path in paths):
+        raise SdkAuthError("SuiteCloud SDK validation changed the generated project")
+    actual = {path.relative_to(root).as_posix(): path for path in paths if path.is_file()}
+    if set(actual) != set(project.files) or any(
+        actual[name].stat().st_size != len(content) or actual[name].read_bytes() != content
+        for name, content in project.files.items()
+    ):
+        raise SdkAuthError("SuiteCloud SDK validation changed the generated project")
 
 
 class _BoundedOutput(asyncio.SubprocessProtocol):
@@ -139,6 +199,8 @@ class IsolatedSdkSession:
         self._entered = False
         self._open = False
         self._attempted = False
+        self._verified_identity: VerifiedIdentity | None = None
+        self._validation_attempted = False
         self._env: dict[str, str] = {}
         self.auth_id = "fw_" + secrets.token_hex(16)
 
@@ -176,6 +238,7 @@ class IsolatedSdkSession:
 
     async def __aexit__(self, *_):
         self._open = False
+        self._verified_identity = None
         self._env.clear()
         shutil.rmtree(self.root)
 
@@ -283,6 +346,78 @@ class IsolatedSdkSession:
                 or actual_role != role_id
             ):
                 raise SdkAuthError("SuiteCloud SDK account or role differs from the authorized identity")
-            return VerifiedIdentity(account, role_id, certificate_id, public_key_sha)
+            self._verified_identity = VerifiedIdentity(account, role_id, certificate_id, public_key_sha)
+            return self._verified_identity
         finally:
             key_file.unlink(missing_ok=True)
+
+    async def validate_project(
+        self,
+        *,
+        expected_identity: VerifiedIdentity,
+        files: dict[str, bytes],
+        manifest: list[dict],
+        expected_snapshot_sha: str,
+        expected_manifest_sha: str,
+        project_format: str,
+    ) -> SdkValidationReceipt:
+        """Inactive fixed server validation; no arbitrary argv, hooks or target.
+
+        A session's successful authentication is required, but is not application
+        authorization. Future integration must still enforce current company,
+        actor, connection, checks, approval and durable exclusive-claim gates.
+        A receipt binds local request bytes and the SDK's success envelope; it
+        does not prove deployment, remote bytes, health or rollback. No retry is
+        allowed, including after an uncertain result or concurrent invocation.
+        """
+        if not self._open:
+            raise SdkAuthError("SuiteCloud SDK session is not open")
+        if self._validation_attempted:
+            raise SdkAuthError("SuiteCloud SDK validation already attempted; reconcile before retry")
+        self._validation_attempted = True
+        if self._verified_identity is None or expected_identity != self._verified_identity:
+            raise SdkAuthError("SuiteCloud SDK validation requires matching verified authentication")
+        identity = self._verified_identity
+        try:
+            project = build_ready_reviewed_project(
+                files=files,
+                manifest=manifest,
+                expected_snapshot_sha=expected_snapshot_sha,
+                expected_manifest_sha=expected_manifest_sha,
+                project_format=project_format,
+            )
+            async with _project_directory(project) as root:
+                cmd = self._command(
+                    "validate",
+                    "-authid",
+                    self.auth_id,
+                    "-project",
+                    str(root),
+                    "-server",
+                    "-accountspecificvalues",
+                    "ERROR",
+                )
+                try:
+                    raw = await _run_process(cmd, cwd=self.root, env=self._env, timeout=90)
+                except TimeoutError:
+                    raise SdkAuthError("SuiteCloud SDK validation timed out; reconcile before retry") from None
+                self._receipt(raw)
+                verification = asyncio.create_task(asyncio.to_thread(_verify_project_bytes, root, project))
+                try:
+                    await asyncio.shield(verification)
+                finally:
+                    await _settle_owned_task(verification)
+                if not self._open or self._verified_identity != identity:
+                    raise SdkAuthError("SuiteCloud SDK validation session is no longer open")
+        except (TrustedProjectError, OSError):
+            raise SdkAuthError("SuiteCloud SDK validation requires an exact supported reviewed project") from None
+        return SdkValidationReceipt(
+            identity=identity,
+            source_snapshot_sha=expected_snapshot_sha,
+            source_manifest_sha=expected_manifest_sha,
+            project_format=project_format,
+            projected_snapshot_sha=project.snapshot_sha,
+            projected_manifest_sha=project.manifest_sha,
+            project_sha=project.project_sha,
+            sdk_output_sha256=hashlib.sha256(raw).hexdigest(),
+        )

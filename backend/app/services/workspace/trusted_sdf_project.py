@@ -40,6 +40,10 @@ class TrustedProjectError(ValueError):
     """Sanitized rejection before a project or credential process is created."""
 
 
+class TestPathProjectError(TrustedProjectError):
+    """A test-looking script path cannot enter a credential operation."""
+
+
 @dataclass(frozen=True)
 class TrustedProject:
     files: Mapping[str, bytes]
@@ -249,6 +253,22 @@ def build_reviewed_project(
         expected_snapshot_sha=snapshot_hash(projected_files),
         expected_manifest_sha=hashlib.sha256(projected_json.encode()).hexdigest(),
     )
+
+
+def build_ready_reviewed_project(**inputs) -> TrustedProject:
+    """Apply current readiness policy without changing versioned v1 projection."""
+    files = inputs.get("files")
+    if type(files) is not dict:
+        _reject()
+    inputs["files"] = files.copy()
+    for path in inputs["files"]:
+        if isinstance(path, str) and path.startswith(("SuiteScripts/", "FileCabinet/SuiteScripts/")):
+            parts = path.lower().split("/")
+            if any(part in {"test", "tests", "__tests__", "__mocks__", "__snapshots__"} for part in parts) or parts[
+                -1
+            ].endswith((".test.js", ".spec.js")):
+                raise TestPathProjectError("Move test inputs outside the deployed script tree before previewing")
+    return build_reviewed_project(**inputs)
 
 
 @contextmanager
