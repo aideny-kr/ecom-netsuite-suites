@@ -233,3 +233,251 @@ async def test_failure_envelopes_never_pass(runtime, failure):
     with pytest.raises(executor.CredentialExecutorError):
         await executor.verify_empty_store(**args)
     assert requests[-1].method == "DELETE"
+
+
+@pytest.fixture
+def validation_inputs():
+    import hashlib
+
+    from app.services.workspace.snapshot import snapshot_hash
+
+    files = {"SuiteScripts/reviewed.js": b"// exact\r\n\x00", "tests/local.js": b"private test input"}
+    manifest = [
+        dict(
+            path=p,
+            operation="create" if p.startswith("SuiteScripts/") else "unchanged",
+            content_sha=hashlib.sha256(b).hexdigest(),
+            apply_order=i,
+        )
+        for i, (p, b) in enumerate(files.items())
+    ]
+    return dict(
+        files=files,
+        manifest=manifest,
+        expected_snapshot_sha=snapshot_hash(files),
+        expected_manifest_sha=hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        project_format="suite-studio-files-v1",
+    )
+
+
+@pytest.fixture
+def receipt_context():
+    import uuid
+
+    return {
+        k: str(uuid.uuid4())
+        for k in ("tenant_id", "workspace_id", "changeset_id", "run_id", "actor_id", "connection_id")
+    }
+
+
+def validation_result(credentials, inputs):
+    from app.services.workspace.suitecloud_sdk import SDK_SHA256, SDK_VERSION, SdkValidationReceipt
+    from app.services.workspace.trusted_sdf_project import build_ready_reviewed_project
+
+    project = build_ready_reviewed_project(**inputs)
+    return asdict(
+        SdkValidationReceipt(
+            executor._identity(**credentials),
+            inputs["expected_snapshot_sha"],
+            inputs["expected_manifest_sha"],
+            inputs["project_format"],
+            project.snapshot_sha,
+            project.manifest_sha,
+            project.project_sha,
+            "e" * 64,
+            SDK_VERSION,
+            SDK_SHA256,
+            True,
+            "ERROR",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_reviewed_validation_transport_and_signed_roundtrip(
+    runtime, credentials, validation_inputs, receipt_context
+):
+    import base64
+
+    from app.services.workspace.sdk_validation_receipt import verify_validation_receipt
+
+    args, requests, attach, _ = runtime
+    result = validation_result(credentials, validation_inputs)
+    attach.return_value = (0, json.dumps(dict(nonce="f" * 64, validation=result)), "")
+    envelope = await executor.validate_project(
+        **credentials,
+        **validation_inputs,
+        context=receipt_context,
+        attempt_nonce="f" * 64,
+        receipt_key=b"k" * 32,
+        **args,
+    )
+    payload = json.loads(attach.call_args.args[1])
+    assert {p: base64.b64decode(b) for p, b in payload["project"]["files"].items()} == validation_inputs["files"]
+    assert payload["nonce"] == "f" * 64
+    assert "receipt_key" not in payload and "context" not in payload and "mac" not in payload
+    spec = json.loads(next(r.content for r in requests if r.method == "POST"))
+    assert not spec["NetworkDisabled"] and spec["HostConfig"]["Mounts"] == []
+    assert "private test input" not in json.dumps(spec) and "PRIVATE KEY" not in json.dumps(spec)
+    assert requests[-1].method == "DELETE"
+    assert "PRIVATE KEY" not in json.dumps(envelope) and "private test input" not in json.dumps(envelope)
+    assert (
+        verify_validation_receipt(
+            envelope=json.loads(json.dumps(envelope)),
+            identity=executor._identity(**credentials),
+            inputs=validation_inputs,
+            context=receipt_context,
+            attempt_nonce="f" * 64,
+            image=args["image"],
+            key=b"k" * 32,
+        )
+        == result
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    [
+        "nonce",
+        "source_snapshot_sha",
+        "source_manifest_sha",
+        "projected_snapshot_sha",
+        "projected_manifest_sha",
+        "project_sha",
+        "sdk_version",
+        "sdk_sha256",
+        "server_validation",
+        "account_specific_values",
+        "identity",
+        "sdk_output_sha256",
+        "extra",
+    ],
+)
+async def test_validation_cannot_certify_wrong_child_result(
+    runtime, credentials, validation_inputs, receipt_context, field
+):
+    args, requests, attach, _ = runtime
+    result = validation_result(credentials, validation_inputs)
+    outer = dict(nonce="f" * 64, validation=result)
+    if field == "nonce":
+        outer[field] = "0" * 64
+    elif field == "server_validation":
+        result[field] = 1
+    else:
+        result[field] = "wrong"
+    attach.return_value = (0, json.dumps(outer), "")
+    with pytest.raises(executor.AuthSeederError):
+        await executor.validate_project(
+            **credentials,
+            **validation_inputs,
+            context=receipt_context,
+            attempt_nonce="f" * 64,
+            receipt_key=b"k" * 32,
+            **args,
+        )
+    assert requests[-1].method == "DELETE" and attach.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["snapshot", "manifest", "format", "files", "entry", "context", "nonce", "key"])
+async def test_invalid_validation_inputs_never_contact_daemon(
+    runtime, credentials, validation_inputs, receipt_context, bad
+):
+    args, requests, attach, _ = runtime
+    params = dict(**validation_inputs, context=receipt_context, attempt_nonce="f" * 64, receipt_key=b"k" * 32)
+    if bad == "snapshot":
+        params["expected_snapshot_sha"] = "0" * 64
+    elif bad == "manifest":
+        params["manifest"][0]["content_sha"] = "0" * 64
+    elif bad == "format":
+        params["project_format"] = "unknown"
+    elif bad == "files":
+        params["files"] = []
+    elif bad == "entry":
+        params["manifest"] = [None]
+    elif bad == "context":
+        params["context"]["tenant_id"] = "not-uuid"
+    elif bad == "nonce":
+        params["attempt_nonce"] = "unsafe"
+    elif bad == "key":
+        params["receipt_key"] = b"weak"
+    with pytest.raises(executor.AuthSeederError):
+        await executor.validate_project(**credentials, **params, **args)
+    assert requests == [] and attach.await_count == 0
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "tenant_id",
+        "workspace_id",
+        "changeset_id",
+        "run_id",
+        "actor_id",
+        "connection_id",
+        "nonce",
+        "image",
+        "key",
+        "tamper",
+        "schema",
+        "extra",
+    ],
+)
+def test_signed_receipt_rejects_cross_context_replay(credentials, validation_inputs, receipt_context, changed):
+    import uuid
+
+    from app.services.workspace.sdk_validation_receipt import seal_validation_receipt, verify_validation_receipt
+
+    params = dict(
+        identity=executor._identity(**credentials),
+        inputs=validation_inputs,
+        context=receipt_context,
+        attempt_nonce="f" * 64,
+        image=IMAGE,
+        key=b"k" * 32,
+    )
+    envelope = seal_validation_receipt(result=validation_result(credentials, validation_inputs), **params)
+    if changed in receipt_context:
+        params["context"] = {**receipt_context, changed: str(uuid.uuid4())}
+    elif changed == "nonce":
+        params["attempt_nonce"] = "a" * 64
+    elif changed == "image":
+        params["image"] = "sha256:" + "b" * 64
+    elif changed == "key":
+        params["key"] = b"z" * 32
+    elif changed == "tamper":
+        envelope["validation"]["sdk_output_sha256"] = "b" * 64
+    elif changed == "schema":
+        envelope["schema"] = "other-v1"
+    else:
+        envelope["extra"] = "untrusted"
+    with pytest.raises(executor.AuthSeederError):
+        verify_validation_receipt(envelope=envelope, **params)
+
+
+@pytest.mark.asyncio
+async def test_caller_edits_during_validation_do_not_change_signed_source(
+    runtime, credentials, validation_inputs, receipt_context
+):
+    args, _, attach, _ = runtime
+    original = validation_result(credentials, validation_inputs)
+
+    async def invoke(*_):
+        validation_inputs["files"].clear()
+        validation_inputs["manifest"][0]["path"] = "evil.js"
+        receipt_context["tenant_id"] = "mutated"
+        return 0, json.dumps(dict(nonce="f" * 64, validation=original)), ""
+
+    attach.side_effect = invoke
+    envelope = await executor.validate_project(
+        **credentials,
+        **validation_inputs,
+        context=receipt_context,
+        attempt_nonce="f" * 64,
+        receipt_key=b"k" * 32,
+        **args,
+    )
+    assert envelope["validation"] == original and envelope["context"]["tenant_id"] != "mutated"

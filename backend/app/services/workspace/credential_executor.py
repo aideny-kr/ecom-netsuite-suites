@@ -1,4 +1,4 @@
-"""Inactive fixed-operation SDK broker; never accepts tenant code or project files.
+"""Inactive fixed-operation SDK broker; tenant file bytes are never executed.
 
 Trusted operator configuration supplies a reviewed immutable image containing
 only Python, Java, cryptography and the pinned SDK module/artifact. Credentials
@@ -10,6 +10,7 @@ caller exists; connection authority and receipt binding remain separate gates.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -26,8 +27,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from app.services.workspace import command_sandbox as broker
 from app.services.workspace.credential_contract import AuthSeederError
 from app.services.workspace.suitecloud_sdk import VerifiedIdentity
+from app.services.workspace.trusted_sdf_project import TrustedProjectError, build_ready_reviewed_project
 
 MAX_INPUT = 32 * 1024
+# Base64 file bytes plus bounded paths/manifest metadata and credentials.
+MAX_VALIDATION_INPUT = 13 * 1024 * 1024
 MAX_RECEIPT = 4096
 TIMEOUT = 120
 
@@ -40,23 +44,45 @@ class CredentialExecutorError(AuthSeederError):
 # path or environment is accepted in the request. Exiting PID 1 tears down all
 # descendants, including detached SDK children, after a killed worker.
 _BOOTSTRAP = r"""
-import asyncio, dataclasses, json, os, signal, sys
+import asyncio, base64, dataclasses, json, os, re, signal, sys
 from pathlib import Path
 signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
 signal.alarm(120)
 sys.path.insert(0, "/opt/suitestudio")
 from app.services.workspace.suitecloud_sdk import IsolatedSdkSession
+from app.services.workspace.trusted_sdf_project import MAX_BYTES, MAX_FILES, build_ready_reviewed_project
 async def execute():
-    raw = sys.stdin.buffer.read(32769)
-    if len(raw) > 32768: raise ValueError()
+    raw = sys.stdin.buffer.read(13631489)
+    if len(raw) > 13631488: raise ValueError()
     request = json.loads(raw)
     if not isinstance(request, dict): raise ValueError()
     op = request.get("operation")
+    if op != "validate_project" and len(raw) > 32768: raise ValueError()
     if op == "verify_empty_store":
         if set(request) != {"operation"}: raise ValueError()
     elif op == "authenticate":
         if set(request) != {"operation", "account_id", "role_id", "certificate_id", "private_key"}: raise ValueError()
         if not all(isinstance(v, str) for v in request.values()): raise ValueError()
+    elif op == "validate_project":
+        if set(request) != {"operation", "account_id", "role_id", "certificate_id", "private_key", "nonce", "project"}:
+            raise ValueError()
+        if not all(isinstance(request[k], str) for k in request if k != "project"): raise ValueError()
+        if not re.fullmatch(r"[a-f0-9]{64}", request["nonce"], re.ASCII): raise ValueError()
+        project = request["project"]
+        if not isinstance(project, dict): raise ValueError()
+        if set(project) != {"files", "manifest", "expected_snapshot_sha", "expected_manifest_sha", "project_format"}:
+            raise ValueError()
+        encoded = project["files"]
+        if not isinstance(encoded, dict) or not 1 <= len(encoded) <= MAX_FILES: raise ValueError()
+        files = {}; total = 0
+        for path, content in encoded.items():
+            if not isinstance(content, str): raise ValueError()
+            decoded = base64.b64decode(content, validate=True)
+            total += len(decoded)
+            if total > MAX_BYTES: raise ValueError()
+            files[path] = decoded
+        project["files"] = files
+        build_ready_reviewed_project(**project)
     else: raise ValueError()
     async with IsolatedSdkSession(sdk_jar=Path("/opt/sdk/cli-2026.1.0.jar"), java=Path("/usr/bin/java")) as session:
         if op == "verify_empty_store":
@@ -64,7 +90,9 @@ async def execute():
             return {"empty_store": True}
         result = await session.authenticate(account_id=request["account_id"], role_id=request["role_id"],
             certificate_id=request["certificate_id"], private_key=request["private_key"].encode("ascii"))
-        return dataclasses.asdict(result)
+        if op == "authenticate": return dataclasses.asdict(result)
+        validation = await session.validate_project(expected_identity=result, **project)
+        return {"nonce": request["nonce"], "validation": dataclasses.asdict(validation)}
 try:
     result = asyncio.run(execute())
     sys.stdout.write(json.dumps(result))
@@ -121,7 +149,8 @@ async def _execute(request: dict, *, image: str, socket: str, docker: str) -> di
     if not Path(socket).is_absolute() or not Path(docker).is_absolute():
         raise CredentialExecutorError("Credential executor runtime configuration is invalid")
     payload = json.dumps(request).encode("utf-8")
-    if len(payload) > MAX_INPUT:
+    limit = MAX_VALIDATION_INPUT if request.get("operation") == "validate_project" else MAX_INPUT
+    if len(payload) > limit:
         raise CredentialExecutorError("Credential executor input exceeds limit")
     lease = uuid.uuid4().hex
     name = "ss-command-" + lease  # Shares the verified versioned broker reaper.
@@ -151,7 +180,7 @@ async def _execute(request: dict, *, image: str, socket: str, docker: str) -> di
             ) from None
         try:
             async with asyncio.timeout(TIMEOUT + 15):
-                spec = _spec(image, online=request["operation"] == "authenticate")
+                spec = _spec(image, online=request["operation"] in {"authenticate", "validate_project"})
                 spec["Labels"] = broker._lease_labels(lease, TIMEOUT)
                 spec["Labels"][broker.LEASE_LABEL + ".purpose"] = "credentials"
                 response = await client.post("/containers/create", params={"name": name}, json=spec)
@@ -253,3 +282,74 @@ async def authenticate(
     if result != asdict(expected):
         raise CredentialExecutorError("Credential executor identity does not match the requested authorization")
     return expected
+
+
+async def validate_project(
+    *,
+    account_id: str,
+    role_id: str,
+    certificate_id: str,
+    private_key: bytes,
+    files: dict[str, bytes],
+    manifest: list[dict],
+    expected_snapshot_sha: str,
+    expected_manifest_sha: str,
+    project_format: str,
+    context: dict,
+    attempt_nonce: str,
+    receipt_key: bytes,
+    image: str,
+    socket: str,
+    docker: str,
+) -> dict:
+    """Fixed authenticate+validate in one disposable namespace; no worker caller.
+
+    Inputs must come from current authorized database state, never a client
+    assertion. The future worker must durably claim the nonce and recheck actor,
+    connection and project authority before and after this operation. This
+    function supplies transport/integrity evidence, not that authorization.
+    No raw SDK diagnostics, credential store or file content leaves the child.
+    """
+    from app.services.workspace.sdk_validation_receipt import require_receipt_inputs, seal_validation_receipt
+
+    context = require_receipt_inputs(context=context, attempt_nonce=attempt_nonce, key=receipt_key)
+    expected = _identity(account_id, role_id, certificate_id, private_key)
+    # Snapshot caller-owned mutable containers before the first await. Rebuild
+    # on both sides of the process boundary and again when accepting evidence.
+    if type(files) is not dict or type(manifest) is not list or any(type(entry) is not dict for entry in manifest):
+        raise CredentialExecutorError("Credential executor requires an exact supported reviewed project")
+    inputs = dict(
+        files=files.copy(),
+        manifest=[entry.copy() for entry in manifest],
+        expected_snapshot_sha=expected_snapshot_sha,
+        expected_manifest_sha=expected_manifest_sha,
+        project_format=project_format,
+    )
+    try:
+        build_ready_reviewed_project(**inputs)
+    except TrustedProjectError:
+        raise CredentialExecutorError("Credential executor requires an exact supported reviewed project") from None
+    request = {
+        "operation": "validate_project",
+        "account_id": expected.account_id,
+        "role_id": role_id,
+        "certificate_id": certificate_id,
+        "private_key": private_key.decode("ascii"),
+        "nonce": attempt_nonce,
+        "project": {
+            **inputs,
+            "files": {path: base64.b64encode(data).decode("ascii") for path, data in inputs["files"].items()},
+        },
+    }
+    result = await _execute(request, image=image, socket=socket, docker=docker)
+    if set(result) != {"nonce", "validation"} or result.get("nonce") != attempt_nonce:
+        raise CredentialExecutorError("Credential executor validation attempt does not match")
+    return seal_validation_receipt(
+        result=result["validation"],
+        identity=expected,
+        inputs=inputs,
+        context=context,
+        attempt_nonce=attempt_nonce,
+        image=image,
+        key=receipt_key,
+    )

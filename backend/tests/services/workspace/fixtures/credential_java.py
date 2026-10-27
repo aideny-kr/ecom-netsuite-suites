@@ -22,12 +22,29 @@ assert "CapEff:\t0000000000000000" in status
 assert "NoNewPrivs:\t1" in status
 if "manageauth" in sys.argv:
     print(json.dumps({"status": "SUCCESS", "data": {}}))
+elif "validate" in sys.argv:
+    root = Path(sys.argv[sys.argv.index("-project") + 1])
+    assert root != Path.cwd() and not (root / "tests").exists()
+    assert (root / "manifest.xml").is_file() and (root / "deploy.xml").is_file()
+    assert (root / "FileCabinet/SuiteScripts/reviewed.js").read_bytes() == b"// exact\r\n\x00"
+    assert not (root / "suitecloud.config.js").exists()
+    assert not (root / "package.json").exists()
+    assert sys.argv[sys.argv.index("-accountspecificvalues") + 1] == "ERROR" and "-server" in sys.argv
+    assert sys.argv[sys.argv.index("-authid") + 1] == Path("fake-verified-auth").read_text()
+    assert not Path("private-key.pem").exists()
+    if Path("fake-validation-hang").exists():
+        Path("/tmp/sdk-validation-ready").write_text("synthetic-only")
+        time.sleep(300)
+    print(json.dumps({"status": "SUCCESS", "data": {"private": "raw sdk detail must be filtered"}}))
 else:
     key = Path(sys.argv[sys.argv.index("-privatekeypath") + 1])
     assert key.parent == Path.cwd() and str(key).startswith("/tmp/suitecloud_sdk_")
     assert stat.S_IMODE(key.stat().st_mode) == 0o600
     assert b"PRIVATE KEY" in key.read_bytes()
     certificate = sys.argv[sys.argv.index("-certificateid") + 1]
+    Path("fake-verified-auth").write_text(sys.argv[sys.argv.index("-authid") + 1])
+    if certificate == "synthetic-validation-hang":
+        Path("fake-validation-hang").touch()
     if certificate == "synthetic-hang":
         subprocess.Popen(
             ["/usr/local/bin/python", "-c", "import time; time.sleep(300)"],

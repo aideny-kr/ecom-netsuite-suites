@@ -227,3 +227,118 @@ console.log('live credential namespace inaccessible');""".replace(
         with pytest.raises(asyncio.CancelledError):
             await credential_task
     assert containers() == before
+
+
+def reviewed_project():
+    import hashlib
+
+    from app.services.workspace.snapshot import snapshot_hash
+
+    files = {"SuiteScripts/reviewed.js": b"// exact\r\n\x00", "tests/local.js": b"private test input"}
+    manifest = [
+        dict(
+            path=p,
+            operation="create" if p.startswith("SuiteScripts/") else "unchanged",
+            content_sha=hashlib.sha256(b).hexdigest(),
+            apply_order=i,
+        )
+        for i, (p, b) in enumerate(files.items())
+    ]
+    return dict(
+        files=files,
+        manifest=manifest,
+        expected_snapshot_sha=snapshot_hash(files),
+        expected_manifest_sha=hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        project_format="suite-studio-files-v1",
+    )
+
+
+def receipt_binding():
+    import uuid
+
+    return {
+        k: str(uuid.uuid4())
+        for k in ("tenant_id", "workspace_id", "changeset_id", "run_id", "actor_id", "connection_id")
+    }
+
+
+@pytest.mark.asyncio
+async def test_actual_namespace_validates_exact_bytes_in_authenticated_session():
+    from app.services.workspace.sdk_validation_receipt import verify_validation_receipt
+
+    before = containers()
+    key, project, context = credentials(), reviewed_project(), receipt_binding()
+    envelope = await executor.validate_project(
+        **key, **project, context=context, attempt_nonce="f" * 64, receipt_key=b"k" * 32, **args(FAKE_IMAGE)
+    )
+    result = verify_validation_receipt(
+        envelope=json.loads(json.dumps(envelope)),
+        identity=executor._identity(**key),
+        inputs=project,
+        context=context,
+        attempt_nonce="f" * 64,
+        image=FAKE_IMAGE,
+        key=b"k" * 32,
+    )
+    assert result["server_validation"] is True
+    assert "raw sdk detail" not in json.dumps(envelope) and "PRIVATE KEY" not in json.dumps(envelope)
+    assert containers() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["base64", "schema", "snapshot"])
+async def test_actual_child_rejects_corrupt_transport_before_authentication(bad):
+    import base64
+
+    before = containers()
+    key, project = credentials(), reviewed_project()
+    project["files"] = {p: base64.b64encode(b).decode() for p, b in project["files"].items()}
+    request = dict(operation="validate_project", **key, nonce="f" * 64, project=project)
+    request["private_key"] = key["private_key"].decode()
+    if bad == "base64":
+        project["files"]["SuiteScripts/reviewed.js"] = "???"
+    elif bad == "schema":
+        request["argv"] = ["untrusted-command"]
+    else:
+        project["expected_snapshot_sha"] = "0" * 64
+    with pytest.raises(executor.CredentialExecutorError):
+        await executor._execute(request, **args(FAKE_IMAGE))
+    assert containers() == before
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_actual_validation_removes_namespace():
+    before = containers()
+    task = asyncio.create_task(
+        executor.validate_project(
+            **credentials("synthetic-validation-hang"),
+            **reviewed_project(),
+            context=receipt_binding(),
+            attempt_nonce="f" * 64,
+            receipt_key=b"k" * 32,
+            **args(FAKE_IMAGE),
+        )
+    )
+    found = None
+    try:
+        async with asyncio.timeout(20):
+            while found is None:
+                for cid in set(containers()) - set(before):
+                    if (
+                        subprocess.run(
+                            docker_cmd("exec", cid, "/bin/sh", "-c", "test -f /tmp/sdk-validation-ready"),
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        ).returncode
+                        == 0
+                    ):
+                        found = cid
+                        break
+                await asyncio.sleep(0.1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert found is not None and containers() == before
