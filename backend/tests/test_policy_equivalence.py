@@ -69,6 +69,8 @@ def saved_report():
                 "tax_adjustments": [],
                 # Read with tagged refund credits (C09, 2026-10-25); none here.
                 "tagged_credits": [],
+                # Read with the order's posted invoices (C14b, 2026-10-27); nothing billed here.
+                "billed_invoices": {"complete": False, "reason": "not_billed"},
             },
         },
         "balance": {
@@ -374,7 +376,7 @@ def test_a_saved_match_read_before_tagged_credits_is_read_again(amount):
 
 
 def test_the_tagged_credit_rule_has_its_own_version():
-    assert RULE_VERSION == 4
+    assert RULE_VERSION >= 4
 
 
 # C15: a credit memo created from the order's own return authorization can now explain an
@@ -386,7 +388,30 @@ def test_the_tagged_credit_rule_has_its_own_version():
 def test_the_rule_version_names_the_return_credit_rule():
     from app.services.transaction_ops.policy_equivalence import RULE_VERSION
 
-    assert RULE_VERSION == 4
+    assert RULE_VERSION >= 4
+
+
+# C14b (2026-10-27): the posted invoices of a billed order can explain a difference its sales order header
+# shows, so a saved difference read before they were reported is read again; a saved match keeps reuse,
+# since the rule only settles differences.
+def test_the_billed_invoice_rule_has_its_own_version():
+    assert RULE_VERSION == 5
+
+
+def test_a_saved_difference_read_before_billed_invoices_is_read_again():
+    report = saved_difference()
+    nothing = {"complete": True, "credits": [], "total": "0", "tax": "0"}
+    report["refund_evidence"]["target"]["invoice_credits"] = {**nothing, "return_credits": dict(nothing)}
+    assert evaluate(report, snapshots()[0], frozenset(), evaluated_at=NOW)["status"] == "equivalent"
+    report["refund_evidence"]["target"].pop("billed_invoices")
+    result = evaluate(report, snapshots()[0], frozenset(), evaluated_at=NOW)
+    assert result == {"status": "affected", "reason": "billed_invoices_not_read"}
+
+
+def test_a_saved_match_read_before_billed_invoices_keeps_reuse():
+    report = saved_report()
+    report["refund_evidence"]["target"].pop("billed_invoices")
+    assert evaluate(report, snapshots()[0], frozenset(), evaluated_at=NOW)["status"] == "equivalent"
 
 
 def test_a_saved_order_total_difference_read_before_return_credits_is_read_again():

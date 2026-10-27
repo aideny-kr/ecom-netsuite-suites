@@ -115,7 +115,7 @@ async def test_reference_cannot_inject_sql(context):
 
 
 async def test_complete_refund_events_prove_source_identity_and_payment_number(context):
-    events = [{"id": "41", "payment_number": "PAY123", "amount": "50.25"}]
+    events = [{"id": "41", "payment_number": "PAY123", "amount": "50.25", "confirmation": "gateway_transaction"}]
     result, requests = await perform(
         context,
         {
@@ -134,8 +134,10 @@ async def test_complete_refund_events_prove_source_identity_and_payment_number(c
 @pytest.mark.parametrize(
     "events",
     [
-        [{"id": "41", "payment_number": "PAY123", "amount": "49"}],
-        [{"id": "41", "payment_number": "PAY123", "amount": "50.25"}] * 2,
+        [{"id": "41", "payment_number": "PAY123", "amount": "49", "confirmation": "gateway_transaction"}],
+        [{"id": "41", "payment_number": "PAY123", "amount": "50.25", "confirmation": "gateway_transaction"}] * 2,
+        [{"id": "41", "payment_number": "PAY123", "amount": "50.25", "confirmation": "unknown"}],
+        [{"id": "41", "payment_number": "PAY123", "amount": "50.25"}],
         None,
     ],
 )
@@ -271,3 +273,88 @@ async def test_batch_input_bound_checked_before_any_provider_read(context, refs)
     with pytest.raises(SourceReadError):
         await refund_reader.RefundBatch().read(AsyncMock(), context[0], context[1], refs)
     source_reader._load_source.assert_not_awaited()
+
+
+# C12 (2026-10-27): the select runs in Solidus's PostgreSQL, so it is executed here against the same
+# columns, not inspected. Synthetic rows only.
+_SPREE = (
+    "CREATE TEMP TABLE spree_orders (id bigint, number text, currency text)",
+    "CREATE TEMP TABLE spree_payment_methods (id bigint, type text)",
+    "CREATE TEMP TABLE spree_payments (id bigint, order_id bigint, number text, source_type text, "
+    "payment_method_id bigint, state text)",
+    "CREATE TEMP TABLE spree_refunds (id bigint, payment_id bigint, amount numeric(10,2), transaction_id text)",
+    "INSERT INTO spree_orders VALUES (1, 'R123456789', 'EUR')",
+    "INSERT INTO spree_payment_methods VALUES (10, 'Spree::PaymentMethod::Check'), (11, 'Spree::PaymentMethod::Stripe')",
+)
+
+
+async def _solidus_refunds(db, payments, refunds):
+    from sqlalchemy import text
+
+    for statement in _SPREE:
+        await db.execute(text(statement))
+    for row in payments:
+        await db.execute(
+            text("INSERT INTO spree_payments VALUES (:id, 1, :number, :source_type, :method, :state)"), row
+        )
+    for row in refunds:
+        await db.execute(text("INSERT INTO spree_refunds VALUES (:id, :payment, :amount, :txn)"), row)
+    rows = (await db.execute(text(refund_reader._refund_query("R123456789")))).mappings().all()
+    assert len(rows) == 1
+    row = dict(rows[0])
+    step = SimpleNamespace(id=uuid4())
+    from datetime import datetime, timezone
+
+    return refund_reader._refund_report(
+        row, step, SimpleNamespace(id=uuid4()), "R123456789", datetime.now(timezone.utc)
+    )
+
+
+def _payment(identifier, source_type, method, state="completed"):
+    return {"id": identifier, "number": f"P{identifier}", "source_type": source_type, "method": method, "state": state}
+
+
+def _refund_row(identifier, payment, amount, txn=None):
+    return {"id": identifier, "payment": payment, "amount": amount, "txn": txn}
+
+
+async def test_a_refund_on_a_completed_check_payment_is_confirmed_without_a_gateway_transaction(db):
+    report = await _solidus_refunds(db, [_payment(100, None, 10)], [_refund_row(500, 100, "181.82")])
+    assert (report["complete"], report["amount"], report["unconfirmed_count"]) == (True, "181.82", 0)
+    assert report["events_complete"] is True
+    assert report["events"] == [
+        {"id": "500", "payment_number": "P100", "amount": "181.82", "confirmation": "manual_payment"}
+    ]
+
+
+async def test_a_gateway_refund_without_a_transaction_stays_unconfirmed(db):
+    report = await _solidus_refunds(
+        db,
+        [_payment(100, "StripeGateway::PaymentSource", 11), _payment(101, None, 10)],
+        [_refund_row(500, 100, "1101.48"), _refund_row(501, 101, "10.00")],
+    )
+    assert (report["complete"], report["amount"], report["unconfirmed_count"]) == (False, None, 1)
+
+
+@pytest.mark.parametrize(
+    "payment",
+    [
+        _payment(100, None, 10, state="invalid"),  # a check payment that never completed
+        _payment(100, None, 99),  # its payment method cannot be read: never dropped, never confirmed
+        _payment(100, None, 11),  # no source but a gateway method
+        _payment(100, "Spree::CreditCard", 10),  # a payment source on a check method
+    ],
+)
+async def test_any_other_refund_without_a_transaction_is_counted_as_unconfirmed(db, payment):
+    report = await _solidus_refunds(db, [payment], [_refund_row(500, 100, "50.00")])
+    assert (report["refund_count"], report["unconfirmed_count"], report["complete"]) == (1, 1, False)
+
+
+async def test_gateway_and_manual_refunds_add_up_with_their_confirmation(db):
+    report = await _solidus_refunds(
+        db,
+        [_payment(100, "StripeGateway::PaymentSource", 11), _payment(101, None, 10)],
+        [_refund_row(500, 100, "20.00", "re_123"), _refund_row(501, 101, "30.00")],
+    )
+    assert (report["complete"], report["amount"]) == (True, "50.00")
+    assert [event["confirmation"] for event in report["events"]] == ["gateway_transaction", "manual_payment"]
