@@ -641,3 +641,52 @@ def test_a_read_tax_adjustment_blocks_invoice_credits_even_when_reconciliation_r
     result = reconcile_order(s, t, c, refunds=r)
     assert result["status"] == "difference"
     assert result["amounts"]["order_total"]["target"] == "120.00"
+
+
+# C06 (2026-10-27): NetSuite computed the VAT one cent below what Solidus removed and the verified
+# reversal refunded. With a configured tolerance the reversal still applies to the tax, and the cent left
+# is recorded as rounding; without one, or beyond it, nothing changes.
+def _over_reversed(tax="19.99", total="120.00", units=1):
+    s, t, c, r = balance_case()
+    t["orders"][0]["header"].update(total=total, taxTotal=tax)
+    if units is not None:
+        c["mapping_json"]["rounding_tolerance"] = {"schema_version": 1, "minor_units": units}
+    return s, t, c, r
+
+
+def test_a_reversal_one_cent_above_the_header_tax_matches_as_recorded_rounding():
+    s, t, c, r = _over_reversed()
+    result = reconcile_order(s, t, c, refunds=r)
+    assert (result["status"], result["reason"]) == ("matched", "within_rounding_tolerance")
+    kinds = [adjustment["kind"] for adjustment in result["adjustments"]]
+    assert kinds == ["tax_reversal", "rounding_tolerance"]
+    assert result["adjustments"][1]["tax_delta"] == "0.01"
+    assert result["original_amounts"]["tax"]["target"] == "19.99"
+
+
+@pytest.mark.parametrize(
+    "tax, total, units",
+    [
+        ("19.99", "120.00", None),  # no tolerance configured
+        ("19.97", "120.00", 2),  # three cents over a two-cent tolerance
+        ("19.99", "119.97", 1),  # the tax is within it but the order total is not
+    ],
+)
+def test_an_over_reversal_without_a_covering_tolerance_still_differs(tax, total, units):
+    s, t, c, r = _over_reversed(tax, total, units)
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["status"] == "difference"
+    assert result["amounts"]["tax"]["target"] == tax
+
+
+def test_an_over_reversal_by_a_credit_that_is_not_a_reversal_still_differs():
+    s, t, c, r = _over_reversed()
+    adjustment = r["target"]["tax_adjustments"][0]
+    adjustment.update(kind="credit_memo", reason_id="71", tax_amount="20", item_accounts={"81": "91"})
+    assert reconcile_order(s, t, c, refunds=r)["status"] != "matched"
+
+
+def test_an_over_reversal_with_refunds_that_differ_still_differs():
+    s, t, c, r = _over_reversed()
+    r["target"]["amount"] = "20.01"
+    assert reconcile_order(s, t, c, refunds=r)["status"] != "matched"

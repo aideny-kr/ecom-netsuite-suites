@@ -29,15 +29,29 @@ def _refund_query(reference):
     return _refund_select(f"o.number = '{reference}'", 2)
 
 
+# A refund is confirmed by its gateway transaction, or, on a completed check-type payment (bank
+# transfer, ACH), by being recorded at all: no gateway is called, so Solidus never gets a transaction
+# id for it (C12, 2026-10-27). Only that exact method counts; a gateway refund with no transaction stays
+# unconfirmed. COALESCE keeps an unreadable payment method from turning the test into NULL, which would
+# drop the refund from both the confirmed and the unconfirmed counts.
+_GATEWAY_REFUND = "NULLIF(r.transaction_id, '') IS NOT NULL"
+_MANUAL_REFUND = (
+    "COALESCE(p.source_type IS NULL AND m.type = 'Spree::PaymentMethod::Check' AND p.state = 'completed', FALSE)"
+)
+_CONFIRMED = f"({_GATEWAY_REFUND} OR {_MANUAL_REFUND})"
+
+
 def _refund_select(predicate, limit):
     return (
         "SELECT o.number AS order_reference, o.currency, COUNT(r.id)::text AS refund_count, "
-        "COUNT(r.id) FILTER (WHERE NULLIF(r.transaction_id, '') IS NULL)::text AS pending_count, "
-        "COALESCE(SUM(r.amount) FILTER (WHERE NULLIF(r.transaction_id, '') IS NOT NULL), 0)::text AS amount, "
+        f"COUNT(r.id) FILTER (WHERE NOT {_CONFIRMED})::text AS pending_count, "
+        f"COALESCE(SUM(r.amount) FILTER (WHERE {_CONFIRMED}), 0)::text AS amount, "
         "CASE WHEN COUNT(r.id)<=100 THEN COALESCE(JSONB_AGG(JSONB_BUILD_OBJECT("
-        "'id',r.id::text,'payment_number',p.number,'amount',r.amount::text) ORDER BY r.id) "
-        "FILTER (WHERE r.id IS NOT NULL AND NULLIF(r.transaction_id, '') IS NOT NULL), '[]'::jsonb) END AS events "
+        "'id',r.id::text,'payment_number',p.number,'amount',r.amount::text,'confirmation',"
+        f"CASE WHEN {_GATEWAY_REFUND} THEN 'gateway_transaction' ELSE 'manual_payment' END) ORDER BY r.id) "
+        f"FILTER (WHERE r.id IS NOT NULL AND {_CONFIRMED}), '[]'::jsonb) END AS events "
         "FROM spree_orders o LEFT JOIN spree_payments p ON p.order_id = o.id "
+        "LEFT JOIN spree_payment_methods m ON m.id = p.payment_method_id "
         "LEFT JOIN spree_refunds r ON r.payment_id = p.id "
         f"WHERE {predicate} GROUP BY o.id, o.number, o.currency ORDER BY o.id LIMIT {limit}"
     )
@@ -96,6 +110,9 @@ async def _read_rows(db, tenant_id, step_id, query, limit, *, client=None):
             await http.aclose()
 
 
+_CONFIRMATIONS = frozenset({"gateway_transaction", "manual_payment"})
+
+
 def _events(value, count, amount, pending):
     try:
         if isinstance(value, str):
@@ -104,7 +121,7 @@ def _events(value, count, amount, pending):
             return [], False
         seen, total, events = set(), 0, []
         for row in value:
-            identifier, payment = row["id"], row["payment_number"]
+            identifier, payment, confirmation = row["id"], row["payment_number"], row["confirmation"]
             number = _decimal(row["amount"])
             if (
                 not isinstance(identifier, str)
@@ -112,13 +129,16 @@ def _events(value, count, amount, pending):
                 or identifier in seen
                 or not isinstance(payment, str)
                 or not re.fullmatch(r"[A-Z0-9]{1,100}", payment)
+                or confirmation not in _CONFIRMATIONS
                 or number is None
                 or number <= 0
             ):
                 return [], False
             seen.add(identifier)
             total += number
-            events.append({"id": identifier, "payment_number": payment, "amount": str(number)})
+            events.append(
+                {"id": identifier, "payment_number": payment, "amount": str(number), "confirmation": confirmation}
+            )
         return (events, True) if total == amount else ([], False)
     except (KeyError, TypeError, ValueError, ArithmeticError):
         return [], False

@@ -173,7 +173,11 @@ def _query(frontier):
         # A document's own status and total, read in the same query: what reconciliation needs to
         # see that a canceled order's deposits are all fully applied, at no extra call (2026-10-22).
         "p.status AS previousstatus, n.status AS nextstatus, "
-        "p.foreigntotal AS previoustotal, n.foreigntotal AS nexttotal "
+        "p.foreigntotal AS previoustotal, n.foreigntotal AS nexttotal, "
+        # An invoice's own tax and exchange rate, for an order billed in full whose sales order was never
+        # updated (C14b, 2026-10-27). taxtotal is in the document's currency, as foreigntotal is.
+        "p.taxtotal AS previoustaxtotal, n.taxtotal AS nexttaxtotal, "
+        "p.exchangerate AS previousexchangerate, n.exchangerate AS nextexchangerate "
         "FROM NextTransactionLink l JOIN transaction p ON p.id=l.previousdoc "
         "JOIN transaction n ON n.id=l.nextdoc "
         "LEFT JOIN transactionline pl ON pl.transaction=p.id AND pl.mainline='T' "
@@ -237,6 +241,60 @@ def billing_documents(nodes, reachable):
         ),
         key=int,
     )
+
+
+# What NetSuite may link to an invoice without changing what it bills: its sales order, payments,
+# deposit applications and the realized FX revaluation of a payment (C14b review R1). A credit memo --
+# standalone ones included, which are no invoice credit -- a journal, a refund or anything else may
+# reduce it.
+_INVOICE_NEIGHBOURS = frozenset({"SalesOrd", "CustPymt", "DepAppl", "FxReval"})
+
+
+def billed_invoices(nodes, reachable, owned, figures, currency_id, edges):
+    """The order's posted invoices and their sums from the graph's own rows, or why they are unknown (C14b).
+
+    For an order billed in full whose sales order header was never updated, reconciliation compares the
+    invoices with the source. Only invoices the order alone owns, posted in the order's currency, with a
+    total, tax and exchange rate every row agrees on, and nothing linked to them that could reduce them:
+    the graph read every link of each invoice, since every billing document is reachable. A cash sale,
+    or any invoice the rows do not prove, leaves them unknown, never zero.
+    """
+
+    def unknown(reason):
+        return {"complete": False, "reason": reason}
+
+    ids = billing_documents(nodes, reachable)
+    if not ids:
+        return unknown("not_billed")
+    for previous, following, before, after in edges:
+        if (previous in ids and after not in _INVOICE_NEIGHBOURS) or (
+            following in ids and before not in _INVOICE_NEIGHBOURS
+        ):
+            return unknown("billing_reduced_or_unproven")
+    total, tax, rates = Decimal(0), Decimal(0), set()
+    for identifier in ids:
+        node = nodes[identifier]
+        if node["type"] != "CustInvc":
+            return unknown("billed_by_cash_sale")
+        if identifier not in owned:
+            return unknown("billing_ownership_ambiguous")
+        if node.get("posting") != "T" or str(node.get("currency")) != str(currency_id):
+            return unknown("billing_unproven")
+        try:
+            amount, amount_tax, rate = (_decimal(value) for value in figures.get(identifier) or (None,) * 3)
+        except (ValueError, TypeError, ArithmeticError):
+            return unknown("billing_amounts_unread")
+        if None in (amount, amount_tax, rate) or amount < 0 or amount_tax < 0 or rate <= 0:
+            return unknown("billing_amounts_unread")
+        total, tax = total + amount, tax + amount_tax
+        rates.add(rate)
+    return {
+        "complete": True,
+        "ids": ids,
+        "total": str(total),
+        "tax": str(tax),
+        "exchange_rates": sorted((str(rate) for rate in rates), key=Decimal),
+    }
 
 
 def _posting(lines, total, tax, taxed):
@@ -584,7 +642,7 @@ async def collect_refunds(
     nodes.update({credit: dict(value["node"]) for credit, value in tagged.items()})
     allocations = defaultdict(set)
     cash_refunds = set()
-    documents = {}
+    documents, figures = {}, {}
     for _ in range(MAX_DEPTH):
         if not frontier:
             break
@@ -614,6 +672,9 @@ async def collect_refunds(
                 seen = (row.get(prefix + "status"), row.get(prefix + "total"))
                 if documents.setdefault(identifier, seen) != seen:
                     documents[identifier] = (None, None)
+                seen = tuple(row.get(prefix + key) for key in ("total", "taxtotal", "exchangerate"))
+                if figures.setdefault(identifier, seen) != seen:
+                    figures[identifier] = None
             before, after = nodes[previous]["type"], nodes[following]["type"]
             edges.add((previous, following, before, after))
             if previous in frontier and before in _PARENTS.get(after, set()):
@@ -760,6 +821,7 @@ async def collect_refunds(
         # The order's invoices and cash sales and its deposits, from the graph's own rows: what
         # reconciliation needs to settle a canceled order (decided 2026-10-22).
         "billing_ids": billing_documents(nodes, reachable),
+        "billed_invoices": billed_invoices(nodes, reachable, owned, figures, currency_id, edges),
         "deposits": order_deposits(nodes, reachable, owned, documents),
         # Retain every observed participant, including voided refunds and
         # parents outside the owned set. They can invalidate the proof later.

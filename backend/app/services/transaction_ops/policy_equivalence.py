@@ -19,7 +19,10 @@ from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProf
 # 4: a saved report read before tagged refund credits is affected, matched or not (C09, 2026-10-25)
 # 4: a saved order-total difference read before the order's own return credits were reported, or a saved
 #    credit match that left NetSuite tax on a zero order, is affected (C15)
-RULE_VERSION = 4
+# 5: a saved difference read before the order's posted invoices were reported is affected (C14b,
+#    2026-10-27). That also covers C06, which settles only differences. C12 needs nothing here: a saved
+#    report whose Solidus refunds were unconfirmed is already refund_evidence_incomplete, never reused.
+RULE_VERSION = 5
 SCOPE_KEYS = (
     "source_connection_id",
     "source_step_id",
@@ -203,6 +206,9 @@ def evaluate(report, snapshot, changed, *, evaluated_at):
         # canceled order needs its billing and deposits, which reads before this did not report; the
         # source status is "unknown" when Solidus flagged the order for review, so that counts too.
         if balance["status"] == "difference":
+            # C14b: the posted invoices of a billed order can now explain its difference.
+            if "billed_invoices" not in target:
+                return gap("billed_invoices_not_read", "affected")
             canceled = (report.get("source") or {}).get("status") in {"cancelled", "unknown"}
             if canceled and not ("billing_ids" in target and "deposits" in target):
                 return gap("canceled_order_evidence_not_read", "affected")

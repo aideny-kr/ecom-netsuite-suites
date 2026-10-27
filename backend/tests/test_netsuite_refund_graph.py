@@ -930,3 +930,102 @@ def test_the_graph_query_reads_each_documents_status_and_total():
     query = _query({"1"})
     for column in ("p.status AS previousstatus", "n.status AS nextstatus", "p.foreigntotal AS previoustotal"):
         assert column in query
+
+
+# C14b (2026-10-27): a fully billed order whose sales order header was never updated. Reconciliation needs
+# the posted invoices' own totals, tax and exchange rates, read from the columns of the graph query it
+# already runs: no extra call. Anything the rows do not prove leaves them unknown, never zero.
+def with_invoice(row, prefix, total, tax, rate="1"):
+    return {**row, prefix + "total": total, prefix + "taxtotal": tax, prefix + "exchangerate": rate}
+
+
+def invoiced_reader(*invoices):
+    reader = DepositReader()
+    for identifier, total, tax, *rate in invoices:
+        reader.edges.append(with_invoice(edge("1", identifier, "SalesOrd", "CustInvc"), "next", total, tax, *rate))
+    return reader
+
+
+async def test_the_graph_sums_the_orders_posted_invoices_at_no_extra_call():
+    plain = DepositReader()
+    await collect_refunds(plain, "1", "1", "1", order_reference="R123456789")
+    reader = invoiced_reader(("5", "0", "0", "0.0918428"), ("6", "2499", "499.8", "0.0924702"))
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["billed_invoices"] == {
+        "complete": True,
+        "ids": ["5", "6"],
+        "total": "2499",
+        "tax": "499.8",
+        "exchange_rates": ["0.0918428", "0.0924702"],
+    }
+    assert reader.calls == plain.calls
+
+
+async def test_an_order_with_nothing_billed_has_no_billed_invoices():
+    result = await collect_refunds(DepositReader(), "1", "1", "1", order_reference="R123456789")
+    assert result["billed_invoices"] == {"complete": False, "reason": "not_billed"}
+
+
+@pytest.mark.parametrize(
+    "change, reason",
+    [
+        (lambda r: r.edges.append(edge("1", "7", "SalesOrd", "CashSale")), "billed_by_cash_sale"),
+        (
+            lambda r: r.edges.append(with_invoice(edge("900", "5", "SalesOrd", "CustInvc"), "next", "10", "0")),
+            "billing_ownership_ambiguous",
+        ),
+        (lambda r: r.edges[-1].update(nextposting="F"), "billing_unproven"),
+        (lambda r: r.edges[-1].update(nexttaxtotal=None), "billing_amounts_unread"),
+        (lambda r: r.edges[-1].update(nexttotal="-1"), "billing_amounts_unread"),
+        (lambda r: r.edges[-1].update(nexttaxtotal=0.5), "billing_amounts_unread"),  # never a binary float
+        (lambda r: r.edges[-1].update(nextexchangerate=None), "billing_amounts_unread"),
+        # two rows that disagree on the same invoice
+        (
+            lambda r: r.edges.append(with_invoice(edge("5", "8", "CustInvc", "CustPymt"), "previous", "10", "1")),
+            "billing_amounts_unread",
+        ),
+    ],
+)
+async def test_invoices_the_rows_do_not_prove_are_unknown_and_never_break_the_refund_proof(change, reason):
+    reader = invoiced_reader(("5", "10", "0"))
+    change(reader)
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["billed_invoices"] == {"complete": False, "reason": reason}
+    assert result["amount"] == Decimal("100.00")
+
+
+async def test_a_voided_invoice_is_not_billed():
+    reader = invoiced_reader(("5", "10", "0"), ("6", "5", "0"))
+    reader.edges[-1].update(nextvoided="T")
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert (result["billed_invoices"]["ids"], result["billed_invoices"]["total"]) == (["5"], "10")
+
+
+def test_the_graph_query_reads_each_documents_tax_and_exchange_rate():
+    from app.services.transaction_ops.netsuite_refunds import _query
+
+    query = _query({"1"})
+    for column in ("n.taxtotal AS nexttaxtotal", "p.exchangerate AS previousexchangerate"):
+        assert column in query
+
+
+# C14b review R1: a standalone credit applied to an invoice is no invoice credit (it has no createdfrom),
+# so empty invoice credits do not prove the invoice was not reduced. Only the documents NetSuite links to
+# an invoice can: its sales order, its payments, deposit applications and realized FX revaluations.
+@pytest.mark.parametrize("neighbour", ["CustCred", "Journal", "CustRfnd", "RtnAuth", "CashRfnd", "Unknown"])
+async def test_an_invoice_reduced_by_any_other_linked_document_is_unknown(neighbour):
+    reader = invoiced_reader(("5", "100.00", "20.00"))
+    reader.edges.append(with_invoice(edge("5", "9", "CustInvc", neighbour), "previous", "100.00", "20.00"))
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["billed_invoices"] == {"complete": False, "reason": "billing_reduced_or_unproven"}
+    assert result["amount"] == Decimal("100.00")
+
+
+async def test_payments_deposit_applications_and_fx_revaluations_leave_the_invoice_as_billed():
+    reader = invoiced_reader(("5", "100.00", "20.00"))
+    reader.edges += [
+        with_invoice(edge("5", following, "CustInvc", kind), "previous", "100.00", "20.00")
+        for following, kind in (("10", "CustPymt"), ("11", "DepAppl"), ("12", "FxReval"))
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["billed_invoices"]["complete"] is True

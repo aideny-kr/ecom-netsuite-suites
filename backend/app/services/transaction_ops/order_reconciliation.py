@@ -261,6 +261,8 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
             left, right = values[key]
             if left is not None and right is not None and left != right and right >= adjustment:
                 values[key] = (left, right - adjustment)
+            elif key == "tax" and _over_reversal_within_rounding(values, adjustment, credits, config, precision):
+                values[key] = (left, right - adjustment)
         if values != original_values:
             adjustments.extend(credits)
     if not credits:
@@ -361,6 +363,27 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                 }
             )
             break
+    if (
+        not credits
+        and not tax_adjustment_read
+        and "posting_reconciliation" not in result
+        and not any(adjustment.get("kind") == "invoice_credit_memos" for adjustment in adjustments)
+    ):
+        billed = _billed_invoices(header, refunds.get("target"), values, reference, currency, precision)
+        if billed:
+            if billed.pop("sales_order_alignment"):
+                result["posting_reconciliation"] = {
+                    "status": "matched",
+                    "source": billed["total"],
+                    "net_posting_total": billed["total"],
+                    "delta": f"{Decimal(0):.{precision}f}",
+                    "basis": billed["kind"],
+                    "sales_order_alignment": "required",
+                }
+            else:
+                values["order_total"] = (values["order_total"][0], _amount(billed["total"], precision))
+                values["tax"] = (values["tax"][0], _amount(billed["tax"], precision))
+            adjustments.append(billed)
     zero = _zero_total_order_tax(source, values, precision)
     if zero:
         adjustments.append(zero)
@@ -507,6 +530,71 @@ def _native_zero_tax(source_tax, target, header, precision):
     }
 
 
+BILLED = "G"  # the sales order is billed in full: nothing is left to invoice
+
+
+def _billed_invoices(header, evidence, values, reference, currency, precision):
+    """The order's posted invoices when they equal the source and its billed sales order does not (C14b).
+
+    order_reconciliation compares the sales order header, which does not post. Billed in full, the order
+    owes what its invoices say; once they equal the source in total and tax, it is matched on them and
+    the header stays in original_amounts. Only with nothing else in play: the complete refund read of this
+    order names exactly these invoices, and no invoice, return or hand-booked credit and no tax
+    adjustment, each read and not assumed. An order whose invoices total zero, like the source, leaves
+    the source's tax to _zero_total_order_tax. The shape the sales-order alignment write fixes (one
+    invoice, no tax anywhere, at exchange rate 1, the header above it) keeps its difference with that
+    write required (decided by Aiden, 2026-10-22). Anything else returns None.
+    """
+    from app.services.transaction_ops.netsuite_refunds import order_status
+
+    if order_status(header) != BILLED or _refund(evidence, reference, currency, precision) is None:
+        return None
+    if evidence.get("tax_adjustments") or evidence.get("tagged_credits") != []:
+        return None
+    credits = evidence.get("invoice_credits")
+    returns = credits.get("return_credits") if isinstance(credits, dict) else None
+    for read in (credits, returns):
+        if not isinstance(read, dict) or read.get("complete") is not True or read.get("credits") != []:
+            return None
+    invoices = evidence.get("billed_invoices")
+    if not isinstance(invoices, dict) or invoices.get("complete") is not True:
+        return None
+    ids, rates = invoices.get("ids"), invoices.get("exchange_rates")
+    if not isinstance(ids, list) or not ids or ids != evidence.get("billing_ids") or not isinstance(rates, list):
+        return None
+    total, tax = _amount(invoices.get("total"), precision), _amount(invoices.get("tax"), precision)
+    (source_total, target_total), (source_tax, target_tax) = values["order_total"], values["tax"]
+    if None in (total, tax, source_total, source_tax, target_total):
+        return None
+    if (source_total, source_tax) == (target_total, target_tax) or total != source_total:
+        return None
+    if tax != source_tax and not (total == 0 and tax == 0):
+        return None
+    try:
+        # The sales order's own rate as well: the alignment write refuses any other (review R2).
+        base_rate = (
+            bool(rates)
+            and all(_decimal(rate) == 1 for rate in rates)
+            and ("exchangeRate" not in header or _decimal(str(header["exchangeRate"])) == 1)
+        )
+    except (ValueError, TypeError, DecimalException):
+        return None
+    alignment = (
+        len(ids) == 1 and base_rate and source_tax == 0 and tax == 0 and target_tax == 0 and target_total > total
+    )
+    return {
+        "kind": "billed_invoices_match_source",
+        "status": "verified",
+        "basis": (
+            "the order is billed in full and its posted invoices equal the source; the sales order was not updated"
+        ),
+        "invoices": list(ids),
+        "total": f"{total:.{precision}f}",
+        "tax": f"{tax:.{precision}f}",
+        "sales_order_alignment": alignment,
+    }
+
+
 # Payments that never moved money.
 _UNPAID_PAYMENT_STATES = frozenset({"void", "failed", "invalid", "checkout"})
 
@@ -539,6 +627,38 @@ def _zero_total_order_tax(source, values, precision):
         "basis": "the source and NetSuite order totals are both zero, so the source's tax is not owed",
         "source_tax": f"{source_tax:.{precision}f}",
     }
+
+
+def _over_reversal_within_rounding(values, adjustment, credits, config, precision):
+    """Whether verified VAT reversals may exceed the sales order's tax by a configured rounding amount (C06).
+
+    NetSuite can compute the VAT a cent below what Solidus removed and the reversal refunded, so the
+    reversal is larger than the header tax it reverses. Only tax-reversal credits, and only when the
+    order then sits within the config's tolerance as _within_rounding will require: the excess, what is
+    left of the tax and the already adjusted order total all within it, and refunds that agree exactly.
+    _within_rounding then records the cent. Otherwise nothing changes, so a real over-reversal stays a
+    difference and never shows a negative NetSuite tax.
+    """
+    from app.services.transaction_ops.rounding_tolerance import configured_tolerance
+
+    allowed = configured_tolerance(config, precision)
+    (left, right), (total_left, total_right), (refunds_left, refunds_right) = (
+        values["tax"],
+        values["order_total"],
+        values["refunds"],
+    )
+    if allowed is None or None in (left, right, total_left, total_right) or right >= adjustment:
+        return False
+    if refunds_left is None or refunds_left != refunds_right:
+        return False
+    if any(credit.get("kind") != "tax_reversal" for credit in credits):
+        return False
+    tolerance = allowed[1]
+    return (
+        adjustment - right <= tolerance
+        and abs(left - (right - adjustment)) <= tolerance
+        and abs(total_left - total_right) <= tolerance
+    )
 
 
 def _within_rounding(values, config, precision):
