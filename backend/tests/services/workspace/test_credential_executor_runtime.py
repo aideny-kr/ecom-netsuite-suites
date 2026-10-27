@@ -288,11 +288,30 @@ async def test_actual_namespace_validates_exact_bytes_in_authenticated_session()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", ["base64", "schema", "snapshot"])
-async def test_actual_child_rejects_corrupt_transport_before_authentication(bad):
+@pytest.mark.parametrize("bad", ["base64", "schema", "snapshot", "reordered_negative_control"])
+async def test_actual_child_rejects_corrupt_transport_before_authentication(bad, monkeypatch):
     import base64
 
     before = containers()
+    # Observe attempted authentication rather than inferring ordering from the
+    # final error. The negative control removes the early projection check:
+    # validation still rejects, but this sentinel now detects authentication.
+    marker = "SYNTHETIC_AUTH_ATTEMPT"
+    needle = "        result = await session.authenticate("
+    assert executor._BOOTSTRAP.count(needle) == 1
+    bootstrap = executor._BOOTSTRAP.replace(needle, '        print("' + marker + '", flush=True)\n' + needle)
+    if bad == "reordered_negative_control":
+        bootstrap = bootstrap.replace("        build_ready_reviewed_project(**project)\n", "")
+    monkeypatch.setattr(executor, "_BOOTSTRAP", bootstrap)
+    observed = []
+    original_attach = broker._attach
+
+    async def observe(*args):
+        result = await original_attach(*args)
+        observed.append(result[1])
+        return result
+
+    monkeypatch.setattr(broker, "_attach", observe)
     key, project = credentials(), reviewed_project()
     project["files"] = {p: base64.b64encode(b).decode() for p, b in project["files"].items()}
     request = dict(operation="validate_project", **key, nonce="f" * 64, project=project)
@@ -305,6 +324,8 @@ async def test_actual_child_rejects_corrupt_transport_before_authentication(bad)
         project["expected_snapshot_sha"] = "0" * 64
     with pytest.raises(executor.CredentialExecutorError):
         await executor._execute(request, **args(FAKE_IMAGE))
+    assert len(observed) == 1
+    assert (marker in observed[0]) == (bad == "reordered_negative_control")
     assert containers() == before
 
 
@@ -342,3 +363,64 @@ async def test_cancel_during_actual_validation_removes_namespace():
         with pytest.raises(asyncio.CancelledError):
             await task
     assert found is not None and containers() == before
+
+
+@pytest.mark.asyncio
+async def test_actual_validation_transports_maximum_source_bytes(monkeypatch):
+    import hashlib
+
+    from app.services.workspace.snapshot import snapshot_hash
+    from app.services.workspace.trusted_sdf_project import MAX_BYTES
+
+    project = reviewed_project()
+    bulk = b"x" * (MAX_BYTES - sum(map(len, project["files"].values())))
+    project["files"]["SuiteScripts/bulk.txt"] = bulk
+    project["manifest"].append(
+        dict(
+            path="SuiteScripts/bulk.txt",
+            operation="create",
+            content_sha=hashlib.sha256(bulk).hexdigest(),
+            apply_order=2,
+        )
+    )
+    project["expected_snapshot_sha"] = snapshot_hash(project["files"])
+    project["expected_manifest_sha"] = hashlib.sha256(
+        json.dumps(project["manifest"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    observed = []
+    original_attach = broker._attach
+
+    async def observe(cmd, data, timeout):
+        observed.append(len(data))
+        return await original_attach(cmd, data, timeout)
+
+    monkeypatch.setattr(broker, "_attach", observe)
+    before = containers()
+    envelope = await executor.validate_project(
+        **credentials(),
+        **project,
+        context=receipt_binding(),
+        attempt_nonce="f" * 64,
+        receipt_key=b"k" * 32,
+        **args(FAKE_IMAGE),
+    )
+    assert MAX_BYTES < observed[0] <= executor.MAX_VALIDATION_INPUT
+    assert envelope["validation"]["source_snapshot_sha"] == project["expected_snapshot_sha"]
+    assert containers() == before
+
+
+@pytest.mark.asyncio
+async def test_actual_validation_namespace_deadline_is_sanitized_and_uncertain(monkeypatch):
+    assert executor._BOOTSTRAP.count("signal.alarm(120)") == 1
+    monkeypatch.setattr(executor, "_BOOTSTRAP", executor._BOOTSTRAP.replace("signal.alarm(120)", "signal.alarm(2)"))
+    before = containers()
+    with pytest.raises(executor.CredentialExecutorError, match="outcome uncertain after timeout; reconcile"):
+        await executor.validate_project(
+            **credentials("synthetic-validation-hang"),
+            **reviewed_project(),
+            context=receipt_binding(),
+            attempt_nonce="f" * 64,
+            receipt_key=b"k" * 32,
+            **args(FAKE_IMAGE),
+        )
+    assert containers() == before

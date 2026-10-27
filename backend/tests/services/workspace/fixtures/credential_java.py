@@ -27,6 +27,10 @@ elif "validate" in sys.argv:
     assert root != Path.cwd() and not (root / "tests").exists()
     assert (root / "manifest.xml").is_file() and (root / "deploy.xml").is_file()
     assert (root / "FileCabinet/SuiteScripts/reviewed.js").read_bytes() == b"// exact\r\n\x00"
+    bulk = root / "FileCabinet/SuiteScripts/bulk.txt"
+    if bulk.exists():
+        assert bulk.stat().st_size > 7 * 1024 * 1024
+        assert bulk.read_bytes() == b"x" * bulk.stat().st_size
     assert not (root / "suitecloud.config.js").exists()
     assert not (root / "package.json").exists()
     assert sys.argv[sys.argv.index("-accountspecificvalues") + 1] == "ERROR" and "-server" in sys.argv

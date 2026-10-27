@@ -40,8 +40,9 @@ class CredentialExecutorError(AuthSeederError):
     """Sanitized failure; unknown outcomes never trigger automatic replay."""
 
 
-# PID 1 owns an independent deadline. No project, arbitrary argv, hook, import
-# path or environment is accepted in the request. Exiting PID 1 tears down all
+# PID 1 owns an independent deadline. Only bounded reviewed file bytes and
+# fixed metadata are accepted; no argv, hook, import path or environment.
+# Exiting PID 1 tears down all
 # descendants, including detached SDK children, after a killed worker.
 _BOOTSTRAP = r"""
 import asyncio, base64, dataclasses, json, os, re, signal, sys
@@ -341,7 +342,12 @@ async def validate_project(
             "files": {path: base64.b64encode(data).decode("ascii") for path, data in inputs["files"].items()},
         },
     }
-    result = await _execute(request, image=image, socket=socket, docker=docker)
+    try:
+        result = await _execute(request, image=image, socket=socket, docker=docker)
+    except TimeoutError:
+        raise CredentialExecutorError(
+            "SDK validation outcome uncertain after timeout; reconcile before retry"
+        ) from None
     if set(result) != {"nonce", "validation"} or result.get("nonce") != attempt_nonce:
         raise CredentialExecutorError("Credential executor validation attempt does not match")
     return seal_validation_receipt(

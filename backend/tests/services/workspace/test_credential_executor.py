@@ -481,3 +481,28 @@ async def test_caller_edits_during_validation_do_not_change_signed_source(
         **args,
     )
     assert envelope["validation"] == original and envelope["context"]["tenant_id"] != "mutated"
+
+
+@pytest.mark.asyncio
+async def test_validation_timeout_cannot_sign_or_replay(runtime, credentials, validation_inputs, receipt_context):
+    args, requests, attach, _ = runtime
+    attach.side_effect = TimeoutError("private daemon detail")
+    with pytest.raises(executor.CredentialExecutorError, match="outcome uncertain after timeout") as caught:
+        await executor.validate_project(
+            **credentials,
+            **validation_inputs,
+            context=receipt_context,
+            attempt_nonce="f" * 64,
+            receipt_key=b"k" * 32,
+            **args,
+        )
+    assert "private daemon detail" not in str(caught.value)
+    assert attach.await_count == 1 and requests[-1].method == "DELETE"
+
+
+@pytest.mark.asyncio
+async def test_oversized_validation_transport_rejected_before_daemon(runtime):
+    args, requests, attach, _ = runtime
+    with pytest.raises(executor.CredentialExecutorError, match="input exceeds limit"):
+        await executor._execute(dict(operation="validate_project", padding="x" * executor.MAX_VALIDATION_INPUT), **args)
+    assert not requests and attach.await_count == 0

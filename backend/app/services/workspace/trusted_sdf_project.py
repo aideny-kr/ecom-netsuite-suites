@@ -174,8 +174,9 @@ def build_reviewed_project(
 ) -> TrustedProject:
     """Project the entire signed/check-tested snapshot using an explicit version.
 
-    Tests and package configuration stay bound by the original hashes but never
-    enter the credential process. Only script files are projected. The returned
+    Tests and package configuration stay bound by the original hashes. The
+    broker transports them as data for verification, but never materializes or
+    executes them. Only script files are projected. The returned
     hashes identify that projection; callers must retain the full snapshot's
     identity separately. This does not grant execution or target authority.
     """
