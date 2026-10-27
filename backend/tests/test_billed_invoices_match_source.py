@@ -92,6 +92,15 @@ def test_the_shape_the_sales_order_alignment_fixes_keeps_its_difference_with_tha
     assert result["amounts"]["order_total"]["target"] == "1659.00"
 
 
+def test_a_sales_order_at_another_exchange_rate_is_not_the_alignment_shape():
+    # Review R2: the alignment write refuses a sales order whose own exchange rate is not 1.
+    source, target, config, refunds = billed("1499.00", "0.00", invoices=(("5", "1499.00", "0.00", "1"),))
+    target["orders"][0]["header"].update(total="1659.00", taxTotal="0.00", exchangeRate="1.25")
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched"
+    assert "posting_reconciliation" not in result
+
+
 def test_a_foreign_currency_order_of_that_shape_matches_since_the_alignment_cannot_reach_it():
     source, target, config, refunds = billed("42942.14", "0.00", invoices=(("5", "42942.14", "0.00", "0.0396271"),))
     target["orders"][0]["header"].update(total="43000.00", taxTotal="0.00")

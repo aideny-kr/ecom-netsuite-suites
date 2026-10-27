@@ -571,7 +571,12 @@ def _billed_invoices(header, evidence, values, reference, currency, precision):
     if tax != source_tax and not (total == 0 and tax == 0):
         return None
     try:
-        base_rate = bool(rates) and all(_decimal(rate) == 1 for rate in rates)
+        # The sales order's own rate as well: the alignment write refuses any other (review R2).
+        base_rate = (
+            bool(rates)
+            and all(_decimal(rate) == 1 for rate in rates)
+            and ("exchangeRate" not in header or _decimal(str(header["exchangeRate"])) == 1)
+        )
     except (ValueError, TypeError, DecimalException):
         return None
     alignment = (

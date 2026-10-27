@@ -1007,3 +1007,25 @@ def test_the_graph_query_reads_each_documents_tax_and_exchange_rate():
     query = _query({"1"})
     for column in ("n.taxtotal AS nexttaxtotal", "p.exchangerate AS previousexchangerate"):
         assert column in query
+
+
+# C14b review R1: a standalone credit applied to an invoice is no invoice credit (it has no createdfrom),
+# so empty invoice credits do not prove the invoice was not reduced. Only the documents NetSuite links to
+# an invoice can: its sales order, its payments, deposit applications and realized FX revaluations.
+@pytest.mark.parametrize("neighbour", ["CustCred", "Journal", "CustRfnd", "RtnAuth", "CashRfnd", "Unknown"])
+async def test_an_invoice_reduced_by_any_other_linked_document_is_unknown(neighbour):
+    reader = invoiced_reader(("5", "100.00", "20.00"))
+    reader.edges.append(with_invoice(edge("5", "9", "CustInvc", neighbour), "previous", "100.00", "20.00"))
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["billed_invoices"] == {"complete": False, "reason": "billing_reduced_or_unproven"}
+    assert result["amount"] == Decimal("100.00")
+
+
+async def test_payments_deposit_applications_and_fx_revaluations_leave_the_invoice_as_billed():
+    reader = invoiced_reader(("5", "100.00", "20.00"))
+    reader.edges += [
+        with_invoice(edge("5", following, "CustInvc", kind), "previous", "100.00", "20.00")
+        for following, kind in (("10", "CustPymt"), ("11", "DepAppl"), ("12", "FxReval"))
+    ]
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
+    assert result["billed_invoices"]["complete"] is True

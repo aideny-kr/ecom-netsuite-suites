@@ -243,13 +243,21 @@ def billing_documents(nodes, reachable):
     )
 
 
-def billed_invoices(nodes, reachable, owned, figures, currency_id):
+# What NetSuite may link to an invoice without changing what it bills: its sales order, payments,
+# deposit applications and the realized FX revaluation of a payment (C14b review R1). A credit memo --
+# standalone ones included, which are no invoice credit -- a journal, a refund or anything else may
+# reduce it.
+_INVOICE_NEIGHBOURS = frozenset({"SalesOrd", "CustPymt", "DepAppl", "FxReval"})
+
+
+def billed_invoices(nodes, reachable, owned, figures, currency_id, edges):
     """The order's posted invoices and their sums from the graph's own rows, or why they are unknown (C14b).
 
     For an order billed in full whose sales order header was never updated, reconciliation compares the
     invoices with the source. Only invoices the order alone owns, posted in the order's currency, with a
-    total, tax and exchange rate every row agrees on; a cash sale, or any invoice the rows do not prove,
-    leaves them unknown, never zero.
+    total, tax and exchange rate every row agrees on, and nothing linked to them that could reduce them:
+    the graph read every link of each invoice, since every billing document is reachable. A cash sale,
+    or any invoice the rows do not prove, leaves them unknown, never zero.
     """
 
     def unknown(reason):
@@ -258,6 +266,11 @@ def billed_invoices(nodes, reachable, owned, figures, currency_id):
     ids = billing_documents(nodes, reachable)
     if not ids:
         return unknown("not_billed")
+    for previous, following, before, after in edges:
+        if (previous in ids and after not in _INVOICE_NEIGHBOURS) or (
+            following in ids and before not in _INVOICE_NEIGHBOURS
+        ):
+            return unknown("billing_reduced_or_unproven")
     total, tax, rates = Decimal(0), Decimal(0), set()
     for identifier in ids:
         node = nodes[identifier]
@@ -808,7 +821,7 @@ async def collect_refunds(
         # The order's invoices and cash sales and its deposits, from the graph's own rows: what
         # reconciliation needs to settle a canceled order (decided 2026-10-22).
         "billing_ids": billing_documents(nodes, reachable),
-        "billed_invoices": billed_invoices(nodes, reachable, owned, figures, currency_id),
+        "billed_invoices": billed_invoices(nodes, reachable, owned, figures, currency_id, edges),
         "deposits": order_deposits(nodes, reachable, owned, documents),
         # Retain every observed participant, including voided refunds and
         # parents outside the owned set. They can invalidate the proof later.
