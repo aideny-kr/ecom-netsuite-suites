@@ -210,3 +210,60 @@ asyncio.run(main())
             with pytest.raises(attempts.ValidationAttemptError, match="claimed"):
                 await attempts.execute_validation_attempt(db, **args, runtime=runtime)
         call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["source", "revocation"])
+async def test_separate_commit_between_claim_and_dispatch_blocks_broker(installation, monkeypatch, drift):  # noqa: F811
+    monkeypatch.setattr(settings, "DEDICATED_RUNTIME", True)
+    factory = async_sessionmaker(installation["engine"], expire_on_commit=False)
+    args, file_id, _ = await seed(factory, installation["company"])
+    runtime = attempts.ValidationRuntime("sha256:" + "a" * 64, "/tmp/synthetic.sock", "/usr/bin/docker", b"r" * 32)
+    original_commit = attempts._commit
+    injected = False
+
+    async def commit_then_change(db, tenant_id):
+        nonlocal injected
+        await original_commit(db, tenant_id)
+        if not injected:
+            injected = True
+            async with factory() as other:
+                await set_tenant_context(other, str(tenant_id))
+                record = await other.scalar(
+                    select(WorkspaceArtifact).where(
+                        WorkspaceArtifact.run_id == args["run_id"], WorkspaceArtifact.artifact_type == attempts.ATTEMPT
+                    )
+                )
+                assert record is not None, "claim commit not visible before mutation"
+                model = Connection if drift == "revocation" else WorkspaceFile
+                identifier = args["connection_id"] if drift == "revocation" else file_id
+                changes = dict(status="revoked") if drift == "revocation" else dict(content="// pre-dispatch edit\n")
+                if drift == "revocation":
+                    row = await other.get(Connection, identifier)
+                    row.status = "revoked"
+                else:
+                    await other.execute(update(model).where(model.id == identifier).values(**changes))
+                await other.commit()
+
+    monkeypatch.setattr(attempts, "_commit", commit_then_change)
+    with patch.object(
+        attempts.credential_executor, "validate_project", AsyncMock(side_effect=lambda **kw: synthetic_receipt(kw))
+    ) as broker:
+        async with factory() as db:
+            await set_tenant_context(db, str(args["tenant_id"]))
+            run = await attempts.execute_validation_attempt(db, **args, runtime=runtime)
+            assert injected and run.status == "failed" and run.gate_status == "block"
+        broker.assert_not_awaited()
+        async with factory() as db:
+            await set_tenant_context(db, str(args["tenant_id"]))
+            run = await db.get(WorkspaceRun, args["run_id"])
+            assert run.status == "failed"
+            outcome = await db.scalar(
+                select(WorkspaceArtifact).where(
+                    WorkspaceArtifact.run_id == run.id, WorkspaceArtifact.artifact_type == attempts.OUTCOME
+                )
+            )
+            assert json.loads(outcome.content)["state"] == "uncertain"
+            with pytest.raises(attempts.ValidationAttemptError, match="claimed"):
+                await attempts.execute_validation_attempt(db, **args, runtime=runtime)
+        broker.assert_not_awaited()

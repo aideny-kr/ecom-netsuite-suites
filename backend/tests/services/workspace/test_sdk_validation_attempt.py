@@ -75,6 +75,7 @@ async def test_current_authority_and_source_checked_after_broker(db, journal, dr
 
     attempts, args, run, connection, _, project = journal
     ws, cs, user, *_ = project
+    observed = []
 
     async def execute(**kwargs):
         result = synthetic_receipt(kwargs)
@@ -88,8 +89,12 @@ async def test_current_authority_and_source_checked_after_broker(db, journal, dr
             "membership": (UserRole, None, dict(tenant_id=tenant_b.id)),
         }[drift]
         where = model.user_id == user.id if drift == "membership" else model.id == identifier
-        await db.execute(update(model).where(where).values(**changes).execution_options(synchronize_session=False))
+        if drift == "connection":
+            connection.status = "revoked"
+        else:
+            await db.execute(update(model).where(where).values(**changes).execution_options(synchronize_session=False))
         await db.flush()
+        observed.append(drift)
         return result
 
     with patch.object(attempts.credential_executor, "validate_project", AsyncMock(side_effect=execute)) as call:
@@ -102,6 +107,7 @@ async def test_current_authority_and_source_checked_after_broker(db, journal, dr
         with pytest.raises(attempts.ValidationAttemptError, match="claimed"):
             await attempts.execute_validation_attempt(db, **args)
         assert call.await_count == 1
+        assert observed == [drift]
     assert not (
         await db.scalars(
             select(WorkspaceArtifact).where(
@@ -315,3 +321,37 @@ async def test_journal_through_actual_broker_and_disposable_namespace(db, journa
     evidence = await attempts.read_validation_receipt(db, tenant_id=args["tenant_id"], run_id=run.id, runtime=runtime)
     assert evidence["server_validation"] is True
     # Java in this image is synthetic. No real account handshake is claimed.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["source", "revocation"])
+async def test_claim_commit_to_dispatch_recheck_prevents_credential_send(db, journal, drift, monkeypatch):
+    from app.models.connection import Connection
+    from app.models.workspace import WorkspaceFile
+
+    attempts, args, run, connection, _, project = journal
+    original_commit = attempts._commit
+    injected = False
+
+    async def commit_then_change(session, tenant_id):
+        nonlocal injected
+        await original_commit(session, tenant_id)
+        if not injected:
+            injected = True
+            model = Connection if drift == "revocation" else WorkspaceFile
+            identifier = connection.id if drift == "revocation" else project[3].id
+            changes = dict(status="revoked") if drift == "revocation" else dict(content="// pre-dispatch edit\n")
+            if drift == "revocation":
+                row = await session.get(Connection, identifier)
+                row.status = "revoked"
+            else:
+                await session.execute(update(model).where(model.id == identifier).values(**changes))
+            await original_commit(session, tenant_id)
+
+    monkeypatch.setattr(attempts, "_commit", commit_then_change)
+    with patch.object(
+        attempts.credential_executor, "validate_project", AsyncMock(side_effect=lambda **kw: synthetic_receipt(kw))
+    ) as broker:
+        await attempts.execute_validation_attempt(db, **args)
+        broker.assert_not_awaited()
+    assert injected and run.status == "failed" and run.gate_status == "block"

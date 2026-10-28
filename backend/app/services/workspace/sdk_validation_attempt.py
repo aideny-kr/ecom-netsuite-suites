@@ -229,6 +229,9 @@ async def execute_validation_attempt(
     A cancellation/crash leaves the durable running claim for reconciliation.
     Failures after claim also consume this run; retry requires a new authorized
     run. No result_json/deploy authority is created, even on verified success.
+    Before a claim is committed, refusals leave the caller's transaction open.
+    The caller must commit/rollback (or close its session) on every exception
+    to release the run/connection locks, including duplicate-delivery refusal.
     """
     run = await _run(db, tenant_id, run_id)
     prior = await db.scalar(
