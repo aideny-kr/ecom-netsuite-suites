@@ -216,20 +216,24 @@ async def compute_deploy_snapshot(
     workspace + changeset; tenant filtering is enforced at the query level.
     """
     files_result = await db.execute(
-        select(WorkspaceFile).where(
+        select(WorkspaceFile)
+        .where(
             WorkspaceFile.workspace_id == workspace_id,
             WorkspaceFile.tenant_id == tenant_id,
             WorkspaceFile.is_directory.is_(False),
         )
+        .execution_options(populate_existing=True)
     )
     files: dict[str, str] = {f.path: f.content or "" for f in files_result.scalars().all()}
 
     cs_result = await db.execute(
-        select(WorkspaceChangeSet).where(
+        select(WorkspaceChangeSet)
+        .where(
             WorkspaceChangeSet.id == changeset_id,
             WorkspaceChangeSet.workspace_id == workspace_id,
             WorkspaceChangeSet.tenant_id == tenant_id,
         )
+        .execution_options(populate_existing=True)
     )
     changeset = cs_result.scalar_one_or_none()
     if changeset is None:
@@ -242,6 +246,7 @@ async def compute_deploy_snapshot(
             WorkspacePatch.tenant_id == tenant_id,
         )
         .order_by(WorkspacePatch.apply_order)
+        .execution_options(populate_existing=True)
     )
     patches = list(patch_result.scalars().all())
 

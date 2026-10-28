@@ -1,8 +1,8 @@
 """Internal, context-bound SDK evidence; signing never grants target authority.
 
-No worker caller or durable store is enabled here. A future caller must commit
-the exclusive attempt/nonce, recheck current authority, persist this envelope
-and verify it with the expected database context before using the evidence.
+No worker caller is enabled here. The inactive sdk_validation_attempt adapter
+journals the exclusive attempt/nonce, rechecks current authority, persists this
+envelope and verifies it against database context. It grants no deploy authority.
 Keys are trusted application inputs and never enter the credential container.
 """
 

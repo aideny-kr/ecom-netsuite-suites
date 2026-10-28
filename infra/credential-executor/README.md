@@ -66,11 +66,22 @@ container. Raw SDK output, keys, credential stores and project bytes are not
 returned. Verification requires independently loaded expected context, nonce,
 identity, image and source bytes; a signature alone grants no authority.
 
-This is an inactive internal broker interface. There is still no validation
-worker caller, durable receipt storage, nonce consumption or configured signing
-key. Before integration, commit the exclusive attempt/nonce before external
-work, enforce current actor/company/connection/project gates before and after
-the call, durably persist and verify the envelope, and fail closed without
-replay after uncertain outcomes. Synthetic Java/container checks prove the
+The inactive `sdk_validation_attempt` service journals an exclusive run/nonce
+before the broker call, rechecks current actor/company/membership/connection/
+project bytes before and after execution, and persists/reverifies signed evidence.
+Its fixed artifact types use the existing tenant-scoped artifact store and the
+run row lock. This service is their only writer; duplicate or inconsistent
+journal records block readback. Worker death/cancellation leaves a committed
+running claim for operator reconciliation. Other failures consume the run with
+an uncertain outcome, never an automatic retry. A new authorized run is needed
+after reconciliation; resetting the old run cannot bypass its existing journal.
+
+There is still no API/worker caller or configured runtime/signing key. The new
+receipt is separate from deploy prerequisite `result_json`; even successful
+SDK evidence leaves `gate_status=block`. Reading it requires current authority,
+source, identity, image and the retained signing key again. Caller-owned read
+transactions must commit/rollback promptly to release locks. Signing-key custody/
+rotation, worker delivery, operator resolution and deployment-gate integration
+remain activation work. Synthetic Java/container checks prove the
 protocol and namespace behavior only, not a real authorized NetSuite handshake,
 server validation, deployment, remote readback, health or rollback.

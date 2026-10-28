@@ -26,7 +26,15 @@ elif "validate" in sys.argv:
     root = Path(sys.argv[sys.argv.index("-project") + 1])
     assert root != Path.cwd() and not (root / "tests").exists()
     assert (root / "manifest.xml").is_file() and (root / "deploy.xml").is_file()
-    assert (root / "FileCabinet/SuiteScripts/reviewed.js").read_bytes() == b"// exact\r\n\x00"
+    scripts = root / "FileCabinet/SuiteScripts"
+    if (scripts / "reviewed.js").exists():
+        assert (scripts / "reviewed.js").read_bytes() == b"// exact\r\n\x00"
+    else:
+        # Separate database-backed journal fixture. PostgreSQL text cannot
+        # contain the NUL used by the transport-only fixture above.
+        assert {p.name for p in scripts.iterdir()} == {"a.js", "new.js"}
+        assert (scripts / "a.js").read_bytes() == b"// checked\n"
+        assert (scripts / "new.js").read_bytes() == b"// checked patch\n"
     bulk = root / "FileCabinet/SuiteScripts/bulk.txt"
     if bulk.exists():
         assert bulk.stat().st_size > 7 * 1024 * 1024
