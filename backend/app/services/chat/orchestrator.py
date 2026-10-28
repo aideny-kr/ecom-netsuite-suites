@@ -4706,6 +4706,15 @@ async def run_chat_turn(
                         else:
                             _persisted_output = {"charts": _charts_output}
                     _persisted_output = _keep_group_breakdown(_persisted_output, turn_group_breakdown)
+                    # Any blocker card still queued when the agent finished (a path that queued after the
+                    # agent's own drains) is shown once here and saved with the answer, never carried into a
+                    # later turn (fix_blockers).
+                    from app.services.transaction_ops.fix_blockers import take_cards
+
+                    for side_card in take_cards(db):
+                        if not _card_shown(_result_cards, side_card):
+                            _result_cards.append(side_card)
+                            yield {"type": "result_card", "data": side_card}
                     if _result_cards:
                         _persisted_output = {**(_persisted_output or {}), "result_cards": _result_cards}
 
@@ -5191,6 +5200,14 @@ async def run_chat_turn(
 
         # Strip raw tool reference tags / leaked XML the LLM may include
         final_text = _sanitize_assistant_text(final_text)
+
+        # Any blocker card still queued is shown once and saved with the answer (fix_blockers).
+        from app.services.transaction_ops.fix_blockers import take_cards
+
+        for side_card in take_cards(db):
+            if not _card_shown(legacy_result_cards, side_card):
+                legacy_result_cards.append(side_card)
+                yield {"type": "result_card", "data": side_card}
 
         # ── Save assistant message ──
         assistant_msg = ChatMessage(

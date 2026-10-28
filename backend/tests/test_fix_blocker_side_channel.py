@@ -136,3 +136,55 @@ def test_a_groups_blocked_orders_become_one_card():
         ["R222222222", "12", "Price match", "line", "-5.00", None],
     ]
     assert fix_blockers.group_card([one]) is one and fix_blockers.group_card([]) is None
+
+
+async def test_a_card_queued_by_group_preparation_is_shown(db):
+    # Review round 6 (F1): group preparation runs after the tool's own drain, in the confirmation step.
+    from app.services.chat.agents.base_agent import BaseSpecialistAgent
+    from app.services.chat.llm_adapter import LLMResponse, ToolUseBlock
+    from tests.test_metabase_skills import _agent
+
+    agent = _agent([])
+    agent._tool_defs.append(
+        {"name": "transaction_ops_accounting_group", "description": "Group", "input_schema": {"type": "object"}}
+    )
+    card, step = _card(), 0
+
+    async def response(**kwargs):
+        nonlocal step
+        step += 1
+        if step == 1:
+            return LLMResponse(
+                tool_use_blocks=[ToolUseBlock("g", "transaction_ops_accounting_group", {"group_id": "g"})]
+            )
+        return LLMResponse(text_blocks=["Done."])
+
+    async def stream(**kwargs):
+        yield "response", await response(**kwargs)
+
+    async def dispatch(tool_name, tool_input, **kwargs):
+        return json.dumps({"success": True, "group_id": "g", "case_count": 2})
+
+    async def prepare(**kwargs):
+        fix_blockers.queue_card(kwargs["db"], card)  # as group preparation does, after the tool returned
+        return None
+
+    adapter = MagicMock()
+    adapter.create_message = response
+    adapter.stream_message = stream
+    adapter.build_assistant_message.side_effect = lambda r: {"role": "assistant", "content": ""}
+    adapter.build_tool_result_message.side_effect = lambda content: {"role": "user", "content": content}
+    with (
+        patch("app.services.chat.mutation_guard.classify_connector_mutation", new=AsyncMock(return_value=None)),
+        patch("app.services.chat.tools.execute_tool_call", side_effect=dispatch),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", side_effect=prepare),
+        patch(
+            "app.services.chat.agents.base_agent.extract_structured_confidence",
+            new=AsyncMock(return_value=SimpleNamespace(score=5, source="test")),
+        ),
+        patch("app.services.chat.agents.base_agent._maybe_store_query_pattern", new=AsyncMock()),
+    ):
+        events = [e async for e in BaseSpecialistAgent.run_streaming(agent, "Fix group g", {}, db, adapter, "test")]
+    shown = [value for kind, value in events if kind == "tool_intercept"]
+    assert shown == [("result_card", card)]
+    assert fix_blockers.take_cards(db) == []

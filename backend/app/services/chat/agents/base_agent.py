@@ -2497,6 +2497,12 @@ class BaseSpecialistAgent(abc.ABC):
                                 ),
                             )
                             return
+                        # Preparation runs after the tool's own drain and may queue cards of its own (a group's
+                        # merged blocker card): show them now (fix_blockers, review round 6).
+                        from app.services.transaction_ops.fix_blockers import take_cards
+
+                        for side_card in take_cards(db):
+                            yield "tool_intercept", ("result_card", side_card)
                         if not prepared and block.name == "transaction_ops_accounting_group":
                             investigation = db.info.get("accounting_group_investigation")
                             if investigation:
@@ -2544,6 +2550,9 @@ class BaseSpecialistAgent(abc.ABC):
                                                 duration_ms=int((time.monotonic() - read_start) * 1000),
                                             )
                                         )
+                                    # The representative reads' own blocker cards repeat rows the group's
+                                    # merged card already showed: drop them.
+                                    take_cards(db)
                                     investigation["representative_observations"] = details
                                     investigation["representative_instruction"] = (
                                         "The saved source and document details below have already been inspected for "
