@@ -229,7 +229,7 @@ def _facts(
         or paid != total
         or not adjustments_final(source)
     ):
-        raise RefusalError("source_not_final")
+        raise RefusalError("source_not_final", _finality(source, require_paid=True))
     if (_dec(credit.get("taxTotal")) or Decimal(0)) != 0:
         raise RefusalError("credit_tax_engine_nonzero")
     taxed = _tax_accounts(profile)
@@ -1174,3 +1174,10 @@ async def prepare_group_member(db, tenant_id, case_id):
     proposal["resolution_plan"] = proposal_plan(proposal, context["report"])
     db.info["accounting_correction_candidate"] = proposal
     return proposal
+
+
+def _finality(source, **kwargs):
+    """What the source-finality guard found, for the person (fix_blockers, 2026-10-27)."""
+    from app.services.transaction_ops.fix_blockers import source_finality
+
+    return source_finality(source, **kwargs)

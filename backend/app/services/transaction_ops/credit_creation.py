@@ -84,7 +84,7 @@ def facts(
         or None in (total, source_tax)
         or not adjustments_final(source)
     ):
-        raise RefusalError("source_not_final")
+        raise RefusalError("source_not_final", _finality(source))
     if require_difference and own_external_id and any(d.get("externalId") == own_external_id for d, _ in credits):
         # The case's own credit exists: another create would reuse its idempotency key, which NetSuite
         # refuses. A further correction is a person's call (packet review round 1, F4).
@@ -1192,3 +1192,10 @@ def project(p, report, current, *, verified_at, now):
             "posting_reconciliation": posting,
         },
     }
+
+
+def _finality(source, **kwargs):
+    """What the source-finality guard found, for the person (fix_blockers, 2026-10-27)."""
+    from app.services.transaction_ops.fix_blockers import source_finality
+
+    return source_finality(source, **kwargs)

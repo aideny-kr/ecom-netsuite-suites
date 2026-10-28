@@ -468,6 +468,39 @@ async def execute_accounting_group(params: dict, **kwargs) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+async def _blocker_fields(db, tenant_id, case_id, code, detail):
+    """A refused fix's blocker for the model, and its records' card for the person (fix_blockers, 2026-10-27).
+
+    Empty for a refusal with no known owner. Without the case to name the order, the model still learns
+    who acts, but no card is shown.
+    """
+    from datetime import datetime, timezone
+
+    from app.services.transaction_ops import case_service, fix_blockers
+    from app.services.transaction_ops.state_service import StateError
+
+    value = fix_blockers.blocker(code, detail)
+    if value is None:
+        return {}
+    card = None
+    if value["objects"]:
+        try:
+            case = await case_service.get_case(db, tenant_id, case_id)
+            source = (case.latest_report_json or {}).get("source") or {}
+            card = fix_blockers.card(
+                value,
+                order_reference=case.order_reference,
+                currency=source.get("currency"),
+                observed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except (StateError, AttributeError, TypeError):
+            card = None
+    fields = {"blocker": fix_blockers.for_model(value, card_shown=card is not None)}
+    if card is not None:
+        fields["blocker_card"] = card
+    return fields
+
+
 _REALLOCATION_GUIDANCE = {
     "outcome_does_not_match_source": "The lines do not make the order equal the source. Use detail.required: "
     "the tax part of the credit is what the order's posted tax exceeds the source by. Never round. "
@@ -484,6 +517,8 @@ _REALLOCATION_GUIDANCE = {
     "detail.tax_refund_items) for the tax part and an equal negative line on this credit's item. Leave this credit, "
     "its refund and the invoice as they are.",
     "foreign_currency_unsupported": "Foreign-currency credits are not supported by this correction.",
+    "source_not_final": "Solidus can still change this order (detail.open_adjustments, detail.checks). See blocker: "
+    "say who must act and what to do; do not try another write path.",
 }
 
 
@@ -535,6 +570,7 @@ async def execute_propose_credit_reallocation(params: dict, **kwargs) -> dict:
                 "guidance": _REALLOCATION_GUIDANCE.get(
                     exc.code, "Resolve the stated evidence gap; do not switch to another write path."
                 ),
+                **(await _blocker_fields(db, tenant_id, case_id, exc.code, exc.detail)),
                 "financial_writes": 0,
             }
         if not case_resolution_scope.allows(restriction, proposal):
@@ -617,6 +653,8 @@ _CREDIT_GUIDANCE = {
     "call; report it.",
     "period_locked": "The current posting period is closed or AR-locked; report it.",
     "foreign_currency_unsupported": "Foreign-currency invoices are not supported by this correction.",
+    "source_not_final": "Solidus can still change this order (detail.open_adjustments, detail.checks). See blocker: "
+    "say who must act and what to do; do not try another write path.",
     "credit_location_required": "The invoice has no location and the subsidiary has no configured correction "
     "location; report the configuration gap.",
 }
@@ -670,6 +708,7 @@ async def execute_propose_credit(params: dict, **kwargs) -> dict:
                 or _CREDIT_GUIDANCE.get(
                     exc.code, "Resolve the stated evidence gap; do not switch to another write path."
                 ),
+                **(await _blocker_fields(db, tenant_id, case_id, exc.code, exc.detail)),
                 "financial_writes": 0,
             }
         if not case_resolution_scope.allows(restriction, proposal):
@@ -1042,6 +1081,16 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         from datetime import datetime, timezone
 
         evidence["completed_at"] = datetime.now(timezone.utc).isoformat()
+        from app.services.transaction_ops.fix_blockers import evidence_fields
+
+        # Who must act when no fix can be prepared yet: shown as a card, named for the model (2026-10-27).
+        blocked = evidence_fields(
+            evidence,
+            correction,
+            order_reference=case.order_reference,
+            currency=((case.latest_report_json or {}).get("source") or {}).get("currency"),
+            observed_at=evidence["completed_at"],
+        )
         evidence_event = await log_event(
             db,
             tenant_id,
@@ -1067,6 +1116,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                     "case_id": str(case.id),
                     "evidence_summary": completion_evidence_summary(evidence),
                     "record_links": evidence["record_links"],
+                    **blocked,
                     "detail_access": {
                         "case_id": str(case.id),
                         "observation_id": str(evidence_event.id),

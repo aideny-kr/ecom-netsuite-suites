@@ -1,0 +1,194 @@
+"""A refused fix names its blocker, who acts and the exact records (2026-10-27).
+
+Of 19 fresh per-order agent runs on 27 Oct, 18 ended with "I can't prepare a fix" and 17 of those were the
+source_not_final guard: Solidus still had an unfinalized adjustment. The guard is right; the agent never
+said which adjustment. These tests pin the deterministic blocker that replaces that guesswork.
+Synthetic data only.
+"""
+
+import json
+
+import pytest
+
+from app.services.transaction_ops import fix_blockers
+
+
+def _source(**updates):
+    return {
+        "number": "R123456789",
+        "currency": "USD",
+        "state": "complete",
+        "requires_review": False,
+        "completed_at": "2026-04-21T20:48:00Z",
+        "payment_state": "paid",
+        "adjustments": [
+            {
+                "id": 11,
+                "label": "Manual Tax Correction",
+                "amount": "-47.04",
+                "finalized": False,
+                "adjustable_type": "Spree::Order",
+                "source_type": None,
+                "created_at": "2026-10-21T15:03:00Z",
+            },
+            {
+                "id": 12,
+                "label": "Promotion",
+                "amount": "-10.00",
+                "finalized": True,
+                "adjustable_type": "Spree::Order",
+                "source_type": "Spree::PromotionAction",
+            },
+        ],
+        "line_items": [
+            {
+                "adjustments": [
+                    # Solidus's own tax-rate adjustments stay open on completed orders by design.
+                    {
+                        "id": 21,
+                        "label": "Tax",
+                        "amount": "0.00",
+                        "finalized": False,
+                        "source_type": "Spree::TaxRate",
+                        "adjustable_type": "Spree::LineItem",
+                    },
+                    {
+                        "id": 22,
+                        "label": "Price match",
+                        "amount": "-5.00",
+                        "finalized": False,
+                        "source_type": "Spree::PromotionAction",
+                        "adjustable_type": "Spree::LineItem",
+                        "created_at": "2026-10-22T09:00:00Z",
+                    },
+                ]
+            },
+        ],
+        "shipments": [
+            {
+                "adjustments": [
+                    {
+                        "id": 31,
+                        "label": "Shipping Tax",
+                        "amount": "0.00",
+                        "finalized": False,
+                        "source_type": "Spree::TaxRate",
+                        "adjustable_type": "Spree::Shipment",
+                    }
+                ]
+            }
+        ],
+        **updates,
+    }
+
+
+def test_the_open_adjustments_are_named_and_solidus_tax_rates_are_not():
+    finality = fix_blockers.source_finality(_source())
+    assert [a["id"] for a in finality["open_adjustments"]] == ["11", "22"]
+    assert finality["open_adjustments"][0] == {
+        "id": "11",
+        "label": "Manual Tax Correction",
+        "amount": "-47.04",
+        "applies_to": "order",
+        "created_at": "2026-10-21T15:03:00Z",
+    }
+    assert finality["open_adjustments"][1]["applies_to"] == "line"
+    assert finality["checks"] == ["open_adjustments"]
+
+
+@pytest.mark.parametrize(
+    "updates, check",
+    [
+        ({"state": "returned"}, "order_not_complete"),
+        ({"requires_review": True}, "flagged_for_review"),
+        ({"completed_at": None}, "not_completed"),
+    ],
+)
+def test_every_failed_finality_check_is_named(updates, check):
+    finality = fix_blockers.source_finality(_source(adjustments=[], line_items=[], **updates))
+    assert finality["checks"] == [check] and finality["open_adjustments"] == []
+
+
+def test_payment_is_checked_only_where_the_guard_requires_it():
+    source = _source(adjustments=[], line_items=[], payment_state="balance_due")
+    assert fix_blockers.source_finality(source)["checks"] == []
+    assert fix_blockers.source_finality(source, require_paid=True)["checks"] == ["payment_not_settled"]
+
+
+def test_the_list_is_bounded():
+    many = [{"id": i, "label": "x", "amount": "-1.00", "finalized": False} for i in range(40)]
+    finality = fix_blockers.source_finality(_source(adjustments=many, line_items=[]))
+    assert len(finality["open_adjustments"]) == fix_blockers.MAX_OBJECTS
+    assert finality["open_adjustments_not_listed"] == 40 - fix_blockers.MAX_OBJECTS
+
+
+def test_source_not_final_names_solidus_operations_and_the_records():
+    blocker = fix_blockers.blocker("source_not_final", fix_blockers.source_finality(_source()))
+    assert blocker["owner"] == "Solidus operations"
+    assert "void" in blocker["action"].lower() and "finalize" in blocker["action"].lower()
+    assert [o["id"] for o in blocker["objects"]] == ["11", "22"]
+
+
+def test_every_known_refusal_has_an_owner_and_an_action():
+    for code in fix_blockers.KNOWN:
+        blocker = fix_blockers.blocker(code, {})
+        assert blocker["owner"] and blocker["action"] and blocker["title"]
+
+
+def test_an_unknown_refusal_has_no_invented_blocker():
+    assert fix_blockers.blocker("outcome_does_not_match_source", {"required": "1.00"}) is None
+
+
+def test_the_card_carries_every_record_and_amount():
+    blocker = fix_blockers.blocker("source_not_final", fix_blockers.source_finality(_source()))
+    card = fix_blockers.card(blocker, order_reference="R123456789", currency="USD", observed_at="2026-10-27T19:47:00Z")
+    assert card["kind"] == "table" and card["title"] == blocker["title"]
+    assert [c["key"] for c in card["columns"]] == ["id", "label", "applies_to", "amount", "created"]
+    assert card["columns"][3] == {
+        "key": "amount",
+        "label": "Amount",
+        "format": "currency",
+        "currency": "USD",
+        "align": "right",
+    }
+    assert card["rows"][0] == ["11", "Manual Tax Correction", "order", "-47.04", "2026-10-21"]
+    assert card["check"] == {"status": "warn", "text": blocker["action"]}
+    assert "R123456789" in card["subtitle"] and "Solidus operations" in card["subtitle"]
+    for key in ("card_id", "result_ids", "queries", "tiles", "top_n", "collapsed"):
+        assert key in card
+
+
+def test_a_blocker_without_records_has_no_card():
+    assert fix_blockers.card(fix_blockers.blocker("period_locked", {}), order_reference="R1", currency="USD") is None
+
+
+def test_the_model_learns_who_acts_but_never_the_amounts():
+    blocker = fix_blockers.blocker("source_not_final", fix_blockers.source_finality(_source()))
+    summary = json.dumps(fix_blockers.for_model(blocker, card_shown=True))
+    assert "Solidus operations" in summary and '"open_records": 2' in summary
+    assert "47.04" not in summary and "Manual Tax Correction" not in summary
+
+
+def test_the_evidence_view_names_the_blocker_when_no_fix_is_ready():
+    fields = fix_blockers.evidence_fields(
+        {"source_refresh": _source()},
+        None,
+        order_reference="R123456789",
+        currency="USD",
+        observed_at="2026-10-27T19:47:00Z",
+    )
+    assert fields["fix_blocker"]["who_acts"] == "Solidus operations" and fields["fix_blocker"]["card_shown"]
+    assert [row[0] for row in fields["fix_blocker_card"]["rows"]] == ["11", "22"]
+
+
+@pytest.mark.parametrize(
+    "evidence, correction",
+    [
+        ({"source_refresh": _source()}, {"kind": "credit_line_reallocation"}),  # a fix is ready: nothing blocks it
+        ({"source_refresh": _source(adjustments=[], line_items=[])}, None),  # nothing open in Solidus
+        ({"source_refresh": _source(adjustments=[], line_items=[], state="returned")}, None),  # no records to name
+        ({}, None),  # Solidus was not read
+    ],
+)
+def test_the_evidence_view_is_unchanged_without_an_open_adjustment_to_name(evidence, correction):
+    assert fix_blockers.evidence_fields(evidence, correction, order_reference="R1", currency="USD") == {}

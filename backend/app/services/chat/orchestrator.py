@@ -858,6 +858,24 @@ def _stamp_result_id(condensed: str, sse_event_data: dict, result_id: str | None
 _RESULT_CARD_TOOLS = frozenset({"present_result", "present.result", "compare_results", "compare.results"})
 
 
+def _card_shown(cards, card):
+    """Whether a card with this id is already among the turn's cards."""
+    identifier = card.get("card_id") if isinstance(card, dict) else None
+    return identifier is not None and any(isinstance(c, dict) and c.get("card_id") == identifier for c in cards)
+
+
+_FIX_BLOCKER_TOOLS = frozenset(
+    {
+        "transaction_ops.propose_credit",
+        "transaction_ops_propose_credit",
+        "transaction_ops.propose_credit_reallocation",
+        "transaction_ops_propose_credit_reallocation",
+        "transaction_ops.accounting_evidence",
+        "transaction_ops_accounting_evidence",
+    }
+)
+
+
 def _intercept_tool_result(
     tool_name: str, result_str: str, context_need: str = ContextNeed.DATA, result_id: str | None = None
 ) -> tuple[str | None, dict | None, str]:
@@ -896,6 +914,23 @@ def _intercept_tool_result(
         condensed = condense_status(parsed)
         condensed = _stamp_result_id(condensed, event, result_id)
         return "data_table", event, condensed
+
+    # A blocked fix: the card names the records and amounts; the model reads who acts (fix_blockers).
+    if tool_name in _FIX_BLOCKER_TOOLS:
+        try:
+            parsed = json.loads(result_str)
+        except (ValueError, TypeError):
+            return None, None, result_str
+        if isinstance(parsed, dict):
+            key = "fix_blocker_card" if "fix_blocker_card" in parsed else "blocker_card"
+            card = parsed.get(key)
+            if isinstance(card, dict) and isinstance(card.get("card_id"), str) and isinstance(card.get("rows"), list):
+                seen = {k: v for k, v in parsed.items() if k != key}
+                # The refusal's detail carries the same records the card shows.
+                if key == "blocker_card":
+                    seen.pop("detail", None)
+                return "result_card", card, json.dumps(seen, default=str)
+        return None, None, result_str
 
     # The breakdown card carries every amount; the model reads causes, counts and next steps.
     if tool_name in ("transaction_ops.group_breakdown", "transaction_ops_group_breakdown"):
@@ -4581,9 +4616,11 @@ async def run_chat_turn(
                         elif event_type == "progress":
                             yield progress_event(payload)
                         elif event_type == "tool_intercept" and payload[0] == "result_card":
-                            # Several cards may accompany one answer; persisted as a list.
-                            _result_cards.append(payload[1])
-                            yield {"type": "result_card", "data": payload[1]}
+                            # Several cards may accompany one answer; persisted as a list. A card id already
+                            # shown this turn (a fix blocker read twice) is shown once.
+                            if not _card_shown(_result_cards, payload[1]):
+                                _result_cards.append(payload[1])
+                                yield {"type": "result_card", "data": payload[1]}
                         elif event_type == "tool_intercept":
                             # payload is (event_type_str, event_data_dict)
                             last_structured_output = {"type": payload[0], "data": payload[1]}
@@ -5074,8 +5111,9 @@ async def run_chat_turn(
                 )
                 if intercept_type == "result_card":
                     # Cards never replace the turn's data output; they ride beside it.
-                    legacy_result_cards.append(intercept_data)
-                    yield {"type": "result_card", "data": intercept_data}
+                    if not _card_shown(legacy_result_cards, intercept_data):
+                        legacy_result_cards.append(intercept_data)
+                        yield {"type": "result_card", "data": intercept_data}
                 elif intercept_type is not None:
                     last_structured_output = {"type": intercept_type, "data": intercept_data}
                     if intercept_type == "group_breakdown":
