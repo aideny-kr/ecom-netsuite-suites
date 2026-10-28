@@ -48,7 +48,7 @@ def test_a_refused_fix_shows_its_blocker_card_and_the_model_gets_no_amounts(name
     result = {
         "success": False,
         "refused": "source_not_final",
-        "detail": fix_blockers.source_finality(SOURCE),
+        "detail": fix_blockers.model_detail("source_not_final", fix_blockers.source_finality(SOURCE)),
         "guidance": "…",
         "blocker": fix_blockers.for_model(blocker, card_shown=True),
         "blocker_card": card,
@@ -58,7 +58,7 @@ def test_a_refused_fix_shows_its_blocker_card_and_the_model_gets_no_amounts(name
     assert event_type == "result_card" and event == card
     seen = json.loads(for_model)
     assert seen["refused"] == "source_not_final" and seen["blocker"]["who_acts"] == "Solidus operations"
-    assert "blocker_card" not in seen and "detail" not in seen
+    assert "blocker_card" not in seen and seen["detail"]["checks"] == ["open_adjustments"]
     assert "47.04" not in for_model and "Manual Tax Correction" not in for_model
 
 
@@ -107,3 +107,26 @@ def test_a_card_already_shown_this_turn_is_shown_once():
     assert _card_shown([card], dict(card)) is True
     assert _card_shown([card], {**card, "card_id": "other"}) is False
     assert _card_shown([card], {"title": "no id"}) is False
+
+
+def test_an_unprojected_evidence_response_still_shows_the_card_and_hides_it_from_the_model():
+    # Review F1: the legacy loop, or a view too large to project, hands the interceptor the full response.
+    blocker, card = _blocked()
+    full = {
+        "success": True,
+        "case_id": "c1",
+        "accounting_evidence": {"completed_at": "2026-10-27T19:47:00Z"},
+        "fix_blocker_card": card,
+        "model_context": {
+            "version": 1,
+            "data": {
+                "case_id": "c1",
+                "fix_blocker": fix_blockers.for_model(blocker, card_shown=True),
+                "fix_blocker_card": card,
+            },
+        },
+    }
+    event_type, event, for_model = _intercept_tool_result("transaction_ops_accounting_evidence", json.dumps(full))
+    assert event_type == "result_card" and event == card
+    assert "fix_blocker_card" not in for_model and "47.04" not in for_model
+    assert json.loads(for_model)["model_context"]["data"]["fix_blocker"]["open_records"] == 1

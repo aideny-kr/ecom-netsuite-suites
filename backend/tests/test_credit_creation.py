@@ -1,3 +1,5 @@
+import json
+
 """Smart resolver, slice 1: a credit memo the agent proposes, accepted only by outcome.
 
 The agent chooses the items and amounts. The server accepts them only when the order's posted
@@ -268,8 +270,12 @@ async def test_a_blocked_credit_tells_who_acts_and_carries_the_card(monkeypatch)
 
     monkeypatch.setattr("app.services.transaction_ops.case_service.get_case", no_case)
     out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
-    # No case to name the order: the person still learns who acts, without a card.
+    # No case to name the order: the person still learns who acts, without a card, and the model still gets
+    # no labels or amounts (review F2).
     assert out["blocker"]["card_shown"] is False and "blocker_card" not in out
+    text = json.dumps(out)
+    assert "Manual Tax Correction" not in text and "47.04" not in text
+    assert out["detail"] == {"checks": ["open_adjustments"], "open_adjustments": 1}
 
 
 async def test_a_refusal_with_no_known_owner_has_no_blocker(monkeypatch):

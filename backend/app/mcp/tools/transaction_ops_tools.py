@@ -468,6 +468,13 @@ async def execute_accounting_group(params: dict, **kwargs) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+def _model_detail(code, detail):
+    """The refusal detail the model reads; the audit log keeps it whole (fix_blockers.model_detail)."""
+    from app.services.transaction_ops.fix_blockers import model_detail
+
+    return model_detail(code, detail)
+
+
 async def _blocker_fields(db, tenant_id, case_id, code, detail):
     """A refused fix's blocker for the model, and its records' card for the person (fix_blockers, 2026-10-27).
 
@@ -566,7 +573,7 @@ async def execute_propose_credit_reallocation(params: dict, **kwargs) -> dict:
             return {
                 "success": False,
                 "refused": exc.code,
-                "detail": exc.detail,
+                "detail": _model_detail(exc.code, exc.detail),
                 "guidance": _REALLOCATION_GUIDANCE.get(
                     exc.code, "Resolve the stated evidence gap; do not switch to another write path."
                 ),
@@ -702,7 +709,7 @@ async def execute_propose_credit(params: dict, **kwargs) -> dict:
             return {
                 "success": False,
                 "refused": exc.code,
-                "detail": exc.detail,
+                "detail": _model_detail(exc.code, exc.detail),
                 # The detailed reason, when it has its own guidance, says more than the code.
                 "guidance": _CREDIT_GUIDANCE.get(str((exc.detail or {}).get("reason")))
                 or _CREDIT_GUIDANCE.get(
@@ -1109,6 +1116,8 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             "success": True,
             "case_id": str(case.id),
             "accounting_evidence": evidence,
+            # Also at the top level, for a reader that gets the whole response (review F1).
+            **({"fix_blocker_card": blocked["fix_blocker_card"]} if "fix_blocker_card" in blocked else {}),
             "evidence_summary": completion_evidence_summary(evidence),
             "model_context": {
                 "version": 1,

@@ -922,13 +922,15 @@ def _intercept_tool_result(
         except (ValueError, TypeError):
             return None, None, result_str
         if isinstance(parsed, dict):
-            key = "fix_blocker_card" if "fix_blocker_card" in parsed else "blocker_card"
-            card = parsed.get(key)
+            # The card is at the top level, or inside the evidence tool's model view when the model reads only
+            # that projection; a reader handed the whole response must lose it from both (review F1).
+            view = parsed.get("model_context") if isinstance(parsed.get("model_context"), dict) else {}
+            data = view.get("data") if isinstance(view.get("data"), dict) else {}
+            card = parsed.get("blocker_card") or parsed.get("fix_blocker_card") or data.get("fix_blocker_card")
             if isinstance(card, dict) and isinstance(card.get("card_id"), str) and isinstance(card.get("rows"), list):
-                seen = {k: v for k, v in parsed.items() if k != key}
-                # The refusal's detail carries the same records the card shows.
-                if key == "blocker_card":
-                    seen.pop("detail", None)
+                seen = {k: v for k, v in parsed.items() if k not in ("blocker_card", "fix_blocker_card")}
+                if "fix_blocker_card" in data:
+                    seen["model_context"] = {**view, "data": {k: v for k, v in data.items() if k != "fix_blocker_card"}}
                 return "result_card", card, json.dumps(seen, default=str)
         return None, None, result_str
 

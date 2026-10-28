@@ -24,8 +24,8 @@ _BLOCKERS = {
     "period_locked": (
         "Fix blocked: the posting period is locked",
         "Finance",
-        "The document's period is closed or locked. Ask for the correction in the open period, or have "
-        "finance reopen the period.",
+        "The document's period is closed or locked. The correction can be made in the open period instead; "
+        "otherwise finance reopens the period.",
     ),
     "foreign_currency_unsupported": (
         "Fix blocked: foreign-currency document",
@@ -61,6 +61,17 @@ _BLOCKERS = {
     ),
 }
 KNOWN = frozenset(_BLOCKERS)
+# Refusals whose tool guidance itself proposes another correction (a locked period: the same fix in the open
+# period, review F4). For every other known refusal the agent must not try another write path.
+_ANOTHER_PATH_SUPPORTED = frozenset({"period_locked"})
+
+# The source's other failed finality checks, in plain words (review F3).
+_CHECK_PHRASES = {
+    "order_not_complete": "the order is not complete in Solidus",
+    "flagged_for_review": "Solidus flags the order for review",
+    "not_completed": "the order has no completion date in Solidus",
+    "payment_not_settled": "the order's payment is not settled in Solidus",
+}
 
 _APPLIES_TO = {"Spree::Order": "order", "Spree::LineItem": "line", "Spree::Shipment": "shipment"}
 
@@ -117,15 +128,43 @@ def blocker(code, detail):
         return None
     title, owner, action = _BLOCKERS[code]
     detail = detail if isinstance(detail, dict) else {}
+    checks = list(detail.get("checks") or []) if code == "source_not_final" else []
     objects = detail.get("open_adjustments") if code == "source_not_final" else None
+    objects = list(objects) if isinstance(objects, list) else []
+    also = [_CHECK_PHRASES[check] for check in checks if check in _CHECK_PHRASES]
+    if code == "source_not_final" and not objects and also:
+        action = (
+            f"Solidus must settle this order first: {'; '.join(also)}. Then ask again; the app never corrects "
+            "NetSuite while Solidus can still change the order."
+        )
+        also = []
+    elif also:
+        action = f"{action} Also: {'; '.join(also)}."
     return {
         "code": code,
         "title": title,
         "owner": owner,
         "action": action,
-        "checks": list(detail.get("checks") or []),
-        "objects": list(objects) if isinstance(objects, list) else [],
+        "checks": checks,
+        "also_blocking": also,
+        "objects": objects,
         "objects_not_listed": detail.get("open_adjustments_not_listed", 0),
+    }
+
+
+def model_detail(code, detail):
+    """A refusal's detail as the model may read it: the records' labels and amounts stay on the card.
+
+    For source_not_final, only the failed checks and how many adjustments are open (review F2). Any other
+    refusal keeps its detail, which the model may need to correct its proposal.
+    """
+    if code != "source_not_final" or not isinstance(detail, dict):
+        return detail
+    listed = detail.get("open_adjustments")
+    return {
+        "checks": list(detail.get("checks") or []),
+        "open_adjustments": (len(listed) if isinstance(listed, list) else 0)
+        + int(detail.get("open_adjustments_not_listed") or 0),
     }
 
 
@@ -172,11 +211,16 @@ def for_model(value, *, card_shown):
         "blocked": value["code"],
         "who_acts": value["owner"],
         "what_to_do": value["action"],
+        "also_blocking": list(value.get("also_blocking") or []),
         "open_records": len(value["objects"]) + int(value.get("objects_not_listed") or 0),
         "card_shown": card_shown,
         "say": "Tell the person in one or two sentences who must act and what to do. "
         + ("The card beside your answer lists the records and amounts; do not repeat them. " if card_shown else "")
-        + "Do not try another write path for this refusal.",
+        + (
+            "Follow the tool's guidance for the correction it supports."
+            if value["code"] in _ANOTHER_PATH_SUPPORTED
+            else "Do not try another write path for this refusal."
+        ),
     }
 
 

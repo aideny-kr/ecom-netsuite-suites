@@ -192,3 +192,42 @@ def test_the_evidence_view_names_the_blocker_when_no_fix_is_ready():
 )
 def test_the_evidence_view_is_unchanged_without_an_open_adjustment_to_name(evidence, correction):
     assert fix_blockers.evidence_fields(evidence, correction, order_reference="R1", currency="USD") == {}
+
+
+def test_the_model_never_gets_the_records_even_without_a_card():
+    # Review F2: what the model reads is amount-free whether or not the card could be built.
+    detail = fix_blockers.model_detail("source_not_final", fix_blockers.source_finality(_source()))
+    assert detail == {"checks": ["open_adjustments"], "open_adjustments": 2}
+    text = json.dumps(detail)
+    assert "47.04" not in text and "Manual Tax Correction" not in text
+    other = {"required": {"tax": "450.20"}}
+    assert fix_blockers.model_detail("outcome_does_not_match_source", other) is other
+
+
+def test_other_failed_checks_are_named_beside_the_open_adjustments():
+    # Review F3: a review flag blocks the next proposal too, so it is said, not dropped.
+    finality = fix_blockers.source_finality(_source(requires_review=True))
+    blocker = fix_blockers.blocker("source_not_final", finality)
+    assert blocker["also_blocking"] == ["Solidus flags the order for review"]
+    shown = fix_blockers.card(blocker, order_reference="R1", currency="USD")
+    assert "Solidus flags the order for review" in shown["check"]["text"]
+    assert fix_blockers.for_model(blocker, card_shown=True)["also_blocking"] == ["Solidus flags the order for review"]
+
+
+def test_with_nothing_open_the_action_names_what_solidus_must_settle():
+    finality = fix_blockers.source_finality(_source(adjustments=[], line_items=[], state="returned"))
+    blocker = fix_blockers.blocker("source_not_final", finality)
+    assert blocker["objects"] == [] and "Void" not in blocker["action"]
+    assert "the order is not complete in Solidus" in blocker["action"]
+
+
+def test_a_locked_period_keeps_the_supported_open_period_correction():
+    # Review F4: the tool's own guidance proposes the open-period correction; the blocker must not forbid it.
+    summary = fix_blockers.for_model(fix_blockers.blocker("period_locked", {}), card_shown=False)
+    assert "Do not try another write path" not in summary["say"]
+    assert "open period" in summary["what_to_do"]
+    for code in fix_blockers.KNOWN - {"period_locked"}:
+        assert (
+            "Do not try another write path"
+            in fix_blockers.for_model(fix_blockers.blocker(code, {}), card_shown=False)["say"]
+        )
