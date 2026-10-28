@@ -293,3 +293,32 @@ def take_cards(db):
     info = getattr(db, "info", None)
     cards = info.pop(_SIDE_CARDS, None) if isinstance(info, dict) else None
     return [card for card in cards or [] if isinstance(card, dict)]
+
+
+MAX_GROUP_ROWS = 60
+
+
+def group_card(cards):
+    """One card for a group's blocked orders: each order's open adjustments under an Order column.
+
+    Group preparation reads each order on its own short-lived session (review round 5, F1); their cards are
+    merged here so the group shows one card, not one per order. One card is shown as it is; none is None.
+    """
+    cards = [c for c in cards if isinstance(c, dict) and isinstance(c.get("rows"), list) and c["rows"]]
+    if len(cards) <= 1:
+        return cards[0] if cards else None
+    first = cards[0]
+    references = [
+        str(c.get("card_id", "")).split(":")[1] if c.get("card_id", "").count(":") >= 2 else "" for c in cards
+    ]
+    rows = [[reference, *row] for reference, c in zip(references, cards) for row in c["rows"]]
+    return {
+        **first,
+        "card_id": "fix-blocker-group:" + ",".join(sorted(references)),
+        "title": f"Fix blocked for {len(cards)} orders: Solidus can still change them",
+        "subtitle": "who acts: Solidus operations",
+        "columns": [{"key": "order", "label": "Order", "format": "text", "align": "left"}, *first["columns"]],
+        "rows": rows[:MAX_GROUP_ROWS],
+        "truncated": len(rows) > MAX_GROUP_ROWS or any(c.get("truncated") for c in cards),
+        "top_n": MAX_GROUP_ROWS,
+    }

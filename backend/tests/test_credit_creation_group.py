@@ -205,7 +205,7 @@ class TestGroupFallback:
     """The group step: a member whose credit sits in a locked period gets the zero-total credit."""
 
     @staticmethod
-    async def _prepare(monkeypatch, *, reallocation_code, zero_total):
+    async def _prepare(monkeypatch, *, reallocation_code, zero_total, queued=None, seen=None):
         from app.services.chat.write_confirmation_service import WriteConfirmationPayload
         from app.services.transaction_ops import accounting_group as group
         from app.services.transaction_ops import credit_line_reallocation as reallocation
@@ -233,6 +233,10 @@ class TestGroupFallback:
             yield child
 
         async def evidence(*args, **kwargs):
+            if queued is not None:  # as the evidence tool does on the order's own session
+                from app.services.transaction_ops.fix_blockers import queue_card
+
+                queue_card(kwargs["context"]["db"], queued)
             return {"success": True, "accounting_evidence": {}}
 
         async def reallocate(child_db, tenant_id, case_id):
@@ -283,6 +287,10 @@ class TestGroupFallback:
         ]
         # What the progress line shows for members set aside: label -> count.
         calls.append({a["label"]: a["count"] for a in snapshots[-1]["set_aside"]})
+        if seen is not None:
+            from app.services.transaction_ops.fix_blockers import take_cards
+
+            seen.extend(take_cards(db))
         return result, skipped, calls
 
     async def test_a_locked_period_falls_back_to_the_zero_total_credit(self, monkeypatch):
@@ -310,6 +318,19 @@ class TestGroupFallback:
         _, skipped, calls = await self._prepare(monkeypatch, reallocation_code="period_locked", zero_total=refusal)
         assert "not prepared: derive_unsupported_shape" in skipped[0]["payload"]["reason"]
         assert calls[-1] == {"period is locked": 1}
+
+    async def test_a_blocker_card_read_on_the_orders_session_reaches_the_chats_session(self, monkeypatch):
+        # Review round 5 (F1): each order is read on its own session, closed before the agent could show its card.
+        card = {
+            "card_id": "fix-blocker:R123456789:source_not_final",
+            "rows": [["11", "x", "order", "-1.00", None]],
+            "columns": [{"key": "id"}],
+        }
+        seen = []
+        await self._prepare(
+            monkeypatch, reallocation_code="no_verified_exemplar", zero_total=None, queued=card, seen=seen
+        )
+        assert seen == [card]
 
     async def test_a_crashed_zero_total_attempt_keeps_the_member_and_its_evidence(self, monkeypatch):
         _, skipped, calls = await self._prepare(

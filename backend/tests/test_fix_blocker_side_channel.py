@@ -114,3 +114,25 @@ async def test_the_agent_shows_a_queued_card_after_the_tool_and_the_model_never_
             await BaseSpecialistAgent.run(agent, "Fix R123456789", {}, db, adapter, "test")
     assert outputs and all("Manual Tax Correction" not in o and "47.04" not in o for o in outputs)
     assert fix_blockers.take_cards(db) == []  # nothing left over for a later turn
+
+
+def test_a_groups_blocked_orders_become_one_card():
+    # Review round 5 (F1): group preparation reads each order on its own session; its cards are merged.
+    one = fix_blockers.card(
+        fix_blockers.blocker("source_not_final", fix_blockers.source_finality(SOURCE)),
+        order_reference="R111111111",
+        currency="USD",
+    )
+    two = {
+        **one,
+        "card_id": "fix-blocker:R222222222:source_not_final",
+        "rows": [["12", "Price match", "line", "-5.00", None]],
+    }
+    merged = fix_blockers.group_card([one, two])
+    assert merged["title"] == "Fix blocked for 2 orders: Solidus can still change them"
+    assert [c["key"] for c in merged["columns"]][:2] == ["order", "id"]
+    assert merged["rows"] == [
+        ["R111111111", "11", "Manual Tax Correction", "order", "-47.04", "2026-10-21"],
+        ["R222222222", "12", "Price match", "line", "-5.00", None],
+    ]
+    assert fix_blockers.group_card([one]) is one and fix_blockers.group_card([]) is None
