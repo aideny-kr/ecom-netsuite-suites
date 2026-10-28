@@ -337,6 +337,9 @@ class TestRefuses:
         facts = _us()
         facts["source"]["payment_state"] = "balance_due"
         assert _refused(facts, US_FIX) == "source_not_final"
+        with pytest.raises(RefusalError) as exc:
+            reallocation.assess(lines=US_FIX, **facts)
+        assert "payment_not_settled" in exc.value.detail["checks"]
 
     def test_nothing_to_fix(self):
         facts = _us()
@@ -447,6 +450,11 @@ class TestReviewRoundOne:
         facts = _us()
         facts["source"] = {**facts["source"], "adjustments": [{"id": 1, "amount": "-2.8", "finalized": False}]}
         assert _refused(facts, US_FIX) == "source_not_final"
+        # The refusal names the adjustment, so the agent can say what Solidus must change (2026-10-27).
+        with pytest.raises(RefusalError) as exc:
+            reallocation.assess(lines=US_FIX, **facts)
+        assert [a["id"] for a in exc.value.detail["open_adjustments"]] == ["1"]
+        assert exc.value.detail["checks"] == ["open_adjustments"]
 
     def test_an_unfinalized_solidus_tax_rate_adjustment_is_not_an_open_change(self):
         """Staging 2026-10-22 (R183209823): Solidus leaves its tax-rate adjustments unfinalized on

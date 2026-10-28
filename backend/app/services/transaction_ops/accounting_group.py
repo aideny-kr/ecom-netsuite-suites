@@ -269,6 +269,7 @@ async def prepare_group_confirmation(
     *, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, progress=None, **_
 ):
     from app.mcp.tools.transaction_ops_tools import execute_accounting_evidence
+    from app.services.transaction_ops.fix_blockers import group_card, queue_card, take_cards
     from app.services.transaction_ops.group_investigation import handoff, summarize
     from app.services.transaction_ops.read_batch import reference_read_batch
     from app.services.transaction_ops.tax_correction import candidate_confirmation
@@ -280,6 +281,10 @@ async def prepare_group_confirmation(
     previous = db.info.get("accounting_group_investigation")
     if previous and previous.get("scope") == selection["scope"] and previous.get("group_id") == selection["group_id"]:
         return None
+
+    # Each order is read on its own session; a blocker card it queues there is kept here and shown once,
+    # merged for the group, on the chat's session (fix_blockers, review round 5 F1).
+    side_cards = {}
 
     async def prepare(member):
         # Per-member timing travels on the member (into the parent card and the audits):
@@ -308,6 +313,7 @@ async def prepare_group_confirmation(
                     evidence = await execute_accounting_evidence(
                         {"case_id": member["case_id"]}, context={**context, "group_preparation": True}
                     )
+                    side_cards[member["case_id"]] = take_cards(child_db)
                     timing["evidence_ms"] = elapsed()
                     collected = evidence.get("accounting_evidence") or {}
                     routes = collected.get("investigation_routes", [])
@@ -513,6 +519,7 @@ async def prepare_group_confirmation(
         await asyncio.shield(record_preparation_interrupted(tenant_id, actor_id, session_id, correlation_id, selection))
         raise
     tracker.settle(members)
+    queue_card(db, group_card([c for m in selection["members"] for c in side_cards.get(m["case_id"], [])]))
     if not any(member.get("card") for member in members):
         investigation = handoff(selection, members, reads.hits)
         db.info["accounting_group_investigation"] = investigation

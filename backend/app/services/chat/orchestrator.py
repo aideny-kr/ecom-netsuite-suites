@@ -858,6 +858,12 @@ def _stamp_result_id(condensed: str, sse_event_data: dict, result_id: str | None
 _RESULT_CARD_TOOLS = frozenset({"present_result", "present.result", "compare_results", "compare.results"})
 
 
+def _card_shown(cards, card):
+    """Whether a card with this id is already among the turn's cards."""
+    identifier = card.get("card_id") if isinstance(card, dict) else None
+    return identifier is not None and any(isinstance(c, dict) and c.get("card_id") == identifier for c in cards)
+
+
 def _intercept_tool_result(
     tool_name: str, result_str: str, context_need: str = ContextNeed.DATA, result_id: str | None = None
 ) -> tuple[str | None, dict | None, str]:
@@ -4581,9 +4587,11 @@ async def run_chat_turn(
                         elif event_type == "progress":
                             yield progress_event(payload)
                         elif event_type == "tool_intercept" and payload[0] == "result_card":
-                            # Several cards may accompany one answer; persisted as a list.
-                            _result_cards.append(payload[1])
-                            yield {"type": "result_card", "data": payload[1]}
+                            # Several cards may accompany one answer; persisted as a list. A card id already
+                            # shown this turn (a fix blocker read twice) is shown once.
+                            if not _card_shown(_result_cards, payload[1]):
+                                _result_cards.append(payload[1])
+                                yield {"type": "result_card", "data": payload[1]}
                         elif event_type == "tool_intercept":
                             # payload is (event_type_str, event_data_dict)
                             last_structured_output = {"type": payload[0], "data": payload[1]}
@@ -4698,6 +4706,15 @@ async def run_chat_turn(
                         else:
                             _persisted_output = {"charts": _charts_output}
                     _persisted_output = _keep_group_breakdown(_persisted_output, turn_group_breakdown)
+                    # Any blocker card still queued when the agent finished (a path that queued after the
+                    # agent's own drains) is shown once here and saved with the answer, never carried into a
+                    # later turn (fix_blockers).
+                    from app.services.transaction_ops.fix_blockers import take_cards
+
+                    for side_card in take_cards(db):
+                        if not _card_shown(_result_cards, side_card):
+                            _result_cards.append(side_card)
+                            yield {"type": "result_card", "data": side_card}
                     if _result_cards:
                         _persisted_output = {**(_persisted_output or {}), "result_cards": _result_cards}
 
@@ -5074,8 +5091,9 @@ async def run_chat_turn(
                 )
                 if intercept_type == "result_card":
                     # Cards never replace the turn's data output; they ride beside it.
-                    legacy_result_cards.append(intercept_data)
-                    yield {"type": "result_card", "data": intercept_data}
+                    if not _card_shown(legacy_result_cards, intercept_data):
+                        legacy_result_cards.append(intercept_data)
+                        yield {"type": "result_card", "data": intercept_data}
                 elif intercept_type is not None:
                     last_structured_output = {"type": intercept_type, "data": intercept_data}
                     if intercept_type == "group_breakdown":
@@ -5083,6 +5101,13 @@ async def run_chat_turn(
                     yield {"type": intercept_type, "data": intercept_data}
                     if _is_pricing_task_output(last_structured_output):
                         suppress_streamed_text = True
+                # Cards a tool queued beside its result (fix_blockers): shown, never read by the model.
+                from app.services.transaction_ops.fix_blockers import take_cards
+
+                for side_card in take_cards(db):
+                    if not _card_shown(legacy_result_cards, side_card):
+                        legacy_result_cards.append(side_card)
+                        yield {"type": "result_card", "data": side_card}
 
                 tool_results_content.append(
                     {
@@ -5175,6 +5200,14 @@ async def run_chat_turn(
 
         # Strip raw tool reference tags / leaked XML the LLM may include
         final_text = _sanitize_assistant_text(final_text)
+
+        # Any blocker card still queued is shown once and saved with the answer (fix_blockers).
+        from app.services.transaction_ops.fix_blockers import take_cards
+
+        for side_card in take_cards(db):
+            if not _card_shown(legacy_result_cards, side_card):
+                legacy_result_cards.append(side_card)
+                yield {"type": "result_card", "data": side_card}
 
         # ── Save assistant message ──
         assistant_msg = ChatMessage(

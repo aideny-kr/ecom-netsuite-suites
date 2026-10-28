@@ -1,0 +1,324 @@
+"""Why a fix was refused, who can unblock it, and on exactly which records (2026-10-27).
+
+A refused correction used to reach the person as a list of "missing evidence": the guard knew exactly what
+blocked it, but said only its code. On 27 Oct, 17 of 18 refused agent runs were source_not_final, and no
+answer named the Solidus adjustment to void or finalize. So the blocker is computed here, from the same
+evidence the guard read, never by the model: a card the person sees beside the answer, and a summary for
+the model that names who acts but carries no amounts (the card shows them).
+
+Only refusals with a known owner and action get a blocker; any other code keeps the tool's own guidance.
+"""
+
+from app.services.transaction_ops.credit_line_reallocation import OPEN_BY_DESIGN_ADJUSTMENTS, _adjustments, _dec
+
+MAX_OBJECTS = 20
+MAX_LABEL = 120
+
+# code -> (title, owner, action). Plain words for the person who has to act.
+_BLOCKERS = {
+    "source_not_final": (
+        "Fix blocked: Solidus can still change this order",
+        "Solidus operations",
+        "Void each open adjustment below if it repeats a change already made, or finalize it. "
+        "Then ask again; the app never corrects NetSuite while Solidus can still change the order.",
+    ),
+    "period_locked": (
+        "Fix blocked: the posting period is locked",
+        "Finance",
+        "A posting period this correction needs is closed or locked. Use the agent's open-period correction "
+        "if it offers one; otherwise finance reopens the period.",
+    ),
+    "foreign_currency_unsupported": (
+        "Fix blocked: foreign-currency document",
+        "Aiden (policy)",
+        "Corrections on foreign-currency documents are not enabled. Decide whether to enable them, or "
+        "correct it by hand in NetSuite.",
+    ),
+    "tax_refund_items_not_configured": (
+        "Fix blocked: no tax-refund item configured",
+        "Configuration",
+        "This subsidiary has no tax-refund item in its refund profile. Add the item and its tax account.",
+    ),
+    "credit_location_required": (
+        "Fix blocked: no correction location",
+        "Configuration",
+        "The invoice has no location and the subsidiary has no correction location configured. Add one.",
+    ),
+    "invoice_paid_by_card": (
+        "Fix blocked: paid by card",
+        "Finance",
+        "Solidus must record the refund; NetSuite then needs the credit and the customer refund together, "
+        "booked by hand.",
+    ),
+    "netsuite_refund_already_recorded": (
+        "Fix blocked: NetSuite already refunded this order",
+        "Finance",
+        "Do not refund again. Review the existing refund by hand.",
+    ),
+    "case_credit_exists": (
+        "Fix blocked: the app's credit already exists",
+        "A person",
+        "This order already has the credit the app created. Any further correction is a person's call.",
+    ),
+}
+KNOWN = frozenset(_BLOCKERS)
+# Refusals whose tool guidance itself proposes another correction (a locked period: the same fix in the open
+# period, review F4). For every other known refusal the agent must not try another write path.
+_ANOTHER_PATH_SUPPORTED = frozenset({"period_locked"})
+
+# The source's other failed finality checks, in plain words (review F3).
+_CHECK_PHRASES = {
+    "order_not_complete": "the order is not complete in Solidus",
+    "flagged_for_review": "Solidus flags the order for review",
+    "not_completed": "the order has no completion date in Solidus",
+    "payment_not_settled": "the order's payment is not settled in Solidus",
+    "amounts_unreadable": "Solidus's order totals could not be read",
+    "payment_differs_from_total": "the amount paid in Solidus differs from the order total",
+}
+
+_APPLIES_TO = {"Spree::Order": "order", "Spree::LineItem": "line", "Spree::Shipment": "shipment"}
+
+
+def _open(adjustment):
+    return (
+        isinstance(adjustment, dict)
+        and "finalized" in adjustment
+        and adjustment["finalized"] is not True
+        and adjustment.get("source_type") not in OPEN_BY_DESIGN_ADJUSTMENTS
+    )
+
+
+def source_finality(source, *, require_paid=False):
+    """Which finality checks the source fails, and its open adjustments as they were read.
+
+    The same tests as the guards' (credit_line_reallocation.adjustments_final and the state checks beside
+    it), reported instead of answered. Informational only: the guards decide, this explains.
+    """
+    source = source if isinstance(source, dict) else {}
+    checks = []
+    if source.get("state") != "complete":
+        checks.append("order_not_complete")
+    if source.get("requires_review") not in (False, None):
+        checks.append("flagged_for_review")
+    if not source.get("completed_at"):
+        checks.append("not_completed")
+    total = _dec(source.get("total"))
+    if total is None or _dec(source.get("tax_total")) is None:
+        checks.append("amounts_unreadable")
+    if require_paid and source.get("payment_state") != "paid":
+        checks.append("payment_not_settled")
+    if require_paid:
+        paid = _dec(source.get("payment_total"))
+        if paid is None or (total is not None and paid != total):
+            checks.append("payment_differs_from_total")
+    found = [a for a in _adjustments(source) if _open(a)]
+    if found:
+        checks.append("open_adjustments")
+    detail = {
+        "checks": checks,
+        "open_adjustments": [
+            {
+                "id": str(a.get("id")),
+                "label": None if a.get("label") is None else str(a.get("label"))[:MAX_LABEL],
+                "amount": None if a.get("amount") is None else str(a.get("amount")),
+                "applies_to": _APPLIES_TO.get(a.get("adjustable_type"), a.get("adjustable_type")),
+                "created_at": a.get("created_at"),
+            }
+            for a in found[:MAX_OBJECTS]
+        ],
+    }
+    if len(found) > MAX_OBJECTS:
+        detail["open_adjustments_not_listed"] = len(found) - MAX_OBJECTS
+    return detail
+
+
+def blocker(code, detail):
+    """The refusal's owner, action and records, or None for a code with no known owner."""
+    if code not in _BLOCKERS:
+        return None
+    title, owner, action = _BLOCKERS[code]
+    detail = detail if isinstance(detail, dict) else {}
+    checks = list(detail.get("checks") or []) if code == "source_not_final" else []
+    objects = detail.get("open_adjustments") if code == "source_not_final" else None
+    objects = list(objects) if isinstance(objects, list) else []
+    also = [_CHECK_PHRASES[check] for check in checks if check in _CHECK_PHRASES]
+    if code == "source_not_final" and not objects and also:
+        action = (
+            f"Solidus must settle this order first: {'; '.join(also)}. Then ask again; the app never corrects "
+            "NetSuite while Solidus can still change the order."
+        )
+        also = []
+    elif code == "source_not_final" and not objects:
+        # Never prescribe voiding adjustments that were not found (review R2-F2).
+        action = (
+            "Solidus can still change this order, but the reason was not identified. Check the order in "
+            "Solidus, then ask again."
+        )
+    elif also:
+        action = f"{action} Also: {'; '.join(also)}."
+    return {
+        "code": code,
+        "title": title,
+        "owner": owner,
+        "action": action,
+        "checks": checks,
+        "also_blocking": also,
+        "objects": objects,
+        "objects_not_listed": detail.get("open_adjustments_not_listed", 0),
+    }
+
+
+def model_detail(code, detail):
+    """A refusal's detail as the model may read it: the records' labels and amounts stay on the card.
+
+    For source_not_final, only the failed checks and how many adjustments are open (review F2). Any other
+    refusal keeps its detail, which the model may need to correct its proposal.
+    """
+    if code != "source_not_final" or not isinstance(detail, dict):
+        return detail
+    listed = detail.get("open_adjustments")
+    return {
+        "checks": list(detail.get("checks") or []),
+        "open_adjustments": (len(listed) if isinstance(listed, list) else 0)
+        + int(detail.get("open_adjustments_not_listed") or 0),
+    }
+
+
+def card(value, *, order_reference, currency, observed_at=None):
+    """A result card listing the blocker's records, or None when it has none to show.
+
+    The chat renders it like any result card: every amount comes from here, never from the model.
+    """
+    if not value or not value["objects"]:
+        return None
+    rows = [
+        [o.get("id"), o.get("label"), o.get("applies_to"), o.get("amount"), (o.get("created_at") or "")[:10] or None]
+        for o in value["objects"]
+    ]
+    return {
+        "card_id": f"fix-blocker:{order_reference}:{value['code']}",
+        "kind": "table",
+        "result_ids": [],
+        "title": value["title"],
+        "source": "Solidus",
+        "subtitle": f"{order_reference} · who acts: {value['owner']}",
+        "as_of": observed_at,
+        "scope": None,
+        "queries": [],
+        "columns": [
+            {"key": "id", "label": "Adjustment", "format": "text", "align": "left"},
+            {"key": "label", "label": "Label", "format": "text", "align": "left"},
+            {"key": "applies_to", "label": "Applies to", "format": "text", "align": "left"},
+            {"key": "amount", "label": "Amount", "format": "currency", "currency": currency, "align": "right"},
+            {"key": "created", "label": "Created", "format": "date", "align": "left"},
+        ],
+        "rows": rows,
+        "check": {"status": "warn", "text": value["action"]},
+        "tiles": [],
+        "top_n": MAX_OBJECTS,
+        "collapsed": False,
+        "truncated": bool(value.get("objects_not_listed")),
+    }
+
+
+def for_model(value, *, card_shown):
+    """What the model is told: who acts and what to do, never the amounts or labels the card shows."""
+    return {
+        "blocked": value["code"],
+        "who_acts": value["owner"],
+        "what_to_do": value["action"],
+        "also_blocking": list(value.get("also_blocking") or []),
+        "open_records": len(value["objects"]) + int(value.get("objects_not_listed") or 0),
+        "card_shown": card_shown,
+        "say": "Tell the person in one or two sentences who must act and what to do. "
+        + ("The card beside your answer lists the records and amounts; do not repeat them. " if card_shown else "")
+        + (
+            "Follow the tool's guidance for the correction it supports."
+            if value["code"] in _ANOTHER_PATH_SUPPORTED
+            else "Do not try another write path for this refusal."
+        ),
+    }
+
+
+def evidence_fields(evidence, correction, *, order_reference, currency, observed_at=None):
+    """The evidence tool's blocker, before any fix is tried: Solidus adjustments still open, no fix ready.
+
+    The model reads only a producer view of the evidence, which leaves the source's adjustments out, so it
+    could not say which one blocks the fix (R012251901, 27 Oct). Only open adjustments, the records the
+    person can act on, make a blocker here; the fix tools still refuse every other failed check themselves.
+    """
+    source = evidence.get("source_refresh") if isinstance(evidence, dict) else None
+    if correction is not None or not isinstance(source, dict):
+        return {}
+    finality = source_finality(source)
+    if not finality["open_adjustments"]:
+        return {}
+    value = blocker("source_not_final", finality)
+    shown = card(value, order_reference=order_reference, currency=currency, observed_at=observed_at)
+    # "model" goes into the model's view; "card" only into the whole response, never the model's view.
+    return {"model": for_model(value, card_shown=shown is not None), "card": shown}
+
+
+# The agent hands the model a producer's view only while it stays under this many characters
+# (base_agent.MODEL_CONTEXT_LIMIT); past it, the model gets the whole response. The summary joins the
+# view only with room to spare, so it can never be what tips a view over that line (review R4-F1).
+MODEL_VIEW_BUDGET = 22_000
+
+_SIDE_CARDS = "chat_side_cards"
+
+
+def with_summary(view, summary):
+    """The model view with the blocker summary added, or the view unchanged when it would not fit."""
+    import json
+
+    if not summary:
+        return view
+    candidate = {**view, "fix_blocker": summary}
+    return candidate if len(json.dumps(candidate, default=str)) <= MODEL_VIEW_BUDGET else view
+
+
+def queue_card(db, value):
+    """Queue a card for the person beside the tool result, never in it (review rounds 1-4).
+
+    The agent loop takes it after the tool call and shows it; nothing that reads the tool's result (the
+    model, an interceptor, a benchmark runner) ever has it.
+    """
+    info = getattr(db, "info", None)
+    if value and isinstance(info, dict):
+        info.setdefault(_SIDE_CARDS, []).append(value)
+
+
+def take_cards(db):
+    """The cards queued since the last call, once."""
+    info = getattr(db, "info", None)
+    cards = info.pop(_SIDE_CARDS, None) if isinstance(info, dict) else None
+    return [card for card in cards or [] if isinstance(card, dict)]
+
+
+MAX_GROUP_ROWS = 60
+
+
+def group_card(cards):
+    """One card for a group's blocked orders: each order's open adjustments under an Order column.
+
+    Group preparation reads each order on its own short-lived session (review round 5, F1); their cards are
+    merged here so the group shows one card, not one per order. One card is shown as it is; none is None.
+    """
+    cards = [c for c in cards if isinstance(c, dict) and isinstance(c.get("rows"), list) and c["rows"]]
+    if len(cards) <= 1:
+        return cards[0] if cards else None
+    first = cards[0]
+    references = [
+        str(c.get("card_id", "")).split(":")[1] if c.get("card_id", "").count(":") >= 2 else "" for c in cards
+    ]
+    rows = [[reference, *row] for reference, c in zip(references, cards) for row in c["rows"]]
+    return {
+        **first,
+        "card_id": "fix-blocker-group:" + ",".join(sorted(references)),
+        "title": f"Fix blocked for {len(cards)} orders: Solidus can still change them",
+        "subtitle": "who acts: Solidus operations",
+        "columns": [{"key": "order", "label": "Order", "format": "text", "align": "left"}, *first["columns"]],
+        "rows": rows[:MAX_GROUP_ROWS],
+        "truncated": len(rows) > MAX_GROUP_ROWS or any(c.get("truncated") for c in cards),
+        "top_n": MAX_GROUP_ROWS,
+    }

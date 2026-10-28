@@ -1,3 +1,5 @@
+import json
+
 """Smart resolver, slice 1: a credit memo the agent proposes, accepted only by outcome.
 
 The agent chooses the items and amounts. The server accepts them only when the order's posted
@@ -211,6 +213,109 @@ def test_scope_period_source_and_invoice_guards_refuse_specifically(mutate, code
     with pytest.raises(cc.RefusalError) as exc:
         cc.assess(lines=LINES, memo="x", **facts)
     assert exc.value.code == code
+
+
+async def test_a_blocked_credit_tells_who_acts_and_carries_the_card(monkeypatch):
+    """2026-10-27: a source_not_final refusal reaches the chat with its blocker and the records' card."""
+    from app.mcp.tools import transaction_ops_tools as tools
+    from app.services.transaction_ops import fix_blockers
+
+    db = SimpleNamespace(info={})
+    source = {
+        "state": "complete",
+        "requires_review": False,
+        "completed_at": "2026-04-21T20:48:00Z",
+        "total": "2356.04",
+        "tax_total": "111.08",
+        "adjustments": [
+            {
+                "id": 11,
+                "label": "Manual Tax Correction",
+                "amount": "-47.04",
+                "finalized": False,
+                "adjustable_type": "Spree::Order",
+                "created_at": "2026-10-21T15:03:00Z",
+            }
+        ],
+    }
+
+    async def authorize(context, create):
+        return db, "tenant", SimpleNamespace(id="actor")
+
+    async def no_scope(*a, **k):
+        return None
+
+    async def log(*a, **k):
+        return SimpleNamespace(id="audit-1")
+
+    async def propose(*a, **k):
+        raise cc.RefusalError("source_not_final", fix_blockers.source_finality(source))
+
+    async def get_case(db_, tenant, case_id):
+        return SimpleNamespace(order_reference="R123456789", latest_report_json={"source": {"currency": "USD"}})
+
+    monkeypatch.setattr(tools, "_authorize", authorize)
+    monkeypatch.setattr("app.services.transaction_ops.case_resolution_scope.load", no_scope)
+    monkeypatch.setattr("app.services.audit_service.log_event", log)
+    monkeypatch.setattr("app.services.transaction_ops.case_service.get_case", get_case)
+    monkeypatch.setattr(cc, "propose", propose)
+    out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
+    assert (out["success"], out["refused"]) == (False, "source_not_final")
+    assert out["blocker"]["who_acts"] == "Solidus operations" and out["blocker"]["card_shown"] is True
+    # The card goes beside the result, never into it (review rounds 1-4).
+    assert "Manual Tax Correction" not in json.dumps(out) and "47.04" not in json.dumps(out)
+    [card] = fix_blockers.take_cards(db)
+    assert card["rows"][0][:2] == ["11", "Manual Tax Correction"] and card["columns"][3]["currency"] == "USD"
+
+    async def no_case(*a, **k):
+        from app.services.transaction_ops.state_service import StateError
+
+        raise StateError("not_found", 404)
+
+    monkeypatch.setattr("app.services.transaction_ops.case_service.get_case", no_case)
+    out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
+    # No case to name the order: the person still learns who acts, without a card, and the model still gets
+    # no labels or amounts (review F2).
+    assert out["blocker"]["card_shown"] is False and fix_blockers.take_cards(db) == []
+    text = json.dumps(out)
+    assert "Manual Tax Correction" not in text and "47.04" not in text
+    assert out["detail"] == {"checks": ["open_adjustments"], "open_adjustments": 1}
+
+
+async def test_a_refusal_with_no_known_owner_has_no_blocker(monkeypatch):
+    from app.mcp.tools import transaction_ops_tools as tools
+
+    db = SimpleNamespace(info={})
+
+    async def authorize(context, create):
+        return db, "tenant", SimpleNamespace(id="actor")
+
+    async def no_scope(*a, **k):
+        return None
+
+    async def log(*a, **k):
+        return SimpleNamespace(id="audit-1")
+
+    async def propose(*a, **k):
+        raise cc.RefusalError("no_difference", {})
+
+    monkeypatch.setattr(tools, "_authorize", authorize)
+    monkeypatch.setattr("app.services.transaction_ops.case_resolution_scope.load", no_scope)
+    monkeypatch.setattr("app.services.audit_service.log_event", log)
+    monkeypatch.setattr(cc, "propose", propose)
+    out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
+    assert "blocker" not in out and db.info == {}
+
+
+def test_a_source_not_final_refusal_names_the_open_adjustment():
+    # 2026-10-27: the agent can only say what Solidus must change if the refusal names it.
+    facts = _facts()
+    facts["source"]["adjustments"][0].update(finalized=False)
+    with pytest.raises(cc.RefusalError) as exc:
+        cc.assess(lines=LINES, memo="x", **facts)
+    assert exc.value.code == "source_not_final"
+    assert len(exc.value.detail["open_adjustments"]) == 1
+    assert exc.value.detail["checks"] == ["open_adjustments"]
 
 
 def test_the_memo_always_names_the_order():
