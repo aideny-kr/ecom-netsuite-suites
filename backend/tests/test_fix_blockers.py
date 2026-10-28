@@ -21,6 +21,9 @@ def _source(**updates):
         "requires_review": False,
         "completed_at": "2026-04-21T20:48:00Z",
         "payment_state": "paid",
+        "total": "2356.04",
+        "tax_total": "111.08",
+        "payment_total": "2356.04",
         "adjustments": [
             {
                 "id": 11,
@@ -231,3 +234,25 @@ def test_a_locked_period_keeps_the_supported_open_period_correction():
             "Do not try another write path"
             in fix_blockers.for_model(fix_blockers.blocker(code, {}), card_shown=False)["say"]
         )
+
+
+def test_a_payment_that_differs_from_the_total_is_named():
+    # Review R2-F2: the reallocation guard also refuses when Solidus's paid amount differs from its total.
+    source = _source(adjustments=[], line_items=[], total="799.00", payment_total="798.00")
+    finality = fix_blockers.source_finality(source, require_paid=True)
+    assert finality["checks"] == ["payment_differs_from_total"]
+    blocker = fix_blockers.blocker("source_not_final", finality)
+    assert (
+        "Void" not in blocker["action"]
+        and "the amount paid in Solidus differs from the order total" in blocker["action"]
+    )
+
+
+def test_unreadable_amounts_are_named():
+    finality = fix_blockers.source_finality(_source(adjustments=[], line_items=[], total=None))
+    assert finality["checks"] == ["amounts_unreadable"]
+
+
+def test_a_refusal_with_no_identified_check_never_prescribes_voiding_adjustments():
+    blocker = fix_blockers.blocker("source_not_final", {"checks": [], "open_adjustments": []})
+    assert "Void" not in blocker["action"] and "not identified" in blocker["action"]

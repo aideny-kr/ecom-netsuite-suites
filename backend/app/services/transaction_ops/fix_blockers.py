@@ -9,7 +9,7 @@ the model that names who acts but carries no amounts (the card shows them).
 Only refusals with a known owner and action get a blocker; any other code keeps the tool's own guidance.
 """
 
-from app.services.transaction_ops.credit_line_reallocation import OPEN_BY_DESIGN_ADJUSTMENTS, _adjustments
+from app.services.transaction_ops.credit_line_reallocation import OPEN_BY_DESIGN_ADJUSTMENTS, _adjustments, _dec
 
 MAX_OBJECTS = 20
 
@@ -71,6 +71,8 @@ _CHECK_PHRASES = {
     "flagged_for_review": "Solidus flags the order for review",
     "not_completed": "the order has no completion date in Solidus",
     "payment_not_settled": "the order's payment is not settled in Solidus",
+    "amounts_unreadable": "Solidus's order totals could not be read",
+    "payment_differs_from_total": "the amount paid in Solidus differs from the order total",
 }
 
 _APPLIES_TO = {"Spree::Order": "order", "Spree::LineItem": "line", "Spree::Shipment": "shipment"}
@@ -99,8 +101,15 @@ def source_finality(source, *, require_paid=False):
         checks.append("flagged_for_review")
     if not source.get("completed_at"):
         checks.append("not_completed")
+    total = _dec(source.get("total"))
+    if total is None or _dec(source.get("tax_total")) is None:
+        checks.append("amounts_unreadable")
     if require_paid and source.get("payment_state") != "paid":
         checks.append("payment_not_settled")
+    if require_paid:
+        paid = _dec(source.get("payment_total"))
+        if paid is None or (total is not None and paid != total):
+            checks.append("payment_differs_from_total")
     found = [a for a in _adjustments(source) if _open(a)]
     if found:
         checks.append("open_adjustments")
@@ -138,6 +147,12 @@ def blocker(code, detail):
             "NetSuite while Solidus can still change the order."
         )
         also = []
+    elif code == "source_not_final" and not objects:
+        # Never prescribe voiding adjustments that were not found (review R2-F2).
+        action = (
+            "Solidus can still change this order, but the reason was not identified. Check the order in "
+            "Solidus, then ask again."
+        )
     elif also:
         action = f"{action} Also: {'; '.join(also)}."
     return {

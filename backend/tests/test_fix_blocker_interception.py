@@ -15,6 +15,8 @@ SOURCE = {
     "state": "complete",
     "requires_review": False,
     "completed_at": "2026-04-21T20:48:00Z",
+    "total": "2356.04",
+    "tax_total": "111.08",
     "adjustments": [
         {
             "id": 11,
