@@ -12,6 +12,7 @@ Only refusals with a known owner and action get a blocker; any other code keeps 
 from app.services.transaction_ops.credit_line_reallocation import OPEN_BY_DESIGN_ADJUSTMENTS, _adjustments, _dec
 
 MAX_OBJECTS = 20
+MAX_LABEL = 120
 
 # code -> (title, owner, action). Plain words for the person who has to act.
 _BLOCKERS = {
@@ -24,8 +25,8 @@ _BLOCKERS = {
     "period_locked": (
         "Fix blocked: the posting period is locked",
         "Finance",
-        "The document's period is closed or locked. The correction can be made in the open period instead; "
-        "otherwise finance reopens the period.",
+        "A posting period this correction needs is closed or locked. Use the agent's open-period correction "
+        "if it offers one; otherwise finance reopens the period.",
     ),
     "foreign_currency_unsupported": (
         "Fix blocked: foreign-currency document",
@@ -118,7 +119,7 @@ def source_finality(source, *, require_paid=False):
         "open_adjustments": [
             {
                 "id": str(a.get("id")),
-                "label": a.get("label"),
+                "label": None if a.get("label") is None else str(a.get("label"))[:MAX_LABEL],
                 "amount": None if a.get("amount") is None else str(a.get("amount")),
                 "applies_to": _APPLIES_TO.get(a.get("adjustable_type"), a.get("adjustable_type")),
                 "created_at": a.get("created_at"),
@@ -254,7 +255,5 @@ def evidence_fields(evidence, correction, *, order_reference, currency, observed
         return {}
     value = blocker("source_not_final", finality)
     shown = card(value, order_reference=order_reference, currency=currency, observed_at=observed_at)
-    fields = {"fix_blocker": for_model(value, card_shown=shown is not None)}
-    if shown is not None:
-        fields["fix_blocker_card"] = shown
-    return fields
+    # "model" goes into the model's view; "card" only into the whole response, never the model's view.
+    return {"model": for_model(value, card_shown=shown is not None), "card": shown}

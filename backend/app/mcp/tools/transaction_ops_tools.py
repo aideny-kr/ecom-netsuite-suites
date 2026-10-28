@@ -1116,8 +1116,8 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             "success": True,
             "case_id": str(case.id),
             "accounting_evidence": evidence,
-            # Also at the top level, for a reader that gets the whole response (review F1).
-            **({"fix_blocker_card": blocked["fix_blocker_card"]} if "fix_blocker_card" in blocked else {}),
+            # The card only in the whole response, never in the model's view (review rounds 1-3).
+            **({"fix_blocker_card": blocked["card"]} if blocked.get("card") else {}),
             "evidence_summary": completion_evidence_summary(evidence),
             "model_context": {
                 "version": 1,
@@ -1125,7 +1125,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                     "case_id": str(case.id),
                     "evidence_summary": completion_evidence_summary(evidence),
                     "record_links": evidence["record_links"],
-                    **blocked,
+                    **({"fix_blocker": blocked["model"]} if blocked else {}),
                     "detail_access": {
                         "case_id": str(case.id),
                         "observation_id": str(evidence_event.id),

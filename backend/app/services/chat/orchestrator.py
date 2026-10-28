@@ -877,7 +877,11 @@ _FIX_BLOCKER_TOOLS = frozenset(
 
 
 def _intercept_tool_result(
-    tool_name: str, result_str: str, context_need: str = ContextNeed.DATA, result_id: str | None = None
+    tool_name: str,
+    result_str: str,
+    context_need: str = ContextNeed.DATA,
+    result_id: str | None = None,
+    full_result_str: str | None = None,
 ) -> tuple[str | None, dict | None, str]:
     """Intercept data-producing tool results for frontend DataFrame rendering.
 
@@ -916,23 +920,24 @@ def _intercept_tool_result(
         return "data_table", event, condensed
 
     # A blocked fix: the card names the records and amounts; the model reads who acts (fix_blockers).
+    # The card is read from the tool's whole response and is never part of the model's view, so it can
+    # neither reach the model nor push that view past its size limit (review rounds 1-3).
     if tool_name in _FIX_BLOCKER_TOOLS:
         try:
-            parsed = json.loads(result_str)
+            parsed = json.loads(full_result_str if full_result_str is not None else result_str)
         except (ValueError, TypeError):
             return None, None, result_str
-        if isinstance(parsed, dict):
-            # The card is at the top level, or inside the evidence tool's model view when the model reads only
-            # that projection; a reader handed the whole response must lose it from both (review F1).
-            view = parsed.get("model_context") if isinstance(parsed.get("model_context"), dict) else {}
-            data = view.get("data") if isinstance(view.get("data"), dict) else {}
-            card = parsed.get("blocker_card") or parsed.get("fix_blocker_card") or data.get("fix_blocker_card")
-            if isinstance(card, dict) and isinstance(card.get("card_id"), str) and isinstance(card.get("rows"), list):
-                seen = {k: v for k, v in parsed.items() if k not in ("blocker_card", "fix_blocker_card")}
-                if "fix_blocker_card" in data:
-                    seen["model_context"] = {**view, "data": {k: v for k, v in data.items() if k != "fix_blocker_card"}}
-                return "result_card", card, json.dumps(seen, default=str)
-        return None, None, result_str
+        card = (parsed.get("blocker_card") or parsed.get("fix_blocker_card")) if isinstance(parsed, dict) else None
+        if not (isinstance(card, dict) and isinstance(card.get("card_id"), str) and isinstance(card.get("rows"), list)):
+            return None, None, result_str
+        try:
+            seen = json.loads(result_str)
+        except (ValueError, TypeError):
+            return "result_card", card, result_str
+        if isinstance(seen, dict):
+            seen = {k: v for k, v in seen.items() if k not in ("blocker_card", "fix_blocker_card")}
+            return "result_card", card, json.dumps(seen, default=str)
+        return "result_card", card, result_str
 
     # The breakdown card carries every amount; the model reads causes, counts and next steps.
     if tool_name in ("transaction_ops.group_breakdown", "transaction_ops_group_breakdown"):
@@ -1584,7 +1589,7 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
         full_payload = extract_result_payload(tool_name, params or {}, payload_source)
 
         event_type, event_data, new_result_str = _intercept_tool_result(
-            tool_name, result_str, context_need=context_need, result_id=None
+            tool_name, result_str, context_need=context_need, result_id=None, full_result_str=payload_source
         )
 
         result_id: str | None = None

@@ -180,8 +180,22 @@ def test_the_evidence_view_names_the_blocker_when_no_fix_is_ready():
         currency="USD",
         observed_at="2026-10-27T19:47:00Z",
     )
-    assert fields["fix_blocker"]["who_acts"] == "Solidus operations" and fields["fix_blocker"]["card_shown"]
-    assert [row[0] for row in fields["fix_blocker_card"]["rows"]] == ["11", "22"]
+    assert fields["model"]["who_acts"] == "Solidus operations" and fields["model"]["card_shown"]
+    assert [row[0] for row in fields["card"]["rows"]] == ["11", "22"]
+
+
+def test_the_model_part_stays_small_however_long_the_records_are():
+    # Review R3-F1: 20 open adjustments with long labels must not grow what the model reads.
+    many = [
+        {"id": i, "label": "x" * 1200, "amount": "-1.00", "finalized": False, "adjustable_type": "Spree::Order"}
+        for i in range(25)
+    ]
+    fields = fix_blockers.evidence_fields(
+        {"source_refresh": _source(adjustments=many, line_items=[])}, None, order_reference="R1", currency="USD"
+    )
+    assert len(json.dumps(fields["model"])) < 2000 and "xxxx" not in json.dumps(fields["model"])
+    assert fields["model"]["open_records"] == 25
+    assert all(len(row[1]) <= fix_blockers.MAX_LABEL for row in fields["card"]["rows"])
 
 
 @pytest.mark.parametrize(
@@ -228,7 +242,7 @@ def test_a_locked_period_keeps_the_supported_open_period_correction():
     # Review F4: the tool's own guidance proposes the open-period correction; the blocker must not forbid it.
     summary = fix_blockers.for_model(fix_blockers.blocker("period_locked", {}), card_shown=False)
     assert "Do not try another write path" not in summary["say"]
-    assert "open period" in summary["what_to_do"]
+    assert "open-period correction" in summary["what_to_do"]
     for code in fix_blockers.KNOWN - {"period_locked"}:
         assert (
             "Do not try another write path"

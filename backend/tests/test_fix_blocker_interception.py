@@ -65,20 +65,25 @@ def test_a_refused_fix_shows_its_blocker_card_and_the_model_gets_no_amounts(name
 
 
 @pytest.mark.parametrize("name", ["transaction_ops.accounting_evidence", "transaction_ops_accounting_evidence"])
-def test_the_evidence_view_shows_the_card_and_keeps_the_rest_for_the_model(name):
+def test_the_card_comes_from_the_whole_response_and_the_model_view_is_untouched(name):
+    # Review rounds 1-3: the card is never in the model's view; the interceptor reads it from the whole response.
     blocker, card = _blocked()
+    summary = fix_blockers.for_model(blocker, card_shown=True)
     view = {
         "case_id": "c1",
         "evidence_summary": {"candidate_available": False},
-        "fix_blocker": fix_blockers.for_model(blocker, card_shown=True),
-        "fix_blocker_card": card,
+        "fix_blocker": summary,
         "success": True,
     }
-    event_type, event, for_model = _intercept_tool_result(name, json.dumps(view))
+    full = {
+        "success": True,
+        "case_id": "c1",
+        "fix_blocker_card": card,
+        "model_context": {"version": 1, "data": {"case_id": "c1", "fix_blocker": summary}},
+    }
+    event_type, event, for_model = _intercept_tool_result(name, json.dumps(view), full_result_str=json.dumps(full))
     assert event_type == "result_card" and event == card
-    seen = json.loads(for_model)
-    assert seen["evidence_summary"] == {"candidate_available": False} and seen["fix_blocker"]["open_records"] == 1
-    assert "fix_blocker_card" not in seen and "47.04" not in for_model
+    assert json.loads(for_model) == view and "47.04" not in for_model
 
 
 @pytest.mark.parametrize(
@@ -119,16 +124,15 @@ def test_an_unprojected_evidence_response_still_shows_the_card_and_hides_it_from
         "case_id": "c1",
         "accounting_evidence": {"completed_at": "2026-10-27T19:47:00Z"},
         "fix_blocker_card": card,
+        # As the evidence tool builds it: the card only at the top level, never in the model's view.
         "model_context": {
             "version": 1,
-            "data": {
-                "case_id": "c1",
-                "fix_blocker": fix_blockers.for_model(blocker, card_shown=True),
-                "fix_blocker_card": card,
-            },
+            "data": {"case_id": "c1", "fix_blocker": fix_blockers.for_model(blocker, card_shown=True)},
         },
     }
-    event_type, event, for_model = _intercept_tool_result("transaction_ops_accounting_evidence", json.dumps(full))
+    event_type, event, for_model = _intercept_tool_result(
+        "transaction_ops_accounting_evidence", json.dumps(full), full_result_str=json.dumps(full)
+    )
     assert event_type == "result_card" and event == card
     assert "fix_blocker_card" not in for_model and "47.04" not in for_model
     assert json.loads(for_model)["model_context"]["data"]["fix_blocker"]["open_records"] == 1
