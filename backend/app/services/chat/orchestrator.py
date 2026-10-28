@@ -864,24 +864,8 @@ def _card_shown(cards, card):
     return identifier is not None and any(isinstance(c, dict) and c.get("card_id") == identifier for c in cards)
 
 
-_FIX_BLOCKER_TOOLS = frozenset(
-    {
-        "transaction_ops.propose_credit",
-        "transaction_ops_propose_credit",
-        "transaction_ops.propose_credit_reallocation",
-        "transaction_ops_propose_credit_reallocation",
-        "transaction_ops.accounting_evidence",
-        "transaction_ops_accounting_evidence",
-    }
-)
-
-
 def _intercept_tool_result(
-    tool_name: str,
-    result_str: str,
-    context_need: str = ContextNeed.DATA,
-    result_id: str | None = None,
-    full_result_str: str | None = None,
+    tool_name: str, result_str: str, context_need: str = ContextNeed.DATA, result_id: str | None = None
 ) -> tuple[str | None, dict | None, str]:
     """Intercept data-producing tool results for frontend DataFrame rendering.
 
@@ -918,26 +902,6 @@ def _intercept_tool_result(
         condensed = condense_status(parsed)
         condensed = _stamp_result_id(condensed, event, result_id)
         return "data_table", event, condensed
-
-    # A blocked fix: the card names the records and amounts; the model reads who acts (fix_blockers).
-    # The card is read from the tool's whole response and is never part of the model's view, so it can
-    # neither reach the model nor push that view past its size limit (review rounds 1-3).
-    if tool_name in _FIX_BLOCKER_TOOLS:
-        try:
-            parsed = json.loads(full_result_str if full_result_str is not None else result_str)
-        except (ValueError, TypeError):
-            return None, None, result_str
-        card = (parsed.get("blocker_card") or parsed.get("fix_blocker_card")) if isinstance(parsed, dict) else None
-        if not (isinstance(card, dict) and isinstance(card.get("card_id"), str) and isinstance(card.get("rows"), list)):
-            return None, None, result_str
-        try:
-            seen = json.loads(result_str)
-        except (ValueError, TypeError):
-            return "result_card", card, result_str
-        if isinstance(seen, dict):
-            seen = {k: v for k, v in seen.items() if k not in ("blocker_card", "fix_blocker_card")}
-            return "result_card", card, json.dumps(seen, default=str)
-        return "result_card", card, result_str
 
     # The breakdown card carries every amount; the model reads causes, counts and next steps.
     if tool_name in ("transaction_ops.group_breakdown", "transaction_ops_group_breakdown"):
@@ -1589,7 +1553,7 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
         full_payload = extract_result_payload(tool_name, params or {}, payload_source)
 
         event_type, event_data, new_result_str = _intercept_tool_result(
-            tool_name, result_str, context_need=context_need, result_id=None, full_result_str=payload_source
+            tool_name, result_str, context_need=context_need, result_id=None
         )
 
         result_id: str | None = None
@@ -5128,6 +5092,13 @@ async def run_chat_turn(
                     yield {"type": intercept_type, "data": intercept_data}
                     if _is_pricing_task_output(last_structured_output):
                         suppress_streamed_text = True
+                # Cards a tool queued beside its result (fix_blockers): shown, never read by the model.
+                from app.services.transaction_ops.fix_blockers import take_cards
+
+                for side_card in take_cards(db):
+                    if not _card_shown(legacy_result_cards, side_card):
+                        legacy_result_cards.append(side_card)
+                        yield {"type": "result_card", "data": side_card}
 
                 tool_results_content.append(
                     {

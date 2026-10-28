@@ -257,3 +257,39 @@ def evidence_fields(evidence, correction, *, order_reference, currency, observed
     shown = card(value, order_reference=order_reference, currency=currency, observed_at=observed_at)
     # "model" goes into the model's view; "card" only into the whole response, never the model's view.
     return {"model": for_model(value, card_shown=shown is not None), "card": shown}
+
+
+# The agent hands the model a producer's view only while it stays under this many characters
+# (base_agent.MODEL_CONTEXT_LIMIT); past it, the model gets the whole response. The summary joins the
+# view only with room to spare, so it can never be what tips a view over that line (review R4-F1).
+MODEL_VIEW_BUDGET = 22_000
+
+_SIDE_CARDS = "chat_side_cards"
+
+
+def with_summary(view, summary):
+    """The model view with the blocker summary added, or the view unchanged when it would not fit."""
+    import json
+
+    if not summary:
+        return view
+    candidate = {**view, "fix_blocker": summary}
+    return candidate if len(json.dumps(candidate, default=str)) <= MODEL_VIEW_BUDGET else view
+
+
+def queue_card(db, value):
+    """Queue a card for the person beside the tool result, never in it (review rounds 1-4).
+
+    The agent loop takes it after the tool call and shows it; nothing that reads the tool's result (the
+    model, an interceptor, a benchmark runner) ever has it.
+    """
+    info = getattr(db, "info", None)
+    if value and isinstance(info, dict):
+        info.setdefault(_SIDE_CARDS, []).append(value)
+
+
+def take_cards(db):
+    """The cards queued since the last call, once."""
+    info = getattr(db, "info", None)
+    cards = info.pop(_SIDE_CARDS, None) if isinstance(info, dict) else None
+    return [card for card in cards or [] if isinstance(card, dict)]

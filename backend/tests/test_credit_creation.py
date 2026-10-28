@@ -262,8 +262,10 @@ async def test_a_blocked_credit_tells_who_acts_and_carries_the_card(monkeypatch)
     out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
     assert (out["success"], out["refused"]) == (False, "source_not_final")
     assert out["blocker"]["who_acts"] == "Solidus operations" and out["blocker"]["card_shown"] is True
-    assert out["blocker_card"]["rows"][0][:2] == ["11", "Manual Tax Correction"]
-    assert out["blocker_card"]["columns"][3]["currency"] == "USD"
+    # The card goes beside the result, never into it (review rounds 1-4).
+    assert "Manual Tax Correction" not in json.dumps(out) and "47.04" not in json.dumps(out)
+    [card] = fix_blockers.take_cards(db)
+    assert card["rows"][0][:2] == ["11", "Manual Tax Correction"] and card["columns"][3]["currency"] == "USD"
 
     async def no_case(*a, **k):
         from app.services.transaction_ops.state_service import StateError
@@ -274,7 +276,7 @@ async def test_a_blocked_credit_tells_who_acts_and_carries_the_card(monkeypatch)
     out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
     # No case to name the order: the person still learns who acts, without a card, and the model still gets
     # no labels or amounts (review F2).
-    assert out["blocker"]["card_shown"] is False and "blocker_card" not in out
+    assert out["blocker"]["card_shown"] is False and fix_blockers.take_cards(db) == []
     text = json.dumps(out)
     assert "Manual Tax Correction" not in text and "47.04" not in text
     assert out["detail"] == {"checks": ["open_adjustments"], "open_adjustments": 1}
@@ -302,7 +304,7 @@ async def test_a_refusal_with_no_known_owner_has_no_blocker(monkeypatch):
     monkeypatch.setattr("app.services.audit_service.log_event", log)
     monkeypatch.setattr(cc, "propose", propose)
     out = await tools.execute_propose_credit({"case_id": str(CASE), "lines": LINES})
-    assert "blocker" not in out and "blocker_card" not in out
+    assert "blocker" not in out and db.info == {}
 
 
 def test_a_source_not_final_refusal_names_the_open_adjustment():

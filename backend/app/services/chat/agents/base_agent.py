@@ -231,6 +231,9 @@ def _is_valid_uuid(val: str) -> bool:
 
 
 _MAX_ERROR_CHARS = 1000
+# A producer's model view (model_context) is used while it stays under this many characters; past it, the
+# model gets the whole response (fix_blockers.MODEL_VIEW_BUDGET keeps its summary well inside this).
+MODEL_CONTEXT_LIMIT = 24_000
 _MAX_RESULT_ROWS = 500  # Cap rows sent back to LLM (50 was too low for grouped queries like 14 platforms x 10 weeks)
 
 
@@ -411,7 +414,7 @@ def _truncate_tool_result(result_str: str) -> str:
         and isinstance(view, dict)
         and view.get("version") == 1
         and isinstance(view.get("data"), dict)
-        and len(json.dumps(view["data"], default=str)) <= 24_000
+        and len(json.dumps(view["data"], default=str)) <= MODEL_CONTEXT_LIMIT
     ):
         projected = {
             **view["data"],
@@ -434,7 +437,7 @@ def _truncate_tool_result(result_str: str) -> str:
             if key in parsed:
                 projected[key] = parsed[key]
         encoded = json.dumps(projected, default=str)
-        if len(encoded) <= 24_000:
+        if len(encoded) <= MODEL_CONTEXT_LIMIT:
             return encoded
 
     # Cap large row-based results (e.g., SuiteQL queries returning hundreds of rows)
@@ -1005,6 +1008,11 @@ class BaseSpecialistAgent(abc.ABC):
                                 pass
 
                     completion.observe(block.name, block.input, result_str)
+                    # A card a tool queued beside its result has no screen in a run that is not streamed:
+                    # drop it, so no later turn shows it (fix_blockers).
+                    from app.services.transaction_ops.fix_blockers import take_cards
+
+                    take_cards(db)
 
                     from app.services.chat.metabase_results import is_bound_table, nonstream_interceptor
 
@@ -2322,6 +2330,12 @@ class BaseSpecialistAgent(abc.ABC):
                         )
                         if intercept_data is not None:
                             yield "tool_intercept", intercept_data
+                    # Cards a tool queued beside its result (fix_blockers): shown to the person after the tool
+                    # call, never part of what the model reads, with or without an interceptor.
+                    from app.services.transaction_ops.fix_blockers import take_cards
+
+                    for side_card in take_cards(db):
+                        yield "tool_intercept", ("result_card", side_card)
 
                     # Metric trust boundary — TOOL-enforced, not interceptor-dependent.
                     # When no interceptor is wired (e.g. the vs-MCP benchmark runner in

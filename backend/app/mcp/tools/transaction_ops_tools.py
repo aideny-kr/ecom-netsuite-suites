@@ -502,10 +502,9 @@ async def _blocker_fields(db, tenant_id, case_id, code, detail):
             )
         except (StateError, AttributeError, TypeError):
             card = None
-    fields = {"blocker": fix_blockers.for_model(value, card_shown=card is not None)}
-    if card is not None:
-        fields["blocker_card"] = card
-    return fields
+    # The card goes beside the result for the person, never into it (review rounds 1-4).
+    fix_blockers.queue_card(db, card)
+    return {"blocker": fix_blockers.for_model(value, card_shown=card is not None)}
 
 
 _REALLOCATION_GUIDANCE = {
@@ -1111,32 +1110,31 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         )
         evidence["audit_id"] = str(evidence_event.id)
         from app.services.transaction_ops.accounting_evidence import completion_evidence_summary
+        from app.services.transaction_ops.fix_blockers import queue_card, with_summary
 
+        view = {
+            "case_id": str(case.id),
+            "evidence_summary": completion_evidence_summary(evidence),
+            "record_links": evidence["record_links"],
+            "detail_access": {
+                "case_id": str(case.id),
+                "observation_id": str(evidence_event.id),
+                "sections": ["source", "documents", "applications", "assessment"],
+                "instruction": "Use this evidence tool with case_id, observation_id and section for "
+                "saved detail (no native API calls). Documents include native line/GL evidence. "
+                "Omitted details are not absent or verified. Use a fresh case-only call when "
+                "current changed state is required, not merely to inspect this observation.",
+            },
+        }
+        # Who must act when no fix is ready: the card beside the result for the person, and in the model's
+        # view only a short summary that fits (review rounds 1-4).
+        queue_card(db, blocked.get("card"))
         return {
             "success": True,
             "case_id": str(case.id),
             "accounting_evidence": evidence,
-            # The card only in the whole response, never in the model's view (review rounds 1-3).
-            **({"fix_blocker_card": blocked["card"]} if blocked.get("card") else {}),
             "evidence_summary": completion_evidence_summary(evidence),
-            "model_context": {
-                "version": 1,
-                "data": {
-                    "case_id": str(case.id),
-                    "evidence_summary": completion_evidence_summary(evidence),
-                    "record_links": evidence["record_links"],
-                    **({"fix_blocker": blocked["model"]} if blocked else {}),
-                    "detail_access": {
-                        "case_id": str(case.id),
-                        "observation_id": str(evidence_event.id),
-                        "sections": ["source", "documents", "applications", "assessment"],
-                        "instruction": "Use this evidence tool with case_id, observation_id and section for "
-                        "saved detail (no native API calls). Documents include native line/GL evidence. "
-                        "Omitted details are not absent or verified. Use a fresh case-only call when "
-                        "current changed state is required, not merely to inspect this observation.",
-                    },
-                },
-            },
+            "model_context": {"version": 1, "data": with_summary(view, blocked.get("model"))},
         }
     except (ValueError, _ToolError, StateError, NetSuiteEvidenceError) as exc:
         return {"success": False, "error": "Accounting case or scoped configuration unavailable.", "reason": str(exc)}

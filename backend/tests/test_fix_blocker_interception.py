@@ -1,14 +1,12 @@
-"""A blocked fix reaches the screen as a card with its records; the model reads who acts, no amounts.
-
-2026-10-27: refused fixes and the evidence tool carry the blocker's card beside an amount-free summary.
-The interceptor shows the card and hands the model the summary only. Synthetic data only.
+"""Blocker cards never ride in tool results, so the result interception leaves these tools alone; a card id
+is shown once per turn (2026-10-27). How the cards travel: test_fix_blocker_side_channel. Synthetic data only.
 """
 
 import json
 
 import pytest
 
-from app.services.chat.orchestrator import _intercept_tool_result
+from app.services.chat.orchestrator import _card_shown, _intercept_tool_result
 from app.services.transaction_ops import fix_blockers
 
 SOURCE = {
@@ -30,109 +28,27 @@ SOURCE = {
 }
 
 
-def _blocked():
-    blocker = fix_blockers.blocker("source_not_final", fix_blockers.source_finality(SOURCE))
-    card = fix_blockers.card(blocker, order_reference="R123456789", currency="USD")
-    return blocker, card
+def _card():
+    value = fix_blockers.blocker("source_not_final", fix_blockers.source_finality(SOURCE))
+    return fix_blockers.card(value, order_reference="R123456789", currency="USD")
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        "transaction_ops.propose_credit",
         "transaction_ops_propose_credit",
-        "transaction_ops.propose_credit_reallocation",
         "transaction_ops_propose_credit_reallocation",
+        "transaction_ops_accounting_evidence",
     ],
 )
-def test_a_refused_fix_shows_its_blocker_card_and_the_model_gets_no_amounts(name):
-    blocker, card = _blocked()
-    result = {
-        "success": False,
-        "refused": "source_not_final",
-        "detail": fix_blockers.model_detail("source_not_final", fix_blockers.source_finality(SOURCE)),
-        "guidance": "…",
-        "blocker": fix_blockers.for_model(blocker, card_shown=True),
-        "blocker_card": card,
-        "financial_writes": 0,
-    }
-    event_type, event, for_model = _intercept_tool_result(name, json.dumps(result))
-    assert event_type == "result_card" and event == card
-    seen = json.loads(for_model)
-    assert seen["refused"] == "source_not_final" and seen["blocker"]["who_acts"] == "Solidus operations"
-    assert "blocker_card" not in seen and seen["detail"]["checks"] == ["open_adjustments"]
-    assert "47.04" not in for_model and "Manual Tax Correction" not in for_model
-
-
-@pytest.mark.parametrize("name", ["transaction_ops.accounting_evidence", "transaction_ops_accounting_evidence"])
-def test_the_card_comes_from_the_whole_response_and_the_model_view_is_untouched(name):
-    # Review rounds 1-3: the card is never in the model's view; the interceptor reads it from the whole response.
-    blocker, card = _blocked()
-    summary = fix_blockers.for_model(blocker, card_shown=True)
-    view = {
-        "case_id": "c1",
-        "evidence_summary": {"candidate_available": False},
-        "fix_blocker": summary,
-        "success": True,
-    }
-    full = {
-        "success": True,
-        "case_id": "c1",
-        "fix_blocker_card": card,
-        "model_context": {"version": 1, "data": {"case_id": "c1", "fix_blocker": summary}},
-    }
-    event_type, event, for_model = _intercept_tool_result(name, json.dumps(view), full_result_str=json.dumps(full))
-    assert event_type == "result_card" and event == card
-    assert json.loads(for_model) == view and "47.04" not in for_model
-
-
-@pytest.mark.parametrize(
-    "name, result",
-    [
-        (
-            "transaction_ops_propose_credit",
-            {"success": False, "refused": "outcome_does_not_match_source", "detail": {"required": {"tax": "450.20"}}},
-        ),
-        ("transaction_ops_accounting_evidence", {"success": True, "case_id": "c1"}),
-        ("transaction_ops_propose_credit", {"success": False, "blocker_card": {"title": "no card id"}}),
-    ],
-)
-def test_without_a_valid_card_the_result_is_untouched(name, result):
-    text = json.dumps(result)
+def test_the_fix_tools_results_are_not_intercepted(name):
+    text = json.dumps({"success": False, "refused": "source_not_final", "blocker": {"who_acts": "Solidus operations"}})
     assert _intercept_tool_result(name, text) == (None, None, text)
 
 
-def test_a_result_that_is_not_json_is_untouched():
-    assert _intercept_tool_result("transaction_ops_propose_credit", "oops") == (None, None, "oops")
-
-
 def test_a_card_already_shown_this_turn_is_shown_once():
-    from app.services.chat.orchestrator import _card_shown
-
-    _, card = _blocked()
+    card = _card()
     assert _card_shown([], card) is False
     assert _card_shown([card], dict(card)) is True
     assert _card_shown([card], {**card, "card_id": "other"}) is False
     assert _card_shown([card], {"title": "no id"}) is False
-
-
-def test_an_unprojected_evidence_response_still_shows_the_card_and_hides_it_from_the_model():
-    # Review F1: the legacy loop, or a view too large to project, hands the interceptor the full response.
-    blocker, card = _blocked()
-    full = {
-        "success": True,
-        "case_id": "c1",
-        "accounting_evidence": {"completed_at": "2026-10-27T19:47:00Z"},
-        "fix_blocker_card": card,
-        # As the evidence tool builds it: the card only at the top level, never in the model's view.
-        "model_context": {
-            "version": 1,
-            "data": {"case_id": "c1", "fix_blocker": fix_blockers.for_model(blocker, card_shown=True)},
-        },
-    }
-    event_type, event, for_model = _intercept_tool_result(
-        "transaction_ops_accounting_evidence", json.dumps(full), full_result_str=json.dumps(full)
-    )
-    assert event_type == "result_card" and event == card
-    assert "fix_blocker_card" not in for_model and "47.04" not in for_model
-    assert json.loads(for_model)["model_context"]["data"]["fix_blocker"]["open_records"] == 1
