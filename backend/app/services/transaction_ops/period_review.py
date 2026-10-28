@@ -369,7 +369,7 @@ async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=No
                     func.count().label("checked"),
                     *[
                         func.count().filter(category == name).label(name)
-                        for name in ("matched", "needs_review", "not_verified")
+                        for name in ("matched", "resolved", "needs_review", "not_verified")
                     ],
                 ).select_from(latest)
             )
@@ -379,7 +379,7 @@ async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=No
     )
     query = select(latest)
     if status:
-        if status not in ("matched", "needs_review", "not_verified"):
+        if status not in ("matched", "resolved", "needs_review", "not_verified"):
             raise state.StateError("invalid_result_status", 422)
         query = query.where(category == status)
     if search:
@@ -414,6 +414,7 @@ async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=No
                 "action": (report.get("comparison") or {}).get("recommended_action"),
                 "automation": report.get("automation"),
                 "reconciled": bool(row.get("case_reconciled")),
+                "resolved": bool(row.get("case_resolved")),
             }
         )
     return {

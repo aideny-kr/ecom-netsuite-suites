@@ -1,0 +1,303 @@
+"""Resolved by a person (decided by Aiden, 2026-10-27/28).
+
+When a person fixes an order outside the app, or accepts what is left, they re-check it and accept the
+remaining difference. The case is then "resolved": it leaves Needs review and the issue groups, counts as
+its own bucket (never as matched), stays resolved while later scans find the same remaining difference,
+reopens when that difference changes, and reconciles if the order later matches. Synthetic data only.
+"""
+
+from copy import deepcopy
+from datetime import timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
+
+from app.models.audit import AuditEvent
+from app.models.transaction_ops import TransactionCase
+from app.services.transaction_ops import case_service
+from app.services.transaction_ops.state_service import StateError
+from tests.test_transaction_cases import NOW, observe, report
+from tests.test_transaction_ops_state_db import seed_config
+
+REASON = "fixed_in_netsuite_rest_in_source"
+
+
+def changed_report(observed):
+    body = report(observed=observed)
+    body["balance"]["amounts"]["order_total"].update(target="98.00", delta="2.00")
+    return body
+
+
+async def actions(db, tenant, action):
+    return list(
+        await db.scalars(
+            select(AuditEvent).where(AuditEvent.tenant_id == tenant, AuditEvent.action == "transaction_ops." + action)
+        )
+    )
+
+
+async def open_case(db, actor):
+    config = await seed_config(db, actor.tenant_id, actor)
+    await observe(db, actor, config, report(), NOW)
+    [case] = await case_service.list_cases(db, actor.tenant_id)
+    return config, case
+
+
+async def resolve(db, actor, case, *, at=None, **overrides):
+    values = {
+        "reason": REASON,
+        "note": "Solidus ops asked to void the duplicate adjustment.",
+        "accepted": case_service.remaining_difference(case.latest_report_json),
+        **overrides,
+    }
+    return await case_service.resolve_case(
+        db, actor.tenant_id, case.id, actor=actor, now=at or NOW + timedelta(minutes=1), **values
+    )
+
+
+async def test_a_person_accepts_the_remaining_difference_after_a_fresh_check(db, admin_user):
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    accepted = case_service.remaining_difference(case.latest_report_json)
+    assert accepted == {
+        "status": "mismatch",
+        "amounts": {"order_total": "1.00", "tax": "1.00", "refunds": "1.00"},
+    }
+    resolved = await resolve(db, actor, case)
+    assert resolved.status == "resolved"
+    record = resolved.resolution_json
+    assert (record["reason"], record["resolved_by"], record["accepted"]) == (REASON, str(actor.id), accepted)
+    assert record["note"] == "Solidus ops asked to void the duplicate adjustment."
+    assert record["observed_at"] == case.last_observed_at.isoformat()
+    assert len(await actions(db, actor.tenant_id, "case.resolved_by_person")) == 1
+
+
+@pytest.mark.parametrize(
+    "overrides, at_minutes, code",
+    [
+        ({}, 16, "recheck_required"),  # the remaining difference must be from a fresh check
+        ({"accepted": {"status": "mismatch", "amounts": {"order_total": "2.00"}}}, 1, "remaining_difference_changed"),
+        ({"reason": "because"}, 1, "invalid_resolution_reason"),
+        ({"note": "x" * 1001}, 1, "invalid_resolution_note"),
+    ],
+)
+async def test_an_acceptance_the_evidence_does_not_back_is_refused(db, admin_user, overrides, at_minutes, code):
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case, at=NOW + timedelta(minutes=at_minutes), **overrides)
+    assert exc.value.code == code
+    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "open"
+
+
+async def test_only_an_open_case_can_be_resolved(db, admin_user):
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    await resolve(db, actor, case)
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case)
+    assert exc.value.code == "case_not_open"
+    await observe(db, actor, config, report("matched", NOW + timedelta(minutes=2)), NOW + timedelta(minutes=2))
+    reconciled = await case_service.get_case(db, actor.tenant_id, case.id)
+    assert reconciled.status == "reconciled"
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, reconciled, at=NOW + timedelta(minutes=3))
+    assert exc.value.code == "case_not_open"
+
+
+async def test_a_later_scan_with_the_same_remaining_difference_keeps_it_resolved(db, admin_user):
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    await resolve(db, actor, case)
+    later = NOW + timedelta(hours=1)
+    await observe(db, actor, config, report(observed=later), later)
+    kept = await case_service.get_case(db, actor.tenant_id, case.id)
+    assert kept.status == "resolved" and kept.last_observed_at == later
+    assert len(await actions(db, actor.tenant_id, "case.kept_resolved")) == 1
+
+
+async def test_a_changed_remaining_difference_reopens_it(db, admin_user):
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    await resolve(db, actor, case)
+    later = NOW + timedelta(hours=1)
+    await observe(db, actor, config, changed_report(later), later)
+    reopened = await case_service.get_case(db, actor.tenant_id, case.id)
+    assert reopened.status == "open"
+    assert reopened.resolution_json["reopened"]["why"] == "remaining_difference_changed"
+    assert reopened.resolution_json["reason"] == REASON  # the earlier acceptance stays on record
+    assert len(await actions(db, actor.tenant_id, "case.reopened_after_resolution")) == 1
+
+
+async def test_a_resolved_order_that_later_matches_is_reconciled(db, admin_user):
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    await resolve(db, actor, case)
+    later = NOW + timedelta(hours=1)
+    await observe(db, actor, config, report("matched", later), later)
+    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "reconciled"
+
+
+async def test_a_person_can_reopen_a_resolved_case(db, admin_user):
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    await resolve(db, actor, case)
+    reopened = await case_service.reopen_case(db, actor.tenant_id, case.id, actor=actor, now=NOW + timedelta(minutes=2))
+    assert reopened.status == "open" and reopened.resolution_json["reopened"]["why"] == "by_person"
+    assert len(await actions(db, actor.tenant_id, "case.reopened_by_person")) == 1
+    with pytest.raises(StateError) as exc:
+        await case_service.reopen_case(db, actor.tenant_id, case.id, actor=actor, now=NOW + timedelta(minutes=3))
+    assert exc.value.code == "case_not_resolved"
+
+
+async def test_the_database_still_refuses_to_move_a_reconciled_case(db, admin_user):
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    await observe(db, actor, config, report("matched", NOW + timedelta(minutes=1)), NOW + timedelta(minutes=1))
+    with pytest.raises(DBAPIError, match="reconciled_case_is_final"):
+        async with db.begin_nested():
+            await db.execute(text("UPDATE transaction_cases SET status='resolved' WHERE id=:id"), {"id": case.id})
+
+
+async def test_review_results_count_a_resolved_case_apart_and_keep_it_out_of_needs_review(db, admin_user, monkeypatch):
+    from app.services.transaction_ops.case_groups import list_groups
+    from app.services.transaction_ops.case_service import case_scope
+    from app.services.transaction_ops.period_review import review_results
+    from app.services.transaction_ops.workspace_results import review_page
+    from tests.test_transaction_case_groups import seed
+    from tests.test_transaction_review_results import evidence
+    from tests.test_transaction_review_slices import review
+
+    actor = admin_user[0]
+    _, root = await review(db, actor, monkeypatch)
+    await seed(db, actor.tenant_id, 3, scope=case_scope(root))
+    cases = list(
+        await db.scalars(
+            select(TransactionCase)
+            .where(TransactionCase.tenant_id == actor.tenant_id)
+            .order_by(TransactionCase.order_reference)
+        )
+    )
+    for case in cases:
+        row = await evidence(
+            db, actor, root, case.order_reference, "difference", root.created_at, source_id=str(case.id)
+        )
+        body = deepcopy(case.latest_report_json)
+        body.update(case_id=str(case.id), source={"record_id": str(case.id)})
+        row.report_json = {**row.report_json, **body}
+    cases[0].status = "resolved"
+    cases[0].resolution_json = {"reason": REASON}
+    # The same order number resolved under another subsidiary says nothing about this one.
+    twin = uuid4()
+    db.add(
+        TransactionCase(
+            id=twin,
+            tenant_id=actor.tenant_id,
+            case_key=twin.hex,
+            order_reference=cases[1].order_reference,
+            scope_json={**case_scope(root), "subsidiary_id": "other"},
+            status="resolved",
+            resolution_json={"reason": REASON},
+            first_observed_at=root.created_at,
+            last_observed_at=root.created_at,
+            latest_report_json=deepcopy(cases[1].latest_report_json),
+        )
+    )
+    await db.flush()
+    results = await review_results(db, actor.tenant_id, root.id, limit=5)
+    assert results["summary"] == {"checked": 3, "matched": 0, "resolved": 1, "needs_review": 2, "not_verified": 0}
+    page = await review_page(db, actor.tenant_id, [root.id], limit=5, status="needs_review")
+    assert sorted(item["order_reference"] for item in page["items"]) == sorted(c.order_reference for c in cases[1:])
+    resolved = await review_page(db, actor.tenant_id, [root.id], limit=5, status="resolved")
+    assert [item["order_reference"] for item in resolved["items"]] == [cases[0].order_reference]
+    assert resolved["items"][0]["resolved"] is True
+    groups = await list_groups(db, actor.tenant_id, review_run_ids=[str(root.id)], status="needs_review")
+    assert sum(group["case_count"] for group in groups["groups"]) == 2
+
+
+def test_the_api_offers_exactly_the_service_reasons():
+    from typing import get_args
+
+    from app.schemas.transaction_runs import CaseResolution
+
+    assert set(get_args(CaseResolution.model_fields["reason"].annotation)) == case_service.RESOLUTION_REASONS
+
+
+async def test_a_person_resolves_and_reopens_a_case_over_the_api(app, client, db, admin_user):
+    from datetime import datetime, timezone
+
+    from app.api.v1.transaction_ops import router
+    from tests.conftest import enable_feature_flag
+
+    app.include_router(router, prefix="/api/v1")
+    actor, headers = admin_user
+    for flag in ("celigo", "reconciliation"):
+        await enable_feature_flag(db, actor.tenant_id, flag)
+    config = await seed_config(db, actor.tenant_id, actor)
+
+    fresh = datetime.now(timezone.utc)
+    await observe(db, actor, config, report(observed=fresh), fresh)
+    [case] = await case_service.list_cases(db, actor.tenant_id)
+    case_id, accepted = case.id, case_service.remaining_difference(case.latest_report_json)
+    stale = await client.post(
+        f"/api/v1/transaction-ops/cases/{case_id}/resolve",
+        headers=headers,
+        json={"reason": REASON, "accepted": {**accepted, "status": "difference"}},
+    )
+    assert stale.status_code == 409 and "remaining_difference_changed" in stale.text
+    done = await client.post(
+        f"/api/v1/transaction-ops/cases/{case_id}/resolve",
+        headers=headers,
+        json={"reason": REASON, "note": "Solidus ops", "accepted": accepted},
+    )
+    assert done.status_code == 200, done.text[:300]
+    assert done.json()["status"] == "resolved" and done.json()["resolution_json"]["reason"] == REASON
+    bad = await client.post(
+        f"/api/v1/transaction-ops/cases/{case_id}/resolve",
+        headers=headers,
+        json={"reason": "because", "accepted": accepted},
+    )
+    assert bad.status_code == 422
+    back = await client.post(f"/api/v1/transaction-ops/cases/{case_id}/reopen", headers=headers)
+    assert back.status_code == 200 and back.json()["status"] == "open"
+
+
+async def test_the_case_offers_exactly_what_may_be_accepted_and_until_when(db, admin_user):
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    offer = case_service.resolution_offer(case, now=NOW + timedelta(minutes=1))
+    assert offer == {
+        "available": True,
+        "unavailable_reason": None,
+        "accepted": case_service.remaining_difference(case.latest_report_json),
+        "fresh_until": (NOW + case_service.RESOLUTION_FRESHNESS).isoformat(),
+        "reasons": sorted(case_service.RESOLUTION_REASONS),
+    }
+    stale = case_service.resolution_offer(case, now=NOW + timedelta(minutes=16))
+    assert (stale["available"], stale["unavailable_reason"]) == (False, "recheck_required")
+    resolved = await resolve(db, actor, case)
+    assert (
+        case_service.resolution_offer(resolved, now=NOW + timedelta(minutes=2))["unavailable_reason"] == "case_not_open"
+    )
+
+
+async def test_reading_a_case_carries_its_offer(app, client, db, admin_user):
+    from datetime import datetime, timezone
+
+    from app.api.v1.transaction_ops import router
+    from tests.conftest import enable_feature_flag
+
+    app.include_router(router, prefix="/api/v1")
+    actor, headers = admin_user
+    for flag in ("celigo", "reconciliation"):
+        await enable_feature_flag(db, actor.tenant_id, flag)
+    config = await seed_config(db, actor.tenant_id, actor)
+    fresh = datetime.now(timezone.utc)
+    await observe(db, actor, config, report(observed=fresh), fresh)
+    [case] = await case_service.list_cases(db, actor.tenant_id)
+    response = await client.get(f"/api/v1/transaction-ops/cases/{case.id}", headers=headers)
+    assert response.status_code == 200, response.text[:300]
+    offer = response.json()["resolution_offer"]
+    assert offer["available"] is True and offer["accepted"]["amounts"]["order_total"] == "1.00"

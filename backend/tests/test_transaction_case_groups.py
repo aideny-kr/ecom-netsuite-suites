@@ -173,7 +173,7 @@ async def test_period_groups_match_review_counts_and_keep_agent_members_in_scope
     await db.flush()
     scope = {"review_run_ids": [str(root.id)], "status": "needs_review"}
     results = await review_results(db, actor.tenant_id, root.id, limit=1)
-    assert results["summary"] == {"checked": 26, "matched": 1, "needs_review": 24, "not_verified": 1}
+    assert results["summary"] == {"checked": 26, "matched": 1, "resolved": 0, "needs_review": 24, "not_verified": 1}
     groups = await list_groups(db, actor.tenant_id, **scope)
     assert sum(g["case_count"] for g in groups["groups"]) == 24
     assert len(groups["groups"]) == 1

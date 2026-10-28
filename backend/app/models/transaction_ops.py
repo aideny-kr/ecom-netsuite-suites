@@ -243,7 +243,7 @@ class TransactionCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "case_key"),
-        CheckConstraint("status IN ('open','reconciled')", name="ck_transaction_case_status"),
+        CheckConstraint("status IN ('open','reconciled','resolved')", name="ck_transaction_case_status"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
     case_key: Mapped[str] = mapped_column(String(64))
@@ -253,6 +253,8 @@ class TransactionCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     first_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     latest_report_json: Mapped[dict] = mapped_column(JSONB)
+    # A person's acceptance of the remaining difference (case_service.resolve_case), and any reopening.
+    resolution_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class TransactionCaseObservation(Base, UUIDPrimaryKeyMixin, TimestampMixin):

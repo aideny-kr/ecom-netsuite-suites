@@ -305,6 +305,13 @@ async def period_evidence(
     # One hashed scoped set replaces a correlated case lookup per finding.
     # The exact tenant + JSON business scope remains the authority boundary.
     reconciled = winners.c.order_reference.in_(reconciled_orders)
+    # Resolved by a person after a fresh check (2026-10-28): its own bucket, never needs review or matched.
+    resolved_orders = select(TransactionCase.order_reference).where(
+        TransactionCase.tenant_id == tenant_id,
+        TransactionCase.scope_json == case_scope(root),
+        TransactionCase.status == "resolved",
+    )
+    resolved = winners.c.order_reference.in_(resolved_orders)
     query = (
         select(
             readings.c.id,
@@ -312,6 +319,7 @@ async def period_evidence(
             winners.c.order_reference,
             readings.c.balance_status,
             reconciled.label("case_reconciled"),
+            resolved.label("case_resolved"),
         )
         .select_from(winners)
         .join(readings, readings.c.id == winners.c.id)
@@ -342,8 +350,11 @@ def result_category(latest):
     )
     # A reconciled case counts as matched in every review, group and export (decided 2026-09-30).
     reconciled = [(latest.c.case_reconciled, "matched")] if "case_reconciled" in latest.c else []
+    # A case a person resolved after a fresh check is its own bucket (decided 2026-10-28).
+    resolved = [(latest.c.case_resolved, "resolved")] if "case_resolved" in latest.c else []
     return case(
         *reconciled,
+        *resolved,
         (verdict == "matched", "matched"),
         (
             verdict.in_(["difference", "mismatch", "missing_in_netsuite", "ambiguous", "currency_mismatch"]),

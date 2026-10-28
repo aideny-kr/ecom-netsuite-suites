@@ -93,6 +93,33 @@ def _cleared(report, now):
         return False
 
 
+# Resolved by a person (decided by Aiden, 2026-10-27/28): after a fresh check, a person accepts what is left.
+RESOLUTION_REASONS = frozenset(
+    {
+        "fixed_in_netsuite_rest_in_source",
+        "accepted_residual",
+        "handled_outside_app",
+        "duplicate_or_test_order",
+    }
+)
+RESOLUTION_FRESHNESS = timedelta(minutes=15)
+MAX_RESOLUTION_NOTE = 1000
+
+
+def remaining_difference(report):
+    """What a person accepts when resolving a case: the comparison's status and each metric's delta.
+
+    Later scans compare their own remaining difference with it: the same keeps the case resolved, any
+    other reopens it.
+    """
+    balance = (report or {}).get("balance") or {}
+    amounts = balance.get("amounts") or {}
+    return {
+        "status": balance.get("status"),
+        "amounts": {key: (amounts.get(key) or {}).get("delta") for key in ("order_total", "tax", "refunds")},
+    }
+
+
 def settle_observation(case, report, *, cleared, now, observed):
     """Apply a newer observation to its case and return the audit actions it causes.
 
@@ -104,6 +131,20 @@ def settle_observation(case, report, *, cleared, now, observed):
     """
     if case.status == "reconciled" and not cleared:
         return [("case.kept_reconciled", {"evidence_observed_at": observed.isoformat()})]
+    if case.status == "resolved" and not cleared:
+        # A person accepted what was left. The same remaining difference keeps it resolved; any other
+        # reopens it with why, and the acceptance stays on record (2026-10-28).
+        case.last_observed_at = now
+        case.latest_report_json = report
+        remaining = remaining_difference(report)
+        if remaining == (case.resolution_json or {}).get("accepted"):
+            return [("case.kept_resolved", {"evidence_observed_at": observed.isoformat()})]
+        case.status = "open"
+        case.resolution_json = {
+            **(case.resolution_json or {}),
+            "reopened": {"at": now.isoformat(), "why": "remaining_difference_changed", "remaining": remaining},
+        }
+        return [("case.reopened_after_resolution", {"evidence_observed_at": observed.isoformat()})]
     prior = case.status
     case.status = "reconciled" if cleared else "open"
     case.last_observed_at = now
@@ -248,6 +289,99 @@ async def get_case(db, tenant_id, case_id):
     if row is None:
         raise StateError("not_found", 404)
     return row
+
+
+def resolution_offer(case, *, now):
+    """What a person may accept on this case right now, computed by the server for the screen.
+
+    The screen sends `accepted` back unchanged; resolve_case refuses it if anything moved meanwhile.
+    """
+    remaining = remaining_difference(case.latest_report_json)
+    if case.status != "open":
+        why = "case_not_open"
+    elif remaining["status"] == "matched":
+        why = "nothing_to_resolve"
+    elif not timedelta(0) <= now - case.last_observed_at <= RESOLUTION_FRESHNESS:
+        why = "recheck_required"
+    else:
+        why = None
+    return {
+        "available": why is None,
+        "unavailable_reason": why,
+        "accepted": remaining,
+        "fresh_until": (case.last_observed_at + RESOLUTION_FRESHNESS).isoformat(),
+        "reasons": sorted(RESOLUTION_REASONS),
+    }
+
+
+async def _case_for_update(db, tenant_id, case_id):
+    from app.services.transaction_ops.state_service import StateError
+
+    await set_tenant_context(db, str(tenant_id))
+    row = await db.scalar(
+        select(TransactionCase)
+        .where(TransactionCase.tenant_id == tenant_id, TransactionCase.id == case_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise StateError("not_found", 404)
+    return row
+
+
+async def resolve_case(db, tenant_id, case_id, *, actor, reason, note, accepted, now):
+    """A person accepts an open case's remaining difference after a fresh check (2026-10-28).
+
+    Only an open case, only when its latest check is at most RESOLUTION_FRESHNESS old, and only when the
+    remaining difference the person saw (`accepted`) is still the case's. The case leaves Needs review as
+    "resolved"; nothing is written to NetSuite or the source.
+    """
+    from app.services.transaction_ops.state_service import StateError, _audit
+
+    case = await _case_for_update(db, tenant_id, case_id)
+    if case.status != "open":
+        raise StateError("case_not_open", 409)
+    if reason not in RESOLUTION_REASONS:
+        raise StateError("invalid_resolution_reason", 422)
+    if note is not None and (not isinstance(note, str) or len(note) > MAX_RESOLUTION_NOTE):
+        raise StateError("invalid_resolution_note", 422)
+    if not timedelta(0) <= now - case.last_observed_at <= RESOLUTION_FRESHNESS:
+        raise StateError("recheck_required", 409)
+    current = remaining_difference(case.latest_report_json)
+    if current["status"] == "matched":
+        raise StateError("nothing_to_resolve", 409)
+    if accepted != current:
+        raise StateError("remaining_difference_changed", 409)
+    case.status = "resolved"
+    case.resolution_json = {
+        "resolved_by": str(actor.id),
+        "resolved_at": now.isoformat(),
+        "reason": reason,
+        "note": note or None,
+        "accepted": current,
+        "observed_at": case.last_observed_at.isoformat(),
+    }
+    await db.flush()
+    await _audit(
+        db, tenant_id, "case.resolved_by_person", case, actor=actor, payload={"resolution": case.resolution_json}
+    )
+    return case
+
+
+async def reopen_case(db, tenant_id, case_id, *, actor, now):
+    """A person puts a resolved case back in Needs review; the earlier acceptance stays on record."""
+    from app.services.transaction_ops.state_service import StateError, _audit
+
+    case = await _case_for_update(db, tenant_id, case_id)
+    if case.status != "resolved":
+        raise StateError("case_not_resolved", 409)
+    case.status = "open"
+    case.resolution_json = {
+        **(case.resolution_json or {}),
+        "reopened": {"by": str(actor.id), "at": now.isoformat(), "why": "by_person"},
+    }
+    await db.flush()
+    await _audit(db, tenant_id, "case.reopened_by_person", case, actor=actor)
+    return case
 
 
 async def cases_for_order(db, tenant_id, order_reference, *, limit=10):

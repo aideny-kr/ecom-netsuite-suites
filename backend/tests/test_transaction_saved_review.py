@@ -55,7 +55,7 @@ async def test_new_report_request_materializes_saved_results_without_dispatch(
     publisher.assert_not_called()
     run_id = UUID(data["id"])
     results = await period_review.review_results(db, actor.tenant_id, run_id)
-    assert results["summary"] == {"checked": 1, "matched": 1, "needs_review": 0, "not_verified": 0}
+    assert results["summary"] == {"checked": 1, "matched": 1, "resolved": 0, "needs_review": 0, "not_verified": 0}
     assert not await state_service.list_findings(db, actor.tenant_id, run_id)  # No restamping/copying observations.
     status = await period_review.review_status(db, actor.tenant_id, run_id)
     assert status["complete"] and status["source_freshness"] == "unverified"

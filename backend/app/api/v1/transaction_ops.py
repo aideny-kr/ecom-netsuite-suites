@@ -17,6 +17,7 @@ from app.models.user import User
 from app.schemas.transaction_runs import (
     CaseObservationOut,
     CaseOut,
+    CaseResolution,
     ConfigControl,
     ConfigCreate,
     ConfigOut,
@@ -354,7 +355,7 @@ async def list_group_cases(
 async def list_cases(
     user: Reader,
     db: Database,
-    status: Literal["open", "reconciled"] | None = None,
+    status: Literal["open", "reconciled", "resolved"] | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
@@ -370,7 +371,14 @@ async def get_case(case_id: UUID, user: Reader, db: Database):
         rows = await project_rows(
             db, user.tenant_id, [{"report_json": {**case.latest_report_json, "case_id": str(case.id)}}]
         )
-        return CaseOut.model_validate(case).model_copy(update={"latest_report_json": rows[0]["report_json"]})
+        from datetime import datetime, timezone
+
+        return CaseOut.model_validate(case).model_copy(
+            update={
+                "latest_report_json": rows[0]["report_json"],
+                "resolution_offer": case_service.resolution_offer(case, now=datetime.now(timezone.utc)),
+            }
+        )
     except service.StateError as exc:
         raise _http_error(exc) from None
 
@@ -401,6 +409,43 @@ async def case_resolution_history(
 
     try:
         return await history(db, user.tenant_id, case_id, limit=limit, offset=offset)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/cases/{case_id}/resolve", response_model=CaseOut)
+async def resolve_case(case_id: UUID, request: CaseResolution, user: Reader, db: Database):
+    """A person accepts the remaining difference after a fresh check; the case leaves Needs review."""
+    from datetime import datetime, timezone
+
+    try:
+        case = await case_service.resolve_case(
+            db,
+            user.tenant_id,
+            case_id,
+            actor=user,
+            reason=request.reason,
+            note=request.note,
+            accepted=request.accepted,
+            now=datetime.now(timezone.utc),
+        )
+        out = CaseOut.model_validate(case)
+        await db.commit()
+        return out
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/cases/{case_id}/reopen", response_model=CaseOut)
+async def reopen_case(case_id: UUID, user: Reader, db: Database):
+    """A person puts a resolved case back in Needs review."""
+    from datetime import datetime, timezone
+
+    try:
+        case = await case_service.reopen_case(db, user.tenant_id, case_id, actor=user, now=datetime.now(timezone.utc))
+        out = CaseOut.model_validate(case)
+        await db.commit()
+        return out
     except service.StateError as exc:
         raise _http_error(exc) from None
 
@@ -438,7 +483,7 @@ async def review_findings(
     db: Database,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     offset: Annotated[int, Query(ge=0)] = 0,
-    status: Literal["matched", "needs_review", "not_verified"] | None = None,
+    status: Literal["matched", "resolved", "needs_review", "not_verified"] | None = None,
     search: Annotated[str, Query(max_length=100)] = "",
 ):
     try:
@@ -466,7 +511,7 @@ async def investigate_cases(request: CaseBatchInvestigation, user: Reader, db: D
 class ReviewExport(BaseModel):
     model_config = ConfigDict(extra="forbid")
     review_run_ids: list[UUID] = Field(min_length=1, max_length=20)
-    status: Literal["matched", "needs_review", "not_verified"] | None = None
+    status: Literal["matched", "resolved", "needs_review", "not_verified"] | None = None
     search: str = Field(default="", max_length=200)
 
 
@@ -477,7 +522,7 @@ async def selected_review_results(
     review_run_ids: Annotated[list[UUID], Query(min_length=1, max_length=20)],
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
-    status: Literal["matched", "needs_review", "not_verified"] | None = None,
+    status: Literal["matched", "resolved", "needs_review", "not_verified"] | None = None,
     search: Annotated[str, Query(max_length=200)] = "",
 ):
     from app.services.transaction_ops.workspace_results import review_page

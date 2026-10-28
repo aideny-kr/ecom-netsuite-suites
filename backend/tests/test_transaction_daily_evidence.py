@@ -54,7 +54,7 @@ async def test_reuse_daily_evidence_deduplicates_and_covers_without_new_provider
     await add(db, actor, root, "R123456789", "matched", row.created_at + timedelta(seconds=1))
     await add(db, actor, row, "R123456788", "difference", row.created_at)
     results = await period_review.review_results(db, actor.tenant_id, root.id)
-    assert results["summary"] == {"checked": 2, "matched": 1, "needs_review": 1, "not_verified": 0}
+    assert results["summary"] == {"checked": 2, "matched": 1, "resolved": 0, "needs_review": 1, "not_verified": 0}
     status = await period_review.review_status(db, actor.tenant_id, root.id)
     assert status["completed_slices"] == 2 and not status["complete"]
     providers = AsyncMock(side_effect=AssertionError("Covered slices must not call a provider"))

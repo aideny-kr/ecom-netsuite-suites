@@ -141,6 +141,8 @@ def _build_workbook(wb, rows, scopes, *, status, search, generated_at, report_id
         category = (
             "matched"
             if row.get("case_reconciled") or row["status"] == "matched"
+            else "resolved"
+            if row.get("case_resolved")
             else "needs_review"
             if row["status"] in REVIEW_STATUSES
             else "not_verified"
@@ -320,6 +322,7 @@ async def export_review(db, actor, run_ids, *, status=None, search=""):
                         source.c.report_json["case_id"].astext.label("case_id"),
                         source.c.report_json.label("report_json"),
                         source.c.case_reconciled,
+                        source.c.case_resolved,
                         *columns,
                         identifier,
                     )
