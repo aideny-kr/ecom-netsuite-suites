@@ -586,3 +586,116 @@ it("shows a resolved case as reconciled while retaining the raw observed varianc
   expect(await screen.findByText("Reconciled")).toBeInTheDocument();
   expect(screen.getByText("+123456789012335.123456")).toBeInTheDocument();
 });
+
+const remaining = { status: "difference", amounts: { order_total: "-49.36", tax: "-2.32", refunds: "0.00" } };
+function withCase(detail: Record<string, unknown>, summary?: Record<string, number>, rowFlags: Record<string, unknown> = {}) {
+  const original = vi.mocked(apiClient.get).getMockImplementation()!;
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) => {
+    if (path.endsWith("/cases/case-a"))
+      return {
+        id: "case-a",
+        order_reference: "R123456789",
+        scope_json: {},
+        last_observed_at: "2026-10-27T17:41:00Z",
+        latest_report_json: { balance },
+        ...detail,
+      } as never;
+    if (path.includes("/cases/case-a/observations")) return [] as never;
+    const response = await original(path);
+    if (path.includes("/review-results?")) {
+      const data = response as { items: Array<Record<string, unknown>>; summary: Record<string, number> };
+      return { ...data, summary: summary || data.summary, items: data.items.map((item) => ({ ...item, ...rowFlags })) } as never;
+    }
+    return response;
+  });
+}
+
+it("counts orders resolved by a person in their own tile and filter, apart from matched", async () => {
+  withCase({ status: "resolved" }, { checked: 8, matched: 4, resolved: 1, needs_review: 2, not_verified: 1 }, { resolved: true });
+  mount();
+  await waitFor(() => expect(screen.getByTestId("stat-resolved")).toHaveTextContent("1"));
+  expect(screen.getByTestId("stat-matched")).toHaveTextContent("4");
+  expect(await screen.findByText("Resolved by person", { selector: "span" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Result status"), { target: { value: "resolved" } });
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(expect.stringMatching(/review-results\?.*status=resolved/)),
+  );
+  // Resolved cases are not in the issue groups, so the groups are not asked for them.
+  expect(vi.mocked(apiClient.get).mock.calls.some(([p]) => p.includes("/case-groups?") && p.includes("status=resolved"))).toBe(false);
+});
+
+it("accepts a freshly re-checked difference exactly as the server offered it", async () => {
+  withCase({
+    status: "open",
+    resolution_offer: {
+      available: true,
+      unavailable_reason: null,
+      accepted: remaining,
+      fresh_until: "2026-10-27T17:56:00Z",
+      reasons: ["accepted_residual", "duplicate_or_test_order", "fixed_in_netsuite_rest_in_source", "handled_outside_app"],
+    },
+  });
+  vi.mocked(apiClient.post).mockResolvedValue({ id: "case-a", status: "resolved" });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  const accept = await screen.findByRole("button", { name: "Accept as resolved" });
+  expect(screen.getByText(/I accept the remaining difference of -49.36 \(order total\) and -2.32 \(tax\) as shown/)).toBeInTheDocument();
+  expect(accept).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "fixed_in_netsuite_rest_in_source" } });
+  expect(accept).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: /I accept the remaining difference/ }));
+  fireEvent.change(screen.getByLabelText(/Note/), { target: { value: "Solidus ops will void the duplicate." } });
+  fireEvent.click(accept);
+  await waitFor(() =>
+    expect(apiClient.post).toHaveBeenCalledWith("/api/v1/transaction-ops/cases/case-a/resolve", {
+      reason: "fixed_in_netsuite_rest_in_source",
+      note: "Solidus ops will void the duplicate.",
+      accepted: remaining,
+    }),
+  );
+});
+
+it("asks for a re-check before a stale difference can be accepted", async () => {
+  withCase({
+    status: "open",
+    resolution_offer: { available: false, unavailable_reason: "recheck_required", accepted: remaining, fresh_until: "2026-10-26T21:40:00Z", reasons: [] },
+  });
+  vi.mocked(apiClient.post).mockResolvedValue({ runs: [{ id: "recheck-run", config_id: "scope-a", case_ids: ["case-a"] }], blocked: [] });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  expect(await screen.findByText("Fixed this outside the app?")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Accept as resolved" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "I fixed this — re-check" }));
+  await waitFor(() =>
+    expect(apiClient.post).toHaveBeenCalledWith("/api/v1/transaction-ops/cases/investigate", {
+      case_ids: ["case-a"],
+      evaluation_key: expect.any(String),
+    }),
+  );
+  expect(await screen.findByText(/Re-checking/)).toBeInTheDocument();
+  expect(vi.mocked(apiClient.post).mock.calls.some(([p]) => p.includes("/resolve"))).toBe(false);
+});
+
+it("shows who resolved a case, why and what they accepted, and lets a person reopen it", async () => {
+  withCase({
+    status: "resolved",
+    resolution_json: {
+      resolved_by: "user-1",
+      resolved_by_name: "T. Accountant",
+      resolved_at: "2026-10-27T17:43:00Z",
+      reason: "fixed_in_netsuite_rest_in_source",
+      note: "Solidus ops will void the duplicate.",
+      accepted: remaining,
+      observed_at: "2026-10-27T17:41:00Z",
+    },
+  });
+  vi.mocked(apiClient.post).mockResolvedValue({ id: "case-a", status: "open" });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  expect(await screen.findByText(/Resolved by T. Accountant/)).toBeInTheDocument();
+  expect(screen.getByText(/Fixed in NetSuite; the remaining difference is in Solidus/)).toBeInTheDocument();
+  expect(screen.getByText(/order total -49.36, tax -2.32, refunds 0.00/)).toBeInTheDocument();
+  expect(screen.getByText(/Solidus ops will void the duplicate/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
+  await waitFor(() => expect(apiClient.post).toHaveBeenCalledWith("/api/v1/transaction-ops/cases/case-a/reopen", {}));
+});
