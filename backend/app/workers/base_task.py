@@ -7,10 +7,18 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.database import _is_supabase
 from app.models.audit import AuditEvent
 from app.models.job import Job
 
-sync_engine = create_engine(settings.DATABASE_URL_SYNC)
+# Same pool settings as the async engines in app.core.database. Without pre-ping, a
+# connection the server closed while it sat idle in the pool failed the next task's
+# before_start, so the task never ran and no jobs row recorded it (staging 2026-10-26..28).
+sync_engine = create_engine(
+    settings.DATABASE_URL_SYNC,
+    pool_pre_ping=True,
+    pool_recycle=300 if _is_supabase(settings.DATABASE_URL_SYNC) else -1,
+)
 
 
 def set_tenant_context_sync(session: Session, tenant_id: str) -> None:
@@ -53,6 +61,9 @@ class InstrumentedTask(Task):
     SYSTEM_TENANT_ID = "00000000-0000-0000-0000-000000000000"
 
     def before_start(self, task_id, args, kwargs):
+        # The task object is shared by every run in this worker process. Clear the last
+        # run's job id first, so if this start fails, on_failure can't mark that run failed.
+        self._job_id = None
         self._correlation_id = kwargs.pop("correlation_id", None) or str(uuid.uuid4())
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
 
