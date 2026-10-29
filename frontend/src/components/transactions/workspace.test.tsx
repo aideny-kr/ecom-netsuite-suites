@@ -587,7 +587,14 @@ it("shows a resolved case as reconciled while retaining the raw observed varianc
   expect(screen.getByText("+123456789012335.123456")).toBeInTheDocument();
 });
 
-const remaining = { status: "difference", amounts: { order_total: "-49.36", tax: "-2.32", refunds: "0.00" } };
+const remaining = {
+  status: "difference",
+  amounts: {
+    order_total: { source: "87.66", target: "100.00", delta: "-12.34" },
+    tax: { source: "6.77", target: "8.00", delta: "-1.23" },
+    refunds: { source: "5.00", target: "5.00", delta: "0.00" },
+  },
+};
 function withCase(detail: Record<string, unknown>, summary?: Record<string, number>, rowFlags: Record<string, unknown> = {}) {
   const original = vi.mocked(apiClient.get).getMockImplementation()!;
   vi.mocked(apiClient.get).mockImplementation(async (path: string) => {
@@ -639,7 +646,7 @@ it("accepts a freshly re-checked difference exactly as the server offered it", a
   mount();
   fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
   const accept = await screen.findByRole("button", { name: "Accept as resolved" });
-  expect(screen.getByText(/I accept the remaining difference of -49.36 \(order total\) and -2.32 \(tax\) as shown/)).toBeInTheDocument();
+  expect(screen.getByText(/I accept the remaining difference of -12.34 \(order total\) and -1.23 \(tax\) as shown/)).toBeInTheDocument();
   expect(accept).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "fixed_in_netsuite_rest_in_source" } });
   expect(accept).toBeDisabled();
@@ -694,7 +701,7 @@ it("shows who resolved a case, why and what they accepted, and lets a person reo
   fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
   expect(await screen.findByText(/Resolved by T. Accountant/)).toBeInTheDocument();
   expect(screen.getByText(/Fixed in NetSuite; the remaining difference is in Solidus/)).toBeInTheDocument();
-  expect(screen.getByText(/order total -49.36, tax -2.32, refunds 0.00/)).toBeInTheDocument();
+  expect(screen.getByText(/order total -12.34, tax -1.23, refunds 0.00/)).toBeInTheDocument();
   expect(screen.getByText(/Solidus ops will void the duplicate/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
   await waitFor(() => expect(apiClient.post).toHaveBeenCalledWith("/api/v1/transaction-ops/cases/case-a/reopen", {}));

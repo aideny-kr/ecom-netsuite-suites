@@ -1,7 +1,7 @@
 """Carry exact reconciliation evidence across runs; no approval or write authority."""
 
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -104,20 +104,79 @@ RESOLUTION_REASONS = frozenset(
 )
 RESOLUTION_FRESHNESS = timedelta(minutes=15)
 MAX_RESOLUTION_NOTE = 1000
+# The comparison statuses a person may accept: review_evidence.result_category's Needs review set. Anything
+# else is matched or Not verified (incomplete evidence), which a person cannot accept.
+RESOLVABLE_STATUSES = frozenset({"difference", "mismatch", "missing_in_netsuite", "ambiguous", "currency_mismatch"})
+_METRICS = ("order_total", "tax", "refunds")
+_SIDES = ("source", "target", "delta")
 
 
 def remaining_difference(report):
-    """What a person accepts when resolving a case: the comparison's status and each metric's delta.
+    """What a person accepts when resolving a case: the comparison's status and each metric's amounts.
 
-    Later scans compare their own remaining difference with it: the same keeps the case resolved, any
-    other reopens it.
+    Source and NetSuite amounts are kept beside the delta, so a later scan that finds a changed amount
+    behind an unchanged (or unknown) delta still reopens the case (Codex review, 2026-10-28).
     """
     balance = (report or {}).get("balance") or {}
     amounts = balance.get("amounts") or {}
     return {
         "status": balance.get("status"),
-        "amounts": {key: (amounts.get(key) or {}).get("delta") for key in ("order_total", "tax", "refunds")},
+        "amounts": {key: {side: (amounts.get(key) or {}).get(side) for side in _SIDES} for key in _METRICS},
     }
+
+
+def _amount(value):
+    try:
+        return Decimal(str(value)) if value is not None else None
+    except InvalidOperation:
+        return ("unreadable", value)
+
+
+def same_remaining(first, second):
+    """The same remaining difference: the same status and the same amounts compared as numbers ('1.00' == '1')."""
+
+    def shape(remaining):
+        remaining = remaining if isinstance(remaining, dict) else {}
+        amounts = remaining.get("amounts") if isinstance(remaining.get("amounts"), dict) else {}
+        return remaining.get("status"), [
+            _amount((amounts.get(key) if isinstance(amounts.get(key), dict) else {}).get(side))
+            for key in _METRICS
+            for side in _SIDES
+        ]
+
+    return shape(first) == shape(second)
+
+
+def evidence_read_at(report):
+    """When the report's evidence was read (its oldest read), or None when the report does not say.
+
+    Unlike observation_time there is no fallback: a resolution needs to know the evidence is fresh, and the
+    time a result was saved is not when it was read (a saved-evidence review reuses old reads).
+    """
+    try:
+        times = [datetime.fromisoformat(snapshot["observed_at"]) for snapshot in [report["source"], *report["targets"]]]
+        times.extend(datetime.fromisoformat(value) for value in refund_observation_times(report))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not times or any(value.utcoffset() is None for value in times):
+        return None
+    return min(times)
+
+
+def _resolution_refusal(case, now):
+    """Why a person cannot accept this case's remaining difference right now, or None when they can."""
+    remaining = remaining_difference(case.latest_report_json)
+    if case.status != "open":
+        return "case_not_open"
+    if remaining["status"] == "matched":
+        return "nothing_to_resolve"
+    sources = [remaining["amounts"][key]["source"] for key in _METRICS]
+    if remaining["status"] not in RESOLVABLE_STATUSES or not all(isinstance(_amount(v), Decimal) for v in sources):
+        return "difference_not_measured"
+    read = evidence_read_at(case.latest_report_json)
+    if read is None or not timedelta(0) <= now - read <= RESOLUTION_FRESHNESS:
+        return "recheck_required"
+    return None
 
 
 def settle_observation(case, report, *, cleared, now, observed):
@@ -137,7 +196,7 @@ def settle_observation(case, report, *, cleared, now, observed):
         case.last_observed_at = now
         case.latest_report_json = report
         remaining = remaining_difference(report)
-        if remaining == (case.resolution_json or {}).get("accepted"):
+        if same_remaining(remaining, (case.resolution_json or {}).get("accepted")):
             return [("case.kept_resolved", {"evidence_observed_at": observed.isoformat()})]
         case.status = "open"
         case.resolution_json = {
@@ -296,20 +355,13 @@ def resolution_offer(case, *, now):
 
     The screen sends `accepted` back unchanged; resolve_case refuses it if anything moved meanwhile.
     """
-    remaining = remaining_difference(case.latest_report_json)
-    if case.status != "open":
-        why = "case_not_open"
-    elif remaining["status"] == "matched":
-        why = "nothing_to_resolve"
-    elif not timedelta(0) <= now - case.last_observed_at <= RESOLUTION_FRESHNESS:
-        why = "recheck_required"
-    else:
-        why = None
+    why = _resolution_refusal(case, now)
+    read = evidence_read_at(case.latest_report_json)
     return {
         "available": why is None,
         "unavailable_reason": why,
-        "accepted": remaining,
-        "fresh_until": (case.last_observed_at + RESOLUTION_FRESHNESS).isoformat(),
+        "accepted": remaining_difference(case.latest_report_json),
+        "fresh_until": (read + RESOLUTION_FRESHNESS).isoformat() if read else None,
         "reasons": sorted(RESOLUTION_REASONS),
     }
 
@@ -318,10 +370,12 @@ async def _case_for_update(db, tenant_id, case_id):
     from app.services.transaction_ops.state_service import StateError
 
     await set_tenant_context(db, str(tenant_id))
+    # populate_existing: a copy this session loaded earlier must not stand in for the locked row.
     row = await db.scalar(
         select(TransactionCase)
         .where(TransactionCase.tenant_id == tenant_id, TransactionCase.id == case_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if row is None:
         raise StateError("not_found", 404)
@@ -338,27 +392,28 @@ async def resolve_case(db, tenant_id, case_id, *, actor, reason, note, accepted,
     from app.services.transaction_ops.state_service import StateError, _audit
 
     case = await _case_for_update(db, tenant_id, case_id)
-    if case.status != "open":
-        raise StateError("case_not_open", 409)
+    # Only a person of this tenant with reconciliation access, checked here and not only by the route.
+    await state._human(db, tenant_id, actor, "recon.run")
     if reason not in RESOLUTION_REASONS:
         raise StateError("invalid_resolution_reason", 422)
     if note is not None and (not isinstance(note, str) or len(note) > MAX_RESOLUTION_NOTE):
         raise StateError("invalid_resolution_note", 422)
-    if not timedelta(0) <= now - case.last_observed_at <= RESOLUTION_FRESHNESS:
-        raise StateError("recheck_required", 409)
+    refusal = _resolution_refusal(case, now)
+    if refusal:
+        raise StateError(refusal, 409)
     current = remaining_difference(case.latest_report_json)
-    if current["status"] == "matched":
-        raise StateError("nothing_to_resolve", 409)
-    if accepted != current:
+    if not same_remaining(accepted, current):
         raise StateError("remaining_difference_changed", 409)
     case.status = "resolved"
     case.resolution_json = {
         "resolved_by": str(actor.id),
+        # A snapshot for the screen: who it was when they resolved it.
+        "resolved_by_name": actor.full_name,
         "resolved_at": now.isoformat(),
         "reason": reason,
         "note": note or None,
         "accepted": current,
-        "observed_at": case.last_observed_at.isoformat(),
+        "observed_at": evidence_read_at(case.latest_report_json).isoformat(),
     }
     await db.flush()
     await _audit(
@@ -372,12 +427,13 @@ async def reopen_case(db, tenant_id, case_id, *, actor, now):
     from app.services.transaction_ops.state_service import StateError, _audit
 
     case = await _case_for_update(db, tenant_id, case_id)
+    await state._human(db, tenant_id, actor, "recon.run")
     if case.status != "resolved":
         raise StateError("case_not_resolved", 409)
     case.status = "open"
     case.resolution_json = {
         **(case.resolution_json or {}),
-        "reopened": {"by": str(actor.id), "at": now.isoformat(), "why": "by_person"},
+        "reopened": {"by": str(actor.id), "by_name": actor.full_name, "at": now.isoformat(), "why": "by_person"},
     }
     await db.flush()
     await _audit(db, tenant_id, "case.reopened_by_person", case, actor=actor)

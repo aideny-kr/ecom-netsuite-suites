@@ -136,19 +136,24 @@ def _build_workbook(wb, rows, scopes, *, status, search, generated_at, report_id
         scope = scope_map[row["review_run_id"]]
         config = scope["config"]
         balance = row["balance"] or {}
-        # A reconciled order is matched in every review (decided 2026-09-30); the raw verdict
-        # stays in its own column.
+        # A reconciled order is matched in every review (decided 2026-09-30) and a resolved one resolved
+        # (2026-10-28), in review_evidence.result_category's order; the raw verdict stays in its own column.
         category = (
             "matched"
-            if row.get("case_reconciled") or row["status"] == "matched"
+            if row.get("case_reconciled")
             else "resolved"
             if row.get("case_resolved")
+            else "matched"
+            if row["status"] == "matched"
             else "needs_review"
             if row["status"] in REVIEW_STATUSES
             else "not_verified"
         )
         group_category = status or "needs_review"
-        grouped = category == group_category and group_category != "matched" and row["scope"] is not None
+        # Issue groups hold open problems only: never matched or resolved orders.
+        grouped = (
+            category == group_category and group_category not in ("matched", "resolved") and row["scope"] is not None
+        )
         group_id = row["group_id"] if grouped else None
         name = config.get("name") or f"Entity {config.get('subsidiary_id', 'unavailable')}"
         if grouped:

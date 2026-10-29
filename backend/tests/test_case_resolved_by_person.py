@@ -61,10 +61,8 @@ async def test_a_person_accepts_the_remaining_difference_after_a_fresh_check(db,
     actor = admin_user[0]
     _, case = await open_case(db, actor)
     accepted = case_service.remaining_difference(case.latest_report_json)
-    assert accepted == {
-        "status": "mismatch",
-        "amounts": {"order_total": "1.00", "tax": "1.00", "refunds": "1.00"},
-    }
+    each = {"source": "100.00", "target": "99.00", "delta": "1.00"}
+    assert accepted == {"status": "mismatch", "amounts": {"order_total": each, "tax": each, "refunds": each}}
     resolved = await resolve(db, actor, case)
     assert resolved.status == "resolved"
     record = resolved.resolution_json
@@ -300,4 +298,172 @@ async def test_reading_a_case_carries_its_offer(app, client, db, admin_user):
     response = await client.get(f"/api/v1/transaction-ops/cases/{case.id}", headers=headers)
     assert response.status_code == 200, response.text[:300]
     offer = response.json()["resolution_offer"]
-    assert offer["available"] is True and offer["accepted"]["amounts"]["order_total"] == "1.00"
+    assert offer["available"] is True and offer["accepted"]["amounts"]["order_total"]["delta"] == "1.00"
+
+
+# Codex review round 1 (2026-10-28) -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("read_minutes", [-60, 10])
+async def test_only_a_fresh_read_counts_as_a_fresh_check(db, admin_user, read_minutes):
+    # F1: saving an old read now (a saved-evidence review reuses reads) is not a re-check; nor is a read
+    # stamped in the future.
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    await observe(db, actor, config, report(observed=NOW + timedelta(minutes=read_minutes)), NOW)
+    [case] = await case_service.list_cases(db, actor.tenant_id)
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case)
+    assert exc.value.code == "recheck_required"
+    offer = case_service.resolution_offer(case, now=NOW + timedelta(minutes=1))
+    assert offer["unavailable_reason"] == "recheck_required"
+
+
+async def test_evidence_that_does_not_say_when_it_was_read_cannot_be_accepted(db, admin_user):
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    body = report()
+    del body["source"]["observed_at"]
+    await observe(db, actor, config, body, NOW)
+    [case] = await case_service.list_cases(db, actor.tenant_id)
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case)
+    assert exc.value.code == "recheck_required"
+
+
+@pytest.mark.parametrize("status, source", [("incomplete", "100.00"), ("mismatch", None)])
+async def test_a_difference_that_is_not_measured_cannot_be_accepted(db, admin_user, status, source):
+    # F2: incomplete evidence is Not verified, and an unknown source amount gives later scans nothing to
+    # compare; neither can be accepted.
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    body = report()
+    body["balance"]["status"] = status
+    body["balance"]["amounts"]["tax"]["source"] = source
+    await observe(db, actor, config, body, NOW)
+    [case] = await case_service.list_cases(db, actor.tenant_id)
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case)
+    assert exc.value.code == "difference_not_measured"
+    offer = case_service.resolution_offer(case, now=NOW + timedelta(minutes=1))
+    assert (offer["available"], offer["unavailable_reason"]) == (False, "difference_not_measured")
+
+
+async def test_a_changed_source_amount_reopens_a_case_even_when_the_delta_is_unknown(db, admin_user):
+    # F2: an order missing in NetSuite has no deltas; its source amounts still tell a change.
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+
+    def missing(observed, total):
+        body = report(observed=observed)
+        body["balance"]["status"] = "missing_in_netsuite"
+        body["targets"] = []
+        for key, amounts in body["balance"]["amounts"].items():
+            amounts.update(source=total if key == "order_total" else "0.00", target=None, delta=None)
+        return body
+
+    await observe(db, actor, config, missing(NOW, "100.00"), NOW)
+    [case] = await case_service.list_cases(db, actor.tenant_id)
+    await resolve(db, actor, case, reason="duplicate_or_test_order")
+    later = NOW + timedelta(hours=1)
+    await observe(db, actor, config, missing(later, "1000.00"), later)
+    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "open"
+    assert len(await actions(db, actor.tenant_id, "case.reopened_after_resolution")) == 1
+
+
+async def test_the_same_amounts_written_differently_keep_a_case_resolved(db, admin_user):
+    # F3: '1.00' and '1' are the same remaining difference.
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    await resolve(db, actor, case)
+    later = NOW + timedelta(hours=1)
+    body = report(observed=later)
+    for amounts in body["balance"]["amounts"].values():
+        amounts.update(source="100", target="99.0", delta="1")
+    await observe(db, actor, config, body, later)
+    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "resolved"
+    assert len(await actions(db, actor.tenant_id, "case.kept_resolved")) == 1
+
+
+async def test_only_a_person_of_the_tenant_with_reconciliation_access_resolves_or_reopens(db, admin_user):
+    # F4: the service checks the person itself, as investigate_case does; the route's check is not enough.
+    from types import SimpleNamespace
+
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    stranger = SimpleNamespace(id=uuid4(), tenant_id=uuid4())
+    accepted = case_service.remaining_difference(case.latest_report_json)
+    with pytest.raises(StateError) as exc:
+        await case_service.resolve_case(
+            db, actor.tenant_id, case.id, actor=stranger, reason=REASON, note=None, accepted=accepted, now=NOW
+        )
+    assert exc.value.code == "human_actor_required"
+    await resolve(db, actor, case)
+    with pytest.raises(StateError) as exc:
+        await case_service.reopen_case(db, actor.tenant_id, case.id, actor=stranger, now=NOW + timedelta(minutes=2))
+    assert exc.value.code == "human_actor_required"
+    resolved = await case_service.get_case(db, actor.tenant_id, case.id)
+    assert resolved.resolution_json["resolved_by_name"] == actor.full_name
+
+
+async def test_resolving_reads_the_case_again_under_its_lock(db, admin_user):
+    # F5: another session's newer evidence must win over the copy this session already holds.
+    from sqlalchemy import update
+
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    seen = case_service.remaining_difference(case.latest_report_json)
+    await db.execute(
+        update(TransactionCase)
+        .where(TransactionCase.id == case.id)
+        .values(latest_report_json=changed_report(NOW))
+        .execution_options(synchronize_session=False)
+    )
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case, accepted=seen)
+    assert exc.value.code == "remaining_difference_changed"
+
+
+@pytest.mark.parametrize("raw", ["difference", "matched"])
+async def test_the_export_shows_a_resolved_order_as_resolved_and_never_groups_it(
+    app, client, db, admin_user, monkeypatch, raw
+):
+    # F6, F7: the workbook agrees with the review table (a resolved case is resolved, whatever this
+    # review's raw verdict was) and a resolved-only export has no issue groups.
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from app.api.v1.transaction_ops import router
+    from app.services.transaction_ops.case_service import case_scope
+    from tests.test_transaction_workspace_reports import fixture_rows, linked
+
+    app.include_router(router, prefix="/api/v1")
+    actor, headers = admin_user
+    first, _, cases = await fixture_rows(db, actor, monkeypatch, count=2)
+    identity = uuid4()
+    resolved = TransactionCase(
+        id=identity,
+        tenant_id=actor.tenant_id,
+        case_key=identity.hex,
+        order_reference="R900000002",
+        scope_json=case_scope(first),
+        status="resolved",
+        resolution_json={"reason": REASON},
+        first_observed_at=first.created_at,
+        last_observed_at=first.created_at,
+        latest_report_json=deepcopy(cases[0].latest_report_json),
+    )
+    db.add(resolved)
+    await db.flush()
+    await linked(db, actor, first, resolved, status=raw)
+    response = await client.post(
+        "/api/v1/transaction-ops/review-export",
+        headers=headers,
+        json={"review_run_ids": [str(first.id)], "status": "resolved"},
+    )
+    assert response.status_code == 200, response.text[:300]
+    wb = load_workbook(BytesIO(response.content))
+    findings = {str(row[0].value): row[4].value for row in wb["Reconciliation"].iter_rows(min_row=2)}
+    assert list(findings.values()) == ["resolved"]
+    assert not list(wb["Issue groups"].iter_rows(min_row=2, values_only=True))

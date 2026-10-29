@@ -17,10 +17,16 @@ const enc = encodeURIComponent;
 /** What a person may accept on an open case right now, computed by the server (GET /cases/{id}). */
 export type CaseResolutionOffer = {
   available: boolean;
-  unavailable_reason: "case_not_open" | "nothing_to_resolve" | "recheck_required" | null;
+  unavailable_reason:
+    | "case_not_open"
+    | "nothing_to_resolve"
+    | "difference_not_measured"
+    | "recheck_required"
+    | null;
   /** The remaining difference, sent back unchanged when the person accepts it. */
   accepted: JsonObject;
-  fresh_until: string;
+  /** When the offer lapses (the evidence's read time plus 15 minutes); null when the read time is unknown. */
+  fresh_until: string | null;
   reasons: string[];
 };
 export type TransactionCase = {

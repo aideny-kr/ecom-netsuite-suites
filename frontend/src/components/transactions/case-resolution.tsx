@@ -14,12 +14,14 @@ export const RESOLUTION_REASONS: Record<string, string> = {
 };
 const textarea = "mt-1 block w-full rounded-md border bg-background p-2 text-[13px]";
 
+/** The deltas of a remaining difference (case_service.remaining_difference: source, target and delta). */
 function remaining(accepted: unknown) {
   const amounts = objectValue(objectValue(accepted).amounts);
+  const delta = (key: string) => deltaValue(objectValue(amounts[key]).delta);
   return {
-    total: deltaValue(amounts.order_total).text,
-    tax: deltaValue(amounts.tax).text,
-    refunds: deltaValue(amounts.refunds),
+    total: delta("order_total").text,
+    tax: delta("tax").text,
+    refunds: delta("refunds"),
   };
 }
 
@@ -176,6 +178,16 @@ export function CaseResolution({
     );
   }
 
+  if (offer?.unavailable_reason === "difference_not_measured")
+    return (
+      <section className="space-y-3">
+        {notice}
+        <p className="rounded-lg border p-4 text-[13px] text-muted-foreground">
+          This order&apos;s evidence is incomplete, so what is left cannot be accepted as resolved.
+          Re-check it, or work through it with the agent.
+        </p>
+      </section>
+    );
   if (offer?.unavailable_reason !== "recheck_required") return notice;
   return (
     <section className="space-y-3">
