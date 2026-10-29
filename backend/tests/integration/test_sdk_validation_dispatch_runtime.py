@@ -98,7 +98,9 @@ async def test_committed_selection_worker_exclusivity_and_recovery(installation,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("valid", [False, True])
 async def test_http_selection_commit_or_refusal_rollback_is_visible_to_separate_session(
-    installation, monkeypatch, valid  # noqa: F811
+    installation,
+    monkeypatch,
+    valid,  # noqa: F811
 ):
     from httpx import ASGITransport, AsyncClient
     from sqlalchemy import func
