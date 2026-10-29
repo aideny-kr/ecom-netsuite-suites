@@ -331,15 +331,27 @@ async def test_evidence_that_does_not_say_when_it_was_read_cannot_be_accepted(db
     assert exc.value.code == "recheck_required"
 
 
-@pytest.mark.parametrize("status, source", [("incomplete", "100.00"), ("mismatch", None)])
-async def test_a_difference_that_is_not_measured_cannot_be_accepted(db, admin_user, status, source):
-    # F2: incomplete evidence is Not verified, and an unknown source amount gives later scans nothing to
-    # compare; neither can be accepted.
+@pytest.mark.parametrize(
+    "status, metric, side, missing",
+    [
+        ("incomplete", "tax", "source", "100.00"),  # Not verified
+        ("mismatch", "tax", "source", None),  # an unknown source amount
+        # Round 3 F1: a NetSuite refund read that failed (target_refunds_unavailable) leaves refunds unknown.
+        ("difference", "refunds", "target", None),
+        ("difference", "refunds", "delta", None),
+    ],
+)
+async def test_a_difference_that_is_not_measured_cannot_be_accepted(db, admin_user, status, metric, side, missing):
+    # Every compared amount must be a known number: later scans compare all of them, and the person must
+    # see each one they accept.
     actor = admin_user[0]
     config = await seed_config(db, actor.tenant_id, actor)
     body = report()
     body["balance"]["status"] = status
-    body["balance"]["amounts"]["tax"]["source"] = source
+    body["balance"]["amounts"][metric][side] = missing
+    if side != "source":
+        body["balance"]["amounts"][metric]["delta"] = None
+        body["balance"]["missing_metrics"] = [metric]
     await observe(db, actor, config, body, NOW)
     [case] = await case_service.list_cases(db, actor.tenant_id)
     with pytest.raises(StateError) as exc:

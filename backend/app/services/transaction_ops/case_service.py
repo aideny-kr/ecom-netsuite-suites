@@ -175,8 +175,16 @@ def _resolution_refusal(case, now):
         return "case_not_open"
     if remaining["status"] == "matched":
         return "nothing_to_resolve"
-    sources = [remaining["amounts"][key]["source"] for key in _METRICS]
-    if remaining["status"] not in RESOLVABLE_STATUSES or not all(isinstance(_amount(v), Decimal) for v in sources):
+    # A measured difference: every compared amount (source, NetSuite and delta of each metric) is a known
+    # number and the comparison names no missing metric. Later scans compare all of them, and the person sees
+    # each one they accept; anything unknown is fixed or re-read, never accepted (Codex review rounds 1-3).
+    balance = (case.latest_report_json or {}).get("balance") or {}
+    compared = [remaining["amounts"][key][side] for key in _METRICS for side in _SIDES]
+    if (
+        remaining["status"] not in RESOLVABLE_STATUSES
+        or balance.get("missing_metrics")
+        or not all(isinstance(_amount(value), Decimal) for value in compared)
+    ):
         return "difference_not_measured"
     reads = evidence_read_times(case.latest_report_json)
     # Every read must be in the past, and the oldest within the freshness window.
