@@ -223,6 +223,21 @@ async def _commit(db, tenant_id):
     await set_tenant_context(db, str(tenant_id))
 
 
+async def _has_selection(db, run):
+    return (
+        await db.scalar(
+            select(WorkspaceArtifact.id)
+            .where(
+                WorkspaceArtifact.run_id == run.id,
+                WorkspaceArtifact.tenant_id == run.tenant_id,
+                WorkspaceArtifact.artifact_type == SELECTION,
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 async def bind_validation_connection(db: AsyncSession, *, tenant_id, run_id, connection_id) -> None:
     """Bind an explicit permitted target before queueing; caller must commit.
 
@@ -305,6 +320,8 @@ async def execute_validation_attempt(
     )
     if run.status != "queued" or prior is not None:
         raise ValidationAttemptError("SDK validation run already claimed; reconcile without replay")
+    if connection_id is not None and (run.validator_engine == "suitecloud_sdk_pinned" or await _has_selection(db, run)):
+        raise ValidationAttemptError("Selected SDK validation must use its durable connection binding")
     selection_sha = None
     try:
         if connection_id is None:
@@ -419,11 +436,14 @@ async def _verify_claim(db, run_id, tenant_id, runtime, expected=None):
         if type(claim) is not dict or set(claim) not in (fields, fields | {"selection_sha"}):
             raise ValueError()
         require_receipt_inputs(context=claim["context"], attempt_nonce=claim["attempt_nonce"], key=runtime.receipt_key)
-        context, inputs, target, identity, _ = await _state(db, run, uuid.UUID(claim["context"]["connection_id"]))
         if "selection_sha" in claim:
-            selection, *_ = await _selected(db, run)
+            selection, context, inputs, target, identity, _ = await _selected(db, run)
             if claim["selection_sha"] != hashlib.sha256(_content(selection).encode("ascii")).hexdigest():
                 raise ValueError()
+        else:
+            if await _has_selection(db, run):
+                raise ValueError()
+            context, inputs, target, identity, _ = await _state(db, run, uuid.UUID(claim["context"]["connection_id"]))
     except Exception:
         raise ValidationAttemptError("SDK validation journal or current authority is inconsistent") from None
     if (

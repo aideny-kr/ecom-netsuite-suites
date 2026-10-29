@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -22,7 +23,7 @@ from tests.test_dedicated_runtime import installation  # noqa: F401
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["verified", "revoked", "cancel", "selection_deleted"])
+@pytest.mark.parametrize("mode", ["verified", "revoked", "cancel", "selection_deleted", "changeset_unlinked"])
 async def test_committed_selection_worker_exclusivity_and_recovery(installation, monkeypatch, mode):  # noqa: F811
     monkeypatch.setattr(settings, "DEDICATED_RUNTIME", True)
     factory = async_sessionmaker(installation["engine"], expire_on_commit=False)
@@ -61,6 +62,8 @@ async def test_committed_selection_worker_exclusivity_and_recovery(installation,
                 connection.status = "revoked"
             elif mode == "selection_deleted":
                 await observer.delete(selection)
+            elif mode == "changeset_unlinked":
+                run.changeset_id = None
             await observer.commit()
         if mode == "cancel":
             raise asyncio.CancelledError()
@@ -76,7 +79,7 @@ async def test_committed_selection_worker_exclusivity_and_recovery(installation,
             expected = "running"
         else:
             first = await workspace_run._execute(str(args["tenant_id"]), str(args["run_id"]))
-            expected = "passed" if mode == "verified" else "failed"
+            expected = "passed" if mode == "verified" else ("running" if mode == "changeset_unlinked" else "failed")
             assert first["status"] == expected
         result = await workspace_run._execute(str(args["tenant_id"]), str(args["run_id"]))
         assert result["status"] == expected and call.await_count == 1
@@ -90,3 +93,67 @@ async def test_committed_selection_worker_exclusivity_and_recovery(installation,
             )
             assert receipt["server_validation"] is True
         await observer.rollback()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid", [False, True])
+async def test_http_selection_commit_or_refusal_rollback_is_visible_to_separate_session(
+    installation, monkeypatch, valid
+):  # noqa: F811
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy import func
+
+    from app.core.database import get_db
+    from app.core.security import create_access_token
+    from app.main import create_app
+
+    monkeypatch.setattr(settings, "DEDICATED_RUNTIME", True)
+    factory = async_sessionmaker(installation["engine"], expire_on_commit=False)
+    args, _, _ = await seed(factory, installation["company"])
+    async with factory() as observer:
+        await set_tenant_context(observer, str(args["tenant_id"]))
+        run = await observer.get(WorkspaceRun, args["run_id"])
+        changeset_id = run.changeset_id
+        token = create_access_token({"sub": str(run.triggered_by), "tenant_id": str(run.tenant_id)})
+
+    async def request_db():
+        async with factory() as db:
+            await set_tenant_context(db, str(args["tenant_id"]))
+            yield db  # session close rolls a refused request back, as in get_db
+
+    app = create_app()
+    app.dependency_overrides[get_db] = request_db
+    observed = []
+
+    async def assert_committed(**kwargs):
+        async with factory() as observer:
+            await set_tenant_context(observer, str(args["tenant_id"]))
+            selected_run = await observer.get(WorkspaceRun, uuid.UUID(kwargs["run_id"]))
+            selection = await observer.scalar(
+                select(WorkspaceArtifact).where(
+                    WorkspaceArtifact.run_id == selected_run.id, WorkspaceArtifact.artifact_type == attempts.SELECTION
+                )
+            )
+            assert selected_run.validator_engine == "suitecloud_sdk_pinned" and selection
+            observed.append(selected_run.id)
+
+    # .delay is synchronous; an async assertion is run after request completion
+    # from its captured args, against a genuinely independent connection.
+    with patch.object(workspace_run.workspace_run_task, "delay") as queued:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                f"/api/v1/changesets/{changeset_id}/validate",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"connection_id": str(args["connection_id"] if valid else uuid.uuid4())},
+            )
+        assert response.status_code == (202 if valid else 400), response.text
+        if valid:
+            assert queued.call_count == 1
+            await assert_committed(**queued.call_args.kwargs)
+        else:
+            queued.assert_not_called()
+    async with factory() as observer:
+        await set_tenant_context(observer, str(args["tenant_id"]))
+        count = await observer.scalar(select(func.count()).select_from(WorkspaceRun))
+        assert count == (2 if valid else 1), "A refused request must leave no orphan run"
+        assert len(observed) == int(valid)

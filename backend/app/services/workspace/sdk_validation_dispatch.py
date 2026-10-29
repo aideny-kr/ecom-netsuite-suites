@@ -54,8 +54,18 @@ async def execute_workspace_run(db, *, tenant_id, run_id, extra_params=None):
         try:
             return await attempts.execute_validation_attempt(db, tenant_id=tenant_id, run_id=run_id, runtime=runtime)
         except attempts.ValidationAttemptError:
-            # Only pre-claim refusal reaches here. Post-claim errors are consumed
-            # by the journal; cancellation propagates and leaves its durable claim.
+            # Unexpected post-claim inconsistency can also refuse here. Reload
+            # before changing status; preserve every committed nonqueued claim.
+            run = await db.scalar(
+                select(WorkspaceRun)
+                .where(WorkspaceRun.id == run_id, WorkspaceRun.tenant_id == tenant_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if run is None:
+                raise
+            if run.status != "queued":
+                return run
             reason = "SDK validation selection or current authority is invalid; create a new authorized run"
     run.status = "failed"
     run.gate_status = "block"

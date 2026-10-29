@@ -251,3 +251,29 @@ async def test_selected_dispatch_through_actual_disposable_broker(db, journal, m
     assert (await attempts.read_validation_receipt(db, tenant_id=args["tenant_id"], run_id=run.id, runtime=runtime))[
         "server_validation"
     ] is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_cannot_bypass_selected_binding_or_omit_its_claim_hash(db, journal):  # noqa: F811
+    attempts, args, run = await bind(db, journal)
+    with patch.object(attempts.credential_executor, "validate_project", AsyncMock()) as broker:
+        with pytest.raises(attempts.ValidationAttemptError, match="durable connection"):
+            await attempts.execute_validation_attempt(db, **args)
+        broker.assert_not_awaited()
+    with patch.object(
+        attempts.credential_executor, "validate_project", AsyncMock(side_effect=lambda **kw: synthetic_receipt(kw))
+    ):
+        await attempts.execute_validation_attempt(db, **{k: v for k, v in args.items() if k != "connection_id"})
+    claim = await db.scalar(
+        select(WorkspaceArtifact).where(
+            WorkspaceArtifact.run_id == run.id, WorkspaceArtifact.artifact_type == attempts.ATTEMPT
+        )
+    )
+    value = json.loads(claim.content)
+    del value["selection_sha"]
+    claim.content = attempts._content(value)
+    claim.size_bytes = len(claim.content)
+    claim.sha256_hash = hashlib.sha256(claim.content.encode()).hexdigest()
+    await db.flush()
+    with pytest.raises(attempts.ValidationAttemptError):
+        await attempts.read_validation_receipt(db, tenant_id=run.tenant_id, run_id=run.id, runtime=args["runtime"])
