@@ -122,13 +122,15 @@ def _first_start_fails(real_tenant_session, at: str):
     return tenant_session
 
 
+@pytest.mark.parametrize("retry", [False, True], ids=["next-run", "retry"])
 @pytest.mark.parametrize("at", ["checkout", "commit", "reply-lost"])
-def test_a_start_that_fails_is_recorded_once_without_rewriting_the_previous_run(tenant_id, monkeypatch, at):
+def test_a_start_that_fails_is_recorded_once_without_rewriting_the_previous_run(tenant_id, monkeypatch, at, retry):
+    """A Celery retry reuses the task id, so the earlier run's row must not be found by it."""
     first = _probe.apply(kwargs={"tenant_id": tenant_id})
     assert first.successful(), first.traceback
 
     monkeypatch.setattr(base_task, "tenant_session", _first_start_fails(base_task.tenant_session, at))
-    second = _probe.apply(kwargs={"tenant_id": tenant_id})
+    second = _probe.apply(kwargs={"tenant_id": tenant_id}, task_id=first.id if retry else None)
     assert second.failed()
 
     jobs = _jobs(tenant_id)

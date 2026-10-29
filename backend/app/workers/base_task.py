@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from celery import Task
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -57,17 +57,17 @@ class InstrumentedTask(Task):
     SYSTEM_TENANT_ID = "00000000-0000-0000-0000-000000000000"
 
     def before_start(self, task_id, args, kwargs):
-        # The task object is shared by every run in this worker process. Clear the last
-        # run's job id first, so if this start fails, on_failure can't mark that run failed.
-        self._job_id = None
+        # This run's job id is chosen here, before any database work. The task object is
+        # shared by every run in this worker process (and Celery retries reuse task_id), so
+        # this is the only identity that names this run and nothing else. If this start
+        # fails, on_failure writes this run's row under the same id, whether or not this
+        # commit landed, and never touches another run's row.
+        self._job_id = uuid.uuid4()
         self._correlation_id = kwargs.pop("correlation_id", None) or str(uuid.uuid4())
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
 
         with tenant_session(tenant_id) as session:
-            job = self._job_row(tenant_id, task_id, kwargs, status="running")
-            session.add(job)
-            session.flush()
-
+            session.add(self._job_row(tenant_id, task_id, kwargs, status="running"))
             session.add(
                 AuditEvent(
                     tenant_id=tenant_id,
@@ -75,16 +75,13 @@ class InstrumentedTask(Task):
                     action="job.start",
                     actor_type="system",
                     resource_type="job",
-                    resource_id=str(job.id),
+                    resource_id=str(self._job_id),
                     correlation_id=self._correlation_id,
-                    job_id=job.id,
+                    job_id=self._job_id,
                     payload={"task_name": self.name},
                 )
             )
-            job_id = job.id
             session.commit()
-        # Only a committed row: if the commit fails, on_failure records a new one instead.
-        self._job_id = job_id
 
     def on_success(self, retval, task_id, args, kwargs):
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
@@ -115,22 +112,18 @@ class InstrumentedTask(Task):
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
-        if self._job_id:
-            self._record_failure(tenant_id, task_id, kwargs, exc)
+        if not self._job_id:
             return
-        # before_start failed before committing this run's row. Record the run as failed
-        # anyway, so a run that never started still shows up in jobs. Best effort: whatever
-        # broke the start may break this write too, and it must not replace the task's error.
+        # Best effort: whatever failed the task may break this write too, and it must not
+        # replace the task's own error.
         try:
             self._record_failure(tenant_id, task_id, kwargs, exc)
         except Exception as record_exc:
-            print(
-                f"[InstrumentedTask] {self.name}[{task_id}] failed to start and could not be recorded: {record_exc!r}",
-                flush=True,
-            )
+            print(f"[InstrumentedTask] {self.name}[{task_id}] failure not recorded: {record_exc!r}", flush=True)
 
     def _job_row(self, tenant_id, task_id, kwargs, *, status: str) -> Job:
         return Job(
+            id=self._job_id,
             tenant_id=tenant_id,
             job_type=self.name,
             status=status,
@@ -143,21 +136,11 @@ class InstrumentedTask(Task):
 
     def _record_failure(self, tenant_id, task_id, kwargs, exc) -> None:
         with tenant_session(tenant_id) as session:
-            if self._job_id:
-                job = session.get(Job, self._job_id)
-            else:
-                # The server can commit before_start's row and the reply still be lost, so
-                # look for this run's row before adding one.
-                job = session.scalars(
-                    select(Job)
-                    .where(Job.tenant_id == tenant_id, Job.celery_task_id == task_id, Job.job_type == self.name)
-                    .order_by(Job.started_at.desc())
-                    .limit(1)
-                ).first()
+            job = session.get(Job, self._job_id)
             if job is None:
+                # before_start's commit did not land, so this run has no row yet.
                 job = self._job_row(tenant_id, task_id, kwargs, status="failed")
                 session.add(job)
-                session.flush()
             job.status = "failed"
             job.completed_at = datetime.now(timezone.utc)
             job.error_message = str(exc)
@@ -169,9 +152,9 @@ class InstrumentedTask(Task):
                     action="job.failed",
                     actor_type="system",
                     resource_type="job",
-                    resource_id=str(job.id),
+                    resource_id=str(self._job_id),
                     correlation_id=self._correlation_id,
-                    job_id=job.id,
+                    job_id=self._job_id,
                     status="error",
                     error_message=str(exc),
                 )
