@@ -220,6 +220,17 @@ export function useCaseEvidence(id: string) {
   });
   return { detail, history };
 }
+/** A re-check run's status, polled until it leaves pending/running. */
+export function useRunStatus(id: string | undefined) {
+  const access = useTransactionAccess();
+  return useQuery({
+    queryKey: ["transaction-ops", access.tenantId, "run", id],
+    enabled: access.allowed && !!id,
+    queryFn: () => apiClient.get<TransactionRun>(`${base}/runs/${enc(id!)}`),
+    refetchInterval: (query) =>
+      ["pending", "running"].includes(query.state.data?.status || "pending") ? 5000 : false,
+  });
+}
 /** A person accepts a re-checked case's remaining difference, or reopens a resolved case. */
 export function useCaseResolution(id: string) {
   const access = useTransactionAccess();

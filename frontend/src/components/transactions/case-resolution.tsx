@@ -63,7 +63,8 @@ export function CaseResolution({
   const { resolve, reopen } = useCaseResolution(c.id);
   const [note, setNote] = useState("");
   const [reason, setReason] = useState("");
-  const [ack, setAck] = useState(false);
+  // The confirmation is for the exact amounts the person saw: a new offer clears it (Codex round 2).
+  const [ackFor, setAckFor] = useState<string | null>(null);
   const offer = c.resolution_offer;
   const resolution = objectValue(c.resolution_json);
 
@@ -121,6 +122,8 @@ export function CaseResolution({
 
   if (offer?.available) {
     const r = remaining(offer.accepted);
+    const shown = JSON.stringify(offer.accepted);
+    const ack = ackFor === shown;
     const statement = `I accept the remaining difference of ${r.total} (order total) and ${r.tax} (tax)${
       r.refunds.nonzero ? ` and ${r.refunds.text} (refunds)` : ""
     } as shown.`;
@@ -159,13 +162,20 @@ export function CaseResolution({
           />
         </label>
         <label className="flex items-start gap-2 text-[13px]">
-          <input type="checkbox" className="mt-0.5" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={ack}
+            onChange={(e) => setAckFor(e.target.checked ? shown : null)}
+          />
           <span>{statement}</span>
         </label>
         <div className="flex flex-wrap gap-3">
           <Button
             disabled={!reason || !ack || resolve.isPending}
-            onClick={() => resolve.mutate({ reason, note, accepted: offer.accepted })}
+            onClick={() =>
+              resolve.mutate({ reason, note, accepted: JSON.parse(shown) as typeof offer.accepted })
+            }
           >
             Accept as resolved
           </Button>

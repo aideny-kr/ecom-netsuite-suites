@@ -104,9 +104,10 @@ RESOLUTION_REASONS = frozenset(
 )
 RESOLUTION_FRESHNESS = timedelta(minutes=15)
 MAX_RESOLUTION_NOTE = 1000
-# The comparison statuses a person may accept: review_evidence.result_category's Needs review set. Anything
-# else is matched or Not verified (incomplete evidence), which a person cannot accept.
-RESOLVABLE_STATUSES = frozenset({"difference", "mismatch", "missing_in_netsuite", "ambiguous", "currency_mismatch"})
+# The comparison statuses a person may accept: a measured amount difference. The reconciler stops before
+# reading amounts for missing, ambiguous and currency-mismatched orders (order_reconciliation._reconcile), so
+# a later scan would have nothing to compare an acceptance with; those are fixed, not accepted.
+RESOLVABLE_STATUSES = frozenset({"difference", "mismatch"})
 _METRICS = ("order_total", "tax", "refunds")
 _SIDES = ("source", "target", "delta")
 
@@ -126,10 +127,14 @@ def remaining_difference(report):
 
 
 def _amount(value):
+    if value is None:
+        return None
     try:
-        return Decimal(str(value)) if value is not None else None
+        number = Decimal(str(value))
     except InvalidOperation:
         return ("unreadable", value)
+    # NaN, sNaN and infinities are not amounts (and sNaN raises when compared).
+    return number if number.is_finite() else ("unreadable", value)
 
 
 def same_remaining(first, second):
@@ -147,8 +152,8 @@ def same_remaining(first, second):
     return shape(first) == shape(second)
 
 
-def evidence_read_at(report):
-    """When the report's evidence was read (its oldest read), or None when the report does not say.
+def evidence_read_times(report):
+    """The oldest and newest reads behind a report, or None when the report does not say when it was read.
 
     Unlike observation_time there is no fallback: a resolution needs to know the evidence is fresh, and the
     time a result was saved is not when it was read (a saved-evidence review reuses old reads).
@@ -160,7 +165,7 @@ def evidence_read_at(report):
         return None
     if not times or any(value.utcoffset() is None for value in times):
         return None
-    return min(times)
+    return min(times), max(times)
 
 
 def _resolution_refusal(case, now):
@@ -173,8 +178,9 @@ def _resolution_refusal(case, now):
     sources = [remaining["amounts"][key]["source"] for key in _METRICS]
     if remaining["status"] not in RESOLVABLE_STATUSES or not all(isinstance(_amount(v), Decimal) for v in sources):
         return "difference_not_measured"
-    read = evidence_read_at(case.latest_report_json)
-    if read is None or not timedelta(0) <= now - read <= RESOLUTION_FRESHNESS:
+    reads = evidence_read_times(case.latest_report_json)
+    # Every read must be in the past, and the oldest within the freshness window.
+    if reads is None or reads[1] > now or now - reads[0] > RESOLUTION_FRESHNESS:
         return "recheck_required"
     return None
 
@@ -356,12 +362,12 @@ def resolution_offer(case, *, now):
     The screen sends `accepted` back unchanged; resolve_case refuses it if anything moved meanwhile.
     """
     why = _resolution_refusal(case, now)
-    read = evidence_read_at(case.latest_report_json)
+    reads = evidence_read_times(case.latest_report_json)
     return {
         "available": why is None,
         "unavailable_reason": why,
         "accepted": remaining_difference(case.latest_report_json),
-        "fresh_until": (read + RESOLUTION_FRESHNESS).isoformat() if read else None,
+        "fresh_until": (reads[0] + RESOLUTION_FRESHNESS).isoformat() if reads else None,
         "reasons": sorted(RESOLUTION_REASONS),
     }
 
@@ -370,12 +376,11 @@ async def _case_for_update(db, tenant_id, case_id):
     from app.services.transaction_ops.state_service import StateError
 
     await set_tenant_context(db, str(tenant_id))
-    # populate_existing: a copy this session loaded earlier must not stand in for the locked row.
+    # Locked reads of a case always refresh it (models.transaction_ops._locked_case_reads_refresh).
     row = await db.scalar(
         select(TransactionCase)
         .where(TransactionCase.tenant_id == tenant_id, TransactionCase.id == case_id)
         .with_for_update()
-        .execution_options(populate_existing=True)
     )
     if row is None:
         raise StateError("not_found", 404)
@@ -413,7 +418,7 @@ async def resolve_case(db, tenant_id, case_id, *, actor, reason, note, accepted,
         "reason": reason,
         "note": note or None,
         "accepted": current,
-        "observed_at": evidence_read_at(case.latest_report_json).isoformat(),
+        "observed_at": evidence_read_times(case.latest_report_json)[0].isoformat(),
     }
     await db.flush()
     await _audit(

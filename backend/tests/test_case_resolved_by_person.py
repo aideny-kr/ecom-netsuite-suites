@@ -349,26 +349,22 @@ async def test_a_difference_that_is_not_measured_cannot_be_accepted(db, admin_us
     assert (offer["available"], offer["unavailable_reason"]) == (False, "difference_not_measured")
 
 
-async def test_a_changed_source_amount_reopens_a_case_even_when_the_delta_is_unknown(db, admin_user):
-    # F2: an order missing in NetSuite has no deltas; its source amounts still tell a change.
+@pytest.mark.parametrize("status", ["missing_in_netsuite", "ambiguous", "currency_mismatch"])
+async def test_only_a_measured_amount_difference_can_be_accepted(db, admin_user, status):
+    # Round 2 F4: the reconciler stops before reading amounts for these (order_reconciliation._reconcile),
+    # so later scans would have nothing to compare an acceptance with. They are fixed, not accepted.
     actor = admin_user[0]
     config = await seed_config(db, actor.tenant_id, actor)
-
-    def missing(observed, total):
-        body = report(observed=observed)
-        body["balance"]["status"] = "missing_in_netsuite"
-        body["targets"] = []
-        for key, amounts in body["balance"]["amounts"].items():
-            amounts.update(source=total if key == "order_total" else "0.00", target=None, delta=None)
-        return body
-
-    await observe(db, actor, config, missing(NOW, "100.00"), NOW)
+    body = report()
+    body["balance"]["status"] = status
+    body["balance"]["amounts"] = {
+        key: {"source": None, "target": None, "delta": None} for key in body["balance"]["amounts"]
+    }
+    await observe(db, actor, config, body, NOW)
     [case] = await case_service.list_cases(db, actor.tenant_id)
-    await resolve(db, actor, case, reason="duplicate_or_test_order")
-    later = NOW + timedelta(hours=1)
-    await observe(db, actor, config, missing(later, "1000.00"), later)
-    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "open"
-    assert len(await actions(db, actor.tenant_id, "case.reopened_after_resolution")) == 1
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case, reason="duplicate_or_test_order")
+    assert exc.value.code == "difference_not_measured"
 
 
 async def test_the_same_amounts_written_differently_keep_a_case_resolved(db, admin_user):
@@ -467,3 +463,70 @@ async def test_the_export_shows_a_resolved_order_as_resolved_and_never_groups_it
     findings = {str(row[0].value): row[4].value for row in wb["Reconciliation"].iter_rows(min_row=2)}
     assert list(findings.values()) == ["resolved"]
     assert not list(wb["Issue groups"].iter_rows(min_row=2, values_only=True))
+
+
+# Codex review round 2 (2026-10-28) -------------------------------------------------------------------
+
+
+async def test_a_read_dated_after_now_is_not_fresh_even_beside_a_fresh_one(db, admin_user):
+    # R2 F5: the oldest read being fresh does not make a future-dated read acceptable.
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    body = report(observed=NOW)
+    body["targets"][0]["observed_at"] = (NOW + timedelta(hours=1)).isoformat()
+    await observe(db, actor, config, body, NOW)
+    [case] = await case_service.list_cases(db, actor.tenant_id)
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case)
+    assert exc.value.code == "recheck_required"
+
+
+@pytest.mark.parametrize("value", ["sNaN", "NaN", "Infinity", "abc"])
+async def test_an_unreadable_accepted_amount_is_a_changed_difference_not_an_error(db, admin_user, value):
+    # R2 F6
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    accepted = case_service.remaining_difference(case.latest_report_json)
+    accepted["amounts"]["tax"]["source"] = value
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case, accepted=accepted)
+    assert exc.value.code == "remaining_difference_changed"
+
+
+async def test_a_scan_reads_the_case_again_under_its_lock(db, admin_user):
+    # R2 F2: another session resolved the case after this one loaded it; the scan's changed difference
+    # must still reopen it.
+    from sqlalchemy import update
+
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    resolution = {"reason": REASON, "accepted": case_service.remaining_difference(case.latest_report_json)}
+    await db.execute(
+        update(TransactionCase)
+        .where(TransactionCase.id == case.id)
+        .values(status="resolved", resolution_json=resolution)
+        .execution_options(synchronize_session=False)
+    )
+    later = NOW + timedelta(hours=1)
+    await observe(db, actor, config, changed_report(later), later)
+    row = (
+        await db.execute(text("SELECT status, resolution_json FROM transaction_cases WHERE id = :id"), {"id": case.id})
+    ).one()
+    assert row.status == "open" and row.resolution_json["reopened"]["why"] == "remaining_difference_changed"
+
+
+async def test_every_locked_read_of_a_case_sees_the_locked_row(db, admin_user):
+    # R2 F2, the mechanism: a locked read refreshes an already-loaded case even when the query forgets to ask.
+    from sqlalchemy import update
+
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    await db.execute(
+        update(TransactionCase)
+        .where(TransactionCase.id == case.id)
+        .values(latest_report_json=changed_report(NOW))
+        .execution_options(synchronize_session=False)
+    )
+    locked = await db.scalar(select(TransactionCase).where(TransactionCase.id == case.id).with_for_update())
+    assert locked is case
+    assert locked.latest_report_json["balance"]["amounts"]["order_total"]["delta"] == "2.00"

@@ -15,10 +15,11 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -255,6 +256,22 @@ class TransactionCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     latest_report_json: Mapped[dict] = mapped_column(JSONB)
     # A person's acceptance of the remaining difference (case_service.resolve_case), and any reopening.
     resolution_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _locked_case_reads_refresh(state):
+    """A locked read of a transaction case always reflects the locked row (Codex review, 2026-10-28).
+
+    Without populate_existing, SQLAlchemy keeps a copy the session loaded earlier, so a decision made under
+    the lock (resolve, reopen, a scan reopening a resolved case) could use evidence another session already
+    replaced. Applied here, every locked case read refreshes, including ones written later.
+    """
+    if (
+        state.is_select
+        and getattr(state.statement, "_for_update_arg", None) is not None
+        and any(mapper.class_ is TransactionCase for mapper in state.all_mappers)
+    ):
+        state.update_execution_options(populate_existing=True)
 
 
 class TransactionCaseObservation(Base, UUIDPrimaryKeyMixin, TimestampMixin):

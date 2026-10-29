@@ -43,6 +43,7 @@ import {
   useFixProposals,
   useStartPeriodReview,
   useBulkCaseInvestigation,
+  useRunStatus,
   type PeriodInput,
   type ReviewRow,
 } from "./review-hooks";
@@ -1009,23 +1010,58 @@ function CaseDrawer({ id, close }: { id: string; close: () => void }) {
   if (key.current?.id !== id) key.current = { id, key: crypto.randomUUID() };
   // A re-check is done when the case records a newer observation (server times only) or changes status.
   const [checkingFrom, setCheckingFrom] = useState<{ id: string; at: string } | null>(null);
+  const [recheckIssue, setRecheckIssue] = useState<{ id: string; text: string } | null>(null);
   const c = detail.data;
   const checking =
     !!c &&
     checkingFrom?.id === id &&
     c.status === "open" &&
     c.last_observed_at === checkingFrom.at;
+  const run = useRunStatus(checking ? recheck.data?.runs[0]?.id : undefined);
+  const runEnded = !!run.data && !["pending", "running"].includes(run.data.status);
+  // A run can stop (error, budget) without reading the order again: read the case once more, then say so.
+  useEffect(() => {
+    if (!checking || !runEnded || !run.data || !checkingFrom) return;
+    let live = true;
+    const ended = runState(run.data.status, run.data.termination_reason);
+    void detail.refetch().then((fresh) => {
+      if (live && fresh.data?.status === "open" && fresh.data.last_observed_at === checkingFrom.at) {
+        setCheckingFrom(null);
+        setRecheckIssue({
+          id,
+          text: `The re-check finished without a new reading of this order (${ended}). Open the investigation for details, or re-check again.`,
+        });
+      }
+    });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checking, runEnded]);
   const offersRecheck =
     c?.status === "open" &&
     (checking || c.resolution_offer?.unavailable_reason === "recheck_required");
   const startRecheck = () => {
     if (c) setCheckingFrom({ id, at: c.last_observed_at });
+    setRecheckIssue(null);
     recheck.mutate(
       { case_ids: [id], evaluation_key: key.current!.key },
       {
-        onSuccess: () => {
+        onSuccess: (queued) => {
           if (key.current?.id === id)
             key.current = { id, key: crypto.randomUUID() };
+          if (!queued.runs.length) {
+            // Nothing was queued (for example, no enabled scope matches this case): say so, never wait.
+            setCheckingFrom(null);
+            const code = queued.blocked[0]?.code;
+            setRecheckIssue({
+              id,
+              text:
+                code === "case_scope_unavailable"
+                  ? "The re-check could not start: no enabled reconciliation scope matches this case."
+                  : `The re-check could not start${code ? ` (${code})` : ""}.`,
+            });
+          }
         },
         onError: () => setCheckingFrom(null),
       },
@@ -1092,6 +1128,7 @@ function CaseDrawer({ id, close }: { id: string; close: () => void }) {
               close={close}
             />
             {recheck.error && <p role="alert">{safeError(recheck.error)}</p>}
+            {recheckIssue?.id === id && <p role="alert">{recheckIssue.text}</p>}
             {recheck.data?.runs.map((r) => (
               <Link
                 className="block text-primary underline"
