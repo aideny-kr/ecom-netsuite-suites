@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from pydantic import BaseModel, Field, field_validator
 
 # --- Workspace ---
@@ -274,6 +276,13 @@ class DeployConfirmRequest(BaseModel):
 
 
 # --- UAT Report ---
+
+
+class WorkspaceValidationRequest(BaseModel):
+    """Explicit connection selection; never accepts SDK/runtime credentials."""
+
+    model_config = {"extra": "forbid"}
+    connection_id: uuid.UUID
 
 
 class UATReportResponse(BaseModel):

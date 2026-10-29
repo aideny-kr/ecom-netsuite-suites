@@ -11,6 +11,35 @@ credential executor, current connection/account/role/certificate identity
 binding, and authorized sandbox deployment/readback/health/rollback acceptance
 remain required before activation.
 
+## Selected SDK validation routing (inactive runtime)
+
+`POST /api/v1/changesets/{id}/validate` optionally accepts
+`{"connection_id":"<company connection UUID>"}`. The server requires the current
+builder's permission, an approved changeset, a supported project and the exact
+current sandbox connection with certificate configuration. Before queueing, it
+stores a bounded selection artifact containing public target identity and run
+context, plus an SDK routing marker on the run. Source bytes are captured when
+the exclusive execution claim is committed. An omitted body retains the existing
+closed seeder path; runtime, keys, image and command options are never accepted.
+
+The worker selects its executor from this durable state. Queue kwargs cannot
+replace the connection or supply SDK runtime authority. A missing, duplicate,
+corrupt or stale selection blocks the run without falling back to another
+executor. The SDK attempt commits a single nonce before broker work and binds
+the selection hash to its journal, then rechecks authority, target and source
+before dispatch and on return. Signed receipts remain separate from deployment
+prerequisites and keep `gate_status=block`. Duplicate or cancelled deliveries do
+not replay, and uncertain running attempts require operator reconciliation.
+
+`sdk_validation_dispatch.validation_runtime()` currently always returns `None`.
+Selected runs therefore record a blocked failure and explanatory stderr without
+calling a broker. No environment setting enables this runtime. Tests inject a
+synthetic trusted runtime; their receipts and synthetic Java do not prove a real
+NetSuite handshake or authorize deployment. Activation still requires reviewed
+image/key custody and rotation, dedicated egress, outcome reconciliation, real
+authorized sandbox checks, exact remote-byte verification, health and rollback
+acceptance, and the normal release gates. Never reset a claimed run to retry it.
+
 ## Operator runtime
 
 - `WORKSPACE_COMMAND_IMAGE`: the full local `sha256:` image ID of a reviewed,

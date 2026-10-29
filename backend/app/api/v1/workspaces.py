@@ -23,6 +23,7 @@ from app.schemas.workspace import (
     FileEditProposal,
     SuiteQLAssertionsRequest,
     WorkspaceCreate,
+    WorkspaceValidationRequest,
 )
 from app.services import audit_service, runner_service
 from app.services import workspace_service as ws_svc
@@ -533,6 +534,7 @@ async def _trigger_run(
     run_type: str,
     user: User,
     db: AsyncSession,
+    connection_id: uuid.UUID | None = None,
 ) -> dict:
     """Shared logic for triggering a run from a changeset."""
     from app.services.runner_service import CommandNotAllowedError
@@ -557,6 +559,22 @@ async def _trigger_run(
         )
     except CommandNotAllowedError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if connection_id is not None:
+        from app.services.workspace.sdk_validation_attempt import (
+            ValidationAttemptError,
+            bind_validation_connection,
+        )
+
+        try:
+            await bind_validation_connection(db, tenant_id=user.tenant_id, run_id=run.id, connection_id=connection_id)
+            # Binding changes the server-side updated_at expression. Load it
+            # inside this tenant transaction before synchronous serialization.
+            await db.refresh(run)
+        except ValidationAttemptError:
+            raise HTTPException(
+                status_code=400, detail="Validation requires a current authorized sandbox target"
+            ) from None
 
     await audit_service.log_event(
         db=db,
@@ -586,10 +604,17 @@ async def _trigger_run(
 @changeset_router.post("/{changeset_id}/validate", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_validate(
     changeset_id: uuid.UUID,
+    body: WorkspaceValidationRequest | None = None,
     user: User = Depends(require_permission("workspace.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _trigger_run(changeset_id, "suitecloud_validate", user, db)
+    return await _trigger_run(
+        changeset_id,
+        "suitecloud_validate",
+        user,
+        db,
+        connection_id=body.connection_id if body else None,
+    )
 
 
 @changeset_router.post("/{changeset_id}/unit-tests", status_code=status.HTTP_202_ACCEPTED)

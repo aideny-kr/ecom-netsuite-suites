@@ -1,6 +1,7 @@
 """Inactive durable adapter for the fixed SDK broker.
 
-No API/worker caller or runtime/key configuration is enabled. The run row is
+The worker routes explicitly selected runs here, but runtime/key configuration
+remains disabled. The run row is
 the exclusive journal lock; the committed claim survives worker loss. Existing
 artifact storage supplies tenant RLS and run-cascade cleanup. These new artifact
 types have no writer outside this module. Never reset a claimed run to retry it.
@@ -37,6 +38,7 @@ from app.services.workspace.trusted_sdf_project import PROJECT_FORMAT, build_rea
 ATTEMPT = "sdk_validation_attempt"
 RECEIPT = "sdk_validation_receipt"
 OUTCOME = "sdk_validation_outcome"
+SELECTION = "sdk_validation_selection"
 _ERROR = "SDK validation requires current authorized project and sandbox connection"
 
 
@@ -221,8 +223,66 @@ async def _commit(db, tenant_id):
     await set_tenant_context(db, str(tenant_id))
 
 
+async def bind_validation_connection(db: AsyncSession, *, tenant_id, run_id, connection_id) -> None:
+    """Bind an explicit permitted target before queueing; caller must commit.
+
+    Source is captured at the exclusive execution claim, as for other validation
+    runs. This selection pins connection/account/role/requested key, not deployment
+    authority. No arbitrary queue payload can create or replace this artifact.
+    """
+    run = await _run(db, tenant_id, run_id)
+    existing = await db.scalar(
+        select(WorkspaceArtifact.id)
+        .where(WorkspaceArtifact.run_id == run_id, WorkspaceArtifact.tenant_id == tenant_id)
+        .limit(1)
+    )
+    if run.status != "queued" or existing is not None:
+        raise ValidationAttemptError("SDK validation selection already exists; create a new authorized run")
+    try:
+        context, _, target, _, _ = await _state(db, run, connection_id)
+    except Exception:
+        raise ValidationAttemptError(_ERROR) from None
+    selection = dict(version=1, context=context, target=target)
+    _add(db, run, SELECTION, selection)
+    # Keep routing fail-closed even if the artifact is missing/corrupt later.
+    run.validator_engine = "suitecloud_sdk_pinned"
+    run.gate_status = "block"
+    await audit_service.log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="workspace",
+        action="sdk_validation.selected",
+        actor_id=run.triggered_by,
+        resource_type="workspace_run",
+        resource_id=str(run_id),
+        payload=selection,
+    )
+    await db.flush()
+
+
+async def _selected(db, run):
+    selection = await _read(db, run, SELECTION)
+    try:
+        if type(selection) is not dict or set(selection) != {"version", "context", "target"}:
+            raise ValueError()
+        if type(selection["version"]) is not int or selection["version"] != 1:
+            raise ValueError()
+        connection_id = uuid.UUID(selection["context"]["connection_id"])
+        context, inputs, target, identity, private_key = await _state(db, run, connection_id)
+        if selection != dict(version=1, context=context, target=target):
+            raise ValueError()
+    except Exception:
+        raise ValidationAttemptError("SDK validation selection or current authority changed") from None
+    return selection, context, inputs, target, identity, private_key
+
+
 async def execute_validation_attempt(
-    db: AsyncSession, *, tenant_id: uuid.UUID, run_id: uuid.UUID, connection_id: uuid.UUID, runtime: ValidationRuntime
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    runtime: ValidationRuntime,
+    connection_id: uuid.UUID | None = None,
 ) -> WorkspaceRun:
     """Exclusive fixed-operation execution; no caller-controlled expected state.
 
@@ -245,8 +305,13 @@ async def execute_validation_attempt(
     )
     if run.status != "queued" or prior is not None:
         raise ValidationAttemptError("SDK validation run already claimed; reconcile without replay")
+    selection_sha = None
     try:
-        context, inputs, target, identity, private_key = await _state(db, run, connection_id)
+        if connection_id is None:
+            selection, context, inputs, target, identity, private_key = await _selected(db, run)
+            selection_sha = hashlib.sha256(_content(selection).encode("ascii")).hexdigest()
+        else:
+            context, inputs, target, identity, private_key = await _state(db, run, connection_id)
     except Exception:
         raise ValidationAttemptError(_ERROR) from None
     claim = dict(
@@ -258,6 +323,8 @@ async def execute_validation_attempt(
         source_manifest_sha=inputs["expected_manifest_sha"],
         project_format=PROJECT_FORMAT,
     )
+    if selection_sha is not None:
+        claim["selection_sha"] = selection_sha
     _add(db, run, ATTEMPT, claim)
     run.status = "running"
     run.gate_status = "block"
@@ -340,7 +407,7 @@ async def _verify_claim(db, run_id, tenant_id, runtime, expected=None):
     ):
         raise ValidationAttemptError("SDK validation attempt changed; reconcile without replay")
     try:
-        if type(claim) is not dict or set(claim) != {
+        fields = {
             "context",
             "attempt_nonce",
             "image",
@@ -348,10 +415,15 @@ async def _verify_claim(db, run_id, tenant_id, runtime, expected=None):
             "source_snapshot_sha",
             "source_manifest_sha",
             "project_format",
-        }:
+        }
+        if type(claim) is not dict or set(claim) not in (fields, fields | {"selection_sha"}):
             raise ValueError()
         require_receipt_inputs(context=claim["context"], attempt_nonce=claim["attempt_nonce"], key=runtime.receipt_key)
         context, inputs, target, identity, _ = await _state(db, run, uuid.UUID(claim["context"]["connection_id"]))
+        if "selection_sha" in claim:
+            selection, *_ = await _selected(db, run)
+            if claim["selection_sha"] != hashlib.sha256(_content(selection).encode("ascii")).hexdigest():
+                raise ValueError()
     except Exception:
         raise ValidationAttemptError("SDK validation journal or current authority is inconsistent") from None
     if (
