@@ -9,6 +9,7 @@ to show the run was lost.
 The same failure then mis-recorded an earlier run: ``_job_id`` lives on the task
 singleton, so ``on_failure`` (which Celery calls when ``before_start`` raises) marked the
 PREVIOUS run's jobs row failed. 25 finished transaction-ops scans read as failed that way.
+A start that fails must instead leave the earlier row alone and record itself as failed.
 
 These tests go through ``Task.apply`` (Celery's real tracer) against the local database.
 They terminate a backend with ``pg_terminate_backend``, so they refuse to run anywhere
@@ -17,6 +18,7 @@ but a local Postgres.
 
 import time
 import uuid
+from contextlib import contextmanager
 
 import pytest
 from sqlalchemy import create_engine, delete, select, text
@@ -65,7 +67,8 @@ def _kill_the_pooled_connection() -> None:
     sync_engine.dispose()
     with sync_engine.connect() as conn:
         pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
-    killer = create_engine(settings.DATABASE_URL_SYNC, poolclass=NullPool)
+    # Autocommit: pg_stat_activity is a snapshot that lasts the whole transaction.
+    killer = create_engine(settings.DATABASE_URL_SYNC, poolclass=NullPool, isolation_level="AUTOCOMMIT")
     try:
         with killer.connect() as conn:
             assert conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid}).scalar_one()
@@ -88,24 +91,49 @@ def test_a_run_after_the_pooled_connection_died_still_runs_and_records_its_job(t
     assert [(j.celery_task_id, j.status) for j in jobs] == [(result.id, "completed")]
 
 
-def test_a_start_that_fails_does_not_rewrite_the_previous_runs_job(tenant_id, monkeypatch):
-    first = _probe.apply(kwargs={"tenant_id": tenant_id})
-    assert first.successful(), first.traceback
-
-    # The first checkout fails the way a dead pooled connection does; later checkouts
-    # work, as they do once the pool has replaced the connection.
-    real_tenant_session = base_task.tenant_session
+def _fail_first_checkout(real_tenant_session):
+    """The way a dead pooled connection fails; later checkouts get a fresh connection."""
     calls = {"n": 0}
 
-    def tenant_session_failing_once(tid):
+    def tenant_session(tid):
         calls["n"] += 1
         if calls["n"] == 1:
             raise OperationalError("SET LOCAL", {}, Exception("server closed the connection unexpectedly"))
         return real_tenant_session(tid)
 
-    monkeypatch.setattr(base_task, "tenant_session", tenant_session_failing_once)
+    return tenant_session
+
+
+def _fail_first_commit(real_tenant_session):
+    """The jobs row is flushed, then the connection dies before the commit."""
+    calls = {"n": 0}
+
+    @contextmanager
+    def tenant_session(tid):
+        calls["n"] += 1
+        with real_tenant_session(tid) as session:
+            if calls["n"] == 1:
+
+                def commit():
+                    session.rollback()
+                    raise OperationalError("COMMIT", {}, Exception("server closed the connection unexpectedly"))
+
+                session.commit = commit
+            yield session
+
+    return tenant_session
+
+
+@pytest.mark.parametrize("failure", [_fail_first_checkout, _fail_first_commit], ids=["checkout", "commit"])
+def test_a_start_that_fails_is_recorded_without_rewriting_the_previous_run(tenant_id, monkeypatch, failure):
+    first = _probe.apply(kwargs={"tenant_id": tenant_id})
+    assert first.successful(), first.traceback
+
+    monkeypatch.setattr(base_task, "tenant_session", failure(base_task.tenant_session))
     second = _probe.apply(kwargs={"tenant_id": tenant_id})
     assert second.failed()
 
     jobs = _jobs(tenant_id)
-    assert [(j.celery_task_id, j.status, j.error_message) for j in jobs] == [(first.id, "completed", None)]
+    assert [(j.celery_task_id, j.status) for j in jobs] == [(first.id, "completed"), (second.id, "failed")]
+    assert jobs[0].error_message is None
+    assert "server closed the connection unexpectedly" in jobs[1].error_message

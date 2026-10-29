@@ -7,18 +7,14 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import _is_supabase
+from app.core.database import pool_health_kwargs
 from app.models.audit import AuditEvent
 from app.models.job import Job
 
-# Same pool settings as the async engines in app.core.database. Without pre-ping, a
-# connection the server closed while it sat idle in the pool failed the next task's
-# before_start, so the task never ran and no jobs row recorded it (staging 2026-10-26..28).
-sync_engine = create_engine(
-    settings.DATABASE_URL_SYNC,
-    pool_pre_ping=True,
-    pool_recycle=300 if _is_supabase(settings.DATABASE_URL_SYNC) else -1,
-)
+# Without pre-ping, a connection the server closed while it sat idle in the pool failed
+# the next task's before_start, so the task never ran and no jobs row recorded it
+# (staging 2026-10-26..28).
+sync_engine = create_engine(settings.DATABASE_URL_SYNC, **pool_health_kwargs(settings.DATABASE_URL_SYNC))
 
 
 def set_tenant_context_sync(session: Session, tenant_id: str) -> None:
@@ -80,7 +76,6 @@ class InstrumentedTask(Task):
             )
             session.add(job)
             session.flush()
-            self._job_id = job.id
 
             session.add(
                 AuditEvent(
@@ -95,7 +90,10 @@ class InstrumentedTask(Task):
                     payload={"task_name": self.name},
                 )
             )
+            job_id = job.id
             session.commit()
+        # Only a committed row: if the commit fails, on_failure records a new one instead.
+        self._job_id = job_id
 
     def on_success(self, retval, task_id, args, kwargs):
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
@@ -126,15 +124,27 @@ class InstrumentedTask(Task):
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
-        if not self._job_id:
-            return
+        now = datetime.now(timezone.utc)
 
         with tenant_session(tenant_id) as session:
-            job = session.get(Job, self._job_id)
-            if job:
-                job.status = "failed"
-                job.completed_at = datetime.now(timezone.utc)
-                job.error_message = str(exc)
+            job = session.get(Job, self._job_id) if self._job_id else None
+            if job is None:
+                # before_start failed before committing this run's row. Record the run as
+                # failed anyway: a run that never started must still show up in jobs.
+                job = Job(
+                    tenant_id=tenant_id,
+                    job_type=self.name,
+                    correlation_id=self._correlation_id,
+                    connection_id=kwargs.get("connection_id"),
+                    started_at=now,
+                    parameters=kwargs,
+                    celery_task_id=task_id,
+                )
+                session.add(job)
+            job.status = "failed"
+            job.completed_at = now
+            job.error_message = str(exc)
+            session.flush()
 
             session.add(
                 AuditEvent(
@@ -143,9 +153,9 @@ class InstrumentedTask(Task):
                     action="job.failed",
                     actor_type="system",
                     resource_type="job",
-                    resource_id=str(self._job_id),
+                    resource_id=str(job.id),
                     correlation_id=self._correlation_id,
-                    job_id=self._job_id,
+                    job_id=job.id,
                     status="error",
                     error_message=str(exc),
                 )
