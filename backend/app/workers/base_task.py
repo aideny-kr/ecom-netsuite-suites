@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from celery import Task
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -64,16 +64,7 @@ class InstrumentedTask(Task):
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
 
         with tenant_session(tenant_id) as session:
-            job = Job(
-                tenant_id=tenant_id,
-                job_type=self.name,
-                status="running",
-                correlation_id=self._correlation_id,
-                connection_id=kwargs.get("connection_id"),
-                started_at=datetime.now(timezone.utc),
-                parameters=kwargs,
-                celery_task_id=task_id,
-            )
+            job = self._job_row(tenant_id, task_id, kwargs, status="running")
             session.add(job)
             session.flush()
 
@@ -124,27 +115,52 @@ class InstrumentedTask(Task):
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
-        now = datetime.now(timezone.utc)
+        if self._job_id:
+            self._record_failure(tenant_id, task_id, kwargs, exc)
+            return
+        # before_start failed before committing this run's row. Record the run as failed
+        # anyway, so a run that never started still shows up in jobs. Best effort: whatever
+        # broke the start may break this write too, and it must not replace the task's error.
+        try:
+            self._record_failure(tenant_id, task_id, kwargs, exc)
+        except Exception as record_exc:
+            print(
+                f"[InstrumentedTask] {self.name}[{task_id}] failed to start and could not be recorded: {record_exc!r}",
+                flush=True,
+            )
 
+    def _job_row(self, tenant_id, task_id, kwargs, *, status: str) -> Job:
+        return Job(
+            tenant_id=tenant_id,
+            job_type=self.name,
+            status=status,
+            correlation_id=self._correlation_id,
+            connection_id=kwargs.get("connection_id"),
+            started_at=datetime.now(timezone.utc),
+            parameters=kwargs,
+            celery_task_id=task_id,
+        )
+
+    def _record_failure(self, tenant_id, task_id, kwargs, exc) -> None:
         with tenant_session(tenant_id) as session:
-            job = session.get(Job, self._job_id) if self._job_id else None
+            if self._job_id:
+                job = session.get(Job, self._job_id)
+            else:
+                # The server can commit before_start's row and the reply still be lost, so
+                # look for this run's row before adding one.
+                job = session.scalars(
+                    select(Job)
+                    .where(Job.tenant_id == tenant_id, Job.celery_task_id == task_id, Job.job_type == self.name)
+                    .order_by(Job.started_at.desc())
+                    .limit(1)
+                ).first()
             if job is None:
-                # before_start failed before committing this run's row. Record the run as
-                # failed anyway: a run that never started must still show up in jobs.
-                job = Job(
-                    tenant_id=tenant_id,
-                    job_type=self.name,
-                    correlation_id=self._correlation_id,
-                    connection_id=kwargs.get("connection_id"),
-                    started_at=now,
-                    parameters=kwargs,
-                    celery_task_id=task_id,
-                )
+                job = self._job_row(tenant_id, task_id, kwargs, status="failed")
                 session.add(job)
+                session.flush()
             job.status = "failed"
-            job.completed_at = now
+            job.completed_at = datetime.now(timezone.utc)
             job.error_message = str(exc)
-            session.flush()
 
             session.add(
                 AuditEvent(

@@ -105,14 +105,15 @@ class TestBaseTaskUseTenantSession:
         assert "tenant_session" in method, "on_success must use tenant_session"
 
     def test_on_failure_uses_tenant_session(self):
-        """InstrumentedTask.on_failure must use tenant_session."""
+        """InstrumentedTask.on_failure must write through tenant_session (via _record_failure)."""
         src = self._get_source("app/workers/base_task.py")
-        method = self._extract_method(src, "on_failure")
-        assert "tenant_session" in method, "on_failure must use tenant_session"
+        assert "self._record_failure(" in self._extract_method(src, "on_failure")
+        method = self._extract_method(src, "_record_failure")
+        assert "tenant_session" in method, "_record_failure must use tenant_session"
 
     def test_no_raw_session_in_lifecycle_hooks(self):
         """No lifecycle method should use raw Session(sync_engine)."""
         src = self._get_source("app/workers/base_task.py")
-        for method_name in ["before_start", "on_success", "on_failure"]:
+        for method_name in ["before_start", "on_success", "on_failure", "_record_failure"]:
             method = self._extract_method(src, method_name)
             assert "Session(sync_engine)" not in method, f"{method_name} must not use raw Session(sync_engine)"

@@ -91,32 +91,30 @@ def test_a_run_after_the_pooled_connection_died_still_runs_and_records_its_job(t
     assert [(j.celery_task_id, j.status) for j in jobs] == [(result.id, "completed")]
 
 
-def _fail_first_checkout(real_tenant_session):
-    """The way a dead pooled connection fails; later checkouts get a fresh connection."""
-    calls = {"n": 0}
-
-    def tenant_session(tid):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise OperationalError("SET LOCAL", {}, Exception("server closed the connection unexpectedly"))
-        return real_tenant_session(tid)
-
-    return tenant_session
+_DEAD = "server closed the connection unexpectedly"
 
 
-def _fail_first_commit(real_tenant_session):
-    """The jobs row is flushed, then the connection dies before the commit."""
+def _first_start_fails(real_tenant_session, at: str):
+    """before_start's checkout fails at ``at`` the way a dying connection does. Later
+    checkouts get a fresh connection, as they do once the pool has replaced it.
+
+    checkout: the first statement raises. commit: the row is flushed, then the commit
+    raises. reply-lost: the commit lands on the server, but the client still sees an error.
+    """
     calls = {"n": 0}
 
     @contextmanager
     def tenant_session(tid):
         calls["n"] += 1
+        if calls["n"] == 1 and at == "checkout":
+            raise OperationalError("SET LOCAL", {}, Exception(_DEAD))
         with real_tenant_session(tid) as session:
             if calls["n"] == 1:
+                real_commit = session.commit
 
                 def commit():
-                    session.rollback()
-                    raise OperationalError("COMMIT", {}, Exception("server closed the connection unexpectedly"))
+                    real_commit() if at == "reply-lost" else session.rollback()
+                    raise OperationalError("COMMIT", {}, Exception(_DEAD))
 
                 session.commit = commit
             yield session
@@ -124,16 +122,29 @@ def _fail_first_commit(real_tenant_session):
     return tenant_session
 
 
-@pytest.mark.parametrize("failure", [_fail_first_checkout, _fail_first_commit], ids=["checkout", "commit"])
-def test_a_start_that_fails_is_recorded_without_rewriting_the_previous_run(tenant_id, monkeypatch, failure):
+@pytest.mark.parametrize("at", ["checkout", "commit", "reply-lost"])
+def test_a_start_that_fails_is_recorded_once_without_rewriting_the_previous_run(tenant_id, monkeypatch, at):
     first = _probe.apply(kwargs={"tenant_id": tenant_id})
     assert first.successful(), first.traceback
 
-    monkeypatch.setattr(base_task, "tenant_session", failure(base_task.tenant_session))
+    monkeypatch.setattr(base_task, "tenant_session", _first_start_fails(base_task.tenant_session, at))
     second = _probe.apply(kwargs={"tenant_id": tenant_id})
     assert second.failed()
 
     jobs = _jobs(tenant_id)
     assert [(j.celery_task_id, j.status) for j in jobs] == [(first.id, "completed"), (second.id, "failed")]
     assert jobs[0].error_message is None
-    assert "server closed the connection unexpectedly" in jobs[1].error_message
+    assert _DEAD in jobs[1].error_message
+
+
+def test_a_start_failure_that_cannot_be_recorded_still_reports_the_tasks_own_error(tenant_id, monkeypatch):
+    def database_down(_tid):
+        raise OperationalError("SET LOCAL", {}, Exception(_DEAD))
+
+    monkeypatch.setattr(base_task, "tenant_session", database_down)
+    result = _probe.apply(kwargs={"tenant_id": tenant_id})
+
+    assert result.failed()
+    assert isinstance(result.result, OperationalError) and _DEAD in str(result.result)
+    monkeypatch.undo()
+    assert _jobs(tenant_id) == []
