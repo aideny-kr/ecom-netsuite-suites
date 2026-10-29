@@ -77,6 +77,14 @@ class Payout(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     arrival_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
 
+# Stripe balance-transaction types (PayoutLine.line_type) that move a customer's money.
+# A card payment is a `charge`; a bank payment (ACH and similar, `py_…`) is a `payment`.
+# Either can settle an order, and each has its own refund type. Matching reads these two
+# tuples rather than naming a type, so no site can drop bank payments again.
+CUSTOMER_PAYMENT_LINE_TYPES = ("charge", "payment")
+CUSTOMER_REFUND_LINE_TYPES = ("refund", "payment_refund")
+
+
 class PayoutLine(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     __tablename__ = "payout_lines"
     __table_args__ = (UniqueConstraint("tenant_id", "dedupe_key", name="uq_payout_lines_dedupe"),)

@@ -14,7 +14,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.models.canonical import NetsuitePosting, Payout, PayoutLine
+from app.models.canonical import (
+    CUSTOMER_PAYMENT_LINE_TYPES,
+    CUSTOMER_REFUND_LINE_TYPES,
+    NetsuitePosting,
+    Payout,
+    PayoutLine,
+)
 from app.models.connection import DISPATCHABLE_CONNECTION_STATUSES, Connection
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.schemas.order_reconciliation import (
@@ -198,7 +204,7 @@ class OrderReconJob:
         """Execute a full order-level reconciliation run.
 
         1. Create run record
-        2. Fetch charges from payout_lines (type='charge', date via payouts.arrival_date JOIN)
+        2. Fetch charges from payout_lines (card charges and bank payments, date via payouts.arrival_date JOIN)
         3. Extract order_reference from description using extract_order_ref()
         4. Fetch deposits from netsuite_postings (custdep + deposit, ±5 day buffer)
         5. Set order_reference from related_payout_id
@@ -403,7 +409,7 @@ class OrderReconJob:
         date_to: date,
         subsidiary_id: str | None = None,
     ) -> list[ChargeRecord]:
-        """Fetch charges from payout_lines with line_type='charge'.
+        """Fetch charges (card charges and bank payments) from payout_lines.
 
         Joins payouts to get arrival_date for date filtering and charge_date.
         Extracts order_reference from description using extract_order_ref() with
@@ -420,7 +426,7 @@ class OrderReconJob:
         order_ref_pattern = await self._load_order_ref_pattern_once()
 
         rows = await self._fetch_payout_lines(
-            line_types=["charge"],
+            line_types=list(CUSTOMER_PAYMENT_LINE_TYPES),
             date_from=date_from,
             date_to=date_to,
             subsidiary_id=subsidiary_id,
@@ -609,7 +615,7 @@ class OrderReconJob:
                         .join(p, PayoutLine.payout_id == p.id)
                         .where(
                             PayoutLine.tenant_id == self.tenant_id,
-                            PayoutLine.line_type.in_(["refund", "payment_refund"]),
+                            PayoutLine.line_type.in_(CUSTOMER_REFUND_LINE_TYPES),
                             p.arrival_date >= sanity_from,
                             p.arrival_date <= sanity_to,
                             extracted_ref.in_(chunk),
@@ -628,7 +634,7 @@ class OrderReconJob:
                 candidate_ref_count=len(refs_sorted),
             )
             return await self._fetch_payout_lines(
-                line_types=["refund", "payment_refund"],
+                line_types=list(CUSTOMER_REFUND_LINE_TYPES),
                 date_from=sanity_from,
                 date_to=sanity_to,
                 subsidiary_id=subsidiary_id,
@@ -779,7 +785,7 @@ class OrderReconJob:
                         .join(p, PayoutLine.payout_id == p.id)
                         .where(
                             PayoutLine.tenant_id == self.tenant_id,
-                            PayoutLine.line_type == "charge",
+                            PayoutLine.line_type.in_(CUSTOMER_PAYMENT_LINE_TYPES),
                             p.arrival_date >= sanity_from,
                             p.arrival_date <= sanity_to,
                             extracted_ref.in_(chunk),

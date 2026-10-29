@@ -257,7 +257,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
     Ambiguous multiple charges, truncated reads, missing event timestamps, or
     another currency/subsidiary fail closed. No upstream extraction is needed.
     """
-    from app.models.canonical import PayoutLine
+    from app.models.canonical import CUSTOMER_PAYMENT_LINE_TYPES, CUSTOMER_REFUND_LINE_TYPES, PayoutLine
     from app.services.reconciliation.order_recon_job import _washout_event_date, _washout_evidence
     from app.services.reconciliation.order_ref import extract_order_ref
     from app.services.reconciliation.resolution_verifier import amount
@@ -272,7 +272,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
                         PayoutLine.related_order_id == reference,
                         PayoutLine.description.contains(reference, autoescape=True),
                     ),
-                    PayoutLine.line_type.in_(("charge", "refund")),
+                    PayoutLine.line_type.in_(CUSTOMER_PAYMENT_LINE_TYPES + CUSTOMER_REFUND_LINE_TYPES),
                 )
                 .order_by(PayoutLine.id)
                 .limit(101)
@@ -286,7 +286,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
     linked = [
         p for p in rows if (p.related_order_id == reference or extract_order_ref(p.description, pattern) == reference)
     ]
-    charges = [p for p in linked if p.line_type == "charge"]
+    charges = [p for p in linked if p.line_type in CUSTOMER_PAYMENT_LINE_TYPES]
     if len(charges) != 1 or charges[0].id != charge.id or charge.amount <= 0:
         return False
     if charge.currency != context.get("currency") or charge.amount != amount(context.get("stripe_amount")):
@@ -296,7 +296,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
         return False
     refunds = []
     for p in linked:
-        if p.line_type != "refund":
+        if p.line_type not in CUSTOMER_REFUND_LINE_TYPES:
             continue
         event_date, fallback = _washout_event_date(p.raw_data, None)
         if (

@@ -14,7 +14,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.canonical import NetsuitePosting, Payout, PayoutLine
+from app.models.canonical import CUSTOMER_PAYMENT_LINE_TYPES, NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
 from app.services.reconciliation.recon_job import ReconJobRunner
 
@@ -383,7 +383,7 @@ class ReconPipeline:
             .join(Payout, PayoutLine.payout_id == Payout.id)
             .where(
                 PayoutLine.tenant_id == self.tenant_id,
-                PayoutLine.line_type == "charge",
+                PayoutLine.line_type.in_(CUSTOMER_PAYMENT_LINE_TYPES),
                 Payout.arrival_date >= date_from - buffer,
                 Payout.arrival_date <= date_to + buffer,
             )
