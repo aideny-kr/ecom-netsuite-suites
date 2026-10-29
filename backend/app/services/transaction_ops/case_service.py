@@ -145,7 +145,10 @@ def measured(remaining):
     whose every compared amount (source, NetSuite and delta of order total, tax and refunds) is a finite
     number. Accepting needs it, and so does keeping a case resolved: unknown amounts are never the same.
     """
-    if not isinstance(remaining, dict) or remaining.get("status") not in RESOLVABLE_STATUSES:
+    # The type check first: a list or object status is unhashable (Codex review round 5).
+    if not isinstance(remaining, dict) or not isinstance(remaining.get("status"), str):
+        return None
+    if remaining["status"] not in RESOLVABLE_STATUSES:
         return None
     if not isinstance(remaining.get("currency"), str) or not remaining["currency"]:
         return None

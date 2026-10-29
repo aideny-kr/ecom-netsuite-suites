@@ -593,3 +593,13 @@ async def test_an_unmeasured_later_reading_reopens_a_resolved_case(db, admin_use
     row = (await db.execute(text("SELECT status FROM transaction_cases WHERE id = :id"), {"id": case.id})).one()
     assert row.status == "open"
     assert not await actions(db, actor.tenant_id, "case.kept_resolved")
+
+
+@pytest.mark.parametrize("accepted", [{"status": []}, {"status": {}}, {"status": "mismatch", "currency": ["USD"]}, []])
+async def test_a_malformed_acceptance_is_a_changed_difference_not_an_error(db, admin_user, accepted):
+    # Codex round 5 F1: an unhashable status raised TypeError (HTTP 500).
+    actor = admin_user[0]
+    _, case = await open_case(db, actor)
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case, accepted=accepted)
+    assert exc.value.code == "remaining_difference_changed"
