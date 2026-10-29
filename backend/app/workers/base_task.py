@@ -47,27 +47,42 @@ def tenant_session(tenant_id: str):
 
 
 class InstrumentedTask(Task):
-    """Base task that auto-creates a Job record and emits audit events."""
+    """Base task that auto-creates a Job record and emits audit events.
+
+    Each run's state (job id, correlation id, start time) lives on ``self.request``, the
+    context Celery pushes for that run alone, never on the task object every run in the
+    worker process shares. So no hook can act on another run's row:
+    - Celery retries reuse the task id, so the id can't identify the row.
+    - Celery calls on_failure for a run that never reached before_start, after popping
+      its request, when the STARTED write or a prerun signal fails (trace.py). That run
+      then has no job id.
+    - A threaded pool overlaps runs.
+    """
 
     abstract = True
-    _job_id: uuid.UUID | None = None
-    _correlation_id: str | None = None
 
     # System-wide tasks (no tenant) use this sentinel ID for job tracking
     SYSTEM_TENANT_ID = "00000000-0000-0000-0000-000000000000"
 
+    @property
+    def _job_id(self) -> uuid.UUID | None:
+        """This run's jobs row, or None when this run never reached before_start."""
+        return getattr(self.request, "instrumented_job_id", None)
+
+    @property
+    def _correlation_id(self) -> str | None:
+        return getattr(self.request, "instrumented_correlation_id", None)
+
     def before_start(self, task_id, args, kwargs):
-        # This run's job id is chosen here, before any database work. The task object is
-        # shared by every run in this worker process (and Celery retries reuse task_id), so
-        # this is the only identity that names this run and nothing else. If this start
-        # fails, on_failure writes this run's row under the same id, whether or not this
-        # commit landed, and never touches another run's row.
-        self._job_id = uuid.uuid4()
-        self._correlation_id = kwargs.pop("correlation_id", None) or str(uuid.uuid4())
+        # Chosen before any database work: if this start fails, on_failure writes this run's
+        # row under the same id whether or not the commit below landed.
+        self.request.instrumented_job_id = uuid.uuid4()
+        self.request.instrumented_correlation_id = kwargs.pop("correlation_id", None) or str(uuid.uuid4())
+        self.request.instrumented_started_at = datetime.now(timezone.utc)
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
 
         with tenant_session(tenant_id) as session:
-            session.add(self._job_row(tenant_id, task_id, kwargs, status="running"))
+            session.add(self._job_row(tenant_id, task_id, kwargs))
             session.add(
                 AuditEvent(
                     tenant_id=tenant_id,
@@ -121,15 +136,15 @@ class InstrumentedTask(Task):
         except Exception as record_exc:
             print(f"[InstrumentedTask] {self.name}[{task_id}] failure not recorded: {record_exc!r}", flush=True)
 
-    def _job_row(self, tenant_id, task_id, kwargs, *, status: str) -> Job:
+    def _job_row(self, tenant_id, task_id, kwargs) -> Job:
         return Job(
             id=self._job_id,
             tenant_id=tenant_id,
             job_type=self.name,
-            status=status,
+            status="running",
             correlation_id=self._correlation_id,
             connection_id=kwargs.get("connection_id"),
-            started_at=datetime.now(timezone.utc),
+            started_at=self.request.instrumented_started_at,
             parameters=kwargs,
             celery_task_id=task_id,
         )
@@ -139,7 +154,7 @@ class InstrumentedTask(Task):
             job = session.get(Job, self._job_id)
             if job is None:
                 # before_start's commit did not land, so this run has no row yet.
-                job = self._job_row(tenant_id, task_id, kwargs, status="failed")
+                job = self._job_row(tenant_id, task_id, kwargs)
                 session.add(job)
             job.status = "failed"
             job.completed_at = datetime.now(timezone.utc)

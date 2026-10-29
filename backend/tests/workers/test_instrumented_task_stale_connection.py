@@ -48,7 +48,6 @@ def _probe(tenant_id=None):
 @pytest.fixture
 def tenant_id():
     """A tenant id no other test uses; its jobs and audit rows are removed afterwards."""
-    _probe._job_id = None  # a fresh worker process
     tid = str(uuid.uuid4())
     yield tid
     with Session(sync_engine) as session:
@@ -150,3 +149,16 @@ def test_a_start_failure_that_cannot_be_recorded_still_reports_the_tasks_own_err
     assert isinstance(result.result, OperationalError) and _DEAD in str(result.result)
     monkeypatch.undo()
     assert _jobs(tenant_id) == []
+
+
+def test_a_run_that_fails_before_its_start_never_touches_the_previous_runs_job(tenant_id):
+    """Celery's STARTED write (task_track_started) and prerun signals run before
+    before_start. When one raises, trace.py's outermost except pops the run's request and
+    then calls on_failure. This calls on_failure the same way."""
+    first = _probe.apply(kwargs={"tenant_id": tenant_id})
+    assert first.successful(), first.traceback
+
+    _probe.on_failure(RuntimeError("result backend unavailable"), "next-run", (), {"tenant_id": tenant_id}, None)
+
+    jobs = _jobs(tenant_id)
+    assert [(j.celery_task_id, j.status, j.error_message) for j in jobs] == [(first.id, "completed", None)]
