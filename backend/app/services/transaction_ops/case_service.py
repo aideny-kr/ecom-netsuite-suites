@@ -113,15 +113,16 @@ _SIDES = ("source", "target", "delta")
 
 
 def remaining_difference(report):
-    """What a person accepts when resolving a case: the comparison's status and each metric's amounts.
+    """What a person accepts when resolving a case: the comparison's status, currency and each metric's amounts.
 
     Source and NetSuite amounts are kept beside the delta, so a later scan that finds a changed amount
-    behind an unchanged (or unknown) delta still reopens the case (Codex review, 2026-10-28).
+    behind an unchanged delta still reopens the case (Codex review, 2026-10-28).
     """
     balance = (report or {}).get("balance") or {}
     amounts = balance.get("amounts") or {}
     return {
         "status": balance.get("status"),
+        "currency": balance.get("currency"),
         "amounts": {key: {side: (amounts.get(key) or {}).get(side) for side in _SIDES} for key in _METRICS},
     }
 
@@ -137,19 +138,38 @@ def _amount(value):
     return number if number.is_finite() else ("unreadable", value)
 
 
+def measured(remaining):
+    """A remaining difference as compared numbers, or None when it is not fully measured.
+
+    The one definition of "measured" (Codex review rounds 1-4): a difference or mismatch in a known currency
+    whose every compared amount (source, NetSuite and delta of order total, tax and refunds) is a finite
+    number. Accepting needs it, and so does keeping a case resolved: unknown amounts are never the same.
+    """
+    if not isinstance(remaining, dict) or remaining.get("status") not in RESOLVABLE_STATUSES:
+        return None
+    if not isinstance(remaining.get("currency"), str) or not remaining["currency"]:
+        return None
+    amounts = remaining.get("amounts") if isinstance(remaining.get("amounts"), dict) else {}
+    numbers = []
+    for key in _METRICS:
+        metric = amounts.get(key) if isinstance(amounts.get(key), dict) else {}
+        for side in _SIDES:
+            number = _amount(metric.get(side))
+            if not isinstance(number, Decimal):
+                return None
+            numbers.append(number)
+    return remaining["status"], remaining["currency"], numbers
+
+
+def measured_report(report):
+    """measured() for a report, which also must name no missing metric."""
+    balance = (report or {}).get("balance") or {}
+    return None if balance.get("missing_metrics") else measured(remaining_difference(report))
+
+
 def same_remaining(first, second):
-    """The same remaining difference: the same status and the same amounts compared as numbers ('1.00' == '1')."""
-
-    def shape(remaining):
-        remaining = remaining if isinstance(remaining, dict) else {}
-        amounts = remaining.get("amounts") if isinstance(remaining.get("amounts"), dict) else {}
-        return remaining.get("status"), [
-            _amount((amounts.get(key) if isinstance(amounts.get(key), dict) else {}).get(side))
-            for key in _METRICS
-            for side in _SIDES
-        ]
-
-    return shape(first) == shape(second)
+    """Both remaining differences are fully measured and equal as numbers ('1.00' == '1')."""
+    return (current := measured(first)) is not None and current == measured(second)
 
 
 def evidence_read_times(report):
@@ -175,16 +195,8 @@ def _resolution_refusal(case, now):
         return "case_not_open"
     if remaining["status"] == "matched":
         return "nothing_to_resolve"
-    # A measured difference: every compared amount (source, NetSuite and delta of each metric) is a known
-    # number and the comparison names no missing metric. Later scans compare all of them, and the person sees
-    # each one they accept; anything unknown is fixed or re-read, never accepted (Codex review rounds 1-3).
-    balance = (case.latest_report_json or {}).get("balance") or {}
-    compared = [remaining["amounts"][key][side] for key in _METRICS for side in _SIDES]
-    if (
-        remaining["status"] not in RESOLVABLE_STATUSES
-        or balance.get("missing_metrics")
-        or not all(isinstance(_amount(value), Decimal) for value in compared)
-    ):
+    # Anything unknown is fixed or re-read, never accepted (measured()).
+    if measured_report(case.latest_report_json) is None:
         return "difference_not_measured"
     reads = evidence_read_times(case.latest_report_json)
     # Every read must be in the past, and the oldest within the freshness window.
@@ -210,7 +222,8 @@ def settle_observation(case, report, *, cleared, now, observed):
         case.last_observed_at = now
         case.latest_report_json = report
         remaining = remaining_difference(report)
-        if same_remaining(remaining, (case.resolution_json or {}).get("accepted")):
+        accepted = (case.resolution_json or {}).get("accepted")
+        if measured_report(report) is not None and same_remaining(remaining, accepted):
             return [("case.kept_resolved", {"evidence_observed_at": observed.isoformat()})]
         case.status = "open"
         case.resolution_json = {

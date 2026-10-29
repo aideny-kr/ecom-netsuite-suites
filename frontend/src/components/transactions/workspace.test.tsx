@@ -589,6 +589,7 @@ it("shows a resolved case as reconciled while retaining the raw observed varianc
 
 const remaining = {
   status: "difference",
+  currency: "USD",
   amounts: {
     order_total: { source: "87.66", target: "100.00", delta: "-12.34" },
     tax: { source: "6.77", target: "8.00", delta: "-1.23" },
@@ -653,7 +654,7 @@ it("accepts a freshly re-checked difference exactly as the server offered it", a
   mount();
   fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
   const accept = await screen.findByRole("button", { name: "Accept as resolved" });
-  expect(screen.getByText(/I accept the remaining difference of -12.34 \(order total\) and -1.23 \(tax\) as shown/)).toBeInTheDocument();
+  expect(screen.getByText(/I accept the remaining difference of -12.34 \(order total\) and -1.23 \(tax\) as shown, in USD\./)).toBeInTheDocument();
   expect(accept).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "fixed_in_netsuite_rest_in_source" } });
   expect(accept).toBeDisabled();

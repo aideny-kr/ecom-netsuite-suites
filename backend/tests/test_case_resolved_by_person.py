@@ -62,7 +62,11 @@ async def test_a_person_accepts_the_remaining_difference_after_a_fresh_check(db,
     _, case = await open_case(db, actor)
     accepted = case_service.remaining_difference(case.latest_report_json)
     each = {"source": "100.00", "target": "99.00", "delta": "1.00"}
-    assert accepted == {"status": "mismatch", "amounts": {"order_total": each, "tax": each, "refunds": each}}
+    assert accepted == {
+        "status": "mismatch",
+        "currency": "USD",
+        "amounts": {"order_total": each, "tax": each, "refunds": each},
+    }
     resolved = await resolve(db, actor, case)
     assert resolved.status == "resolved"
     record = resolved.resolution_json
@@ -542,3 +546,50 @@ async def test_every_locked_read_of_a_case_sees_the_locked_row(db, admin_user):
     locked = await db.scalar(select(TransactionCase).where(TransactionCase.id == case.id).with_for_update())
     assert locked is case
     assert locked.latest_report_json["balance"]["amounts"]["order_total"]["delta"] == "2.00"
+
+
+# Codex review round 4 (2026-10-28) -------------------------------------------------------------------
+
+
+async def test_the_same_numbers_in_another_currency_are_a_different_difference(db, admin_user):
+    # R4 F1
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    accepted = case_service.remaining_difference(case.latest_report_json)
+    with pytest.raises(StateError) as exc:
+        await resolve(db, actor, case, accepted={**accepted, "currency": "EUR"})
+    assert exc.value.code == "remaining_difference_changed"
+    await resolve(db, actor, case)
+    later = NOW + timedelta(hours=1)
+    body = report(observed=later)
+    body["balance"]["currency"] = "EUR"
+    await observe(db, actor, config, body, later)
+    assert (await case_service.get_case(db, actor.tenant_id, case.id)).status == "open"
+
+
+@pytest.mark.parametrize("unmeasured", ["old_shape", "refunds_unread"])
+async def test_an_unmeasured_later_reading_reopens_a_resolved_case(db, admin_user, unmeasured):
+    # R4 F2: unknown amounts are never "the same remaining difference", whatever the acceptance holds.
+    from sqlalchemy import update
+
+    actor = admin_user[0]
+    config, case = await open_case(db, actor)
+    later = NOW + timedelta(hours=1)
+    body = report(observed=later)
+    if unmeasured == "old_shape":
+        nothing = {key: {"source": None, "target": None, "delta": None} for key in ("order_total", "tax", "refunds")}
+        await db.execute(
+            update(TransactionCase)
+            .where(TransactionCase.id == case.id)
+            .values(status="resolved", resolution_json={"accepted": {"status": "mismatch", "amounts": nothing}})
+            .execution_options(synchronize_session=False)
+        )
+        body["balance"]["amounts"] = nothing
+    else:
+        await resolve(db, actor, case)
+        body["balance"]["amounts"]["refunds"].update(target=None, delta=None)
+        body["balance"]["missing_metrics"] = ["refunds"]
+    await observe(db, actor, config, body, later)
+    row = (await db.execute(text("SELECT status FROM transaction_cases WHERE id = :id"), {"id": case.id})).one()
+    assert row.status == "open"
+    assert not await actions(db, actor.tenant_id, "case.kept_resolved")

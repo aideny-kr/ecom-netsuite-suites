@@ -126,7 +126,7 @@ export function CaseResolution({
     const ack = ackFor === shown;
     const statement = `I accept the remaining difference of ${r.total} (order total) and ${r.tax} (tax)${
       r.refunds.nonzero ? ` and ${r.refunds.text} (refunds)` : ""
-    } as shown.`;
+    } as shown${typeof offer.accepted.currency === "string" ? `, in ${offer.accepted.currency}` : ""}.`;
     return (
       <section className="space-y-4">
         {notice}
