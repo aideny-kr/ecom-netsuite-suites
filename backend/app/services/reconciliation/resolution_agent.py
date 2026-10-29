@@ -257,7 +257,12 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
     Ambiguous multiple charges, truncated reads, missing event timestamps, or
     another currency/subsidiary fail closed. No upstream extraction is needed.
     """
-    from app.models.canonical import CUSTOMER_PAYMENT_LINE_TYPES, CUSTOMER_REFUND_LINE_TYPES, PayoutLine
+    from app.models.canonical import (
+        CUSTOMER_PAYMENT_LINE_TYPES,
+        CUSTOMER_REFUND_LINE_TYPES,
+        PayoutLine,
+        settled_customer_payment,
+    )
     from app.services.reconciliation.order_recon_job import _washout_event_date, _washout_evidence
     from app.services.reconciliation.order_ref import extract_order_ref
     from app.services.reconciliation.resolution_verifier import amount
@@ -272,7 +277,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
                         PayoutLine.related_order_id == reference,
                         PayoutLine.description.contains(reference, autoescape=True),
                     ),
-                    PayoutLine.line_type.in_(CUSTOMER_PAYMENT_LINE_TYPES + CUSTOMER_REFUND_LINE_TYPES),
+                    or_(settled_customer_payment(PayoutLine), PayoutLine.line_type.in_(CUSTOMER_REFUND_LINE_TYPES)),
                 )
                 .order_by(PayoutLine.id)
                 .limit(101)

@@ -5,6 +5,10 @@ Stripe records a bank payment (ACH and similar, ``py_…``) as balance-transacti
 lines, so none of October 2026's 22 bank payments ($102,549.89) was ever matched, even
 though every one has an exact NetSuite record: 20 customer deposits and 2 customer
 payments. Each test below covers one site that used to name ``"charge"`` itself.
+
+A bank payment the bank rejected is the exception: Stripe reverses it with a
+``payment_failure_refund`` linked only by source (five of them, $235,925.28, in Dec 2025
+and Jan 2026). It never settled its order, so it must not match a deposit or count.
 """
 
 import uuid
@@ -29,32 +33,44 @@ from tests.test_deposit_sync import _seed_netsuite_connection
 WINDOW = {"date_from": date(2026, 10, 1), "date_to": date(2026, 10, 28)}
 
 
+_SOURCE_PREFIX = {"charge": "ch", "refund": "re", "payment": "py", "payment_refund": "pyr"}
+
+
 async def _line(
     db,
     tenant_id,
     *,
     line_type: str,
-    ref: str,
+    ref: str | None,
     amount: Decimal,
     fee: Decimal = Decimal("0"),
+    source: str | None = None,
     arrival_date: date = date(2026, 10, 14),
     event_date: date = date(2026, 10, 10),
 ) -> PayoutLine:
+    """A payout line shaped like stripe_sync's: the balance transaction is ``source_id`` and
+    the object it moved money for (``txn.source``) is ``related_order_id``."""
     payout = await create_test_payout(db, tenant_id, arrival_date=arrival_date)
-    prefix = "REFUND FOR PAYMENT (" if line_type == "payment_refund" else ""
+    if ref is None:
+        description = f"Funds reversed due to payment {source}"
+    elif line_type == "payment_refund":
+        description = f"REFUND FOR PAYMENT (Framework Marketplace Order ID: {ref}-2WWTCTEV)"
+    else:
+        description = f"Framework Marketplace Order ID: {ref}-2WWTCTEV"
     line = PayoutLine(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
         dedupe_key=f"pl-{uuid.uuid4().hex}",
         source="stripe",
-        source_id=f"{'py' if line_type.startswith('payment') else 'ch'}_{uuid.uuid4().hex[:12]}",
+        source_id=f"txn_{uuid.uuid4().hex[:16]}",
+        related_order_id=source or f"{_SOURCE_PREFIX[line_type]}_{uuid.uuid4().hex[:16]}",
         payout_id=payout.id,
         line_type=line_type,
         amount=amount,
         fee=fee,
         net=amount - fee,
         currency="USD",
-        description=f"{prefix}Framework Marketplace Order ID: {ref}-2WWTCTEV",
+        description=description,
         raw_data={"created": int(datetime.combine(event_date, datetime.min.time(), timezone.utc).timestamp())},
     )
     db.add(line)
@@ -166,6 +182,62 @@ async def test_agent_recheck_accepts_a_bank_payment_washout(db, tenant_a):
         db, tenant_a.id, payment, "R540592355", None, {"currency": "USD", "stripe_amount": "100.00"}
     )
 
+    assert verified is True
+
+
+async def _failed_bank_payment(db, tenant_id, *, ref: str, amount: Decimal) -> PayoutLine:
+    payment = await _line(db, tenant_id, line_type="payment", ref=ref, amount=amount, fee=Decimal("5"))
+    await _line(
+        db,
+        tenant_id,
+        line_type="payment_failure_refund",
+        ref=None,
+        amount=-amount,
+        source=payment.related_order_id,
+        event_date=date(2026, 10, 15),
+    )
+    return payment
+
+
+async def test_a_bank_payment_the_bank_rejected_does_not_settle_its_order(db, tenant_a):
+    await _failed_bank_payment(db, tenant_a.id, ref="R273070535", amount=Decimal("77743.98"))
+    await create_test_netsuite_posting(
+        db,
+        tenant_a.id,
+        netsuite_internal_id="421002",
+        related_payout_id="R273070535",
+        transaction_date=date(2026, 10, 10),
+        amount=Decimal("77743.98"),
+    )
+
+    summary = await OrderReconJob(db, str(tenant_a.id)).run(**WINDOW)
+
+    assert (summary.matched_count, summary.unmatched_count) == (0, 0)
+    assert await _results(db, summary.run_id) == []
+
+
+async def test_a_rejected_bank_payment_is_not_counted_as_the_orders_payment(db, tenant_a):
+    """The order's only settled payment is the card charge, so it stays the one payment."""
+    charge = await _line(db, tenant_a.id, line_type="charge", ref="R180490343", amount=Decimal("100.00"))
+    await _failed_bank_payment(db, tenant_a.id, ref="R180490343", amount=Decimal("1200.00"))
+    await _line(
+        db,
+        tenant_a.id,
+        line_type="refund",
+        ref="R180490343",
+        amount=Decimal("-100.00"),
+        event_date=date(2026, 10, 12),
+    )
+    job = OrderReconJob(db, str(tenant_a.id))
+
+    counts = await job._cross_run_charge_ref_counts({"R180490343"}, WINDOW["date_from"], WINDOW["date_to"], None)
+    stepper = await ReconPipeline(db, str(tenant_a.id))._count_charges(WINDOW["date_from"], WINDOW["date_to"], None)
+    verified = await _verify_cached_washout(
+        db, tenant_a.id, charge, "R180490343", None, {"currency": "USD", "stripe_amount": "100.00"}
+    )
+
+    assert counts == {"R180490343": 1}
+    assert stepper == 1
     assert verified is True
 
 

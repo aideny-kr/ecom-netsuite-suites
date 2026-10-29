@@ -9,17 +9,17 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import String, and_, func, or_, select
+from sqlalchemy import ColumnElement, String, and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.models.canonical import (
-    CUSTOMER_PAYMENT_LINE_TYPES,
     CUSTOMER_REFUND_LINE_TYPES,
     NetsuitePosting,
     Payout,
     PayoutLine,
+    settled_customer_payment,
 )
 from app.models.connection import DISPATCHABLE_CONNECTION_STATUSES, Connection
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
@@ -204,7 +204,7 @@ class OrderReconJob:
         """Execute a full order-level reconciliation run.
 
         1. Create run record
-        2. Fetch charges from payout_lines (card charges and bank payments, date via payouts.arrival_date JOIN)
+        2. Fetch charges from payout_lines (settled card charges and bank payments, date via payouts.arrival_date JOIN)
         3. Extract order_reference from description using extract_order_ref()
         4. Fetch deposits from netsuite_postings (custdep + deposit, ±5 day buffer)
         5. Set order_reference from related_payout_id
@@ -371,14 +371,14 @@ class OrderReconJob:
     async def _fetch_payout_lines(
         self,
         *,
-        line_types: list[str],
+        line_filter: ColumnElement[bool],
         date_from: date,
         date_to: date,
         subsidiary_id: str | None = None,
     ) -> list[tuple[PayoutLine, date]]:
         """Shared Payout-join/tenant/date/subsidiary scaffold for both the
         charge fetch and the refund fetch — the two call sites differ only
-        in ``line_types`` and their date bounds (the charge path passes
+        in ``line_filter`` and their date bounds (the charge path passes
         the exact settlement dates; the refund path passes its own
         ``REF_MATCH_SANITY_DAYS``-widened dates), both already computed by
         the caller. Returns raw (PayoutLine, arrival_date) row tuples —
@@ -391,7 +391,7 @@ class OrderReconJob:
             .join(p, PayoutLine.payout_id == p.id)
             .where(
                 PayoutLine.tenant_id == self.tenant_id,
-                PayoutLine.line_type.in_(line_types),
+                line_filter,
                 p.arrival_date >= date_from,
                 p.arrival_date <= date_to,
             )
@@ -409,7 +409,7 @@ class OrderReconJob:
         date_to: date,
         subsidiary_id: str | None = None,
     ) -> list[ChargeRecord]:
-        """Fetch charges (card charges and bank payments) from payout_lines.
+        """Fetch settled card charges and bank payments from payout_lines (see settled_customer_payment).
 
         Joins payouts to get arrival_date for date filtering and charge_date.
         Extracts order_reference from description using extract_order_ref() with
@@ -426,7 +426,7 @@ class OrderReconJob:
         order_ref_pattern = await self._load_order_ref_pattern_once()
 
         rows = await self._fetch_payout_lines(
-            line_types=list(CUSTOMER_PAYMENT_LINE_TYPES),
+            line_filter=settled_customer_payment(PayoutLine),
             date_from=date_from,
             date_to=date_to,
             subsidiary_id=subsidiary_id,
@@ -634,7 +634,7 @@ class OrderReconJob:
                 candidate_ref_count=len(refs_sorted),
             )
             return await self._fetch_payout_lines(
-                line_types=list(CUSTOMER_REFUND_LINE_TYPES),
+                line_filter=PayoutLine.line_type.in_(CUSTOMER_REFUND_LINE_TYPES),
                 date_from=sanity_from,
                 date_to=sanity_to,
                 subsidiary_id=subsidiary_id,
@@ -785,7 +785,7 @@ class OrderReconJob:
                         .join(p, PayoutLine.payout_id == p.id)
                         .where(
                             PayoutLine.tenant_id == self.tenant_id,
-                            PayoutLine.line_type.in_(CUSTOMER_PAYMENT_LINE_TYPES),
+                            settled_customer_payment(PayoutLine),
                             p.arrival_date >= sanity_from,
                             p.arrival_date <= sanity_to,
                             extracted_ref.in_(chunk),
