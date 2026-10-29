@@ -115,8 +115,8 @@ class PayoutLine(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     related_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
-def settled_customer_payment(line=PayoutLine) -> ColumnElement[bool]:
-    """SQL condition: ``line`` is a card charge or a bank payment whose money arrived.
+def settled_customer_payment() -> ColumnElement[bool]:
+    """SQL condition: the PayoutLine is a card charge or a bank payment whose money arrived.
 
     A bank payment the bank later rejected never settled its order, so it must neither
     match a deposit nor count as the order's payment. Stripe links the reversal to the
@@ -126,11 +126,11 @@ def settled_customer_payment(line=PayoutLine) -> ColumnElement[bool]:
     """
     failure = aliased(PayoutLine)
     return and_(
-        line.line_type.in_(CUSTOMER_PAYMENT_LINE_TYPES),
+        PayoutLine.line_type.in_(CUSTOMER_PAYMENT_LINE_TYPES),
         ~exists().where(
-            failure.tenant_id == line.tenant_id,
+            failure.tenant_id == PayoutLine.tenant_id,
             failure.line_type == BANK_PAYMENT_FAILURE_LINE_TYPE,
-            failure.related_order_id == line.related_order_id,
+            failure.related_order_id == PayoutLine.related_order_id,
         ),
     )
 

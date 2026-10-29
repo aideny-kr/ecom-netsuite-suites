@@ -426,7 +426,7 @@ class OrderReconJob:
         order_ref_pattern = await self._load_order_ref_pattern_once()
 
         rows = await self._fetch_payout_lines(
-            line_filter=settled_customer_payment(PayoutLine),
+            line_filter=settled_customer_payment(),
             date_from=date_from,
             date_to=date_to,
             subsidiary_id=subsidiary_id,
@@ -785,7 +785,7 @@ class OrderReconJob:
                         .join(p, PayoutLine.payout_id == p.id)
                         .where(
                             PayoutLine.tenant_id == self.tenant_id,
-                            settled_customer_payment(PayoutLine),
+                            settled_customer_payment(),
                             p.arrival_date >= sanity_from,
                             p.arrival_date <= sanity_to,
                             extracted_ref.in_(chunk),

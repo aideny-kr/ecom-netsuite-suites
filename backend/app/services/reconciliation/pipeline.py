@@ -383,7 +383,7 @@ class ReconPipeline:
             .join(Payout, PayoutLine.payout_id == Payout.id)
             .where(
                 PayoutLine.tenant_id == self.tenant_id,
-                settled_customer_payment(PayoutLine),
+                settled_customer_payment(),
                 Payout.arrival_date >= date_from - buffer,
                 Payout.arrival_date <= date_to + buffer,
             )

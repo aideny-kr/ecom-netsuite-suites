@@ -74,6 +74,7 @@ def _context(**over):
     if base.get("payout_line"):
         base["payout_line"].setdefault("order_reference", "R123456789")
         base["payout_line"].setdefault("subsidiary_id", "1")
+        base["payout_line"].setdefault("settled", "True")
     return base
 
 

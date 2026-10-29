@@ -6,8 +6,6 @@ model confidence never establish identity, currency basis, or permission to post
 
 from decimal import Decimal, InvalidOperation
 
-from app.models.canonical import CUSTOMER_PAYMENT_LINE_TYPES
-
 
 def amount(value) -> Decimal | None:
     try:
@@ -61,7 +59,9 @@ def currency_basis_verified(context: dict) -> bool:
         and ref in {line.get("order_reference"), line.get("related_order_id")}
         and line.get("currency") == currency
         and line.get("subsidiary_id") == subsidiary
-        and line.get("line_type") in CUSTOMER_PAYMENT_LINE_TYPES
+        # Computed by models.canonical.settled_customer_payment() when the context was built:
+        # a card charge, or a bank payment the bank did not reject.
+        and line.get("settled") == "True"
         and amount(line.get("amount")) is not None
         and amount(line.get("amount")) == amount(context.get("stripe_amount"))
         and amount(line.get("fee")) is not None

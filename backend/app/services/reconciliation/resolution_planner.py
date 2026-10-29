@@ -462,7 +462,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     partial unique index with a raw IntegrityError.
     """
     from app.models.audit import AuditEvent
-    from app.models.canonical import NetsuitePosting, Payout, PayoutLine
+    from app.models.canonical import NetsuitePosting, Payout, PayoutLine, settled_customer_payment
     from app.models.reconciliation import (
         ACTIVE_PROPOSAL_STATUSES,
         ReconciliationResult,
@@ -626,6 +626,19 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             .all()
         )
         line_records.update({p.id: p for p in records})
+        settled_ids = set(
+            (
+                await db.execute(
+                    select(PayoutLine.id).where(
+                        PayoutLine.tenant_id == tid,
+                        PayoutLine.id.in_(payout_line_id_list[i : i + _INSERT_CHUNK]),
+                        settled_customer_payment(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
         lines.update(
             {
                 p.id: {
@@ -637,6 +650,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                     "fee": str(p.fee),
                     "net": str(p.net),
                     "line_type": p.line_type,
+                    "settled": str(p.id in settled_ids),
                 }
                 for p in records
             }

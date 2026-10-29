@@ -108,7 +108,7 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
     if str(proposal.tenant_id) != str(tenant_id):
         raise ValueError("proposal tenant mismatch")
 
-    from app.models.canonical import NetsuitePosting, PayoutLine
+    from app.models.canonical import NetsuitePosting, PayoutLine, settled_customer_payment
 
     result = (
         await db.execute(
@@ -210,11 +210,15 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
                 await db.execute(select(PayoutLine).where(PayoutLine.id == pl_id, PayoutLine.tenant_id == tenant_id))
             ).scalar_one_or_none()
             if pl is not None:
+                settled = (
+                    await db.execute(select(PayoutLine.id).where(PayoutLine.id == pl.id, settled_customer_payment()))
+                ).scalar_one_or_none() is not None
                 context["payout_line"] = {
                     "order_reference": extract_order_ref(pl.description, pattern),
                     "related_order_id": pl.related_order_id,
                     "subsidiary_id": pl.subsidiary_id,
                     "line_type": pl.line_type,
+                    "settled": str(settled),
                     "amount": str(pl.amount),
                     "fee": str(pl.fee),
                     "net": str(pl.net),
@@ -277,7 +281,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
                         PayoutLine.related_order_id == reference,
                         PayoutLine.description.contains(reference, autoescape=True),
                     ),
-                    or_(settled_customer_payment(PayoutLine), PayoutLine.line_type.in_(CUSTOMER_REFUND_LINE_TYPES)),
+                    or_(settled_customer_payment(), PayoutLine.line_type.in_(CUSTOMER_REFUND_LINE_TYPES)),
                 )
                 .order_by(PayoutLine.id)
                 .limit(101)

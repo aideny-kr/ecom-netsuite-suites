@@ -20,13 +20,20 @@ import pytest
 from sqlalchemy import select
 
 from app.models.canonical import PayoutLine
-from app.models.reconciliation import ReconciliationResult
+from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
 from app.services.ingestion import netsuite_customer_payments as customer_payments
 from app.services.reconciliation.order_recon_job import OrderReconJob
 from app.services.reconciliation.pipeline import ReconPipeline
-from app.services.reconciliation.resolution_agent import _verify_cached_washout
+from app.services.reconciliation.resolution_agent import _verify_cached_washout, gather_context, validate_output
+from app.services.reconciliation.resolution_planner import plan_run
 from app.services.reconciliation.resolution_verifier import currency_basis_verified
-from tests.conftest import create_test_netsuite_posting, create_test_payout
+from tests.conftest import (
+    create_test_netsuite_posting,
+    create_test_payout,
+    create_test_recon_result,
+    create_test_recon_run,
+)
+from tests.resolution_evidence_helpers import seed_linked_evidence
 from tests.test_customer_payment_matching import application
 from tests.test_deposit_sync import _seed_netsuite_connection
 
@@ -241,7 +248,51 @@ async def test_a_rejected_bank_payment_is_not_counted_as_the_orders_payment(db, 
     assert verified is True
 
 
-def _fee_context(line_type: str) -> dict:
+@pytest.mark.parametrize("rejected", [False, True], ids=["settled", "rejected"])
+async def test_fee_line_proof_holds_only_for_a_bank_payment_that_settled(db, tenant_a, rejected):
+    """The match can run before Stripe syncs the rejection; the proof is built later and
+    must see it."""
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("5.00"),
+        stripe_amount=Decimal("4772.00"),
+        netsuite_amount=Decimal("4767.00"),
+        evidence={"order_reference": "R101907473"},
+    )
+    line, _posting = await seed_linked_evidence(db, run, result)
+    line.line_type = "payment"
+    line.related_order_id = "py_3TestBankPayment"
+    if rejected:
+        await _line(
+            db,
+            tenant_a.id,
+            line_type="payment_failure_refund",
+            ref=None,
+            amount=Decimal("-4772.00"),
+            source=line.related_order_id,
+        )
+    await db.flush()
+
+    await plan_run(db, tenant_a.id, run.id)
+    proposal = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.result_id == result.id))
+    ).scalar_one()
+    context = await gather_context(db, tenant_a.id, proposal)
+    agent_action = validate_output({"action": "book_fee_line"}, context, (Decimal("50"), Decimal("0.01")))["action"]
+
+    assert context["payout_line"]["settled"] == str(not rejected)
+    expected = "needs_human" if rejected else "book_fee_line"
+    assert (proposal.action, agent_action) == (expected, expected)
+
+
+def _fee_context(settled: str | None) -> dict:
     return {
         "currency": "USD",
         "subsidiary_id": "1",
@@ -261,7 +312,8 @@ def _fee_context(line_type: str) -> dict:
             "order_reference": "R101907473",
             "currency": "USD",
             "subsidiary_id": "1",
-            "line_type": line_type,
+            "line_type": "payment",
+            "settled": settled,
             "amount": "4772.00",
             "fee": "5.00",
             "net": "4767.00",
@@ -269,6 +321,6 @@ def _fee_context(line_type: str) -> dict:
     }
 
 
-@pytest.mark.parametrize(("line_type", "verified"), [("charge", True), ("payment", True), ("refund", False)])
-def test_deposit_proof_accepts_card_and_bank_payments_only(line_type, verified):
-    assert currency_basis_verified(_fee_context(line_type)) is verified
+@pytest.mark.parametrize(("settled", "verified"), [("True", True), ("False", False), (None, False)])
+def test_deposit_proof_requires_the_payment_to_have_settled(settled, verified):
+    assert currency_basis_verified(_fee_context(settled)) is verified
