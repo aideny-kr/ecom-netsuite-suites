@@ -11,7 +11,8 @@ singleton, so ``on_failure`` (which Celery calls when ``before_start`` raises) m
 PREVIOUS run's jobs row failed. 25 finished transaction-ops scans read as failed that way.
 A start that fails must instead leave the earlier row alone and record itself as failed.
 
-These tests go through ``Task.apply`` (Celery's real tracer) against the local database.
+These tests go through Celery's real tracer against the local database: ``Task.apply``
+(eager), and a worker tracer (``eager=False``) for the path that only a worker takes.
 They terminate a backend with ``pg_terminate_backend``, so they refuse to run anywhere
 but a local Postgres.
 """
@@ -21,6 +22,7 @@ import uuid
 from contextlib import contextmanager
 
 import pytest
+from celery.app.trace import build_tracer
 from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
@@ -151,14 +153,63 @@ def test_a_start_failure_that_cannot_be_recorded_still_reports_the_tasks_own_err
     assert _jobs(tenant_id) == []
 
 
-def test_a_run_that_fails_before_its_start_never_touches_the_previous_runs_job(tenant_id):
-    """Celery's STARTED write (task_track_started) and prerun signals run before
-    before_start. When one raises, trace.py's outermost except pops the run's request and
-    then calls on_failure. This calls on_failure the same way."""
-    first = _probe.apply(kwargs={"tenant_id": tenant_id})
-    assert first.successful(), first.traceback
+def _run_in_worker(tenant_id) -> str:
+    """One run through the worker's tracer. Unlike eager apply, its outermost except reaches
+    on_failure, after popping the run's request."""
+    task_id = str(uuid.uuid4())
+    tracer = build_tracer(_probe.name, _probe, eager=False, app=celery_app)
+    tracer(task_id, [], {"tenant_id": tenant_id}, {"id": task_id, "task": _probe.name, "delivery_info": {}})
+    return task_id
 
-    _probe.on_failure(RuntimeError("result backend unavailable"), "next-run", (), {"tenant_id": tenant_id}, None)
 
-    jobs = _jobs(tenant_id)
-    assert [(j.celery_task_id, j.status, j.error_message) for j in jobs] == [(first.id, "completed", None)]
+@pytest.mark.parametrize(
+    ("fails", "recorded"),
+    [
+        ("started-write", None),  # before before_start: this run has nothing to record
+        ("on-success-commit", _DEAD),  # after it: this run's row must not stay running
+        ("success-write", "Connection reset by peer"),
+    ],
+)
+def test_a_failure_on_celerys_outer_path_is_recorded_on_its_own_run_only(tenant_id, monkeypatch, fails, recorded):
+    """Celery's outermost except handles a raise outside the task body: the STARTED write
+    (task_track_started) before before_start, or on_success and the SUCCESS write after it.
+    It calls on_failure after popping the run's request."""
+    backend = _probe.backend
+    monkeypatch.setattr(backend, "store_result", lambda *a, **kw: None)
+    monkeypatch.setattr(backend, "process_cleanup", lambda: None)
+    first = _run_in_worker(tenant_id)
+
+    if fails == "on-success-commit":
+        calls = {"n": 0}
+        real_tenant_session = base_task.tenant_session
+
+        @contextmanager
+        def second_checkout_dies(tid):
+            calls["n"] += 1
+            with real_tenant_session(tid) as session:
+                if calls["n"] == 2:  # on_success's; before_start's was the first
+
+                    def commit():
+                        session.rollback()
+                        raise OperationalError("COMMIT", {}, Exception(_DEAD))
+
+                    session.commit = commit
+                yield session
+
+        monkeypatch.setattr(base_task, "tenant_session", second_checkout_dies)
+    else:
+        state = "STARTED" if fails == "started-write" else "SUCCESS"
+
+        def store_result(task_id, result, written_state, *a, **kw):
+            if written_state == state:
+                raise ConnectionError("Error 104 while writing to socket. Connection reset by peer.")
+
+        monkeypatch.setattr(backend, "store_result", store_result)
+    second = _run_in_worker(tenant_id)
+
+    jobs = {j.celery_task_id: j for j in _jobs(tenant_id)}
+    assert (jobs[first].status, jobs[first].error_message) == ("completed", None)
+    if recorded is None:
+        assert second not in jobs
+    else:
+        assert jobs[second].status == "failed" and recorded in jobs[second].error_message

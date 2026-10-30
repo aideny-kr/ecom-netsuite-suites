@@ -50,16 +50,21 @@ class InstrumentedTask(Task):
     """Base task that auto-creates a Job record and emits audit events.
 
     Each run's state (job id, correlation id, start time) lives on ``self.request``, the
-    context Celery pushes for that run alone, never on the task object every run in the
-    worker process shares. So no hook can act on another run's row:
+    context Celery pushes for that run alone. It never lives on the task object, which
+    every run in the worker process shares, so no hook can act on another run's row:
     - Celery retries reuse the task id, so the id can't identify the row.
-    - Celery calls on_failure for a run that never reached before_start, after popping
-      its request, when the STARTED write or a prerun signal fails (trace.py). That run
-      then has no job id.
     - A threaded pool overlaps runs.
+
+    One path needs more. Celery's outermost except (trace.py) calls on_failure after
+    popping the run's request. That covers the STARTED write failing before
+    before_start, and on_success or the SUCCESS write failing after it. on_failure is
+    still handed the run's own kwargs dict, so before_start keeps that dict beside the
+    run's request in ``_last_start``. on_failure recognises the run by that object and
+    never by anything a later run could share.
     """
 
     abstract = True
+    _last_start: tuple[dict, object] | None = None
 
     # System-wide tasks (no tenant) use this sentinel ID for job tracking
     SYSTEM_TENANT_ID = "00000000-0000-0000-0000-000000000000"
@@ -73,16 +78,26 @@ class InstrumentedTask(Task):
     def _correlation_id(self) -> str | None:
         return getattr(self.request, "instrumented_correlation_id", None)
 
+    def _started_request(self, kwargs):
+        """The request of the run ``kwargs`` belongs to, or None if it never reached before_start."""
+        if getattr(self.request, "instrumented_job_id", None) is not None:
+            return self.request
+        if self._last_start is not None and self._last_start[0] is kwargs:
+            return self._last_start[1]
+        return None
+
     def before_start(self, task_id, args, kwargs):
         # Chosen before any database work: if this start fails, on_failure writes this run's
         # row under the same id whether or not the commit below landed.
-        self.request.instrumented_job_id = uuid.uuid4()
-        self.request.instrumented_correlation_id = kwargs.pop("correlation_id", None) or str(uuid.uuid4())
-        self.request.instrumented_started_at = datetime.now(timezone.utc)
+        request = self.request
+        request.instrumented_job_id = uuid.uuid4()
+        request.instrumented_correlation_id = kwargs.pop("correlation_id", None) or str(uuid.uuid4())
+        request.instrumented_started_at = datetime.now(timezone.utc)
+        self._last_start = (kwargs, request)
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
 
         with tenant_session(tenant_id) as session:
-            session.add(self._job_row(tenant_id, task_id, kwargs))
+            session.add(self._job_row(request, tenant_id, task_id, kwargs))
             session.add(
                 AuditEvent(
                     tenant_id=tenant_id,
@@ -90,9 +105,9 @@ class InstrumentedTask(Task):
                     action="job.start",
                     actor_type="system",
                     resource_type="job",
-                    resource_id=str(self._job_id),
-                    correlation_id=self._correlation_id,
-                    job_id=self._job_id,
+                    resource_id=str(request.instrumented_job_id),
+                    correlation_id=request.instrumented_correlation_id,
+                    job_id=request.instrumented_job_id,
                     payload={"task_name": self.name},
                 )
             )
@@ -127,34 +142,35 @@ class InstrumentedTask(Task):
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
-        if not self._job_id:
+        request = self._started_request(kwargs)
+        if request is None:
             return
         # Best effort: whatever failed the task may break this write too, and it must not
         # replace the task's own error.
         try:
-            self._record_failure(tenant_id, task_id, kwargs, exc)
+            self._record_failure(request, tenant_id, task_id, kwargs, exc)
         except Exception as record_exc:
             print(f"[InstrumentedTask] {self.name}[{task_id}] failure not recorded: {record_exc!r}", flush=True)
 
-    def _job_row(self, tenant_id, task_id, kwargs) -> Job:
+    def _job_row(self, request, tenant_id, task_id, kwargs) -> Job:
         return Job(
-            id=self._job_id,
+            id=request.instrumented_job_id,
             tenant_id=tenant_id,
             job_type=self.name,
             status="running",
-            correlation_id=self._correlation_id,
+            correlation_id=request.instrumented_correlation_id,
             connection_id=kwargs.get("connection_id"),
-            started_at=self.request.instrumented_started_at,
+            started_at=request.instrumented_started_at,
             parameters=kwargs,
             celery_task_id=task_id,
         )
 
-    def _record_failure(self, tenant_id, task_id, kwargs, exc) -> None:
+    def _record_failure(self, request, tenant_id, task_id, kwargs, exc) -> None:
         with tenant_session(tenant_id) as session:
-            job = session.get(Job, self._job_id)
+            job = session.get(Job, request.instrumented_job_id)
             if job is None:
                 # before_start's commit did not land, so this run has no row yet.
-                job = self._job_row(tenant_id, task_id, kwargs)
+                job = self._job_row(request, tenant_id, task_id, kwargs)
                 session.add(job)
             job.status = "failed"
             job.completed_at = datetime.now(timezone.utc)
@@ -167,9 +183,9 @@ class InstrumentedTask(Task):
                     action="job.failed",
                     actor_type="system",
                     resource_type="job",
-                    resource_id=str(self._job_id),
-                    correlation_id=self._correlation_id,
-                    job_id=self._job_id,
+                    resource_id=str(request.instrumented_job_id),
+                    correlation_id=request.instrumented_correlation_id,
+                    job_id=request.instrumented_job_id,
                     status="error",
                     error_message=str(exc),
                 )
