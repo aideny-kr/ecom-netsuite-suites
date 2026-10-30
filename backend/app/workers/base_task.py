@@ -59,8 +59,15 @@ class InstrumentedTask(Task):
     popping the run's request. That covers the STARTED write failing before
     before_start, and on_success or the SUCCESS write failing after it. on_failure is
     still handed the run's own kwargs dict, so before_start keeps that dict beside the
-    run's request in ``_last_start``. on_failure recognises the run by that object and
-    never by anything a later run could share.
+    run's request in ``_last_start``. on_failure recognises the run by that object. A
+    worker decodes every delivery, retries included, into a new dict, so no other run's
+    dict can match. That leaves three limits:
+    - In a threaded pool a later start replaces ``_last_start``, so such a failure goes
+      unrecorded. It is never written to the wrong row.
+    - A body that eagerly applies the same task with its own ``self.request.kwargs``
+      would share the dict. Nothing does that today.
+    - If the result backend stays down, Celery's FAILURE write raises before on_failure
+      runs at all.
     """
 
     abstract = True
