@@ -83,6 +83,9 @@ def fee_explained(stripe, netsuite, variance, fee) -> bool:
 
 
 def action_violation(action: str, context: dict) -> str | None:
+    if (context.get("payout_line") or {}).get("settled") == "False" and action != "needs_human":
+        # A bank payment the bank rejected; the planner applies the same gate (rule 1b).
+        return "payment_not_settled"
     if action in {"book_fee_line", "writeoff_je"}:
         if not currency_basis_verified(context):
             return "unverified_currency_or_linkage"

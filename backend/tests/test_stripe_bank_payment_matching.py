@@ -12,7 +12,7 @@ and Jan 2026). It never settled its order, so it must not match a deposit or cou
 """
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -24,7 +24,12 @@ from app.models.reconciliation import ReconciliationResult, ReconResolutionPropo
 from app.services.ingestion import netsuite_customer_payments as customer_payments
 from app.services.reconciliation.order_recon_job import OrderReconJob
 from app.services.reconciliation.pipeline import ReconPipeline
-from app.services.reconciliation.resolution_agent import _verify_cached_washout, gather_context, validate_output
+from app.services.reconciliation.resolution_agent import (
+    AGENT_ALLOWED_ACTIONS,
+    _verify_cached_washout,
+    gather_context,
+    validate_output,
+)
 from app.services.reconciliation.resolution_planner import plan_run
 from app.services.reconciliation.resolution_verifier import currency_basis_verified
 from tests.conftest import (
@@ -192,8 +197,12 @@ async def test_agent_recheck_accepts_a_bank_payment_washout(db, tenant_a):
     assert verified is True
 
 
-async def _failed_bank_payment(db, tenant_id, *, ref: str, amount: Decimal) -> PayoutLine:
-    payment = await _line(db, tenant_id, line_type="payment", ref=ref, amount=amount, fee=Decimal("5"))
+async def _failed_bank_payment(
+    db, tenant_id, *, ref: str, amount: Decimal, arrival_date: date = date(2026, 10, 14)
+) -> PayoutLine:
+    payment = await _line(
+        db, tenant_id, line_type="payment", ref=ref, amount=amount, fee=Decimal("5"), arrival_date=arrival_date
+    )
     await _line(
         db,
         tenant_id,
@@ -290,6 +299,44 @@ async def test_fee_line_proof_holds_only_for_a_bank_payment_that_settled(db, ten
     assert context["payout_line"]["settled"] == str(not rejected)
     expected = "needs_human" if rejected else "book_fee_line"
     assert (proposal.action, agent_action) == (expected, expected)
+
+
+async def test_a_rejected_bank_payment_gets_no_automated_action_from_planner_or_agent(db, tenant_a):
+    """Matched before Stripe synced the rejection, the result still says a deposit is missing.
+    The payout is recent, so without the gate the planner and the agent would both carry
+    it forward as sync lag, and an older one would get create_and_apply_deposit."""
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    payment = await _failed_bank_payment(
+        db, tenant_a.id, ref="R835668425", amount=Decimal("63022.68"), arrival_date=date.today() - timedelta(days=2)
+    )
+    result = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("63022.68"),
+        stripe_amount=Decimal("63022.68"),
+        netsuite_amount=None,
+        evidence={"order_reference": "R835668425", "charge_payout_line_id": str(payment.id)},
+    )
+
+    await plan_run(db, tenant_a.id, run.id)
+    proposal = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.result_id == result.id))
+    ).scalar_one()
+    context = await gather_context(db, tenant_a.id, proposal)
+    agent = {
+        action: validate_output({"action": action, "narrative": ""}, context, (Decimal("50"), Decimal("0.01")))[
+            "action"
+        ]
+        for action in AGENT_ALLOWED_ACTIONS
+    }
+
+    assert proposal.action == "needs_human"
+    assert set(agent.values()) == {"needs_human"}
 
 
 def _fee_context(settled: str | None) -> dict:

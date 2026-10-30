@@ -6,6 +6,8 @@ the async orchestrator (plan_run, below in this module) owns the DB.
 
 Ordered rules (first match wins; spec mapping table):
   1. already posted in a prior run (guard)      → skip
+ 1b. bank payment the bank rejected
+       (payout line not settled)                → needs_human (policy gate; beats rule 2)
   2. clean deterministic match, zero variance   → skip (never reaches proposals)
   3. chargeback / refund-shaped                 → needs_human (policy gate)
   4. evidence: matched deposit unapplied,
@@ -176,6 +178,7 @@ def plan_result(
     washout_verified: bool = False,
     days_since_payout: int | None = None,
     payout_status: str | None = None,
+    payment_settled: bool = True,
 ) -> PlannedProposal | None:
     """Total, pure. Returns None only for rules 1-2/2b (skips)."""
     evidence = evidence or {}
@@ -187,6 +190,17 @@ def plan_result(
     # 1. cross-run double-posting guard
     if already_posted:
         return None
+    # 1b. policy gate: a bank payment the bank rejected never settled, whatever this run
+    #     matched it to. It beats the clean-match skip, so a match made before Stripe
+    #     synced the rejection comes back for review when the run is re-planned.
+    if not payment_settled:
+        return _mk(
+            root,
+            ACTION_NEEDS_HUMAN,
+            "Stripe reversed this bank payment because the bank rejected it. Review before any booking.",
+            abs_variance,
+            above,
+        )
     # 2. clean match — nothing to resolve
     if match_type == "deterministic" and variance_type is None and variance_amount == Decimal("0"):
         return None
@@ -613,32 +627,17 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     lines = {}
     line_records = {}
     for i in range(0, len(payout_line_id_list), _INSERT_CHUNK):
-        records = (
-            (
-                await db.execute(
-                    select(PayoutLine).where(
-                        PayoutLine.tenant_id == tid,
-                        PayoutLine.id.in_(payout_line_id_list[i : i + _INSERT_CHUNK]),
-                    )
+        rows_with_settled = (
+            await db.execute(
+                select(PayoutLine, settled_customer_payment().label("settled")).where(
+                    PayoutLine.tenant_id == tid,
+                    PayoutLine.id.in_(payout_line_id_list[i : i + _INSERT_CHUNK]),
                 )
             )
-            .scalars()
-            .all()
-        )
+        ).all()
+        records = [p for p, _ in rows_with_settled]
+        settled_ids = {p.id for p, settled in rows_with_settled if settled}
         line_records.update({p.id: p for p in records})
-        settled_ids = set(
-            (
-                await db.execute(
-                    select(PayoutLine.id).where(
-                        PayoutLine.tenant_id == tid,
-                        PayoutLine.id.in_(payout_line_id_list[i : i + _INSERT_CHUNK]),
-                        settled_customer_payment(),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
         lines.update(
             {
                 p.id: {
@@ -779,6 +778,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             ),
             days_since_payout=days_since_payout,
             payout_status=payout_status,
+            payment_settled=(lines.get(pl_uuid) or {}).get("settled") != "False",
         )
         if planned is None:
             if charge_source_id in decided_charge_ids:

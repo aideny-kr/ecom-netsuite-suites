@@ -206,19 +206,21 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
         except ValueError:
             pl_id = None
         if pl_id is not None:
-            pl = (
-                await db.execute(select(PayoutLine).where(PayoutLine.id == pl_id, PayoutLine.tenant_id == tenant_id))
-            ).scalar_one_or_none()
+            found = (
+                await db.execute(
+                    select(PayoutLine, settled_customer_payment().label("settled")).where(
+                        PayoutLine.id == pl_id, PayoutLine.tenant_id == tenant_id
+                    )
+                )
+            ).one_or_none()
+            pl, settled = found if found is not None else (None, False)
             if pl is not None:
-                settled = (
-                    await db.execute(select(PayoutLine.id).where(PayoutLine.id == pl.id, settled_customer_payment()))
-                ).scalar_one_or_none() is not None
                 context["payout_line"] = {
                     "order_reference": extract_order_ref(pl.description, pattern),
                     "related_order_id": pl.related_order_id,
                     "subsidiary_id": pl.subsidiary_id,
                     "line_type": pl.line_type,
-                    "settled": str(settled),
+                    "settled": str(bool(settled)),
                     "amount": str(pl.amount),
                     "fee": str(pl.fee),
                     "net": str(pl.net),
