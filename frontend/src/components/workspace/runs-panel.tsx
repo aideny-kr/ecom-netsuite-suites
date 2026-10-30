@@ -5,8 +5,9 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
 import type { WorkspaceRun } from "@/lib/types";
-import { useDeliverQueuedDeploy, useRunArtifacts, useTriggerValidate } from "@/hooks/use-runs";
+import { useDeliverQueuedDeploy, useRunArtifacts } from "@/hooks/use-runs";
 import { usePermissions } from "@/hooks/use-permissions";
+import { ValidationControl } from "./validation-control";
 import { ValidationHitsTable } from "./validation-hits-table";
 
 interface RunsPanelProps {
@@ -36,10 +37,6 @@ function formatDuration(ms: number | null): string {
 
 function RunDetail({ run }: { run: WorkspaceRun }) {
   const { data: artifacts = [] } = useRunArtifacts(run.id);
-  // Reuses the changeset-level validate endpoint — "retry" triggers a fresh
-  // validate run against the same changeset (no run-level retry endpoint exists
-  // on the backend).
-  const triggerValidate = useTriggerValidate();
   const deliverDeploy = useDeliverQueuedDeploy();
   const { hasPermission } = usePermissions();
   const isValidate = run.run_type === "suitecloud_validate";
@@ -66,13 +63,7 @@ function RunDetail({ run }: { run: WorkspaceRun }) {
       )}
       {isValidate && <ValidationHitsTable hits={hits} />}
       {showRetry && run.changeset_id && (
-        <button
-          onClick={() => triggerValidate.mutate(run.changeset_id!)}
-          disabled={triggerValidate.isPending}
-          className="text-[11px] text-blue-600 underline hover:text-blue-700 disabled:opacity-50"
-        >
-          {triggerValidate.isPending ? "Retrying…" : "Retry validate"}
-        </button>
+        <ValidationControl key={run.changeset_id} changesetId={run.changeset_id} retry />
       )}
       {artifacts.length > 0 && (
         <div className="space-y-2">

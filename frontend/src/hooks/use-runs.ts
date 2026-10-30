@@ -66,10 +66,11 @@ export function useDeliverQueuedDeploy() {
 
 export function useTriggerValidate() {
   const queryClient = useQueryClient();
-  return useMutation<WorkspaceRun, Error, string>({
-    mutationFn: (changesetId: string) =>
+  return useMutation<WorkspaceRun, Error, { changesetId: string; connectionId: string }>({
+    mutationFn: ({ changesetId, connectionId }) =>
       apiClient.post<WorkspaceRun>(
         `/api/v1/changesets/${changesetId}/validate`,
+        { connection_id: connectionId },
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["workspace-runs"] });
