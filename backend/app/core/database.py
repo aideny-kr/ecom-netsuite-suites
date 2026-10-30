@@ -25,6 +25,12 @@ def _build_connect_args(url: str) -> dict:
     return {}
 
 
+def pool_health_kwargs(url: str) -> dict:
+    """Pool settings every engine shares, sync and async. Test a pooled connection before
+    handing it out, and on Supabase replace it before the server can close it while idle."""
+    return {"pool_pre_ping": True, "pool_recycle": 300 if _is_supabase(url) else -1}
+
+
 # Prefer direct connection (bypasses PgBouncer) when available
 _db_url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
 _is_remote = _is_supabase(_db_url)
@@ -37,8 +43,7 @@ engine = create_async_engine(
     pool_size=_pool_size,
     max_overflow=_max_overflow,
     connect_args=_build_connect_args(_db_url),
-    pool_pre_ping=True,
-    pool_recycle=300 if _is_remote else -1,
+    **pool_health_kwargs(_db_url),
 )
 
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -152,8 +157,7 @@ def worker_async_session(*, pin_connection=False):
             pool_size=2,
             max_overflow=3,
             connect_args=_build_connect_args(_db_url),
-            pool_pre_ping=True,
-            pool_recycle=300 if _is_remote else -1,
+            **pool_health_kwargs(_db_url),
         )
         factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
         try:
