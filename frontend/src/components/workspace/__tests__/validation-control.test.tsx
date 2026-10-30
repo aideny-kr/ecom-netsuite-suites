@@ -73,12 +73,27 @@ describe("explicit validation target", () => {
     await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue(""));
     expect(screen.getByRole("button", { name: "Validate" })).toBeDisabled();
   });
+  it("blocks cached selections during an unfinished background refresh", async () => {
+    const client = mount(); await select();
+    let finish!: (value: Connection[]) => void;
+    api.get.mockImplementationOnce(() => new Promise<Connection[]>(resolve => { finish = resolve; }));
+    const refresh = client.invalidateQueries({ queryKey: ["connections"] });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Validate" })).toBeDisabled());
+    expect(screen.getByRole("combobox")).toBeDisabled();
+    expect(api.post).not.toHaveBeenCalled();
+    finish([connection("sandbox", "123_SB1")]); await refresh;
+    await waitFor(() => expect(screen.getByRole("button", { name: "Validate" })).toBeEnabled());
+  });
   it("requires reselection when a connection account identity changes", async () => {
     const client = mount(); await select();
     client.setQueryData(["connections", "company"], [connection("sandbox", "999_SB1")]);
     await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue(""));
     expect(screen.getByRole("button", { name: "Validate" })).toBeDisabled();
     expect(api.post).not.toHaveBeenCalled();
+    client.setQueryData(["connections", "company"], [connection("sandbox", "123_SB1")]);
+    await waitFor(() => expect(screen.getByRole("option", { name: /sandbox · 123_SB1/ })).toBeInTheDocument());
+    expect(screen.getByRole("combobox")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Validate" })).toBeDisabled();
   });
   it("explains missing targets and does not send a body-less request", async () => {
     api.get.mockResolvedValue([]); mount();

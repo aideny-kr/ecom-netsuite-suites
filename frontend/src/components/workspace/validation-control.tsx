@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useConnections } from "@/hooks/use-connections";
@@ -16,18 +16,25 @@ export function ValidationControl({ changesetId, disabled = false, retry = false
   const [choice, setChoice] = useState<{ id: string; account: string } | null>(null);
   const connections = useConnections();
   const validation = useTriggerValidate();
+  const resetValidation = validation.reset;
   const targets = (connections.data ?? []).filter(c => c.provider === "netsuite");
   const account = (metadata: Record<string, unknown> | null) =>
     typeof metadata?.account_id === "string" ? metadata.account_id : "";
   const usable = (status: string, accountId: string) =>
     ["active", "healthy"].includes(status) && /^[0-9]+[-_]sb[0-9]+$/i.test(accountId);
   const selected = targets.find(c => c.id === choice?.id && account(c.metadata_json) === choice.account && usable(c.status, account(c.metadata_json)));
-  const unavailable = disabled || connections.isPending || connections.isError || !selected;
+  const unavailable = disabled || connections.isPending || connections.isFetching || connections.isError || !selected;
+  useEffect(() => {
+    if (choice && !selected) {
+      setChoice(null);
+      resetValidation();
+    }
+  }, [choice, selected, resetValidation]);
 
   return <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
     <label htmlFor={id} className="block text-[12px] font-medium">Validation sandbox connection</label>
     <select id={id} value={selected?.id ?? ""}
-      disabled={disabled || connections.isPending || connections.isError || validation.isPending}
+      disabled={disabled || connections.isPending || connections.isFetching || connections.isError || validation.isPending}
       onChange={event => {
         const target = targets.find(c => c.id === event.target.value);
         setChoice(target ? { id: target.id, account: account(target.metadata_json) } : null);
@@ -49,6 +56,7 @@ export function ValidationControl({ changesetId, disabled = false, retry = false
       The server verifies current project and sandbox access. Validation does not authorize deployment.
     </p>
     {connections.isPending && <p role="status" className="text-[11px]">Loading connections…</p>}
+    {connections.isFetching && !connections.isPending && <p role="status" className="text-[11px]">Refreshing connections…</p>}
     {connections.isError && <div className="text-[11px]">
       <p role="alert">Could not load connections. Try again before validating.</p>
       <button type="button" onClick={() => { void connections.refetch(); }} className="text-primary underline">Reload connections</button>
