@@ -112,6 +112,20 @@ describe("explicit validation target", () => {
     expect(await screen.findByRole("button", { name: "Requesting validation…" })).toBeDisabled();
     expect(screen.getByRole("combobox")).toBeDisabled();
   });
+  it("keeps an invalidated pending request locked and shows its eventual refusal", async () => {
+    let refuse!: (error: Error) => void;
+    api.post.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+    const client = mount(); await select();
+    fireEvent.click(screen.getByRole("button", { name: "Validate" }));
+    await screen.findByRole("button", { name: "Requesting validation…" });
+    client.setQueryData(["connections", "company"], [connection("sandbox", "123_SB1", "revoked")]);
+    await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue(""));
+    expect(screen.getByRole("combobox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Requesting validation…" })).toBeDisabled();
+    refuse(new Error("The dispatched target was revoked"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("dispatched target was revoked");
+    expect(api.post).toHaveBeenCalledTimes(1);
+  });
   it("wires the real expanded changeset panel to explicit selection", async () => {
     mount(<ChangesetPanel changesets={[{ id: "change", title: "Reviewed change", status: "approved" } as ChangeSet]} onViewDiff={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /Reviewed change/ })); await select();

@@ -27,9 +27,9 @@ export function ValidationControl({ changesetId, disabled = false, retry = false
   useEffect(() => {
     if (choice && !selected) {
       setChoice(null);
-      resetValidation();
+      if (!validation.isPending) resetValidation();
     }
-  }, [choice, selected, resetValidation]);
+  }, [choice, selected, resetValidation, validation.isPending]);
 
   return <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
     <label htmlFor={id} className="block text-[12px] font-medium">Validation sandbox connection</label>
