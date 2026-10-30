@@ -2,9 +2,21 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    ColumnElement,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    and_,
+    exists,
+)
 from sqlalchemy.dialects.postgresql import JSON, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, aliased, mapped_column
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -77,6 +89,18 @@ class Payout(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     arrival_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
 
+# Stripe balance-transaction types (PayoutLine.line_type) that move a customer's money.
+# A card payment is a `charge`; a bank payment (ACH and similar, `py_…`) is a `payment`.
+# Either can settle an order, and each has its own refund type. Matching selects payments
+# through settled_customer_payment() and refunds through this tuple rather than naming a
+# type, so no site can drop bank payments again.
+CUSTOMER_PAYMENT_LINE_TYPES = ("charge", "payment")
+CUSTOMER_REFUND_LINE_TYPES = ("refund", "payment_refund")
+# Stripe records a bank payment before the bank confirms it. When the bank rejects it,
+# Stripe reverses it with this type, whose source (related_order_id) is the payment's.
+BANK_PAYMENT_FAILURE_LINE_TYPE = "payment_failure_refund"
+
+
 class PayoutLine(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     __tablename__ = "payout_lines"
     __table_args__ = (UniqueConstraint("tenant_id", "dedupe_key", name="uq_payout_lines_dedupe"),)
@@ -89,6 +113,26 @@ class PayoutLine(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     related_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+def settled_customer_payment() -> ColumnElement[bool]:
+    """SQL condition: the PayoutLine is a card charge or a bank payment whose money arrived.
+
+    A bank payment the bank later rejected never settled its order, so it must neither
+    match a deposit nor count as the order's payment. Stripe links the reversal to the
+    payment only through their shared source (``related_order_id``); its description
+    carries no order number. Card charges have no such reversal, because Stripe records
+    a charge only once the money is captured.
+    """
+    failure = aliased(PayoutLine)
+    return and_(
+        PayoutLine.line_type.in_(CUSTOMER_PAYMENT_LINE_TYPES),
+        ~exists().where(
+            failure.tenant_id == PayoutLine.tenant_id,
+            failure.line_type == BANK_PAYMENT_FAILURE_LINE_TYPE,
+            failure.related_order_id == PayoutLine.related_order_id,
+        ),
+    )
 
 
 class Dispute(Base, UUIDPrimaryKeyMixin, CanonicalMixin):

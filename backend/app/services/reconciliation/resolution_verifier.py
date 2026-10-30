@@ -59,7 +59,9 @@ def currency_basis_verified(context: dict) -> bool:
         and ref in {line.get("order_reference"), line.get("related_order_id")}
         and line.get("currency") == currency
         and line.get("subsidiary_id") == subsidiary
-        and line.get("line_type") == "charge"
+        # Computed by models.canonical.settled_customer_payment() when the context was built:
+        # a card charge, or a bank payment the bank did not reject.
+        and line.get("settled") == "True"
         and amount(line.get("amount")) is not None
         and amount(line.get("amount")) == amount(context.get("stripe_amount"))
         and amount(line.get("fee")) is not None
@@ -81,6 +83,9 @@ def fee_explained(stripe, netsuite, variance, fee) -> bool:
 
 
 def action_violation(action: str, context: dict) -> str | None:
+    if (context.get("payout_line") or {}).get("settled") == "False" and action != "needs_human":
+        # A bank payment the bank rejected; the planner applies the same gate (rule 1b).
+        return "payment_not_settled"
     if action in {"book_fee_line", "writeoff_je"}:
         if not currency_basis_verified(context):
             return "unverified_currency_or_linkage"

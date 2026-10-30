@@ -108,7 +108,7 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
     if str(proposal.tenant_id) != str(tenant_id):
         raise ValueError("proposal tenant mismatch")
 
-    from app.models.canonical import NetsuitePosting, PayoutLine
+    from app.models.canonical import NetsuitePosting, PayoutLine, settled_customer_payment
 
     result = (
         await db.execute(
@@ -206,15 +206,21 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
         except ValueError:
             pl_id = None
         if pl_id is not None:
-            pl = (
-                await db.execute(select(PayoutLine).where(PayoutLine.id == pl_id, PayoutLine.tenant_id == tenant_id))
-            ).scalar_one_or_none()
+            found = (
+                await db.execute(
+                    select(PayoutLine, settled_customer_payment().label("settled")).where(
+                        PayoutLine.id == pl_id, PayoutLine.tenant_id == tenant_id
+                    )
+                )
+            ).one_or_none()
+            pl, settled = found if found is not None else (None, False)
             if pl is not None:
                 context["payout_line"] = {
                     "order_reference": extract_order_ref(pl.description, pattern),
                     "related_order_id": pl.related_order_id,
                     "subsidiary_id": pl.subsidiary_id,
                     "line_type": pl.line_type,
+                    "settled": str(bool(settled)),
                     "amount": str(pl.amount),
                     "fee": str(pl.fee),
                     "net": str(pl.net),
@@ -257,7 +263,12 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
     Ambiguous multiple charges, truncated reads, missing event timestamps, or
     another currency/subsidiary fail closed. No upstream extraction is needed.
     """
-    from app.models.canonical import PayoutLine
+    from app.models.canonical import (
+        CUSTOMER_PAYMENT_LINE_TYPES,
+        CUSTOMER_REFUND_LINE_TYPES,
+        PayoutLine,
+        settled_customer_payment,
+    )
     from app.services.reconciliation.order_recon_job import _washout_event_date, _washout_evidence
     from app.services.reconciliation.order_ref import extract_order_ref
     from app.services.reconciliation.resolution_verifier import amount
@@ -272,7 +283,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
                         PayoutLine.related_order_id == reference,
                         PayoutLine.description.contains(reference, autoescape=True),
                     ),
-                    PayoutLine.line_type.in_(("charge", "refund")),
+                    or_(settled_customer_payment(), PayoutLine.line_type.in_(CUSTOMER_REFUND_LINE_TYPES)),
                 )
                 .order_by(PayoutLine.id)
                 .limit(101)
@@ -286,7 +297,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
     linked = [
         p for p in rows if (p.related_order_id == reference or extract_order_ref(p.description, pattern) == reference)
     ]
-    charges = [p for p in linked if p.line_type == "charge"]
+    charges = [p for p in linked if p.line_type in CUSTOMER_PAYMENT_LINE_TYPES]
     if len(charges) != 1 or charges[0].id != charge.id or charge.amount <= 0:
         return False
     if charge.currency != context.get("currency") or charge.amount != amount(context.get("stripe_amount")):
@@ -296,7 +307,7 @@ async def _verify_cached_washout(db, tenant_id, charge, reference, pattern, cont
         return False
     refunds = []
     for p in linked:
-        if p.line_type != "refund":
+        if p.line_type not in CUSTOMER_REFUND_LINE_TYPES:
             continue
         event_date, fallback = _washout_event_date(p.raw_data, None)
         if (
