@@ -32,6 +32,7 @@ import { Variance, deltaValue } from "./variance";
 import type { TransactionView } from "./navigation";
 import { OrdersPage } from "./orders-page";
 import { configForRun } from "./review-scope";
+import { CaseResolution } from "./case-resolution";
 import {
   useReviewRuns,
   useDailyStatus,
@@ -42,6 +43,7 @@ import {
   useFixProposals,
   useStartPeriodReview,
   useBulkCaseInvestigation,
+  useRunStatus,
   type PeriodInput,
   type ReviewRow,
 } from "./review-hooks";
@@ -192,10 +194,10 @@ function Workspace({ view, onViewChange }: WorkspaceNavigation) {
     ? data.results.reduce(
         (sum, q) => {
           for (const key of Object.keys(sum) as (keyof typeof sum)[])
-            sum[key] += q.data!.summary[key];
+            sum[key] += q.data!.summary[key] ?? 0;
           return sum;
         },
-        { checked: 0, matched: 0, needs_review: 0, not_verified: 0 },
+        { checked: 0, matched: 0, resolved: 0, needs_review: 0, not_verified: 0 },
       )
     : null;
   const rows = data.results.flatMap((q) =>
@@ -496,7 +498,7 @@ function Workspace({ view, onViewChange }: WorkspaceNavigation) {
           {typeof failure === "string" ? failure : safeError(failure)}
         </p>
       )}
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         {(
           [
             [
@@ -505,6 +507,11 @@ function Workspace({ view, onViewChange }: WorkspaceNavigation) {
               "Unique orders in available review results",
             ],
             ["matched", "Matched", "Order total, tax and refunds agree"],
+            [
+              "resolved",
+              "Resolved by person",
+              "Accepted after a re-check; reopens if the difference changes",
+            ],
             [
               "needs_review",
               "Needs review",
@@ -582,6 +589,7 @@ function Workspace({ view, onViewChange }: WorkspaceNavigation) {
                 <option value="">All results</option>
                 <option value="needs_review">Needs review</option>
                 <option value="matched">Matched</option>
+                <option value="resolved">Resolved by person</option>
                 <option value="not_verified">Not verified</option>
               </select>
               <ReportDownload
@@ -661,7 +669,7 @@ function Workspace({ view, onViewChange }: WorkspaceNavigation) {
             setSize={setSize}
             label="orders"
           />
-          {tab === "Orders" && status !== "matched" && (
+          {tab === "Orders" && status !== "matched" && status !== "resolved" && (
             <IssueGroups
               key={JSON.stringify([
                 selectedRuns.map((run) => run.id),
@@ -971,7 +979,11 @@ function ResultRow({
       )}
       <td className="p-4">
         <span className="whitespace-nowrap rounded-full border px-2.5 py-1 text-xs">
-          {row.reconciled ? "Reconciled" : verdicts[String(balance.status)] || "Not verified"}
+          {row.reconciled
+            ? "Reconciled"
+            : row.resolved
+              ? "Resolved by person"
+              : verdicts[String(balance.status)] || "Not verified"}
         </span>
       </td>
       <td className="whitespace-nowrap p-4">
@@ -996,7 +1008,65 @@ function CaseDrawer({ id, close }: { id: string; close: () => void }) {
   const recheck = useBulkCaseInvestigation();
   const key = useRef<{ id: string; key: string }>();
   if (key.current?.id !== id) key.current = { id, key: crypto.randomUUID() };
+  // A re-check is done when the case records a newer observation (server times only) or changes status.
+  const [checkingFrom, setCheckingFrom] = useState<{ id: string; at: string } | null>(null);
+  const [recheckIssue, setRecheckIssue] = useState<{ id: string; text: string } | null>(null);
   const c = detail.data;
+  const checking =
+    !!c &&
+    checkingFrom?.id === id &&
+    c.status === "open" &&
+    c.last_observed_at === checkingFrom.at;
+  const run = useRunStatus(checking ? recheck.data?.runs[0]?.id : undefined);
+  const runEnded = !!run.data && !["pending", "running"].includes(run.data.status);
+  // A run can stop (error, budget) without reading the order again: read the case once more, then say so.
+  useEffect(() => {
+    if (!checking || !runEnded || !run.data || !checkingFrom) return;
+    let live = true;
+    const ended = runState(run.data.status, run.data.termination_reason);
+    void detail.refetch().then((fresh) => {
+      if (live && fresh.data?.status === "open" && fresh.data.last_observed_at === checkingFrom.at) {
+        setCheckingFrom(null);
+        setRecheckIssue({
+          id,
+          text: `The re-check finished without a new reading of this order (${ended}). Open the investigation for details, or re-check again.`,
+        });
+      }
+    });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checking, runEnded]);
+  const offersRecheck =
+    c?.status === "open" &&
+    (checking || c.resolution_offer?.unavailable_reason === "recheck_required");
+  const startRecheck = () => {
+    if (c) setCheckingFrom({ id, at: c.last_observed_at });
+    setRecheckIssue(null);
+    recheck.mutate(
+      { case_ids: [id], evaluation_key: key.current!.key },
+      {
+        onSuccess: (queued) => {
+          if (key.current?.id === id)
+            key.current = { id, key: crypto.randomUUID() };
+          if (!queued.runs.length) {
+            // Nothing was queued (for example, no enabled scope matches this case): say so, never wait.
+            setCheckingFrom(null);
+            const code = queued.blocked[0]?.code;
+            setRecheckIssue({
+              id,
+              text:
+                code === "case_scope_unavailable"
+                  ? "The re-check could not start: no enabled reconciliation scope matches this case."
+                  : `The re-check could not start${code ? ` (${code})` : ""}.`,
+            });
+          }
+        },
+        onError: () => setCheckingFrom(null),
+      },
+    );
+  };
   const compose = `Investigate transaction case ${id} using transaction_ops.status with case_id. Explain the evidence and prepare supported exact fixes for my approval. Do not execute an unapproved change.`;
   return (
     <Dialog
@@ -1024,7 +1094,12 @@ function CaseDrawer({ id, close }: { id: string; close: () => void }) {
         ) : (
           <div className="space-y-6">
             <p className="text-[13px] text-muted-foreground">
-              {c.status === "reconciled" ? "Reconciled" : "Open case"} · Last
+              {c.status === "reconciled"
+                ? "Reconciled"
+                : c.status === "resolved"
+                  ? "Resolved by person"
+                  : "Open case"}{" "}
+              · Last
               observed {dateLabel(c.last_observed_at)}
             </p>
             <div className="flex flex-wrap gap-3">
@@ -1035,25 +1110,25 @@ function CaseDrawer({ id, close }: { id: string; close: () => void }) {
                   Work with agent
                 </Link>
               </Button>
-              <Button
-                variant="outline"
-                disabled={recheck.isPending}
-                onClick={() =>
-                  recheck.mutate(
-                    { case_ids: [id], evaluation_key: key.current!.key },
-                    {
-                      onSuccess: () => {
-                        if (key.current?.id === id)
-                          key.current = { id, key: crypto.randomUUID() };
-                      },
-                    },
-                  )
-                }
-              >
-                Recheck evidence
-              </Button>
+              {!offersRecheck && (
+                <Button
+                  variant="outline"
+                  disabled={recheck.isPending}
+                  onClick={startRecheck}
+                >
+                  Recheck evidence
+                </Button>
+              )}
             </div>
+            <CaseResolution
+              key={c.id}
+              c={c}
+              recheck={startRecheck}
+              checking={checking}
+              close={close}
+            />
             {recheck.error && <p role="alert">{safeError(recheck.error)}</p>}
+            {recheckIssue?.id === id && <p role="alert">{recheckIssue.text}</p>}
             {recheck.data?.runs.map((r) => (
               <Link
                 className="block text-primary underline"

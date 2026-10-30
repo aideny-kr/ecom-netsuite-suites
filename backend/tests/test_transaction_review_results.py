@@ -34,7 +34,7 @@ async def test_results_deduplicate_daily_slices_keep_exact_amounts_and_filter_af
     await add(db, actor, child, "R123456789", "matched", root.created_at + timedelta(seconds=1))
     await add(db, actor, child, "R123456788", "missing_in_netsuite", root.created_at)
     data = await period_review.review_results(db, actor.tenant_id, root.id, limit=1)
-    assert data["summary"] == {"checked": 2, "matched": 1, "needs_review": 1, "not_verified": 0}
+    assert data["summary"] == {"checked": 2, "matched": 1, "resolved": 0, "needs_review": 1, "not_verified": 0}
     assert data["total"] == 2 and data["has_next"]
     assert len(data["items"]) == 1
     filtered = await period_review.review_results(db, actor.tenant_id, root.id, status="matched")
@@ -142,7 +142,7 @@ async def test_later_rechecks_update_review_rows_filters_counts_and_links_withou
     await evidence(db, actor, later, "R999999999", "matched", root.created_at + timedelta(seconds=1))
     url = f"/api/v1/transaction-ops/runs/{root.id}/review/findings"
     result = (await client.get(url + "?status=matched&limit=1&search=R123456789", headers=headers)).json()
-    assert result["summary"] == {"checked": 2, "matched": 1, "needs_review": 0, "not_verified": 1}
+    assert result["summary"] == {"checked": 2, "matched": 1, "resolved": 0, "needs_review": 0, "not_verified": 1}
     assert result["total"] == 1 and result["has_next"] is False
     assert result["items"][0]["id"] == str(new.id)
     assert result["items"][0]["run_id"] == str(later.id)
@@ -180,7 +180,7 @@ async def test_resolved_review_ignores_late_and_interim_scans_but_reopens_new_di
         }
         await db.flush()
         result = await period_review.review_results(db, actor.tenant_id, root.id)
-        assert result["summary"] == {"checked": 1, "matched": 1, "needs_review": 0, "not_verified": 0}
+        assert result["summary"] == {"checked": 1, "matched": 1, "resolved": 0, "needs_review": 0, "not_verified": 0}
         assert result["items"][0]["id"] == str(matched.id)
         # The same evidence query drives the issue groups and cannot resurrect
         # the historical mismatch when the updated daily row is incomplete.

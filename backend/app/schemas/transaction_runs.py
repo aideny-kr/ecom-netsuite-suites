@@ -299,10 +299,28 @@ class CaseOut(OutputModel):
     id: UUID
     order_reference: str
     scope_json: dict
-    status: Literal["open", "reconciled"]
+    status: Literal["open", "reconciled", "resolved"]
     first_observed_at: datetime
     last_observed_at: datetime
     latest_report_json: dict
+    resolution_json: dict | None = None
+    # What a person may accept right now (case_service.resolution_offer); only on a single case read.
+    resolution_offer: dict | None = None
+
+
+class CaseResolution(BaseModel):
+    """A person's acceptance of a case's remaining difference (case_service.resolve_case)."""
+
+    model_config = ConfigDict(extra="forbid")
+    reason: Literal[
+        "fixed_in_netsuite_rest_in_source",
+        "accepted_residual",
+        "handled_outside_app",
+        "duplicate_or_test_order",
+    ]
+    note: str | None = Field(default=None, max_length=1000)
+    # The remaining difference the person saw (case_service.remaining_difference); refused if it changed.
+    accepted: dict
 
 
 class CaseObservationOut(OutputModel):

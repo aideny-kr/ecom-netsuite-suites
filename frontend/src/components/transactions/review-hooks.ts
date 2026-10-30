@@ -14,6 +14,21 @@ import type {
 } from "../transaction-ops/types";
 const base = "/api/v1/transaction-ops";
 const enc = encodeURIComponent;
+/** What a person may accept on an open case right now, computed by the server (GET /cases/{id}). */
+export type CaseResolutionOffer = {
+  available: boolean;
+  unavailable_reason:
+    | "case_not_open"
+    | "nothing_to_resolve"
+    | "difference_not_measured"
+    | "recheck_required"
+    | null;
+  /** The remaining difference, sent back unchanged when the person accepts it. */
+  accepted: JsonObject;
+  /** When the offer lapses (the evidence's read time plus 15 minutes); null when the read time is unknown. */
+  fresh_until: string | null;
+  reasons: string[];
+};
 export type TransactionCase = {
   id: string;
   order_reference: string;
@@ -21,9 +36,12 @@ export type TransactionCase = {
   scope_json: JsonObject;
   last_observed_at: string;
   latest_report_json: JsonObject;
+  resolution_json?: JsonObject | null;
+  resolution_offer?: CaseResolutionOffer | null;
 };
 export type ReviewRow = {
   reconciled?: boolean;
+  resolved?: boolean;
   id: string;
   review_run_id?: string;
   config_id?: string;
@@ -41,6 +59,7 @@ export type ReviewResults = {
   summary: {
     checked: number;
     matched: number;
+    resolved: number;
     needs_review: number;
     not_verified: number;
   };
@@ -200,6 +219,39 @@ export function useCaseEvidence(id: string) {
     refetchInterval: 10000,
   });
   return { detail, history };
+}
+/** A re-check run's status, polled until it leaves pending/running. */
+export function useRunStatus(id: string | undefined) {
+  const access = useTransactionAccess();
+  return useQuery({
+    queryKey: ["transaction-ops", access.tenantId, "run", id],
+    enabled: access.allowed && !!id,
+    queryFn: () => apiClient.get<TransactionRun>(`${base}/runs/${enc(id!)}`),
+    refetchInterval: (query) =>
+      ["pending", "running"].includes(query.state.data?.status || "pending") ? 5000 : false,
+  });
+}
+/** A person accepts a re-checked case's remaining difference, or reopens a resolved case. */
+export function useCaseResolution(id: string) {
+  const access = useTransactionAccess();
+  const client = useQueryClient();
+  const refresh = () =>
+    client.invalidateQueries({ queryKey: ["transaction-ops", access.tenantId] });
+  const resolve = useMutation({
+    mutationFn: (request: { reason: string; note: string; accepted: JsonObject }) => {
+      if (!access.allowed) throw new Error("Access unavailable");
+      return apiClient.post<TransactionCase>(`${base}/cases/${enc(id)}/resolve`, request);
+    },
+    onSuccess: refresh,
+  });
+  const reopen = useMutation({
+    mutationFn: () => {
+      if (!access.allowed) throw new Error("Access unavailable");
+      return apiClient.post<TransactionCase>(`${base}/cases/${enc(id)}/reopen`, {});
+    },
+    onSuccess: refresh,
+  });
+  return { resolve, reopen };
 }
 export function useFixProposals(offset: number, enabled: boolean, size = 50) {
   return useRecordPage<TransactionProposal>("proposals", offset, size, enabled);

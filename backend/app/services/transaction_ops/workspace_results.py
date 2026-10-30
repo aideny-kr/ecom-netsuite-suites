@@ -10,7 +10,7 @@ from app.schemas.transaction_runs import CaseOut, ProposalOut, RunOut
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.review_evidence import period_evidence, resolve_review_runs, result_category
 
-CATEGORIES = ("matched", "needs_review", "not_verified")
+CATEGORIES = ("matched", "resolved", "needs_review", "not_verified")
 
 
 async def selected_evidence(db, tenant_id, run_ids, *, metadata_only=False):
@@ -92,6 +92,7 @@ def result_item(row):
         "automation": report.get("automation"),
         # The balance stays the scan's raw evidence; a reconciled order is shown as reconciled.
         "reconciled": bool(row.get("case_reconciled")),
+        "resolved": bool(row.get("case_resolved")),
     }
 
 
@@ -112,6 +113,7 @@ async def review_page(db, tenant_id, run_ids, *, limit=50, offset=0, status=None
                     "config_id",
                     "balance_status",
                     "case_reconciled",
+                    "case_resolved",
                 )
             )
         )

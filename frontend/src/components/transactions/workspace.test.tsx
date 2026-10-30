@@ -1,6 +1,6 @@
 import React from "react";
 import { beforeEach, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { TransactionWorkspace } from "./workspace";
@@ -585,4 +585,195 @@ it("shows a resolved case as reconciled while retaining the raw observed varianc
   mount();
   expect(await screen.findByText("Reconciled")).toBeInTheDocument();
   expect(screen.getByText("+123456789012335.123456")).toBeInTheDocument();
+});
+
+const remaining = {
+  status: "difference",
+  currency: "USD",
+  amounts: {
+    order_total: { source: "87.66", target: "100.00", delta: "-12.34" },
+    tax: { source: "6.77", target: "8.00", delta: "-1.23" },
+    refunds: { source: "5.00", target: "5.00", delta: "0.00" },
+  },
+};
+function withCase(
+  detail: Record<string, unknown> | (() => Record<string, unknown>),
+  summary?: Record<string, number>,
+  rowFlags: Record<string, unknown> = {},
+  runs: Record<string, Record<string, unknown>> = {},
+) {
+  const original = vi.mocked(apiClient.get).getMockImplementation()!;
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) => {
+    if (path.endsWith("/cases/case-a"))
+      return {
+        id: "case-a",
+        order_reference: "R123456789",
+        scope_json: {},
+        last_observed_at: "2026-10-27T17:41:00Z",
+        latest_report_json: { balance },
+        ...(typeof detail === "function" ? detail() : detail),
+      } as never;
+    const run = Object.keys(runs).find((id) => path.endsWith(`/runs/${id}`));
+    if (run) return { id: run, ...runs[run] } as never;
+    if (path.includes("/cases/case-a/observations")) return [] as never;
+    const response = await original(path);
+    if (path.includes("/review-results?")) {
+      const data = response as { items: Array<Record<string, unknown>>; summary: Record<string, number> };
+      return { ...data, summary: summary || data.summary, items: data.items.map((item) => ({ ...item, ...rowFlags })) } as never;
+    }
+    return response;
+  });
+}
+
+it("counts orders resolved by a person in their own tile and filter, apart from matched", async () => {
+  withCase({ status: "resolved" }, { checked: 8, matched: 4, resolved: 1, needs_review: 2, not_verified: 1 }, { resolved: true });
+  mount();
+  await waitFor(() => expect(screen.getByTestId("stat-resolved")).toHaveTextContent("1"));
+  expect(screen.getByTestId("stat-matched")).toHaveTextContent("4");
+  expect(await screen.findByText("Resolved by person", { selector: "span" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Result status"), { target: { value: "resolved" } });
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(expect.stringMatching(/review-results\?.*status=resolved/)),
+  );
+  // Resolved cases are not in the issue groups, so the groups are not asked for them.
+  expect(vi.mocked(apiClient.get).mock.calls.some(([p]) => p.includes("/case-groups?") && p.includes("status=resolved"))).toBe(false);
+});
+
+it("accepts a freshly re-checked difference exactly as the server offered it", async () => {
+  withCase({
+    status: "open",
+    resolution_offer: {
+      available: true,
+      unavailable_reason: null,
+      accepted: remaining,
+      fresh_until: "2026-10-27T17:56:00Z",
+      reasons: ["accepted_residual", "duplicate_or_test_order", "fixed_in_netsuite_rest_in_source", "handled_outside_app"],
+    },
+  });
+  vi.mocked(apiClient.post).mockResolvedValue({ id: "case-a", status: "resolved" });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  const accept = await screen.findByRole("button", { name: "Accept as resolved" });
+  expect(screen.getByText(/I accept the remaining difference of -12.34 \(order total\) and -1.23 \(tax\) as shown, in USD\./)).toBeInTheDocument();
+  expect(accept).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "fixed_in_netsuite_rest_in_source" } });
+  expect(accept).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: /I accept the remaining difference/ }));
+  fireEvent.change(screen.getByLabelText(/Note/), { target: { value: "Solidus ops will void the duplicate." } });
+  fireEvent.click(accept);
+  await waitFor(() =>
+    expect(apiClient.post).toHaveBeenCalledWith("/api/v1/transaction-ops/cases/case-a/resolve", {
+      reason: "fixed_in_netsuite_rest_in_source",
+      note: "Solidus ops will void the duplicate.",
+      accepted: remaining,
+    }),
+  );
+});
+
+it("asks for a re-check before a stale difference can be accepted", async () => {
+  withCase({
+    status: "open",
+    resolution_offer: { available: false, unavailable_reason: "recheck_required", accepted: remaining, fresh_until: "2026-10-26T21:40:00Z", reasons: [] },
+  });
+  vi.mocked(apiClient.post).mockResolvedValue({ runs: [{ id: "recheck-run", config_id: "scope-a", case_ids: ["case-a"] }], blocked: [] });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  expect(await screen.findByText("Fixed this outside the app?")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Accept as resolved" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "I fixed this — re-check" }));
+  await waitFor(() =>
+    expect(apiClient.post).toHaveBeenCalledWith("/api/v1/transaction-ops/cases/investigate", {
+      case_ids: ["case-a"],
+      evaluation_key: expect.any(String),
+    }),
+  );
+  expect(await screen.findByText(/Re-checking/)).toBeInTheDocument();
+  expect(vi.mocked(apiClient.post).mock.calls.some(([p]) => p.includes("/resolve"))).toBe(false);
+});
+
+it("shows who resolved a case, why and what they accepted, and lets a person reopen it", async () => {
+  withCase({
+    status: "resolved",
+    resolution_json: {
+      resolved_by: "user-1",
+      resolved_by_name: "T. Accountant",
+      resolved_at: "2026-10-27T17:43:00Z",
+      reason: "fixed_in_netsuite_rest_in_source",
+      note: "Solidus ops will void the duplicate.",
+      accepted: remaining,
+      observed_at: "2026-10-27T17:41:00Z",
+    },
+  });
+  vi.mocked(apiClient.post).mockResolvedValue({ id: "case-a", status: "open" });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  expect(await screen.findByText(/Resolved by T. Accountant/)).toBeInTheDocument();
+  expect(screen.getByText(/Fixed in NetSuite; the remaining difference is in Solidus/)).toBeInTheDocument();
+  expect(screen.getByText(/order total -12.34, tax -1.23, refunds 0.00/)).toBeInTheDocument();
+  expect(screen.getByText(/Solidus ops will void the duplicate/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
+  await waitFor(() => expect(apiClient.post).toHaveBeenCalledWith("/api/v1/transaction-ops/cases/case-a/reopen", {}));
+});
+
+const offer = (accepted: Record<string, unknown>) => ({
+  status: "open",
+  resolution_offer: {
+    available: true,
+    unavailable_reason: null,
+    accepted,
+    fresh_until: "2026-10-27T17:56:00Z",
+    reasons: ["fixed_in_netsuite_rest_in_source"],
+  },
+});
+const stale = {
+  status: "open",
+  resolution_offer: { available: false, unavailable_reason: "recheck_required", accepted: remaining, fresh_until: null, reasons: [] },
+};
+
+it("drops the confirmation when the offered difference changes before Accept", async () => {
+  // Codex round 2 F1: a confirmation is for the amounts the person saw, not whatever the next poll brings.
+  let current: Record<string, unknown> = remaining;
+  withCase(() => offer(current));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <TransactionWorkspace />
+    </QueryClientProvider>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  const accept = await screen.findByRole("button", { name: "Accept as resolved" });
+  fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "fixed_in_netsuite_rest_in_source" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: /I accept the remaining difference/ }));
+  expect(accept).toBeEnabled();
+  current = { ...remaining, amounts: { ...remaining.amounts, tax: { source: "5.00", target: "8.00", delta: "-3.00" } } };
+  await act(() => client.invalidateQueries());
+  await waitFor(() => expect(screen.getByText(/-3.00 \(tax\) as shown/)).toBeInTheDocument());
+  expect(screen.getByRole("checkbox", { name: /I accept the remaining difference/ })).not.toBeChecked();
+  expect(screen.getByRole("button", { name: "Accept as resolved" })).toBeDisabled();
+  expect(apiClient.post).not.toHaveBeenCalled();
+});
+
+it("says why a re-check could not start instead of waiting forever", async () => {
+  // Codex round 2 F3: a blocked re-check queues no run.
+  withCase(stale);
+  vi.mocked(apiClient.post).mockResolvedValue({ runs: [], blocked: [{ case_id: "case-a", code: "case_scope_unavailable" }] });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  fireEvent.click(await screen.findByRole("button", { name: "I fixed this — re-check" }));
+  expect(await screen.findByText(/could not start/)).toBeInTheDocument();
+  expect(screen.queryByText("Re-checking")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "I fixed this — re-check" })).toBeEnabled();
+});
+
+it("ends the re-check when its run finishes without a new reading", async () => {
+  // Codex round 2 F3: an investigation can stop (error, budget) without observing the order again.
+  withCase(stale, undefined, {}, { "recheck-run": { status: "finished", termination_reason: "error" } });
+  vi.mocked(apiClient.post).mockResolvedValue({ runs: [{ id: "recheck-run", config_id: "scope-a", case_ids: ["case-a"] }], blocked: [] });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review case →" }));
+  fireEvent.click(await screen.findByRole("button", { name: "I fixed this — re-check" }));
+  expect(await screen.findByText(/finished without a new reading/)).toBeInTheDocument();
+  expect(screen.getByText(/Investigation error/)).toBeInTheDocument();
+  expect(screen.queryByText("Re-checking")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "I fixed this — re-check" })).toBeEnabled();
 });

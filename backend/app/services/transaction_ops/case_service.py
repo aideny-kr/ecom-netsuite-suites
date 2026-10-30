@@ -1,7 +1,7 @@
 """Carry exact reconciliation evidence across runs; no approval or write authority."""
 
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -93,6 +93,121 @@ def _cleared(report, now):
         return False
 
 
+# Resolved by a person (decided by Aiden, 2026-10-27/28): after a fresh check, a person accepts what is left.
+RESOLUTION_REASONS = frozenset(
+    {
+        "fixed_in_netsuite_rest_in_source",
+        "accepted_residual",
+        "handled_outside_app",
+        "duplicate_or_test_order",
+    }
+)
+RESOLUTION_FRESHNESS = timedelta(minutes=15)
+MAX_RESOLUTION_NOTE = 1000
+# The comparison statuses a person may accept: a measured amount difference. The reconciler stops before
+# reading amounts for missing, ambiguous and currency-mismatched orders (order_reconciliation._reconcile), so
+# a later scan would have nothing to compare an acceptance with; those are fixed, not accepted.
+RESOLVABLE_STATUSES = frozenset({"difference", "mismatch"})
+_METRICS = ("order_total", "tax", "refunds")
+_SIDES = ("source", "target", "delta")
+
+
+def remaining_difference(report):
+    """What a person accepts when resolving a case: the comparison's status, currency and each metric's amounts.
+
+    Source and NetSuite amounts are kept beside the delta, so a later scan that finds a changed amount
+    behind an unchanged delta still reopens the case (Codex review, 2026-10-28).
+    """
+    balance = (report or {}).get("balance") or {}
+    amounts = balance.get("amounts") or {}
+    return {
+        "status": balance.get("status"),
+        "currency": balance.get("currency"),
+        "amounts": {key: {side: (amounts.get(key) or {}).get(side) for side in _SIDES} for key in _METRICS},
+    }
+
+
+def _amount(value):
+    if value is None:
+        return None
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        return ("unreadable", value)
+    # NaN, sNaN and infinities are not amounts (and sNaN raises when compared).
+    return number if number.is_finite() else ("unreadable", value)
+
+
+def measured(remaining):
+    """A remaining difference as compared numbers, or None when it is not fully measured.
+
+    The one definition of "measured" (Codex review rounds 1-4): a difference or mismatch in a known currency
+    whose every compared amount (source, NetSuite and delta of order total, tax and refunds) is a finite
+    number. Accepting needs it, and so does keeping a case resolved: unknown amounts are never the same.
+    """
+    # The type check first: a list or object status is unhashable (Codex review round 5).
+    if not isinstance(remaining, dict) or not isinstance(remaining.get("status"), str):
+        return None
+    if remaining["status"] not in RESOLVABLE_STATUSES:
+        return None
+    if not isinstance(remaining.get("currency"), str) or not remaining["currency"]:
+        return None
+    amounts = remaining.get("amounts") if isinstance(remaining.get("amounts"), dict) else {}
+    numbers = []
+    for key in _METRICS:
+        metric = amounts.get(key) if isinstance(amounts.get(key), dict) else {}
+        for side in _SIDES:
+            number = _amount(metric.get(side))
+            if not isinstance(number, Decimal):
+                return None
+            numbers.append(number)
+    return remaining["status"], remaining["currency"], numbers
+
+
+def measured_report(report):
+    """measured() for a report, which also must name no missing metric."""
+    balance = (report or {}).get("balance") or {}
+    return None if balance.get("missing_metrics") else measured(remaining_difference(report))
+
+
+def same_remaining(first, second):
+    """Both remaining differences are fully measured and equal as numbers ('1.00' == '1')."""
+    return (current := measured(first)) is not None and current == measured(second)
+
+
+def evidence_read_times(report):
+    """The oldest and newest reads behind a report, or None when the report does not say when it was read.
+
+    Unlike observation_time there is no fallback: a resolution needs to know the evidence is fresh, and the
+    time a result was saved is not when it was read (a saved-evidence review reuses old reads).
+    """
+    try:
+        times = [datetime.fromisoformat(snapshot["observed_at"]) for snapshot in [report["source"], *report["targets"]]]
+        times.extend(datetime.fromisoformat(value) for value in refund_observation_times(report))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not times or any(value.utcoffset() is None for value in times):
+        return None
+    return min(times), max(times)
+
+
+def _resolution_refusal(case, now):
+    """Why a person cannot accept this case's remaining difference right now, or None when they can."""
+    remaining = remaining_difference(case.latest_report_json)
+    if case.status != "open":
+        return "case_not_open"
+    if remaining["status"] == "matched":
+        return "nothing_to_resolve"
+    # Anything unknown is fixed or re-read, never accepted (measured()).
+    if measured_report(case.latest_report_json) is None:
+        return "difference_not_measured"
+    reads = evidence_read_times(case.latest_report_json)
+    # Every read must be in the past, and the oldest within the freshness window.
+    if reads is None or reads[1] > now or now - reads[0] > RESOLUTION_FRESHNESS:
+        return "recheck_required"
+    return None
+
+
 def settle_observation(case, report, *, cleared, now, observed):
     """Apply a newer observation to its case and return the audit actions it causes.
 
@@ -104,6 +219,21 @@ def settle_observation(case, report, *, cleared, now, observed):
     """
     if case.status == "reconciled" and not cleared:
         return [("case.kept_reconciled", {"evidence_observed_at": observed.isoformat()})]
+    if case.status == "resolved" and not cleared:
+        # A person accepted what was left. The same remaining difference keeps it resolved; any other
+        # reopens it with why, and the acceptance stays on record (2026-10-28).
+        case.last_observed_at = now
+        case.latest_report_json = report
+        remaining = remaining_difference(report)
+        accepted = (case.resolution_json or {}).get("accepted")
+        if measured_report(report) is not None and same_remaining(remaining, accepted):
+            return [("case.kept_resolved", {"evidence_observed_at": observed.isoformat()})]
+        case.status = "open"
+        case.resolution_json = {
+            **(case.resolution_json or {}),
+            "reopened": {"at": now.isoformat(), "why": "remaining_difference_changed", "remaining": remaining},
+        }
+        return [("case.reopened_after_resolution", {"evidence_observed_at": observed.isoformat()})]
     prior = case.status
     case.status = "reconciled" if cleared else "open"
     case.last_observed_at = now
@@ -248,6 +378,95 @@ async def get_case(db, tenant_id, case_id):
     if row is None:
         raise StateError("not_found", 404)
     return row
+
+
+def resolution_offer(case, *, now):
+    """What a person may accept on this case right now, computed by the server for the screen.
+
+    The screen sends `accepted` back unchanged; resolve_case refuses it if anything moved meanwhile.
+    """
+    why = _resolution_refusal(case, now)
+    reads = evidence_read_times(case.latest_report_json)
+    return {
+        "available": why is None,
+        "unavailable_reason": why,
+        "accepted": remaining_difference(case.latest_report_json),
+        "fresh_until": (reads[0] + RESOLUTION_FRESHNESS).isoformat() if reads else None,
+        "reasons": sorted(RESOLUTION_REASONS),
+    }
+
+
+async def _case_for_update(db, tenant_id, case_id):
+    from app.services.transaction_ops.state_service import StateError
+
+    await set_tenant_context(db, str(tenant_id))
+    # Locked reads of a case always refresh it (models.transaction_ops._locked_case_reads_refresh).
+    row = await db.scalar(
+        select(TransactionCase)
+        .where(TransactionCase.tenant_id == tenant_id, TransactionCase.id == case_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise StateError("not_found", 404)
+    return row
+
+
+async def resolve_case(db, tenant_id, case_id, *, actor, reason, note, accepted, now):
+    """A person accepts an open case's remaining difference after a fresh check (2026-10-28).
+
+    Only an open case, only when its latest check is at most RESOLUTION_FRESHNESS old, and only when the
+    remaining difference the person saw (`accepted`) is still the case's. The case leaves Needs review as
+    "resolved"; nothing is written to NetSuite or the source.
+    """
+    from app.services.transaction_ops.state_service import StateError, _audit
+
+    case = await _case_for_update(db, tenant_id, case_id)
+    # Only a person of this tenant with reconciliation access, checked here and not only by the route.
+    await state._human(db, tenant_id, actor, "recon.run")
+    if reason not in RESOLUTION_REASONS:
+        raise StateError("invalid_resolution_reason", 422)
+    if note is not None and (not isinstance(note, str) or len(note) > MAX_RESOLUTION_NOTE):
+        raise StateError("invalid_resolution_note", 422)
+    refusal = _resolution_refusal(case, now)
+    if refusal:
+        raise StateError(refusal, 409)
+    current = remaining_difference(case.latest_report_json)
+    if not same_remaining(accepted, current):
+        raise StateError("remaining_difference_changed", 409)
+    case.status = "resolved"
+    case.resolution_json = {
+        "resolved_by": str(actor.id),
+        # A snapshot for the screen: who it was when they resolved it.
+        "resolved_by_name": actor.full_name,
+        "resolved_at": now.isoformat(),
+        "reason": reason,
+        "note": note or None,
+        "accepted": current,
+        "observed_at": evidence_read_times(case.latest_report_json)[0].isoformat(),
+    }
+    await db.flush()
+    await _audit(
+        db, tenant_id, "case.resolved_by_person", case, actor=actor, payload={"resolution": case.resolution_json}
+    )
+    return case
+
+
+async def reopen_case(db, tenant_id, case_id, *, actor, now):
+    """A person puts a resolved case back in Needs review; the earlier acceptance stays on record."""
+    from app.services.transaction_ops.state_service import StateError, _audit
+
+    case = await _case_for_update(db, tenant_id, case_id)
+    await state._human(db, tenant_id, actor, "recon.run")
+    if case.status != "resolved":
+        raise StateError("case_not_resolved", 409)
+    case.status = "open"
+    case.resolution_json = {
+        **(case.resolution_json or {}),
+        "reopened": {"by": str(actor.id), "by_name": actor.full_name, "at": now.isoformat(), "why": "by_person"},
+    }
+    await db.flush()
+    await _audit(db, tenant_id, "case.reopened_by_person", case, actor=actor)
+    return case
 
 
 async def cases_for_order(db, tenant_id, order_reference, *, limit=10):

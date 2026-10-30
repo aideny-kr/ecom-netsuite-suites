@@ -199,7 +199,7 @@ async def test_review_results_and_groups_show_a_reconciled_case_as_matched(db, a
     )
     await db.flush()
     results = await review_results(db, actor.tenant_id, root.id, limit=5)
-    assert results["summary"] == {"checked": 3, "matched": 1, "needs_review": 2, "not_verified": 0}
+    assert results["summary"] == {"checked": 3, "matched": 1, "resolved": 0, "needs_review": 2, "not_verified": 0}
     page = await review_page(db, actor.tenant_id, [root.id], limit=5, status="needs_review")
     assert sorted(item["order_reference"] for item in page["items"]) == sorted(c.order_reference for c in cases[1:])
     groups = await list_groups(db, actor.tenant_id, review_run_ids=[str(root.id)], status="needs_review")

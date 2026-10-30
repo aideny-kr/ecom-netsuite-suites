@@ -98,7 +98,7 @@ async def test_saved_single_day_reuses_wider_scan_with_exact_membership_and_no_p
 ):
     actor, root, row, _ = await setup(db, admin_user, monkeypatch)
     results = await period_review.review_results(db, actor.tenant_id, root.id)
-    assert results["summary"] == {"checked": 1, "matched": 1, "needs_review": 0, "not_verified": 0}
+    assert results["summary"] == {"checked": 1, "matched": 1, "resolved": 0, "needs_review": 0, "not_verified": 0}
     assert [item["order_reference"] for item in results["items"]] == ["R123456788"]
     receipt = await daily_evidence.coverage_receipt(
         db, root, ReviewSpan.model_validate(root.params_json["review"]), whole_span=True
