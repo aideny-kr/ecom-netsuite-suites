@@ -191,8 +191,9 @@ def plan_result(
     if already_posted:
         return None
     # 1b. policy gate: a bank payment the bank rejected never settled, whatever this run
-    #     matched it to. It beats the clean-match skip, so a match made before Stripe
-    #     synced the rejection comes back for review when the run is re-planned.
+    #     matched it to, so every action rule below is closed to it. plan_run never
+    #     re-plans a result already in the matches bucket, so a clean match made before
+    #     Stripe synced the rejection is not caught here.
     if not payment_settled:
         return _mk(
             root,
