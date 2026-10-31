@@ -25,9 +25,9 @@ import {
   useDeployPreview,
   useTriggerAssertions,
   useTriggerUnitTests,
-  useTriggerValidate,
   useUATReport,
 } from "@/hooks/use-runs";
+import { ValidationControl } from "./validation-control";
 import { DeployConfirmationCard } from "./deploy-confirmation-card";
 
 interface ChangesetPanelProps {
@@ -65,7 +65,6 @@ export function ChangesetPanel({
 }: ChangesetPanelProps) {
   const transition = useTransitionChangeset();
   const apply = useApplyChangeset();
-  const triggerValidate = useTriggerValidate();
   const triggerTests = useTriggerUnitTests();
   const triggerAssertions = useTriggerAssertions();
   const deployPreviewMutation = useDeployPreview();
@@ -204,6 +203,7 @@ export function ChangesetPanel({
                     {cs.description}
                   </p>
                 )}
+                <ValidationControl key={cs.id} changesetId={cs.id} disabled={runsDisabled} />
                 {panelError && (
                   <p className="text-[12px] text-destructive">{panelError}</p>
                 )}
@@ -216,21 +216,6 @@ export function ChangesetPanel({
                   >
                     <Eye className="mr-1 h-3 w-3" />
                     View Diff
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-[12px]"
-                    onClick={() => triggerValidate.mutate(cs.id)}
-                    disabled={runsDisabled || triggerValidate.isPending}
-                    title={
-                      runsDisabled
-                        ? "Changeset must be approved before validate/tests"
-                        : undefined
-                    }
-                  >
-                    <Shield className="mr-1 h-3 w-3" />
-                    Validate
                   </Button>
                   <Button
                     size="sm"

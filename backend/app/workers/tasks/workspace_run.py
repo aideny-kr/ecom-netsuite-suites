@@ -4,7 +4,7 @@ import asyncio
 import uuid
 
 from app.core.database import set_tenant_context, worker_async_session
-from app.services import runner_service
+from app.services.workspace.sdk_validation_dispatch import execute_workspace_run
 from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
@@ -24,8 +24,8 @@ async def _execute(tenant_id: str, run_id: str, extra_params: dict | None = None
     """Async inner: open session, set RLS, execute run."""
     async with worker_async_session() as session:
         await set_tenant_context(session, tenant_id)
-        run = await runner_service.execute_run(
-            session, uuid.UUID(run_id), uuid.UUID(tenant_id), extra_params=extra_params
+        run = await execute_workspace_run(
+            session, run_id=uuid.UUID(run_id), tenant_id=uuid.UUID(tenant_id), extra_params=extra_params
         )
         await session.commit()
         return {

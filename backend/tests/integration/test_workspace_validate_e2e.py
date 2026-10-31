@@ -13,7 +13,6 @@ not that workspace_propose_patch is called.
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -22,9 +21,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import encrypt_credentials
 from app.mcp.tools import workspace_tools
-from app.models.connection import Connection
 from app.models.workspace import (
     ValidationHit,
     Workspace,
@@ -88,25 +85,10 @@ async def seeded_workspace_with_changeset(db: AsyncSession, tenant_a, admin_user
 
 @pytest_asyncio.fixture
 async def seeded_netsuite_connection(db: AsyncSession, tenant_a):
-    creds = {
-        "auth_type": "oauth2",
-        "access_token": "tok",
-        "refresh_token": "ref",
-        "expires_at": time.time() + 3600,
-        "account_id": "1234567",
-        "client_id": "test_client",
-    }
-    conn = Connection(
-        tenant_id=tenant_a.id,
-        provider="netsuite",
-        label="NS",
-        status="active",
-        auth_type="oauth2",
-        encrypted_credentials=encrypt_credentials(creds),
-    )
-    db.add(conn)
-    await db.flush()
-    return conn
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "1234567-sb1")
+    return SeededCredentials(path=Path("/tmp/fake.json"), **identity)
 
 
 @pytest.mark.asyncio
@@ -145,7 +127,7 @@ async def test_apply_patch_to_validate_to_record_fix_intent_e2e(
     orch._create_run = _create_run_inline
 
     permission_mock = AsyncMock(return_value=True)
-    seeded_creds = SeededCredentials(path=Path("/tmp/fake.json"), account_id="1234567")
+    seeded_creds = seeded_netsuite_connection
 
     with (
         patch("app.core.dependencies.has_permission", new=permission_mock),

@@ -3,14 +3,16 @@
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import inspect as _sql_inspect
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_permission
+from app.core.dependencies import has_permission, require_permission
 from app.models.user import User
 from app.schemas.workspace import (
     ChangeSetCreate,
@@ -18,8 +20,10 @@ from app.schemas.workspace import (
     DeployConfirmRequest,
     DeployPreviewRequest,
     DeploySandboxRequest,
+    FileEditProposal,
     SuiteQLAssertionsRequest,
     WorkspaceCreate,
+    WorkspaceValidationRequest,
 )
 from app.services import audit_service, runner_service
 from app.services import workspace_service as ws_svc
@@ -27,6 +31,7 @@ from app.services import workspace_service as ws_svc
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+run_router = APIRouter(prefix="/runs", tags=["workspaces"])
 
 
 def _serialize_workspace(ws) -> dict:
@@ -240,6 +245,7 @@ async def read_file(
     result = await ws_svc.read_file(db, workspace_id, file_id, user.tenant_id, line_start, line_end)
     if not result:
         raise HTTPException(status_code=404, detail="File not found")
+    result["can_edit"] = await has_permission(db, user.id, "workspace.manage")
     await audit_service.log_event(
         db=db,
         tenant_id=user.tenant_id,
@@ -254,6 +260,36 @@ async def read_file(
             "line_start": line_start,
             "line_end": line_end,
         },
+    )
+    await db.commit()
+    return result
+
+
+@router.post("/{workspace_id}/files/{file_id}/draft", status_code=status.HTTP_201_CREATED)
+async def propose_file_edit(
+    workspace_id: uuid.UUID,
+    file_id: uuid.UUID,
+    body: FileEditProposal,
+    user: Annotated[User, Depends(require_permission("workspace.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    try:
+        result = await ws_svc.propose_file_edit(
+            db, workspace_id, file_id, user.tenant_id, user.id, body.baseline_sha256, body.content
+        )
+    except ValueError as exc:
+        message = str(exc)
+        code = 404 if "not found" in message else 409 if "changed" in message or "locked" in message else 400
+        raise HTTPException(status_code=code, detail=message) from exc
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.file.edit_proposed",
+        actor_id=user.id,
+        resource_type="changeset",
+        resource_id=result["changeset_id"],
+        payload={"workspace_id": str(workspace_id), "file_id": str(file_id), "baseline_sha256": body.baseline_sha256},
     )
     await db.commit()
     return result
@@ -498,6 +534,7 @@ async def _trigger_run(
     run_type: str,
     user: User,
     db: AsyncSession,
+    connection_id: uuid.UUID | None = None,
 ) -> dict:
     """Shared logic for triggering a run from a changeset."""
     from app.services.runner_service import CommandNotAllowedError
@@ -522,6 +559,22 @@ async def _trigger_run(
         )
     except CommandNotAllowedError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if connection_id is not None:
+        from app.services.workspace.sdk_validation_attempt import (
+            ValidationAttemptError,
+            bind_validation_connection,
+        )
+
+        try:
+            await bind_validation_connection(db, tenant_id=user.tenant_id, run_id=run.id, connection_id=connection_id)
+            # Binding changes the server-side updated_at expression. Load it
+            # inside this tenant transaction before synchronous serialization.
+            await db.refresh(run)
+        except ValidationAttemptError:
+            raise HTTPException(
+                status_code=400, detail="Validation requires a current authorized sandbox target"
+            ) from None
 
     await audit_service.log_event(
         db=db,
@@ -551,10 +604,17 @@ async def _trigger_run(
 @changeset_router.post("/{changeset_id}/validate", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_validate(
     changeset_id: uuid.UUID,
+    body: WorkspaceValidationRequest | None = None,
     user: User = Depends(require_permission("workspace.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _trigger_run(changeset_id, "suitecloud_validate", user, db)
+    return await _trigger_run(
+        changeset_id,
+        "suitecloud_validate",
+        user,
+        db,
+        connection_id=body.connection_id if body else None,
+    )
 
 
 @changeset_router.post("/{changeset_id}/unit-tests", status_code=status.HTTP_202_ACCEPTED)
@@ -819,19 +879,39 @@ async def deploy_sandbox_confirm(
     await db.flush()
     await db.commit()
 
-    from app.workers.tasks.workspace_run import workspace_run_task
+    from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
 
-    workspace_run_task.delay(
-        tenant_id=str(user.tenant_id),
-        run_id=str(run.id),
-        correlation_id=run.correlation_id,
-        extra_params={
-            "sandbox_id": token_row.sandbox_id,
-            "expected_snapshot_sha": token_row.snapshot_sha,
-        },
-    )
+    try:
+        run, pending = await dispatch_confirmed_deploy(db, run_id=run.id, tenant_id=user.tenant_id, actor_id=user.id)
+    except ValueError as exc:
+        # Confirmation is already durable. A later edit must not become a 500
+        # or encourage creating another deployment without seeing this run.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "deployment_delivery_blocked",
+                "message": str(exc),
+                "run_id": str(run.id),
+                "status": run.status,
+            },
+        ) from exc
+    return {**_serialize_run(run), "dispatch_pending": pending}
 
-    return _serialize_run(run)
+
+@run_router.post("/{run_id}/dispatch")
+async def retry_deploy_delivery(
+    run_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("workspace.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Redeliver the same committed queued deploy; never replay a started run."""
+    from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
+
+    try:
+        run, pending = await dispatch_confirmed_deploy(db, run_id=run_id, tenant_id=user.tenant_id, actor_id=user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {**_serialize_run(run), "dispatch_pending": pending}
 
 
 def _gate_status(ok: bool, run) -> str:
@@ -902,15 +982,76 @@ async def get_uat_report(
                 assertions_report = None
             break
 
-    # Compute overall status
-    validate_ok = latest_runs.get("suitecloud_validate") and latest_runs["suitecloud_validate"].status == "passed"
-    tests_ok = latest_runs.get("jest_unit_test") and latest_runs["jest_unit_test"].status == "passed"
+    # Historical passing runs do not establish readiness of the current code.
+    from app.services.deploy_preview_service import (
+        DeployPreviewError,
+        compute_deploy_snapshot,
+        require_project_readiness,
+    )
+    from app.services.deploy_service import check_deploy_prerequisites
+
+    project_state = "not_run"
+    try:
+        readiness = await check_deploy_prerequisites(db, cs.id, user.tenant_id)
+        current_gates = readiness["gates"]
+        if readiness["allowed"]:
+            snapshot = await compute_deploy_snapshot(
+                db=db, changeset_id=cs.id, tenant_id=user.tenant_id, workspace_id=cs.workspace_id
+            )
+            try:
+                require_project_readiness(snapshot, current_gates)
+                project_state = "passed"
+            except DeployPreviewError:
+                project_state = "blocked"
+    except (ValueError, DeployPreviewError):
+        current_gates = {}
+    validate_state = current_gates.get("validate", {}).get(
+        "status", "stale" if latest_runs.get("suitecloud_validate") else "missing"
+    )
+    tests_state = current_gates.get("unit_tests", {}).get(
+        "status", "stale" if latest_runs.get("jest_unit_test") else "missing"
+    )
+    validate_ok = validate_state == "passed"
+    tests_ok = tests_state == "passed"
     assertions_ok = assertion_run is None or assertion_run.status == "passed"
-    deploy_ok = latest_runs.get("deploy_sandbox") and latest_runs["deploy_sandbox"].status == "passed"
+    deployment = latest_runs.get("deploy_sandbox")
+    deploy_ok = False
+    if deployment is not None and deployment.status == "passed":
+        from app.models.workspace import WorkspaceDeployToken
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        receipt = await db.scalar(
+            select(WorkspaceDeployToken).where(
+                WorkspaceDeployToken.tenant_id == user.tenant_id,
+                WorkspaceDeployToken.workspace_id == cs.workspace_id,
+                WorkspaceDeployToken.changeset_id == cs.id,
+                WorkspaceDeployToken.consumed_run_id == deployment.id,
+                WorkspaceDeployToken.consumed_reason == "confirmed",
+                WorkspaceDeployToken.consumed_at.is_not(None),
+            )
+        )
+        try:
+            current = await compute_deploy_manifest(
+                db=db, changeset_id=cs.id, tenant_id=user.tenant_id, workspace_id=cs.workspace_id
+            )
+        except (ValueError, DeployPreviewError):
+            current = None
+        deploy_ok = bool(
+            receipt
+            and current
+            and deployment.snapshot_hash == current["snapshot_sha"]
+            and receipt.snapshot_sha == current["snapshot_sha"]
+            and receipt.manifest_sha == current["manifest_sha"]
+        )
+    deploy_state = (
+        "passed"
+        if deploy_ok
+        else ("stale" if deployment is not None and deployment.status == "passed" else _gate_status(False, deployment))
+    )
 
     if deploy_ok:
         overall = "deployed"
-    elif validate_ok and tests_ok and assertions_ok:
+    elif validate_ok and tests_ok and assertions_ok and project_state == "passed":
         overall = "ready_for_deploy"
     elif any(r and r.status == "failed" for r in latest_runs.values()):
         overall = "failed"
@@ -922,14 +1063,15 @@ async def get_uat_report(
         "changeset_title": cs.title,
         "changeset_status": cs.status,
         "gates": {
-            "validate": _gate_status(validate_ok, latest_runs.get("suitecloud_validate")),
-            "unit_tests": _gate_status(tests_ok, latest_runs.get("jest_unit_test")),
+            "project": project_state,
+            "validate": validate_state,
+            "unit_tests": tests_state,
             "assertions": (
                 "passed"
                 if (assertion_run and assertion_run.status == "passed")
                 else ("not_run" if not assertion_run else assertion_run.status)
             ),
-            "deploy": _gate_status(deploy_ok, latest_runs.get("deploy_sandbox")),
+            "deploy": deploy_state,
         },
         "runs": runs_summary,
         "artifact_links": artifact_links,
@@ -940,8 +1082,6 @@ async def get_uat_report(
 
 
 # --- Run query endpoints ---
-
-run_router = APIRouter(prefix="/runs", tags=["workspaces"])
 
 
 @run_router.get("/{run_id}")

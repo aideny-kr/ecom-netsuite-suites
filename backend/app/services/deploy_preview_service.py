@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import (
@@ -36,6 +36,13 @@ from app.services.chat.mutation_guard import (
 )
 from app.services.deploy_service import check_deploy_prerequisites
 from app.services.runner_service import _validate_sandbox_target
+from app.services.workspace.snapshot import snapshot_hash
+from app.services.workspace.trusted_sdf_project import (
+    PROJECT_FORMAT,
+    TestPathProjectError,
+    TrustedProjectError,
+    build_ready_reviewed_project,
+)
 
 
 def _token_fingerprint(token: str) -> str:
@@ -176,9 +183,23 @@ async def compute_deploy_manifest(
     tenant_id: uuid.UUID,
     workspace_id: uuid.UUID,
 ) -> dict[str, Any]:
+    """Public manifest identity, without returning snapshot contents to callers."""
+    snapshot = await compute_deploy_snapshot(
+        db=db, changeset_id=changeset_id, tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    return {key: snapshot[key] for key in ("manifest", "snapshot_sha", "manifest_sha")}
+
+
+async def compute_deploy_snapshot(
+    *,
+    db: AsyncSession,
+    changeset_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+) -> dict[str, Any]:
     """Build the deploy manifest for *changeset_id* + compute both hashes.
 
-    Returns a dict ``{manifest, snapshot_sha, manifest_sha}`` where:
+    Returns internal snapshot bytes plus ``{manifest, snapshot_sha, manifest_sha}`` where:
 
     - ``manifest`` is a list of ``{path, operation, content_sha, apply_order}``
       entries sorted by ``path``. ``operation`` ∈ ``{"create", "modify",
@@ -195,20 +216,24 @@ async def compute_deploy_manifest(
     workspace + changeset; tenant filtering is enforced at the query level.
     """
     files_result = await db.execute(
-        select(WorkspaceFile).where(
+        select(WorkspaceFile)
+        .where(
             WorkspaceFile.workspace_id == workspace_id,
             WorkspaceFile.tenant_id == tenant_id,
             WorkspaceFile.is_directory.is_(False),
         )
+        .execution_options(populate_existing=True)
     )
     files: dict[str, str] = {f.path: f.content or "" for f in files_result.scalars().all()}
 
     cs_result = await db.execute(
-        select(WorkspaceChangeSet).where(
+        select(WorkspaceChangeSet)
+        .where(
             WorkspaceChangeSet.id == changeset_id,
             WorkspaceChangeSet.workspace_id == workspace_id,
             WorkspaceChangeSet.tenant_id == tenant_id,
         )
+        .execution_options(populate_existing=True)
     )
     changeset = cs_result.scalar_one_or_none()
     if changeset is None:
@@ -221,6 +246,7 @@ async def compute_deploy_manifest(
             WorkspacePatch.tenant_id == tenant_id,
         )
         .order_by(WorkspacePatch.apply_order)
+        .execution_options(populate_existing=True)
     )
     patches = list(patch_result.scalars().all())
 
@@ -266,10 +292,8 @@ async def compute_deploy_manifest(
         ops[path] = "modify"
 
     # snapshot_sha — final on-disk tree (post-patch).
-    snapshot_payload = {path: _sha256(content) for path, content in files.items()}
-    snapshot_sha = hashlib.sha256(
-        json.dumps(snapshot_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    snapshot_files = {path: content.encode("utf-8") for path, content in files.items()}
+    snapshot_sha = snapshot_hash(snapshot_files)
 
     # Manifest — surface unchanged files AND deleted files so the operator sees the
     # full delta. content_sha for deletes is the pre-delete hash; "" if unknown.
@@ -300,6 +324,43 @@ async def compute_deploy_manifest(
         "manifest": manifest,
         "snapshot_sha": snapshot_sha,
         "manifest_sha": manifest_sha,
+        "files": snapshot_files,
+    }
+
+
+def require_project_readiness(snapshot: dict[str, Any], gates: dict[str, Any]) -> dict[str, Any]:
+    """Check deployability without changing the persisted v1 projection rules.
+
+    A checked test-looking file inside a script tree is ambiguous. Reject the
+    whole deployment instead of silently dropping it or uploading it. Synced
+    CustomScripts paths, spaces, objects and deletes remain unsupported by v1.
+    No source bytes, raw path or filesystem/SDK execution enters this receipt.
+    """
+    try:
+        project = build_ready_reviewed_project(
+            files=snapshot["files"],
+            manifest=snapshot["manifest"],
+            expected_snapshot_sha=snapshot["snapshot_sha"],
+            expected_manifest_sha=snapshot["manifest_sha"],
+            project_format=PROJECT_FORMAT,
+        )
+    except TestPathProjectError as exc:
+        raise DeployGateNotMetError(
+            "Move test inputs outside the deployed script tree before previewing",
+            {**gates, "project": {"status": "blocked", "reason": "test_path_in_script_tree"}},
+        ) from exc
+    except TrustedProjectError as exc:
+        raise DeployGateNotMetError(
+            "Requires a supported file-only SDF project with changed script files; "
+            "CustomScripts paths, spaces, objects and deletes are unsupported",
+            {**gates, "project": {"status": "blocked", "reason": "unsupported_projection"}},
+        ) from exc
+    return {
+        "status": "pass",
+        "format": PROJECT_FORMAT,
+        "snapshot_sha": project.snapshot_sha,
+        "manifest_sha": project.manifest_sha,
+        "project_sha": project.project_sha,
     }
 
 
@@ -346,29 +407,24 @@ async def build_deploy_preview(
     except ValueError as e:
         raise InvalidSandboxTargetError(str(e)) from e
 
-    # 3. Gate check — validate + tests must be passing; assertions may be
-    # required for sensitive deploys. Snapshot binding (codex P1 #6) happens
-    # below once we compute snapshot_sha, when we re-call this with the hash.
+    manifest_payload = await compute_deploy_snapshot(
+        db=db, changeset_id=changeset_id, tenant_id=tenant_id, workspace_id=changeset.workspace_id
+    )
+    # Passing checks must describe this exact content, including unchanged files.
     gate_result = await check_deploy_prerequisites(
         db,
         changeset_id,
         tenant_id,
         require_assertions=require_assertions,
+        expected_snapshot_hash=manifest_payload["snapshot_sha"],
+        expected_account_id=sandbox_id,
     )
     if not gate_result["allowed"]:
         raise DeployGateNotMetError(
             gate_result.get("blocked_reason") or "Deploy gate failed",
             gate_result.get("gates", {}),
         )
-
-    # 4. Compute manifest + hashes. This is the operator-visible
-    # preview content and the cryptographic anchor for the token.
-    manifest_payload = await compute_deploy_manifest(
-        db=db,
-        changeset_id=changeset_id,
-        tenant_id=tenant_id,
-        workspace_id=changeset.workspace_id,
-    )
+    project_gate = require_project_readiness(manifest_payload, gate_result.get("gates", {}))
 
     return {
         "changeset_id": str(changeset_id),
@@ -380,7 +436,9 @@ async def build_deploy_preview(
         "manifest": manifest_payload["manifest"],
         "snapshot_sha": manifest_payload["snapshot_sha"],
         "manifest_sha": manifest_payload["manifest_sha"],
-        "gates": gate_result.get("gates", {}),
+        "gates": {**gate_result.get("gates", {}), "project": project_gate},
+        "target_identity": gate_result["gates"]["validate"]["identity"],
+        "project_format": PROJECT_FORMAT,
     }
 
 
@@ -405,6 +463,8 @@ def _canonical_payload(
     require_assertions: bool,
     actor_id: str,
     issued_at: str,
+    target_identity: dict[str, str] | None = None,
+    project_format: str | None = None,
 ) -> str:
     """Canonical JSON used as HMAC body. ``sort_keys=True`` +
     ``separators=(",", ":")`` matches write_confirmation_service so the
@@ -422,6 +482,8 @@ def _canonical_payload(
             "require_assertions": require_assertions,
             "actor_id": actor_id,
             "issued_at": issued_at,
+            "target_identity": target_identity,
+            "project_format": project_format,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -442,10 +504,12 @@ async def mint_deploy_token(
     effects, and means the partial-unique constraint on
     ``workspace_deploy_tokens`` is only hit on the happy path.
     """
+    if preview.get("project_format") != PROJECT_FORMAT:
+        raise DeployGateNotMetError("Preview has no supported project format; preview again", {})
     # In-flight check — partial unique index would catch this at flush
     # time, but raising up-front lets us return the existing jti so the
     # UI re-renders the live preview instead of starting fresh.
-    # First sweep expired-but-unconsumed rows so they release the unique
+    # First sweep expired or pre-identity previews so they release the unique
     # slot. Postgres can't put now() in an index predicate, so TTL
     # enforcement has to happen here, app-side. Without this an
     # abandoned/expired preview would permanently block deploys on the
@@ -457,12 +521,21 @@ async def mint_deploy_token(
             WorkspaceDeployToken.tenant_id == uuid.UUID(preview["tenant_id"]),
             WorkspaceDeployToken.changeset_id == uuid.UUID(preview["changeset_id"]),
             WorkspaceDeployToken.consumed_at.is_(None),
-            WorkspaceDeployToken.expires_at < now,
+            or_(
+                WorkspaceDeployToken.expires_at < now,
+                WorkspaceDeployToken.target_identity.is_(None),
+                WorkspaceDeployToken.target_identity["connection_id"].astext.is_(None),
+                WorkspaceDeployToken.target_identity["requested_certificate_id"].astext.is_(None),
+                WorkspaceDeployToken.target_identity["local_public_key_sha256"].astext.is_(None),
+                WorkspaceDeployToken.target_identity != preview["target_identity"],
+                WorkspaceDeployToken.project_format.is_(None),
+                WorkspaceDeployToken.project_format != PROJECT_FORMAT,
+            ),
         )
     )
     for stale in expired_rows.scalars().all():
         stale.consumed_at = now
-        stale.consumed_reason = "expired"
+        stale.consumed_reason = "expired" if stale.expires_at < now else "superseded"
     await db.flush()
 
     inflight = await db.execute(
@@ -486,6 +559,8 @@ async def mint_deploy_token(
         workspace_id=uuid.UUID(preview["workspace_id"]),
         changeset_id=uuid.UUID(preview["changeset_id"]),
         sandbox_id=preview["sandbox_id"],
+        target_identity=preview["target_identity"],
+        project_format=PROJECT_FORMAT,
         snapshot_sha=preview["snapshot_sha"],
         manifest_sha=preview["manifest_sha"],
         require_assertions=preview["require_assertions"],
@@ -507,6 +582,8 @@ async def mint_deploy_token(
         require_assertions=preview["require_assertions"],
         actor_id=preview["actor_id"],
         issued_at=issued_at.isoformat(),
+        target_identity=row.target_identity,
+        project_format=row.project_format,
     )
     # session_id keyed off the actor — codex P2 #8 noted that pinning to
     # the user (not cs_id) is the strongest binding short of WebAuthn.
@@ -529,6 +606,8 @@ async def mint_deploy_token(
             "sandbox_id": preview["sandbox_id"],
             "snapshot_sha": preview["snapshot_sha"],
             "manifest_sha": preview["manifest_sha"],
+            "target_identity": row.target_identity,
+            "project_format": row.project_format,
             "file_count": len(preview["manifest"]),
             "gates": preview.get("gates", {}),
             "expires_at": expires_at.isoformat(),
@@ -595,6 +674,11 @@ async def verify_and_consume_deploy_token(
         await db.flush()
         raise TokenExpiredError(f"Token {jti} expired at {row.expires_at.isoformat()}")
 
+    if not row.target_identity:
+        raise DeployGateNotMetError("Preview has no bound validation identity; preview again", {})
+    if row.project_format != PROJECT_FORMAT:
+        raise DeployGateNotMetError("Preview has no supported bound project format; preview again", {})
+
     payload_json = _canonical_payload(
         jti=str(row.id),
         tenant_id=str(row.tenant_id),
@@ -606,6 +690,8 @@ async def verify_and_consume_deploy_token(
         require_assertions=row.require_assertions,
         actor_id=str(row.actor_id),
         issued_at=row.issued_at.isoformat(),
+        target_identity=row.target_identity,
+        project_format=row.project_format,
     )
     is_valid = verify_confirmation_token(
         confirmation_token,
@@ -635,21 +721,9 @@ async def verify_and_consume_deploy_token(
             {"changeset_status": getattr(changeset, "status", None)},
         )
 
-    gate_result = await check_deploy_prerequisites(
-        db,
-        row.changeset_id,
-        tenant_id,
-        require_assertions=row.require_assertions,
-    )
-    if not gate_result["allowed"]:
-        raise DeployGateNotMetError(
-            gate_result.get("blocked_reason") or "Deploy gate failed at confirm",
-            gate_result.get("gates", {}),
-        )
-
     # Codex P1 #6 + #7 — snapshot must still match. Re-compute and
     # compare to the pinned hashes.
-    fresh = await compute_deploy_manifest(
+    fresh = await compute_deploy_snapshot(
         db=db,
         changeset_id=row.changeset_id,
         tenant_id=tenant_id,
@@ -659,6 +733,22 @@ async def verify_and_consume_deploy_token(
         raise SnapshotDriftError("snapshot_sha")
     if fresh["manifest_sha"] != row.manifest_sha:
         raise SnapshotDriftError("manifest_sha")
+
+    gate_result = await check_deploy_prerequisites(
+        db,
+        row.changeset_id,
+        tenant_id,
+        require_assertions=row.require_assertions,
+        expected_snapshot_hash=row.snapshot_sha,
+        expected_account_id=row.sandbox_id,
+        expected_target_identity=row.target_identity,
+    )
+    if not gate_result["allowed"]:
+        raise DeployGateNotMetError(
+            gate_result.get("blocked_reason") or "Deploy gate failed at confirm",
+            gate_result.get("gates", {}),
+        )
+    require_project_readiness(fresh, gate_result.get("gates", {}))
 
     # All checks passed — caller will queue the run, then re-call this
     # row to set consumed_run_id. For now we mark consumed_at to lock the
@@ -681,6 +771,8 @@ async def verify_and_consume_deploy_token(
             "snapshot_sha": row.snapshot_sha,
             "manifest_sha": row.manifest_sha,
             "token_fingerprint": _token_fingerprint(confirmation_token),
+            "target_identity": row.target_identity,
+            "project_format": row.project_format,
         },
     )
 

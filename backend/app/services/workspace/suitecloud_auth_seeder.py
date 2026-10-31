@@ -1,54 +1,67 @@
-"""Bridge from our `connections` table to the suitecloud CLI's credential format.
+"""Fail closed until a supported, isolated SuiteCloud SDK adapter is verified.
 
-The Oracle suitecloud CLI expects credentials at:
-    ``$HOME/.suitecloud-sdk/credentials/<project_id>.json``
+Oracle CLI 3.2 uses ``account:setup:ci`` and an encrypted SDK credential store,
+then selects the project's ``defaultAuthId``. Suite Studio's REST OAuth tokens
+are not that store. Writing a guessed JSON file neither authorizes the CLI nor
+binds its account/role. Never refresh REST credentials or use host credentials
+as a substitute.
 
-Our `connections` table holds encrypted OAuth2 tokens per tenant. This module
-decrypts the active NetSuite connection, refreshes the access token if expired
-(via ``get_valid_token``), and writes the CLI's expected JSON shape. We seed
-per-run (not pod-startup) so token refresh races with long-running jobs are
-avoided and so multiple tenants never share a credential cache on disk.
-
-CLI version contract: documented for ``@oracle/suitecloud-cli`` >=2.0. If the
-CLI upgrades, re-verify the credential file shape.
+A future certificate adapter must verify the actual account/role and supply the
+full identity contract now enforced across check receipts, preview, confirmation
+and worker execution. Requested certificate/local-key fields do not establish
+independently introspected remote certificate identity.
+No certificate provisioning or SDK-store import is implemented here.
 """
 
 from __future__ import annotations
 
-import json
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import decrypt_credentials
 from app.models.connection import Connection
-from app.services.netsuite_oauth_service import get_valid_token
-
-logger = structlog.get_logger()
-
-
-class AuthSeederError(Exception):
-    """Raised when credentials cannot be seeded for a runner subprocess."""
+from app.services.workspace.credential_contract import AuthSeederError  # noqa: F401
 
 
 @dataclass(frozen=True)
 class SeededCredentials:
-    """Result of seeding suitecloud CLI credentials for a runner subprocess.
+    """Adapter result contract; currently used only by synthetic runner tests.
 
-    Returning ``account_id`` here lets callers (the runner) avoid a redundant
-    ``Connection`` lookup + decrypt to read the same value. It also closes a
-    silent-corruption path where the runner's fallback ``account_id="unknown"``
-    would poison ``snapshot_hash`` if the post-seed lookup raced with a
-    connection delete or key rotation.
+    Production seeding fails closed. A stored REST account ID alone is never
+    sufficient authorization, even when its name looks like a sandbox.
     """
 
     path: Path
     account_id: str
+    role_id: str | None = None
+    connection_id: str | None = None
+    requested_certificate_id: str | None = None
+    local_public_key_sha256: str | None = None
+
+
+def require_verified_identity(
+    *, account_id: str | None, role_id: str | None, expected_account_id: str | None = None
+) -> tuple[str, str]:
+    """Shared runner boundary, including synthetic or future adapter results.
+
+    This checks the adapter's identity contract; it does not authenticate an
+    account or authorize a target. The production seeder remains closed.
+    """
+    if (
+        not isinstance(account_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", account_id, re.ASCII)
+        or not isinstance(role_id, str)
+        or not re.fullmatch(r"[1-9][0-9]*", role_id, re.ASCII)
+    ):
+        raise AuthSeederError("Requires a verified SuiteCloud account and role (numeric role ID)")
+    account = account_id.lower().replace("_", "-")
+    if expected_account_id is not None and account != expected_account_id.strip().lower().replace("_", "-"):
+        raise AuthSeederError("Authorized SuiteCloud account does not match the confirmed sandbox")
+    return account, role_id
 
 
 async def seed_credentials_for_run(
@@ -58,31 +71,14 @@ async def seed_credentials_for_run(
     auth_root: Path,
     project_id: str,
 ) -> SeededCredentials:
-    """Write a suitecloud-CLI credential file for ``tenant_id``.
+    """Reject the unsupported REST-token bridge without reading secret values.
 
-    Args:
-        db: Async session — used to load the ``Connection`` row and (via
-            ``get_valid_token``) to commit a refreshed token if needed.
-        tenant_id: The tenant whose NetSuite connection should be seeded.
-        auth_root: Directory the runner uses as ``$HOME``. The credential file
-            is written to ``{auth_root}/.suitecloud-sdk/credentials/{project_id}.json``.
-            Callers should pass a per-run tmp dir so multiple tenants never
-            share a credential cache.
-        project_id: Suitecloud project id (file basename, no ``.json``).
-
-    Returns:
-        ``SeededCredentials`` with the absolute path of the written credential
-        file and the NetSuite ``account_id`` that was written into it. Callers
-        that need ``account_id`` (e.g. for snapshot hashing) should read it
-        from here instead of re-fetching + re-decrypting the ``Connection``.
-
-    Raises:
-        AuthSeederError: No active NetSuite connection for the tenant; or
-            ``get_valid_token`` could not produce a valid access token; or the
-            stored credentials are missing ``account_id`` / ``client_id``.
+    Keep the runner interface while the certificate-based adapter is pending.
+    Neither a missing connection nor an OAuth-only connection can fall through
+    to ambient CLI credentials. No token refresh or filesystem mutation occurs.
     """
-    result = await db.execute(
-        select(Connection)
+    connection_id = await db.scalar(
+        select(Connection.id)
         .where(
             Connection.tenant_id == tenant_id,
             Connection.provider == "netsuite",
@@ -90,53 +86,10 @@ async def seed_credentials_for_run(
         )
         .limit(1)
     )
-    connection = result.scalar_one_or_none()
-    if connection is None:
-        raise AuthSeederError(f"no active NetSuite connection for tenant {tenant_id}")
-
-    # Refresh-aware token retrieval. ``get_valid_token`` mutates
-    # ``connection.encrypted_credentials`` in place and commits if a refresh
-    # occurs, so we must re-decrypt afterwards to read the rotated
-    # refresh_token / expires_at.
-    access_token = await get_valid_token(db, connection)
-    if access_token is None:
-        raise AuthSeederError(f"could not obtain a valid NetSuite access token for tenant {tenant_id}")
-
-    # Re-decrypt AFTER get_valid_token so we read the (possibly refreshed)
-    # refresh_token and expires_at. See netsuite_oauth_service.py:220-225 for
-    # the in-place mutation + commit site. Do NOT cache the pre-call dict to
-    # skip this read — the post-refresh values are load-bearing for the file.
-    creds = decrypt_credentials(connection.encrypted_credentials)
-    account_id = creds.get("account_id")
-    client_id = creds.get("client_id")
-    if not account_id or not client_id:
-        raise AuthSeederError(f"NetSuite connection for tenant {tenant_id} missing account_id or client_id")
-
-    cred_dir = auth_root / ".suitecloud-sdk" / "credentials"
-    cred_dir.mkdir(parents=True, exist_ok=True)
-    cred_dir.chmod(0o700)  # self-contained: don't trust the caller's umask
-    cred_path = cred_dir / f"{project_id}.json"
-
-    payload: dict[str, Any] = {
-        "accountId": account_id,
-        "authType": "oauth2",
-        "oauth2": {
-            "clientId": client_id,
-            "accessToken": access_token,
-            "refreshToken": creds.get("refresh_token"),
-            # TODO(task-4): verify Oracle CLI accepts a Unix epoch float here.
-            # If it expects ISO-8601 or millis-int, fix the format at this
-            # seeder layer (it's the only writer). On most OAuth-aware CLIs
-            # this field is advisory — the CLI re-validates from refreshToken
-            # on first call regardless.
-            "tokenExpiry": creds.get("expires_at"),
-        },
-    }
-    cred_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    cred_path.chmod(0o600)
-    logger.info(
-        "suitecloud_auth.seeded",
-        tenant_id=str(tenant_id),
-        project_id=project_id,
+    if connection_id is None:
+        raise AuthSeederError("no active NetSuite connection for this workspace company")
+    raise AuthSeederError(
+        "SuiteCloud requires verified certificate-based CI authorization for an authorized sandbox account and role. "
+        "The configured REST OAuth connection cannot authorize SuiteCloud CLI. "
+        "The supported SDK credential adapter is not yet available; validation and deployment remain blocked."
     )
-    return SeededCredentials(path=cred_path, account_id=account_id)

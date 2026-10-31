@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from pydantic import BaseModel, Field, field_validator
 
 # --- Workspace ---
@@ -43,6 +45,13 @@ class FileReadResponse(BaseModel):
     truncated: bool
     total_lines: int
     mime_type: str | None
+    sha256_hash: str
+    can_edit: bool = False
+
+
+class FileEditProposal(BaseModel):
+    content: str = Field(max_length=256 * 1024)
+    baseline_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 # --- Search ---
@@ -267,6 +276,13 @@ class DeployConfirmRequest(BaseModel):
 
 
 # --- UAT Report ---
+
+
+class WorkspaceValidationRequest(BaseModel):
+    """Explicit connection selection; never accepts SDK/runtime credentials."""
+
+    model_config = {"extra": "forbid"}
+    connection_id: uuid.UUID
 
 
 class UATReportResponse(BaseModel):

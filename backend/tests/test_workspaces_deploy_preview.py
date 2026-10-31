@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import sys
+import uuid
 from types import ModuleType
 from unittest.mock import MagicMock
 
@@ -27,6 +28,7 @@ from app.models.workspace import (
     WorkspaceChangeSet,
     WorkspaceDeployToken,
     WorkspaceFile,
+    WorkspacePatch,
     WorkspaceRun,
 )
 
@@ -94,11 +96,31 @@ async def deploy_eligible_changeset(db: AsyncSession, tenant_a, admin_user):
     await db.flush()
 
     db.add(
+        WorkspacePatch(
+            tenant_id=tenant_a.id,
+            changeset_id=cs.id,
+            file_path="SuiteScripts/deploy_me.js",
+            operation="modify",
+            new_content="// reviewed patch\n",
+            baseline_sha256="c725115613daf004f09d9ba1b1645b5e8dabf81464fd388dba1dc07605313b81",
+            apply_order=0,
+        )
+    )
+    await db.flush()
+
+    from app.services.deploy_preview_service import compute_deploy_manifest
+
+    snapshot = (await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id))[
+        "snapshot_sha"
+    ]
+
+    db.add(
         WorkspaceRun(
             tenant_id=tenant_a.id,
             workspace_id=ws.id,
             changeset_id=cs.id,
             run_type="suitecloud_validate",
+            snapshot_hash=snapshot,
             status="passed",
             triggered_by=user.id,
             has_errors=False,
@@ -111,8 +133,32 @@ async def deploy_eligible_changeset(db: AsyncSession, tenant_a, admin_user):
             workspace_id=ws.id,
             changeset_id=cs.id,
             run_type="jest_unit_test",
+            snapshot_hash=snapshot,
             status="passed",
             triggered_by=user.id,
+        )
+    )
+    await db.flush()
+    from app.models.workspace import WorkspaceArtifact
+
+    validation = (
+        await db.execute(
+            select(WorkspaceRun).where(
+                WorkspaceRun.changeset_id == cs.id, WorkspaceRun.run_type == "suitecloud_validate"
+            )
+        )
+    ).scalar_one()
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "6738075-sb1")
+    import json
+
+    db.add(
+        WorkspaceArtifact(
+            tenant_id=tenant_a.id,
+            run_id=validation.id,
+            artifact_type="result_json",
+            content=json.dumps(identity),
         )
     )
     await db.flush()
@@ -188,6 +234,11 @@ class TestDeployConfirmEndpoint:
             call_kwargs = fake_task.delay.call_args.kwargs
             assert call_kwargs["extra_params"]["expected_snapshot_sha"] == preview["snapshot_sha"]
             assert call_kwargs["extra_params"]["sandbox_id"] == "6738075-sb1"
+            assert call_kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
+            assert call_kwargs["extra_params"]["require_assertions"] is False
+            assert call_kwargs["extra_params"]["expected_target_identity"]["account_id"] == "6738075-sb1"
+            assert len(call_kwargs["extra_params"]["expected_target_identity"]) == 5
+            assert call_kwargs["extra_params"]["expected_target_identity"]["role_id"] == "1234"
 
         # Test 17 — token row consumed + consumed_run_id linked.
         # We must re-query in a fresh transaction context because the
@@ -202,6 +253,7 @@ class TestDeployConfirmEndpoint:
         # The dep-overridden db session in the test client is the same as
         # `db` here, so the consumed_at/consumed_run_id updates are visible.
         row = token_row.scalar_one()
+        assert call_kwargs["extra_params"]["expected_target_identity"] == row.target_identity
         assert row.consumed_at is not None
         assert str(row.consumed_run_id) == run_id
 
@@ -224,3 +276,87 @@ class TestLegacyEndpointGone:
         assert detail["code"] == "deploy_one_click_deprecated"
         assert "preview_endpoint" in detail
         assert "confirm_endpoint" in detail
+
+
+@pytest.mark.asyncio
+async def test_broker_failure_keeps_same_confirmed_run_recoverable(db, client, deploy_eligible_changeset, tenant_a):
+    ws, cs, user = deploy_eligible_changeset
+    headers = _auth_headers(user.id, tenant_a.id)
+    preview = (
+        await client.post(
+            f"/api/v1/changesets/{cs.id}/deploy-sandbox/preview",
+            json={"sandbox_id": "6738075-sb1"},
+            headers=headers,
+        )
+    ).json()
+    with _mock_workspace_run_task() as task:
+        task.delay.side_effect = RuntimeError("synthetic broker unavailable")
+        confirmed = await client.post(
+            f"/api/v1/changesets/{cs.id}/deploy-sandbox/confirm",
+            json={"jti": preview["jti"], "confirmation_token": preview["confirmation_token"]},
+            headers=headers,
+        )
+    assert confirmed.status_code == 202, confirmed.text
+    assert confirmed.json()["dispatch_pending"] is True
+    run_id = confirmed.json()["id"]
+    with _mock_workspace_run_task() as task:
+        retried = await client.post(f"/api/v1/runs/{run_id}/dispatch", headers=headers)
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["id"] == run_id
+        assert retried.json()["dispatch_pending"] is False
+        assert task.delay.call_args.kwargs["extra_params"]["expected_manifest_sha"] == preview["manifest_sha"]
+    run = await db.get(WorkspaceRun, uuid.UUID(run_id))
+    run.status = "running"
+    await db.flush()
+    with _mock_workspace_run_task() as task:
+        response = await client.post(f"/api/v1/runs/{run_id}/dispatch", headers=headers)
+        assert response.status_code == 200
+        task.delay.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delivery_commit_failure_never_publishes(db, deploy_eligible_changeset, tenant_a):
+    from unittest.mock import AsyncMock, patch
+
+    from app.services import runner_service
+    from app.services.deploy_preview_service import (
+        build_deploy_preview,
+        mint_deploy_token,
+        verify_and_consume_deploy_token,
+    )
+    from app.services.workspace.deploy_dispatch import dispatch_confirmed_deploy
+
+    ws, cs, user = deploy_eligible_changeset
+    preview = await build_deploy_preview(
+        db=db,
+        changeset_id=cs.id,
+        sandbox_id="6738075-sb1",
+        require_assertions=False,
+        tenant_id=tenant_a.id,
+        actor_id=user.id,
+    )
+    minted = await mint_deploy_token(db=db, preview=preview)
+    confirmed = await verify_and_consume_deploy_token(
+        db=db,
+        jti=minted["jti"],
+        confirmation_token=minted["confirmation_token"],
+        actor_id=user.id,
+        tenant_id=tenant_a.id,
+    )
+    run = await runner_service.create_run(
+        db,
+        tenant_id=tenant_a.id,
+        workspace_id=ws.id,
+        changeset_id=cs.id,
+        run_type="deploy_sandbox",
+        triggered_by=user.id,
+    )
+    confirmed["row"].consumed_run_id = run.id
+    await db.flush()
+    with (
+        _mock_workspace_run_task() as task,
+        patch.object(db, "commit", new=AsyncMock(side_effect=RuntimeError("synthetic commit failure"))),
+    ):
+        with pytest.raises(RuntimeError, match="commit failure"):
+            await dispatch_confirmed_deploy(db, run_id=run.id, tenant_id=tenant_a.id, actor_id=user.id)
+        task.delay.assert_not_called()

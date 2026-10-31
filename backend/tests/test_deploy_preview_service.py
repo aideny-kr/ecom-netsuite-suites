@@ -450,6 +450,25 @@ async def fully_ready_changeset(db: AsyncSession, tenant_a, admin_user):
     db.add(cs)
     await db.flush()
 
+    db.add(
+        WorkspacePatch(
+            tenant_id=tenant_a.id,
+            changeset_id=cs.id,
+            file_path="SuiteScripts/new.js",
+            operation="create",
+            new_content="// reviewed patch\n",
+            baseline_sha256="",
+            apply_order=0,
+        )
+    )
+    await db.flush()
+
+    from app.services.deploy_preview_service import compute_deploy_manifest
+
+    snapshot = (await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id))[
+        "snapshot_sha"
+    ]
+
     # Validate + jest must be "passed" for the gate.
     db.add(
         WorkspaceRun(
@@ -457,6 +476,7 @@ async def fully_ready_changeset(db: AsyncSession, tenant_a, admin_user):
             workspace_id=ws.id,
             changeset_id=cs.id,
             run_type="suitecloud_validate",
+            snapshot_hash=snapshot,
             status="passed",
             triggered_by=user.id,
             has_errors=False,
@@ -469,8 +489,32 @@ async def fully_ready_changeset(db: AsyncSession, tenant_a, admin_user):
             workspace_id=ws.id,
             changeset_id=cs.id,
             run_type="jest_unit_test",
+            snapshot_hash=snapshot,
             status="passed",
             triggered_by=user.id,
+        )
+    )
+    await db.flush()
+    from app.models.workspace import WorkspaceArtifact
+
+    validation = (
+        await db.execute(
+            select(WorkspaceRun).where(
+                WorkspaceRun.changeset_id == cs.id, WorkspaceRun.run_type == "suitecloud_validate"
+            )
+        )
+    ).scalar_one()
+    from tests.workspace_identity import make_target
+
+    _, _, identity = await make_target(db, tenant_a.id, "6738075-sb1")
+    import json
+
+    db.add(
+        WorkspaceArtifact(
+            tenant_id=tenant_a.id,
+            run_id=validation.id,
+            artifact_type="result_json",
+            content=json.dumps(identity),
         )
     )
     await db.flush()

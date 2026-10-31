@@ -88,6 +88,7 @@ async def test_fresh_validate_with_matching_hash_passes_gate(seeded_workspace_wi
         workspace_id=workspace.id,
         changeset_id=cs.id,
         run_type="jest_unit_test",
+        snapshot_hash="a" * 64,
         status="passed",
         triggered_by=admin.id,
     )

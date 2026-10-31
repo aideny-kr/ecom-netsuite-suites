@@ -5,7 +5,9 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
 import type { WorkspaceRun } from "@/lib/types";
-import { useRunArtifacts, useTriggerValidate } from "@/hooks/use-runs";
+import { useDeliverQueuedDeploy, useRunArtifacts } from "@/hooks/use-runs";
+import { usePermissions } from "@/hooks/use-permissions";
+import { ValidationControl } from "./validation-control";
 import { ValidationHitsTable } from "./validation-hits-table";
 
 interface RunsPanelProps {
@@ -35,10 +37,8 @@ function formatDuration(ms: number | null): string {
 
 function RunDetail({ run }: { run: WorkspaceRun }) {
   const { data: artifacts = [] } = useRunArtifacts(run.id);
-  // Reuses the changeset-level validate endpoint — "retry" triggers a fresh
-  // validate run against the same changeset (no run-level retry endpoint exists
-  // on the backend).
-  const triggerValidate = useTriggerValidate();
+  const deliverDeploy = useDeliverQueuedDeploy();
+  const { hasPermission } = usePermissions();
   const isValidate = run.run_type === "suitecloud_validate";
   const hits = run.findings ?? [];
   const showRetry =
@@ -46,15 +46,24 @@ function RunDetail({ run }: { run: WorkspaceRun }) {
 
   return (
     <div className="space-y-3">
+      {run.run_type === "deploy_sandbox" && run.status === "queued" && hasPermission("workspace.manage") && (
+        <div className="space-y-1">
+          <p className="text-[11px] text-muted-foreground">
+            Waiting to start. Retry delivery if this deployment remains queued.
+          </p>
+          <button onClick={() => deliverDeploy.mutate(run.id)} disabled={deliverDeploy.isPending}
+            className="text-[11px] text-primary underline disabled:opacity-50">
+            {deliverDeploy.isPending ? "Sending…" : "Retry delivery"}
+          </button>
+          {deliverDeploy.error && <p role="alert" className="text-[11px] text-destructive">{deliverDeploy.error.message}</p>}
+          {deliverDeploy.data?.dispatch_pending && <p role="status" className="text-[11px] text-muted-foreground">
+            Delivery is unavailable. The confirmed run is saved; retry later.
+          </p>}
+        </div>
+      )}
       {isValidate && <ValidationHitsTable hits={hits} />}
       {showRetry && run.changeset_id && (
-        <button
-          onClick={() => triggerValidate.mutate(run.changeset_id!)}
-          disabled={triggerValidate.isPending}
-          className="text-[11px] text-blue-600 underline hover:text-blue-700 disabled:opacity-50"
-        >
-          {triggerValidate.isPending ? "Retrying…" : "Retry validate"}
-        </button>
+        <ValidationControl key={run.changeset_id} changesetId={run.changeset_id} retry />
       )}
       {artifacts.length > 0 && (
         <div className="space-y-2">

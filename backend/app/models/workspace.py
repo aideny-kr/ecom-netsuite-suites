@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -233,6 +233,9 @@ class WorkspaceDeployToken(Base, UUIDPrimaryKeyMixin):
         nullable=False,
     )
     sandbox_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable only for pre-migration previews, which cannot authorize execution.
+    target_identity: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    project_format: Mapped[str | None] = mapped_column(String(64), nullable=True)
     snapshot_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     require_assertions: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

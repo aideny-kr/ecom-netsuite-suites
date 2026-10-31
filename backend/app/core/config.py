@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     # operator credentials kept out of API/worker/Beat containers.
     DEDICATED_RUNTIME: bool = False
 
+    # Operator-reviewed local image ID only. Missing isolation blocks tests;
+    # tenant-authored code must never fall back to execution on the worker.
+    WORKSPACE_COMMAND_IMAGE: str = ""
+    WORKSPACE_COMMAND_SOCKET: str = "/var/run/docker.sock"
+    WORKSPACE_COMMAND_DOCKER: str = "/usr/bin/docker"
+
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ecom_netsuite"
     DATABASE_URL_SYNC: str = "postgresql://postgres:postgres@localhost:5432/ecom_netsuite"
     DATABASE_URL_DIRECT: str = ""  # Direct Supabase connection for migrations
