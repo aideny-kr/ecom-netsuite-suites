@@ -40,6 +40,44 @@ image/key custody and rotation, dedicated egress, outcome reconciliation, real
 authorized sandbox checks, exact remote-byte verification, health and rollback
 acceptance, and the normal release gates. Never reset a claimed run to retry it.
 
+### Inactive receipt-key custody and rotation
+
+`sdk_validation_custody.load_validation_runtime()` prepares a trusted runtime
+from an operator-supplied immutable image, local Docker paths and a private
+absolute key-directory path. It has no HTTP, queue, environment or project-file
+caller. The worker activation seam still returns `None`.
+
+Provision complete generations of key files in a directory owned by the worker
+UID or root, mode 0700. Its regular files must be private (0600 or stricter),
+owned by that UID or root, with one link. Symlinks in any path component, special
+files, oversized files, duplicate names/keys and unsupported manifest fields are
+refused. `manifest` contains only
+`{"version":1,"active":"current.key","retained":["previous.key"]}`.
+Key files contain 32–4096 raw random bytes from the operator's secret manager;
+keys and private paths must never enter source control, tickets, project files,
+child environments or image layers. At most seven previous keys are retained.
+Python objects hide keys from repr; process memory and privileged debugging
+remain within the trusted operator boundary. This loader is not a secret manager.
+
+Prepare rotation in a new private directory, preserving the old generation for
+in-flight workers. Atomically change the trusted operator's generation reference
+only after provisioning and operational review; do not modify files in place.
+Each new durable claim pins the SHA-256 fingerprint of its active random key.
+Readback selects that exact key from the current trusted set and reverifies the
+unchanged v1 receipt and current actor, tenant, target, project and image state.
+Retained keys are verification-only. Removing a key (including compromise
+revocation) blocks its historical receipts without replaying or resigning them.
+Record the operator's rotation/revocation decision and affected fingerprints in
+the private operations record, never the secret bytes.
+
+Legacy claims have no fingerprint and retain the original single-active-key
+verification behavior. Before retiring their original active key, inventory and
+reconcile those attempts with the original pinned runtime. Do not add a guessed
+fingerprint, try all keys, rewrite a receipt or reset a run to obtain a pass.
+Signing integrity does not establish deployment authority. Dedicated egress,
+operator crash/uncertain-outcome reconciliation and real authorized sandbox,
+deployment, exact-byte health and rollback acceptance remain activation gates.
+
 ## Operator runtime
 
 - `WORKSPACE_COMMAND_IMAGE`: the full local `sha256:` image ID of a reviewed,

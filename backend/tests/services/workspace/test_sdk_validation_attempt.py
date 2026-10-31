@@ -53,6 +53,72 @@ def synthetic_receipt(kwargs):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retained", [True, False])
+async def test_rotation_reads_pinned_historical_key_without_resigning_or_replay(db, journal, retained):
+    attempts, args, run, *_ = journal
+    old = args["runtime"]
+    with patch.object(
+        attempts.credential_executor,
+        "validate_project",
+        AsyncMock(side_effect=lambda **kwargs: synthetic_receipt(kwargs)),
+    ) as broker:
+        await attempts.execute_validation_attempt(db, **args)
+        original = await attempts._read(db, run, attempts.RECEIPT)
+        claim = await attempts._read(db, run, attempts.ATTEMPT)
+        assert claim["receipt_key_sha256"] == old.receipt_key_sha256
+        rotated = attempts.ValidationRuntime(
+            old.image, old.socket, old.docker, b"new-key-" * 8, (old.receipt_key,) if retained else ()
+        )
+        if retained:
+            result = await attempts.read_validation_receipt(db, tenant_id=run.tenant_id, run_id=run.id, runtime=rotated)
+            assert result == original["validation"]
+        else:
+            with pytest.raises(attempts.ValidationAttemptError):
+                await attempts.read_validation_receipt(db, tenant_id=run.tenant_id, run_id=run.id, runtime=rotated)
+        assert await attempts._read(db, run, attempts.RECEIPT) == original
+        with pytest.raises(attempts.ValidationAttemptError, match="claimed"):
+            await attempts.execute_validation_attempt(db, **{**args, "runtime": rotated})
+        assert broker.await_count == 1
+        assert run.gate_status == "block"
+        assert not await db.scalar(
+            select(WorkspaceArtifact.id).where(
+                WorkspaceArtifact.run_id == run.id, WorkspaceArtifact.artifact_type == "result_json"
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_receipt_requires_original_active_key_and_keeps_v1_schema(db, journal):
+    import hashlib
+
+    attempts, args, run, *_ = journal
+    old = args["runtime"]
+    with patch.object(
+        attempts.credential_executor,
+        "validate_project",
+        AsyncMock(side_effect=lambda **kwargs: synthetic_receipt(kwargs)),
+    ) as broker:
+        await attempts.execute_validation_attempt(db, **args)
+        row = await db.scalar(
+            select(WorkspaceArtifact).where(
+                WorkspaceArtifact.run_id == run.id, WorkspaceArtifact.artifact_type == attempts.ATTEMPT
+            )
+        )
+        legacy = json.loads(row.content)
+        legacy.pop("receipt_key_sha256")
+        row.content = attempts._content(legacy)
+        row.size_bytes = len(row.content)
+        row.sha256_hash = hashlib.sha256(row.content.encode()).hexdigest()
+        await db.flush()
+        assert (await attempts._read(db, run, attempts.RECEIPT))["schema"] == "suite-studio-sdk-validation-v1"
+        await attempts.read_validation_receipt(db, tenant_id=run.tenant_id, run_id=run.id, runtime=old)
+        rotated = attempts.ValidationRuntime(old.image, old.socket, old.docker, b"new-key-" * 8, (old.receipt_key,))
+        with pytest.raises(attempts.AuthSeederError):
+            await attempts.read_validation_receipt(db, tenant_id=run.tenant_id, run_id=run.id, runtime=rotated)
+        assert broker.await_count == 1
+
+
 @pytest_asyncio.fixture
 async def journal(db, checked_project):  # noqa: F811 -- imported pytest fixture
     from app.services.workspace import sdk_validation_attempt as attempts

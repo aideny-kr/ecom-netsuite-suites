@@ -54,6 +54,7 @@ class ValidationRuntime:
     socket: str
     docker: str
     receipt_key: bytes = field(repr=False)
+    verification_keys: tuple[bytes, ...] = field(default=(), repr=False)
 
     def __post_init__(self):
         if (
@@ -65,8 +66,31 @@ class ValidationRuntime:
             or not Path(self.socket).is_absolute()
             or type(self.docker) is not str
             or not Path(self.docker).is_absolute()
+            or type(self.verification_keys) is not tuple
+            or len(self.verification_keys) > 7
+            or any(type(key) is not bytes or not 32 <= len(key) <= 4096 for key in self.verification_keys)
         ):
             raise ValidationAttemptError("SDK validation requires reviewed runtime configuration")
+        if len({hashlib.sha256(key).digest() for key in (self.receipt_key, *self.verification_keys)}) != (
+            1 + len(self.verification_keys)
+        ):
+            raise ValidationAttemptError("SDK validation requires distinct receipt keys")
+
+    @property
+    def receipt_key_sha256(self) -> str:
+        return hashlib.sha256(self.receipt_key).hexdigest()
+
+    def verification_key(self, claim: dict) -> bytes:
+        # Legacy claims did not pin a key. Preserve their original single-key
+        # behavior; never guess a historical key by trying every signature.
+        fingerprint = claim.get("receipt_key_sha256")
+        if fingerprint is None and "receipt_key_sha256" not in claim:
+            return self.receipt_key
+        if type(fingerprint) is str and re.fullmatch(r"[a-f0-9]{64}", fingerprint, re.ASCII):
+            for key in (self.receipt_key, *self.verification_keys):
+                if hashlib.sha256(key).hexdigest() == fingerprint:
+                    return key
+        raise ValidationAttemptError("SDK validation receipt key is unavailable; reconcile without replay")
 
 
 async def _run(db, tenant_id, run_id):
@@ -339,6 +363,7 @@ async def execute_validation_attempt(
         source_snapshot_sha=inputs["expected_snapshot_sha"],
         source_manifest_sha=inputs["expected_manifest_sha"],
         project_format=PROJECT_FORMAT,
+        receipt_key_sha256=runtime.receipt_key_sha256,
     )
     if selection_sha is not None:
         claim["selection_sha"] = selection_sha
@@ -433,9 +458,14 @@ async def _verify_claim(db, run_id, tenant_id, runtime, expected=None):
             "source_manifest_sha",
             "project_format",
         }
-        if type(claim) is not dict or set(claim) not in (fields, fields | {"selection_sha"}):
+        optional = {"selection_sha", "receipt_key_sha256"}
+        if type(claim) is not dict or not fields <= set(claim) or set(claim) - fields - optional:
             raise ValueError()
-        require_receipt_inputs(context=claim["context"], attempt_nonce=claim["attempt_nonce"], key=runtime.receipt_key)
+        key = runtime.verification_key(claim)
+        # A retained verification key never signs a new/in-flight attempt.
+        if expected is not None and key != runtime.receipt_key:
+            raise ValueError()
+        require_receipt_inputs(context=claim["context"], attempt_nonce=claim["attempt_nonce"], key=key)
         if "selection_sha" in claim:
             selection, context, inputs, target, identity, _ = await _selected(db, run)
             if claim["selection_sha"] != hashlib.sha256(_content(selection).encode("ascii")).hexdigest():
@@ -477,5 +507,5 @@ async def read_validation_receipt(
         context=claim["context"],
         attempt_nonce=claim["attempt_nonce"],
         image=runtime.image,
-        key=runtime.receipt_key,
+        key=runtime.verification_key(claim),
     )

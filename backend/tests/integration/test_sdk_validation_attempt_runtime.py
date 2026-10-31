@@ -80,6 +80,43 @@ async def seed(factory, company):
 
 
 @pytest.mark.asyncio
+async def test_real_commit_rotation_readback_revocation_and_no_replay(installation, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(settings, "DEDICATED_RUNTIME", True)
+    factory = async_sessionmaker(installation["engine"], expire_on_commit=False)
+    args, _, _ = await seed(factory, installation["company"])
+    old = attempts.ValidationRuntime("sha256:" + "a" * 64, "/tmp/synthetic.sock", "/usr/bin/docker", b"r" * 32)
+    rotated = attempts.ValidationRuntime(old.image, old.socket, old.docker, b"new-key-" * 8, (old.receipt_key,))
+    revoked = attempts.ValidationRuntime(old.image, old.socket, old.docker, rotated.receipt_key)
+    with patch.object(
+        attempts.credential_executor, "validate_project", AsyncMock(side_effect=lambda **kw: synthetic_receipt(kw))
+    ) as broker:
+        async with factory() as db:
+            await set_tenant_context(db, str(args["tenant_id"]))
+            run = await attempts.execute_validation_attempt(db, **args, runtime=old)
+            assert run.status == "passed" and run.gate_status == "block"
+        # Distinct runtime-role connections see actual committed claim/receipt.
+        for runtime in (rotated, revoked):
+            async with factory() as db:
+                await set_tenant_context(db, str(args["tenant_id"]))
+                if runtime is rotated:
+                    receipt = await attempts.read_validation_receipt(
+                        db, **{k: args[k] for k in ("tenant_id", "run_id")}, runtime=runtime
+                    )
+                    assert receipt["server_validation"] is True
+                else:
+                    with pytest.raises(attempts.ValidationAttemptError):
+                        await attempts.read_validation_receipt(
+                            db, **{k: args[k] for k in ("tenant_id", "run_id")}, runtime=runtime
+                        )
+                await db.rollback()
+                await set_tenant_context(db, str(args["tenant_id"]))
+                with pytest.raises(attempts.ValidationAttemptError, match="claimed"):
+                    await attempts.execute_validation_attempt(db, **args, runtime=runtime)
+                await db.rollback()
+        assert broker.await_count == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["verified", "rotated", "source", "cancel"])
 async def test_real_commit_exclusive_nonce_shortlocks_and_current_state(installation, monkeypatch, mode):  # noqa: F811
     monkeypatch.setattr(settings, "DEDICATED_RUNTIME", True)
