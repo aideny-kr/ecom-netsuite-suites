@@ -66,7 +66,7 @@ async def test_rotation_reads_pinned_historical_key_without_resigning_or_replay(
         await attempts.execute_validation_attempt(db, **args)
         original = await attempts._read(db, run, attempts.RECEIPT)
         claim = await attempts._read(db, run, attempts.ATTEMPT)
-        assert claim["receipt_key_sha256"] == old.receipt_key_sha256
+        assert claim["receipt_key_id"] == old.receipt_key_id
         rotated = attempts.ValidationRuntime(
             old.image, old.socket, old.docker, b"new-key-" * 8, (old.receipt_key,) if retained else ()
         )
@@ -89,6 +89,39 @@ async def test_rotation_reads_pinned_historical_key_without_resigning_or_replay(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("key_size", [32, 64, 65, 256, 4096])
+async def test_public_key_identifier_cannot_forge_persisted_receipt(db, journal, key_size):
+    import hashlib
+
+    from app.services.workspace.sdk_validation_receipt import _mac
+
+    attempts, args, run, *_ = journal
+    old = args["runtime"]
+    runtime = attempts.ValidationRuntime(old.image, old.socket, old.docker, b"s" * key_size)
+    with patch.object(
+        attempts.credential_executor, "validate_project", AsyncMock(side_effect=lambda **kw: synthetic_receipt(kw))
+    ):
+        await attempts.execute_validation_attempt(db, **{**args, "runtime": runtime})
+    row = await db.scalar(
+        select(WorkspaceArtifact).where(
+            WorkspaceArtifact.run_id == run.id, WorkspaceArtifact.artifact_type == attempts.RECEIPT
+        )
+    )
+    envelope = json.loads(row.content)
+    claim = await attempts._read(db, run, attempts.ATTEMPT)
+    # The tenant can read the claim and MAC. Treat that public identifier as an
+    # attacker-controlled signing key, then store a checksum-consistent forgery.
+    public_id = claim["receipt_key_id"]
+    envelope["mac"] = _mac({k: v for k, v in envelope.items() if k != "mac"}, bytes.fromhex(public_id))
+    row.content = attempts._content(envelope)
+    row.size_bytes = len(row.content)
+    row.sha256_hash = hashlib.sha256(row.content.encode()).hexdigest()
+    await db.flush()
+    with pytest.raises(attempts.AuthSeederError, match="does not match the expected attempt"):
+        await attempts.read_validation_receipt(db, tenant_id=run.tenant_id, run_id=run.id, runtime=runtime)
+
+
+@pytest.mark.asyncio
 async def test_legacy_receipt_requires_original_active_key_and_keeps_v1_schema(db, journal):
     import hashlib
 
@@ -106,7 +139,7 @@ async def test_legacy_receipt_requires_original_active_key_and_keeps_v1_schema(d
             )
         )
         legacy = json.loads(row.content)
-        legacy.pop("receipt_key_sha256")
+        legacy.pop("receipt_key_id")
         row.content = attempts._content(legacy)
         row.size_bytes = len(row.content)
         row.sha256_hash = hashlib.sha256(row.content.encode()).hexdigest()
@@ -114,7 +147,7 @@ async def test_legacy_receipt_requires_original_active_key_and_keeps_v1_schema(d
         assert (await attempts._read(db, run, attempts.RECEIPT))["schema"] == "suite-studio-sdk-validation-v1"
         await attempts.read_validation_receipt(db, tenant_id=run.tenant_id, run_id=run.id, runtime=old)
         rotated = attempts.ValidationRuntime(old.image, old.socket, old.docker, b"new-key-" * 8, (old.receipt_key,))
-        with pytest.raises(attempts.AuthSeederError):
+        with pytest.raises(attempts.AuthSeederError, match="does not match the expected attempt"):
             await attempts.read_validation_receipt(db, tenant_id=run.tenant_id, run_id=run.id, runtime=rotated)
         assert broker.await_count == 1
 

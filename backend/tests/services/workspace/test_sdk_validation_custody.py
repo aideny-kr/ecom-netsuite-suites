@@ -40,6 +40,22 @@ def test_private_generation_loads_without_enabling_runtime(custody):
         runtime.receipt_key = b"x" * 32
 
 
+@pytest.mark.parametrize("sticky", [True, False])
+def test_shared_parent_requires_sticky_rename_protection(custody, sticky):
+    directory, args = custody
+    parent = directory.parent
+    original = parent.stat().st_mode & 0o7777
+    try:
+        parent.chmod(0o1777 if sticky else 0o777)
+        if sticky:
+            assert load_validation_runtime(**args).receipt_key
+        else:
+            with pytest.raises(ValidationAttemptError):
+                load_validation_runtime(**args)
+    finally:
+        parent.chmod(original)
+
+
 @pytest.mark.parametrize(
     "problem",
     [
@@ -125,4 +141,4 @@ def test_absent_legacy_key_id_never_tries_retained_keys():
     assert runtime.verification_key({}) == b"a" * 32
     for fingerprint in [None, 1, "0" * 64, "A" * 64]:
         with pytest.raises(ValidationAttemptError):
-            runtime.verification_key({"receipt_key_sha256": fingerprint})
+            runtime.verification_key({"receipt_key_id": fingerprint})

@@ -49,7 +49,9 @@ caller. The worker activation seam still returns `None`.
 
 Provision complete generations of key files in a directory owned by the worker
 UID or root, mode 0700. Its regular files must be private (0600 or stricter),
-owned by that UID or root, with one link. Symlinks in any path component, special
+owned by that UID or root, with one link. Every parent directory must be owned by
+root or that UID and forbid group/other writes, unless sticky directory semantics
+prevent other users renaming its children. Symlinks in any path component, special
 files, oversized files, duplicate names/keys and unsupported manifest fields are
 refused. `manifest` contains only
 `{"version":1,"active":"current.key","retained":["previous.key"]}`.
@@ -62,18 +64,23 @@ remain within the trusted operator boundary. This loader is not a secret manager
 Prepare rotation in a new private directory, preserving the old generation for
 in-flight workers. Atomically change the trusted operator's generation reference
 only after provisioning and operational review; do not modify files in place.
-Each new durable claim pins the SHA-256 fingerprint of its active random key.
+Each new durable claim pins a domain-separated HMAC key identifier derived from
+its active random key. Never publish a plain SHA-256 key hash: for HMAC-SHA256
+keys over 64 bytes that hash is itself the effective signing key.
 Readback selects that exact key from the current trusted set and reverifies the
 unchanged v1 receipt and current actor, tenant, target, project and image state.
 Retained keys are verification-only. Removing a key (including compromise
 revocation) blocks its historical receipts without replaying or resigning them.
-Record the operator's rotation/revocation decision and affected fingerprints in
+Removing disk files cannot revoke keys already loaded in process memory. Before
+activation, establish worker drain/restart and compromised-key revocation steps;
+do not treat disk removal alone as completed revocation.
+Record the operator's rotation/revocation decision and affected identifiers in
 the private operations record, never the secret bytes.
 
-Legacy claims have no fingerprint and retain the original single-active-key
+Legacy claims have no key identifier and retain the original single-active-key
 verification behavior. Before retiring their original active key, inventory and
 reconcile those attempts with the original pinned runtime. Do not add a guessed
-fingerprint, try all keys, rewrite a receipt or reset a run to obtain a pass.
+identifier, try all keys, rewrite a receipt or reset a run to obtain a pass.
 Signing integrity does not establish deployment authority. Dedicated egress,
 operator crash/uncertain-outcome reconciliation and real authorized sandbox,
 deployment, exact-byte health and rollback acceptance remain activation gates.

@@ -84,7 +84,7 @@ async def test_real_commit_rotation_readback_revocation_and_no_replay(installati
     monkeypatch.setattr(settings, "DEDICATED_RUNTIME", True)
     factory = async_sessionmaker(installation["engine"], expire_on_commit=False)
     args, _, _ = await seed(factory, installation["company"])
-    old = attempts.ValidationRuntime("sha256:" + "a" * 64, "/tmp/synthetic.sock", "/usr/bin/docker", b"r" * 32)
+    old = attempts.ValidationRuntime("sha256:" + "a" * 64, "/tmp/synthetic.sock", "/usr/bin/docker", b"r" * 96)
     rotated = attempts.ValidationRuntime(old.image, old.socket, old.docker, b"new-key-" * 8, (old.receipt_key,))
     revoked = attempts.ValidationRuntime(old.image, old.socket, old.docker, rotated.receipt_key)
     with patch.object(

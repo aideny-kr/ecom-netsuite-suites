@@ -11,6 +11,7 @@ This receipt is deliberately distinct from deploy prerequisite result_json.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -77,18 +78,18 @@ class ValidationRuntime:
             raise ValidationAttemptError("SDK validation requires distinct receipt keys")
 
     @property
-    def receipt_key_sha256(self) -> str:
-        return hashlib.sha256(self.receipt_key).hexdigest()
+    def receipt_key_id(self) -> str:
+        return hmac.new(self.receipt_key, b"suite-studio-sdk-validation-key-id-v1", hashlib.sha256).hexdigest()
 
     def verification_key(self, claim: dict) -> bytes:
         # Legacy claims did not pin a key. Preserve their original single-key
         # behavior; never guess a historical key by trying every signature.
-        fingerprint = claim.get("receipt_key_sha256")
-        if fingerprint is None and "receipt_key_sha256" not in claim:
+        fingerprint = claim.get("receipt_key_id")
+        if fingerprint is None and "receipt_key_id" not in claim:
             return self.receipt_key
         if type(fingerprint) is str and re.fullmatch(r"[a-f0-9]{64}", fingerprint, re.ASCII):
             for key in (self.receipt_key, *self.verification_keys):
-                if hashlib.sha256(key).hexdigest() == fingerprint:
+                if hmac.new(key, b"suite-studio-sdk-validation-key-id-v1", hashlib.sha256).hexdigest() == fingerprint:
                     return key
         raise ValidationAttemptError("SDK validation receipt key is unavailable; reconcile without replay")
 
@@ -363,7 +364,7 @@ async def execute_validation_attempt(
         source_snapshot_sha=inputs["expected_snapshot_sha"],
         source_manifest_sha=inputs["expected_manifest_sha"],
         project_format=PROJECT_FORMAT,
-        receipt_key_sha256=runtime.receipt_key_sha256,
+        receipt_key_id=runtime.receipt_key_id,
     )
     if selection_sha is not None:
         claim["selection_sha"] = selection_sha
@@ -458,7 +459,7 @@ async def _verify_claim(db, run_id, tenant_id, runtime, expected=None):
             "source_manifest_sha",
             "project_format",
         }
-        optional = {"selection_sha", "receipt_key_sha256"}
+        optional = {"selection_sha", "receipt_key_id"}
         if type(claim) is not dict or not fields <= set(claim) or set(claim) - fields - optional:
             raise ValueError()
         key = runtime.verification_key(claim)

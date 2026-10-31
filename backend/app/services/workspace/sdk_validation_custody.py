@@ -18,6 +18,12 @@ from app.services.workspace.sdk_validation_attempt import ValidationAttemptError
 _ERROR = "SDK validation requires a private operator key directory"
 
 
+def _trusted_parent(fd: int) -> None:
+    info = os.fstat(fd)
+    if info.st_uid not in {0, os.geteuid()} or (stat.S_IMODE(info.st_mode) & 0o022 and not info.st_mode & stat.S_ISVTX):
+        raise ValueError()
+
+
 def _directory(stack: ExitStack, path: str) -> int:
     # Walk from / with openat: no symlink traversal, even in parent components.
     if type(path) is not str or not Path(path).is_absolute():
@@ -27,9 +33,11 @@ def _directory(stack: ExitStack, path: str) -> int:
         raise ValueError()
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     stack.callback(os.close, fd)
+    _trusted_parent(fd)
     for part in parts:
         fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
         stack.callback(os.close, fd)
+        _trusted_parent(fd)
     info = os.fstat(fd)
     if info.st_uid not in {0, os.geteuid()} or stat.S_IMODE(info.st_mode) & 0o077:
         raise ValueError()
