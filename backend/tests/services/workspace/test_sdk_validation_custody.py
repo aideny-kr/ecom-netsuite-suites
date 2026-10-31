@@ -142,3 +142,13 @@ def test_absent_legacy_key_id_never_tries_retained_keys():
     for fingerprint in [None, 1, "0" * 64, "A" * 64]:
         with pytest.raises(ValidationAttemptError):
             runtime.verification_key({"receipt_key_id": fingerprint})
+
+
+@pytest.mark.parametrize("long_key", [False, True])
+def test_hmac_equivalent_keys_cannot_undermine_retirement(long_key):
+    import hashlib
+
+    key = b"s" * (96 if long_key else 32)
+    alias = hashlib.sha256(key).digest() if long_key else key + b"\0"
+    with pytest.raises(ValidationAttemptError, match="distinct receipt keys"):
+        ValidationRuntime("sha256:" + "a" * 64, "/run/private.sock", "/usr/bin/docker", key, (alias,))

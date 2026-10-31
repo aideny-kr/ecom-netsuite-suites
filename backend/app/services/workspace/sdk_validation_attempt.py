@@ -47,6 +47,10 @@ class ValidationAttemptError(AuthSeederError):
     """Sanitized journal/authority error; never an instruction to replay."""
 
 
+def _receipt_key_id(key: bytes) -> str:
+    return hmac.new(key, b"suite-studio-sdk-validation-key-id-v1", hashlib.sha256).hexdigest()
+
+
 @dataclass(frozen=True)
 class ValidationRuntime:
     """Trusted operator input only; no settings or user-controlled activation."""
@@ -72,14 +76,14 @@ class ValidationRuntime:
             or any(type(key) is not bytes or not 32 <= len(key) <= 4096 for key in self.verification_keys)
         ):
             raise ValidationAttemptError("SDK validation requires reviewed runtime configuration")
-        if len({hashlib.sha256(key).digest() for key in (self.receipt_key, *self.verification_keys)}) != (
+        if len({_receipt_key_id(key) for key in (self.receipt_key, *self.verification_keys)}) != (
             1 + len(self.verification_keys)
         ):
             raise ValidationAttemptError("SDK validation requires distinct receipt keys")
 
     @property
     def receipt_key_id(self) -> str:
-        return hmac.new(self.receipt_key, b"suite-studio-sdk-validation-key-id-v1", hashlib.sha256).hexdigest()
+        return _receipt_key_id(self.receipt_key)
 
     def verification_key(self, claim: dict) -> bytes:
         # Legacy claims did not pin a key. Preserve their original single-key
@@ -89,7 +93,7 @@ class ValidationRuntime:
             return self.receipt_key
         if type(fingerprint) is str and re.fullmatch(r"[a-f0-9]{64}", fingerprint, re.ASCII):
             for key in (self.receipt_key, *self.verification_keys):
-                if hmac.new(key, b"suite-studio-sdk-validation-key-id-v1", hashlib.sha256).hexdigest() == fingerprint:
+                if _receipt_key_id(key) == fingerprint:
                     return key
         raise ValidationAttemptError("SDK validation receipt key is unavailable; reconcile without replay")
 
